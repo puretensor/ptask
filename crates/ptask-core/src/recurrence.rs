@@ -96,23 +96,23 @@ pub fn parse(input: &str) -> Result<Recurrence> {
     }
 
     // every N <unit>
-    if let Some((n_str, unit)) = lower.split_once(' ') {
-        if let Ok(n) = n_str.parse::<u32>() {
-            let freq = match unit.trim_end_matches('s') {
-                "day" => Some(Freq::Daily),
-                "week" => Some(Freq::Weekly),
-                "month" => Some(Freq::Monthly),
-                _ => None,
-            };
-            if let Some(f) = freq {
-                if n == 0 {
-                    return Err(Error::Other(format!(
-                        "recurrence: interval must be ≥ 1: {:?}",
-                        input
-                    )));
-                }
-                return Ok(build(mode, f, n, vec![], vec![], original));
+    if let Some((n_str, unit)) = lower.split_once(' ')
+        && let Ok(n) = n_str.parse::<u32>()
+    {
+        let freq = match unit.trim_end_matches('s') {
+            "day" => Some(Freq::Daily),
+            "week" => Some(Freq::Weekly),
+            "month" => Some(Freq::Monthly),
+            _ => None,
+        };
+        if let Some(f) = freq {
+            if n == 0 {
+                return Err(Error::Other(format!(
+                    "recurrence: interval must be ≥ 1: {:?}",
+                    input
+                )));
             }
+            return Ok(build(mode, f, n, vec![], vec![], original));
         }
     }
 

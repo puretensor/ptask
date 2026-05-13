@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 license = "MIT"
 authors = ["PureTensor, Inc. <hal@puretensor.ai>"]
@@ -44,7 +44,7 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
 # Internal crates
-ptask-core = { path = "crates/ptask-core", version = "0.1.8" }
+ptask-core = { path = "crates/ptask-core", version = "0.1.9" }
 
 [profile.release]
 opt-level = 3
