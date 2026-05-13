@@ -6,9 +6,11 @@
 //! every run lands a `distill.run` row in `pt_event_log` for the sync API
 //! to surface to clients.
 //!
-//! v0.9.0 will replace the subprocess with a native Rust pipeline. The
-//! `pt_event_log` row shape stays the same across the swap so dashboards
-//! and clients don't need to change.
+//! v0.8.2 — Native SBERT embeddings via `candle-transformers`; see the
+//! `embeddings` submodule. The Python `ingest.distill` subprocess shim
+//! stays the cutover entry point until Phase 9 retires it at v0.9.0.
+
+pub mod embeddings;
 
 use anyhow::{Context, Result};
 use ptask_core::Db;
