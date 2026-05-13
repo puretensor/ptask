@@ -15,3 +15,7 @@ crossterm = { workspace = true }
 nucleo = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+rusqlite = { workspace = true }
+tempfile = "3"
