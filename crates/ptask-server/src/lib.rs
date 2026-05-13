@@ -27,6 +27,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(routes::base::router())
+        .merge(routes::capture::router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
@@ -82,7 +83,8 @@ mod tests {
     fn open_test_db() -> Db {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
-        // Minimal Python schema stub so migrations can FK to tasks.id.
+        // Minimal Python schema stub: tasks (FK target for migrations) +
+        // raw_items (capture endpoint writes here).
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
@@ -90,7 +92,20 @@ mod tests {
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     created_at TEXT NOT NULL
-                );",
+                 );
+                 CREATE TABLE raw_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_file TEXT NOT NULL,
+                    source_date TEXT NOT NULL,
+                    commitment_score REAL DEFAULT 0.0,
+                    processed INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    classification TEXT,
+                    classification_confidence REAL DEFAULT 0.0,
+                    classification_reasoning TEXT DEFAULT ''
+                 );",
             )
             .unwrap();
         }
@@ -139,6 +154,52 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["ptask_core"], ptask_core::VERSION);
+    }
+
+    #[tokio::test]
+    async fn capture_inserts_raw_item() {
+        let db = open_test_db();
+        let app = router(AppState { db: db.clone() });
+        let body = serde_json::json!({"text": "buy bread", "source": "http-test"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/capture")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(parsed["id"].as_i64().unwrap() > 0);
+        assert_eq!(parsed["source_type"], "http-test");
+        // Row landed.
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_empty_text() {
+        let db = open_test_db();
+        let app = router(AppState { db });
+        let body = serde_json::json!({"text": "   "});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/capture")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
