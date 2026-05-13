@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ptask_core::{Db, Extensions, NewTask, dag, priority, pt_id, quickadd, tasks};
+use ptask_core::{Db, Extensions, NewTask, dag, priority, pt_id, quickadd, tasks, views};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -38,8 +38,29 @@ enum Command {
     Done(DoneArgs),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
+    /// Manage saved views.
+    #[command(subcommand)]
+    View(ViewCommand),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
+}
+
+#[derive(Subcommand, Debug)]
+enum ViewCommand {
+    /// Save a filter DSL string under a name.
+    Save { name: String, filter: String },
+    /// List saved views.
+    #[command(alias = "ls")]
+    List,
+    /// Run a saved view's filter and print matching tasks.
+    Show {
+        name: String,
+        /// Override row limit.
+        #[arg(short = 'n', long = "limit", default_value_t = 20)]
+        limit: usize,
+    },
+    /// Delete a saved view.
+    Rm { name: String },
 }
 
 #[derive(clap::Args, Debug)]
@@ -119,6 +140,7 @@ fn main() -> Result<()> {
         Some(Command::List(a)) => cmd_list(&db, a),
         Some(Command::Done(a)) => cmd_done(&db, a),
         Some(Command::Next(a)) => cmd_next(&db, a),
+        Some(Command::View(c)) => cmd_view(&db, c),
         Some(Command::Backfill) => cmd_backfill(&db),
         None => {
             // No subcommand → quick help banner. TUI lands in v0.3.0.
@@ -269,6 +291,54 @@ fn cmd_next(db: &Db, a: NextArgs) -> Result<()> {
     }
     println!("\nShowing {} ready task(s).", rows.len());
     Ok(())
+}
+
+fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
+    match c {
+        ViewCommand::Save { name, filter } => {
+            let v = views::create(db, &name, &filter).map_err(anyhow::Error::msg)?;
+            println!("Saved view '{}': {}", v.name, v.filter_dsl);
+            Ok(())
+        }
+        ViewCommand::List => {
+            let vs = views::list(db).map_err(anyhow::Error::msg)?;
+            if vs.is_empty() {
+                println!("No saved views.");
+                return Ok(());
+            }
+            for v in &vs {
+                println!("  {:24}  {}", v.name, v.filter_dsl);
+            }
+            println!("\n{} view(s).", vs.len());
+            Ok(())
+        }
+        ViewCommand::Show { name, limit } => {
+            let v = views::get(db, &name).map_err(anyhow::Error::msg)?;
+            println!("View '{}': {}", v.name, v.filter_dsl);
+            let expr = ptask_core::filter::parse(&v.filter_dsl).map_err(anyhow::Error::msg)?;
+            let rows = tasks::list_with_filter(db, Some(&expr), None, None, limit)?;
+            if rows.is_empty() {
+                println!("(no tasks match)");
+                return Ok(());
+            }
+            for t in &rows {
+                let label = priority::label(t.priority).to_ascii_uppercase();
+                let pt = t.pt_id.as_deref().unwrap_or("------");
+                println!("[{:8}] [{:8}] {:7} {}", label, t.status, pt, t.title);
+            }
+            println!("\nShowing {} task(s).", rows.len());
+            Ok(())
+        }
+        ViewCommand::Rm { name } => {
+            let removed = views::delete(db, &name).map_err(anyhow::Error::msg)?;
+            if removed {
+                println!("Removed view '{}'.", name);
+            } else {
+                println!("No view named '{}'.", name);
+            }
+            Ok(())
+        }
+    }
 }
 
 fn cmd_backfill(db: &Db) -> Result<()> {
