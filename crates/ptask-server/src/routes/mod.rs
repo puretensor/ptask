@@ -2,4 +2,5 @@
 
 pub mod base;
 pub mod capture;
+pub mod metrics;
 pub mod sync;

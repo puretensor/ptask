@@ -30,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::base::router())
         .merge(routes::capture::router())
         .merge(routes::sync::router())
+        .merge(routes::metrics::router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
@@ -352,6 +353,37 @@ mod tests {
         )
         .unwrap();
         assert!(id > 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_returns_prometheus_text() {
+        let db = open_test_db();
+        let app = router(AppState { db });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(ct.starts_with("text/plain"));
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(s.contains("# TYPE pt_tasks_total gauge"));
+        assert!(s.contains("pt_raw_items_unprocessed "));
+        assert!(s.contains("pt_event_log_cursor "));
+        assert!(s.contains("pt_views_total "));
     }
 
     #[tokio::test]
