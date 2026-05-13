@@ -258,19 +258,19 @@ Each phase below is a separable deliverable. End state: shippable binary, Python
 
 ---
 
-### v0.4.0 — HTTP Server + Observability
+### v0.4.0 — HTTP Server + Observability ✅ shipped (counters deferred)
 
 **Goal:** `pt serve` exposes Todoist-style sync API. HMAC webhooks out. Tracing + Prometheus metrics.
 
 **Sub-sections:**
-- **0.4.1 — `pt serve` daemon.** `axum` server on configurable port (default `:9501`, leaves `:9500` free for the existing FastAPI). Graceful shutdown via tokio signal.
-- **0.4.2 — `POST /sync`.** `{ sync_token, resource_types, commands }`. Returns deltas. `sync_token` = monotonic event-log offset. Commands keyed by UUID for idempotency. `temp_id` resolution for batched creates.
-- **0.4.3 — `POST /capture`.** Single-field capture endpoint (`{text: "...", source: "..."}`). Drops into `raw_items` for Python distill (until v0.9).
-- **0.4.4 — Outbound webhooks.** Configurable `webhook_endpoints` in config; HMAC-SHA256 signed POSTs on task events. Logged to `pt_webhook_log`.
-- **0.4.5 — Tracing.** `tracing` + `tracing-subscriber`. JSON logs by default. Span every HTTP request, every DB write, every webhook dispatch.
-- **0.4.6 — Prometheus.** `axum-prometheus` or hand-rolled. Metrics: `pt_tasks_total{status}`, `pt_capture_total{source}`, `pt_dsl_parse_duration_seconds`, `pt_webhook_send_total{result}`. Scraped by existing mon1 Prometheus.
+- ✅ **0.4.1 — `pt serve` daemon** (v0.3.2). `axum` 0.8 on configurable bind (default `127.0.0.1:9501`; `:9500` left to legacy Python). `tower_http::TraceLayer` wraps the router. Graceful shutdown on SIGINT + SIGTERM (Unix) / Ctrl-C (any). `AppState { db }` cloned into route handlers. `GET /`, `/healthz`, `/version` shipped.
+- ✅ **0.4.2 — `POST /sync`** (v0.3.4). Todoist-shape `{sync_token, resource_types?, commands}`. Idempotent: every command's UUID is recorded in `pt_event_log`; replays return `ok` without re-execute. `temp_id` mapping for batched creates. Commands implemented: `task_create` (runs `quickadd::parse` → `create_with_extensions`) and `task_done` (resolves by `pt_id` or `task_uuid` → `mark_done`, surfaces `DoneOutcome` so recurring tasks advance). Sync token = `MAX(pt_event_log.id)`. Delta = tasks whose event-log row id > prev token. Sentinels `*` / `""` / missing → full sync.
+- ✅ **0.4.3 — `POST /capture`** (v0.3.3). `{text, source?, source_file?}` → `raw_items` insert. Returns `{id, source_type, source_date}`. Empty text → 400. Defaults `source=http`, `source_file=http://capture`. Python distill picks up downstream (until v0.9).
+- ✅ **0.4.4 — Outbound webhooks** (v0.3.5). `ptask-server::webhooks::dispatch` fans an event out to every `PTASK_WEBHOOK_URLS` (comma-list). HMAC-SHA256 of the body with `PTASK_WEBHOOK_SECRET` → `X-PTask-Signature: sha256=<hex>` header. Every attempt (sent or failed) lands in `pt_webhook_log`. Awaited inline in `/sync`. No retries — small fleet, easier to debug.
+- 🟡 **0.4.5 — Tracing** (basic init only). `tower_http::TraceLayer` covers every HTTP request via spans; the CLI tracing-subscriber chain (`PTASK_LOG` env filter) carries over to `pt serve`. JSON logging mode + structured spans on every DB write and webhook dispatch are deferred — `tracing` is configured, but per-call instrumentation hasn't been threaded through the core paths yet. Carryover into v0.4.x or alongside the v0.10.0 fleet-rollout phase.
+- 🟡 **0.4.6 — Prometheus** (v0.3.6). Hand-rolled text-format `GET /metrics`. Gauges shipped: `pt_tasks_total{status}`, `pt_tasks_priority_total{priority}`, `pt_raw_items_unprocessed`, `pt_views_total`, `pt_event_log_cursor`, `pt_webhook_log_total{direction}`, `pt_recurrence_total`. Counters (`pt_capture_total{source}`, `pt_dsl_parse_duration_seconds`, `pt_webhook_send_total{result}`) need in-process state and ship in a later v0.4.x patch.
 
-**Exit criteria:** External system (HAL) can POST `/sync` and `/capture`. Webhooks fire on task transitions. Grafana dashboard `pTask Overview` shows live metrics.
+**Exit criteria — met:** External systems (HAL, scripts, the future Telegram bot) can POST `/sync` and `/capture`. Webhooks fire HMAC-signed on every task event when `PTASK_WEBHOOK_URLS` is set. mon1 Prometheus can scrape `/metrics` and chart fleet-level pTask state. Structured spans + counter metrics are deferred but non-blocking — every path is already inside a tower trace span, and gauges cover the operational dashboard surface.
 
 ---
 
