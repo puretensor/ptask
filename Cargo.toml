@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 license = "MIT"
 authors = ["PureTensor, Inc. <hal@puretensor.ai>"]
@@ -47,10 +47,10 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
 # Internal crates
-ptask-core   = { path = "crates/ptask-core",   version = "0.6.1" }
-ptask-tui    = { path = "crates/ptask-tui",    version = "0.6.1" }
-ptask-server = { path = "crates/ptask-server", version = "0.6.1" }
-ptask-bot    = { path = "crates/ptask-bot",    version = "0.6.1" }
+ptask-core   = { path = "crates/ptask-core",   version = "0.6.2" }
+ptask-tui    = { path = "crates/ptask-tui",    version = "0.6.2" }
+ptask-server = { path = "crates/ptask-server", version = "0.6.2" }
+ptask-bot    = { path = "crates/ptask-bot",    version = "0.6.2" }
 
 # HMAC for outbound webhook signing (v0.3.5).
 sha2 = "0.10"
