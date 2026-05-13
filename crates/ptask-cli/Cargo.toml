@@ -16,6 +16,7 @@ path = "src/main.rs"
 ptask-core   = { workspace = true }
 ptask-tui    = { workspace = true }
 ptask-server = { workspace = true }
+ptask-bot    = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 tokio = { workspace = true }

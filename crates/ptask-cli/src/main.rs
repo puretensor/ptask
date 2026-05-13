@@ -46,6 +46,8 @@ enum Command {
     Tui,
     /// Run the HTTP server (sync API, capture, webhooks, metrics).
     Serve(ServeArgs),
+    /// Run the Telegram bot (teloxide long-poll).
+    Bot,
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
 }
@@ -156,6 +158,7 @@ fn main() -> Result<()> {
         Some(Command::View(c)) => cmd_view(&db, c),
         Some(Command::Tui) => ptask_tui::run(db),
         Some(Command::Serve(a)) => cmd_serve(db, a),
+        Some(Command::Bot) => cmd_bot(db),
         Some(Command::Backfill) => cmd_backfill(&db),
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
             ptask_tui::run(db)
@@ -383,6 +386,14 @@ fn cmd_serve(db: Db, a: ServeArgs) -> Result<()> {
         .build()
         .context("building tokio runtime")?;
     rt.block_on(ptask_server::serve(db, addr))
+}
+
+fn cmd_bot(db: Db) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    rt.block_on(ptask_bot::run(db))
 }
 
 fn cmd_backfill(db: &Db) -> Result<()> {

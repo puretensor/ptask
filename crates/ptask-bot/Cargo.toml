@@ -1,6 +1,6 @@
 [package]
 name = "ptask-bot"
-description = "pTask Telegram bot (teloxide). Scaffold — implemented in v0.5.0."
+description = "pTask Telegram bot (teloxide) — quick-add via DM, morning digest, evening recap."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,11 @@ rust-version.workspace = true
 
 [dependencies]
 ptask-core = { workspace = true }
+teloxide = { workspace = true }
 tokio = { workspace = true }
+tokio-cron-scheduler = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+jiff = { workspace = true }
