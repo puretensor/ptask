@@ -21,11 +21,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use hmac::{Hmac, Mac};
-use ptask_core::magic_words;
 use ptask_core::tasks::{self, DoneOutcome};
 use ptask_core::webhook_log::{Direction, record as log_webhook};
+use ptask_core::{event_log, magic_words};
 use serde::Deserialize;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use tracing::{info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -123,18 +124,84 @@ async fn handle(
 
     let mut closed: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut handled_pt_ids: HashSet<String> = HashSet::new();
     for commit in &event.commits {
         let directives = magic_words::parse(&commit.message);
         if directives.is_empty() {
             continue;
         }
         for pt_id in magic_words::pt_ids_to_close(&directives) {
+            if !handled_pt_ids.insert(pt_id.clone()) {
+                info!(
+                    target: "ptask::webhook",
+                    source,
+                    pt_id,
+                    "duplicate close directive in same delivery ignored"
+                );
+                continue;
+            }
+            let event_uuid = close_event_uuid(source, commit, &pt_id);
+            match event_log::get_by_uuid(&state.db, &event_uuid) {
+                Ok(Some(_)) => {
+                    info!(
+                        target: "ptask::webhook",
+                        source,
+                        pt_id,
+                        commit = %commit.id.chars().take(12).collect::<String>(),
+                        "duplicate close directive ignored"
+                    );
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    errors.push(format!("{}: idempotency lookup: {}", pt_id, e));
+                    continue;
+                }
+            }
             match tasks::resolve(&state.db, &pt_id) {
                 Ok(t) => match tasks::mark_done(&state.db, &t) {
                     Ok(DoneOutcome::Completed) => {
+                        let payload = serde_json::json!({
+                            "task_uuid": t.id,
+                            "pt_id": t.pt_id,
+                            "source": source,
+                            "commit_id": commit.id,
+                        });
+                        record_task_event(
+                            state,
+                            &event_uuid,
+                            &t.id,
+                            "task.completed",
+                            &payload,
+                            &mut errors,
+                        );
+                        crate::webhooks::dispatch(state, "task.completed", Some(&t.id), &payload)
+                            .await;
                         closed.push(format!("{}=done", pt_id));
                     }
                     Ok(DoneOutcome::Advanced { next_deadline }) => {
+                        let payload = serde_json::json!({
+                            "task_uuid": t.id,
+                            "pt_id": t.pt_id,
+                            "source": source,
+                            "commit_id": commit.id,
+                            "next_deadline": next_deadline,
+                        });
+                        record_task_event(
+                            state,
+                            &event_uuid,
+                            &t.id,
+                            "task.recurrence_advanced",
+                            &payload,
+                            &mut errors,
+                        );
+                        crate::webhooks::dispatch(
+                            state,
+                            "task.recurrence_advanced",
+                            Some(&t.id),
+                            &payload,
+                        )
+                        .await;
                         closed.push(format!("{}=advanced→{}", pt_id, next_deadline));
                     }
                     Err(e) => errors.push(format!("{}: {}", pt_id, e)),
@@ -159,6 +226,36 @@ async fn handle(
         })),
     )
         .into_response()
+}
+
+fn record_task_event(
+    state: &AppState,
+    event_uuid: &str,
+    task_uuid: &str,
+    event_type: &str,
+    payload: &serde_json::Value,
+    errors: &mut Vec<String>,
+) {
+    if let Err(e) = event_log::record(&state.db, event_uuid, Some(task_uuid), event_type, payload) {
+        warn!(
+            target: "ptask::webhook",
+            event_uuid,
+            error = %e,
+            "event_log record failed"
+        );
+        errors.push(format!("{}: event_log: {}", event_uuid, e));
+    }
+}
+
+fn close_event_uuid(source: &str, commit: &PushCommit, pt_id: &str) -> String {
+    let commit_key = if commit.id.trim().is_empty() {
+        let mut hasher = Sha256::new();
+        hasher.update(commit.message.as_bytes());
+        hex::encode(hasher.finalize())
+    } else {
+        commit.id.trim().to_string()
+    };
+    format!("git:{}:{}:{}:close", source, commit_key, pt_id)
 }
 
 /// HMAC-SHA256(body, secret) compared in constant time to `signature_hex`.
