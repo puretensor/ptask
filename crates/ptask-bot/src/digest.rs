@@ -31,24 +31,23 @@ pub async fn send_evening(bot: Bot, db: Db, cfg: BotConfig) -> Result<()> {
 fn render_morning(db: &Db) -> Result<String> {
     let now = dates::now_in_operator_tz()?;
     let today = now.date().to_string();
-    // (today | overdue) — let the filter DSL do the date math.
+    // (today | overdue) & pending — let the filter DSL do the date math,
+    // but push status into SQL so done/cancelled rows cannot crowd out the
+    // morning snapshot or suppress the empty "Clear runway" case.
     let expr = ptask_core::filter::parse("today | overdue")?;
-    let rows = ptask_core::tasks::list_with_filter(db, Some(&expr), None, None, 200)?;
+    let rows = ptask_core::tasks::list_with_filter(db, Some(&expr), Some("pending"), None, 200)?;
     let mut out = format!("☕ pTask digest {}\n\n", today);
     if rows.is_empty() {
         out.push_str("Nothing due today and nothing overdue. Clear runway.\n");
         return Ok(out);
     }
 
-    let (overdue, due_today): (Vec<&Task>, Vec<&Task>) = rows
-        .iter()
-        .filter(|t| t.status == "pending")
-        .partition(|t| {
-            t.deadline
-                .as_deref()
-                .map(|d| d < today.as_str())
-                .unwrap_or(false)
-        });
+    let (overdue, due_today): (Vec<&Task>, Vec<&Task>) = rows.iter().partition(|t| {
+        t.deadline
+            .as_deref()
+            .map(|d| d < today.as_str())
+            .unwrap_or(false)
+    });
 
     if !overdue.is_empty() {
         out.push_str(&format!("🚨 OVERDUE ({})\n", overdue.len()));
@@ -64,8 +63,12 @@ fn render_morning(db: &Db) -> Result<String> {
 
 fn render_evening(db: &Db) -> Result<String> {
     let now = dates::now_in_operator_tz()?;
+    render_evening_at(db, &now)
+}
+
+fn render_evening_at(db: &Db, now: &jiff::Zoned) -> Result<String> {
     let today = now.date().to_string();
-    let today_prefix = format!("{}T", today);
+    let (day_start_utc, next_day_start_utc) = local_day_utc_bounds(now)?;
 
     let mut completed = 0i64;
     let mut advanced = 0i64;
@@ -73,15 +76,15 @@ fn render_evening(db: &Db) -> Result<String> {
         let n_done: i64 = c.query_row(
             "SELECT COUNT(*) FROM interactions
              WHERE action='status_change' AND details='Completed via Claude Code'
-               AND ts LIKE ?1 || '%'",
-            [&today_prefix],
+               AND ts >= ?1 AND ts < ?2",
+            [&day_start_utc, &next_day_start_utc],
             |r| r.get(0),
         )?;
         let n_adv: i64 = c.query_row(
             "SELECT COUNT(*) FROM interactions
              WHERE action='recurrence_advance'
-               AND ts LIKE ?1 || '%'",
-            [&today_prefix],
+               AND ts >= ?1 AND ts < ?2",
+            [&day_start_utc, &next_day_start_utc],
             |r| r.get(0),
         )?;
         completed = n_done;
@@ -120,6 +123,19 @@ fn render_evening(db: &Db) -> Result<String> {
         push_rows(&mut out, &refs);
     }
     Ok(out)
+}
+
+fn local_day_utc_bounds(now: &jiff::Zoned) -> Result<(String, String)> {
+    let tz = now.time_zone().clone();
+    let start_local = now.date().to_zoned(tz.clone())?;
+    let next_start_local = now
+        .date()
+        .checked_add(jiff::Span::new().days(1))?
+        .to_zoned(tz)?;
+    Ok((
+        dates::format_iso(&start_local.with_time_zone(jiff::tz::TimeZone::UTC)),
+        dates::format_iso(&next_start_local.with_time_zone(jiff::tz::TimeZone::UTC)),
+    ))
 }
 
 fn push_rows(out: &mut String, rows: &[&Task]) {
@@ -201,6 +217,20 @@ mod tests {
     }
 
     #[test]
+    fn morning_digest_ignores_completed_due_today_for_empty_case() {
+        let (_dir, db) = fresh_db();
+        let today = dates::now_in_operator_tz().unwrap().date().to_string();
+        let mut new = NewTask::minimal("already done today");
+        new.deadline = Some(today);
+        let task = ptask_core::tasks::create(&db, new).unwrap();
+        ptask_core::tasks::mark_done(&db, &task).unwrap();
+
+        let txt = render_morning(&db).unwrap();
+        assert!(txt.contains("Clear runway"), "got:\n{txt}");
+        assert!(!txt.contains("already done today"), "got:\n{txt}");
+    }
+
+    #[test]
     fn evening_recap_reports_zero_when_nothing_today() {
         let (_dir, db) = fresh_db();
         let txt = render_evening(&db).unwrap();
@@ -216,5 +246,41 @@ mod tests {
         ptask_core::tasks::mark_done(&db, &t).unwrap();
         let txt = render_evening(&db).unwrap();
         assert!(txt.contains("Completed today: 1"));
+    }
+
+    #[test]
+    fn local_day_bounds_are_london_local_in_bst() {
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        let now = jiff::civil::date(2026, 5, 13)
+            .at(18, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        let (start, end) = local_day_utc_bounds(&now).unwrap();
+        assert_eq!(start, "2026-05-12T23:00:00+00:00");
+        assert_eq!(end, "2026-05-13T23:00:00+00:00");
+    }
+
+    #[test]
+    fn evening_recap_counts_london_day_across_bst_offset() {
+        let (_dir, db) = fresh_db();
+        let task = ptask_core::tasks::create(&db, NewTask::minimal("late done")).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO interactions (task_id, action, ts, details)
+                 VALUES (?1, 'status_change', '2026-05-12T23:30:00+00:00',
+                         'Completed via Claude Code')",
+                [&task.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        let now = jiff::civil::date(2026, 5, 13)
+            .at(18, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        let txt = render_evening_at(&db, &now).unwrap();
+        assert!(txt.contains("Completed today: 1"), "got:\n{txt}");
     }
 }
