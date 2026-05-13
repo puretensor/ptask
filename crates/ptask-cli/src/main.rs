@@ -41,6 +41,8 @@ enum Command {
     /// Manage saved views.
     #[command(subcommand)]
     View(ViewCommand),
+    /// Launch the terminal UI (ratatui).
+    Tui,
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
 }
@@ -141,6 +143,7 @@ fn main() -> Result<()> {
         Some(Command::Done(a)) => cmd_done(&db, a),
         Some(Command::Next(a)) => cmd_next(&db, a),
         Some(Command::View(c)) => cmd_view(&db, c),
+        Some(Command::Tui) => ptask_tui::run(db),
         Some(Command::Backfill) => cmd_backfill(&db),
         None => {
             // No subcommand → quick help banner. TUI lands in v0.3.0.

@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 license = "MIT"
 authors = ["PureTensor, Inc. <hal@puretensor.ai>"]
@@ -39,12 +39,16 @@ interim = { version = "0.2", features = ["jiff_0_2"] }
 winnow = "1"
 rrule = "0.14"
 petgraph = "0.8"
+ratatui = "0.30"
+crossterm = "0.29"
+nucleo = "0.5"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
 # Internal crates
-ptask-core = { path = "crates/ptask-core", version = "0.2.3" }
+ptask-core = { path = "crates/ptask-core", version = "0.2.4" }
+ptask-tui  = { path = "crates/ptask-tui",  version = "0.2.4" }
 
 [profile.release]
 opt-level = 3

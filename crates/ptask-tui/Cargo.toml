@@ -1,6 +1,6 @@
 [package]
 name = "ptask-tui"
-description = "pTask terminal UI (ratatui). Scaffold — implemented in v0.3.0."
+description = "pTask terminal UI (ratatui). Phase 3 of v1.0.0."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,5 +10,8 @@ rust-version.workspace = true
 
 [dependencies]
 ptask-core = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+nucleo = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
