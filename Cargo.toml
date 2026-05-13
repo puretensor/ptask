@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 license = "MIT"
 authors = ["PureTensor, Inc. <hal@puretensor.ai>"]
@@ -47,10 +47,10 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
 # Internal crates
-ptask-core   = { path = "crates/ptask-core",   version = "0.4.2" }
-ptask-tui    = { path = "crates/ptask-tui",    version = "0.4.2" }
-ptask-server = { path = "crates/ptask-server", version = "0.4.2" }
-ptask-bot    = { path = "crates/ptask-bot",    version = "0.4.2" }
+ptask-core   = { path = "crates/ptask-core",   version = "0.4.3" }
+ptask-tui    = { path = "crates/ptask-tui",    version = "0.4.3" }
+ptask-server = { path = "crates/ptask-server", version = "0.4.3" }
+ptask-bot    = { path = "crates/ptask-bot",    version = "0.4.3" }
 
 # HMAC for outbound webhook signing (v0.3.5).
 sha2 = "0.10"
@@ -58,8 +58,8 @@ hmac = "0.12"
 hex  = "0.4"
 
 # Telegram bot (v0.5.x). `macros` enables #[derive(BotCommands)].
+# Schedules are jiff-based sleep-until loops (DST-correct) — no cron crate.
 teloxide = { version = "0.17", default-features = false, features = ["macros", "ctrlc_handler", "rustls"] }
-tokio-cron-scheduler = "0.15"
 
 [profile.release]
 opt-level = 3

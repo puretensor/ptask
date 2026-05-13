@@ -21,6 +21,7 @@
 
 mod commands;
 mod config;
+mod digest;
 mod schedule;
 
 use anyhow::{Context, Result};

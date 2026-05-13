@@ -12,9 +12,12 @@ rust-version.workspace = true
 ptask-core = { workspace = true }
 teloxide = { workspace = true }
 tokio = { workspace = true }
-tokio-cron-scheduler = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
 jiff = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+rusqlite = { workspace = true }
