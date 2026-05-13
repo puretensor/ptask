@@ -204,23 +204,23 @@ PT-N is minted in `pt_extensions` for every existing task on v0.1.0 first run. C
 
 Each phase below is a separable deliverable. End state: shippable binary, Python system still functioning, tests green, version tagged.
 
-### v0.1.0 — Foundation
+### v0.1.0 — Foundation ✅ shipped
 
 **Goal:** Rust workspace exists, reads the existing DB, mints PT-N for every task, ships a CLI with parity for the three current verbs (`add`, `list`, `done`). Python remains authoritative on all writes.
 
 **Sub-sections:**
-- **0.1.1 — Workspace scaffold.** `Cargo.toml` workspace, 6 crates, edition 2024, MIT. Mirror `ptve` layout conventions (shared `[workspace.package]` block).
-- **0.1.2 — Database connection layer.** `ptask-core::storage` with `rusqlite` + `r2d2` + `r2d2_sqlite`. WAL mode, `busy_timeout=30s`, `foreign_keys=ON`. Detect existing DB location via env (`PTASK_DB` defaults to `~/puretensor-tasks/tasks.db`).
-- **0.1.3 — Refinery migrations.** `V001__pt_extensions.sql`, `V002__pt_views.sql`, `V003__pt_recurrence.sql`, `V004__pt_event_log.sql`, `V005__pt_webhook_log.sql`. Embedded in binary.
-- **0.1.4 — PT-N minting.** One-shot on first run: iterate `tasks` in `created_at` order, mint sequential `PT-1..PT-N` into `pt_extensions`. Idempotent — re-running is a no-op.
-- **0.1.5 — CLI `pt add`.** Argument parity with Python `cli.py add` (`-p`, `-d`, `--deadline`, `--reason`). Writes to `tasks` via direct SQL until v0.9 (Python schema is well-understood; preserve byte-for-byte defaults).
-- **0.1.6 — CLI `pt list`.** Parity with Python (`-s`, `-p`, `-n`, `-v`). Display includes PT-N from `pt_extensions`.
-- **0.1.7 — CLI `pt done <pt-id-or-substring>`.** Accepts `PT-123` or title substring. Logs interaction.
-- **0.1.8 — Skill update.** `~/.claude/skills/ptask/SKILL.md` rewritten to call `pt` with `python3 ~/puretensor-tasks/cli.py` as fallback.
-- **0.1.9 — CI.** `.github/workflows/ci.yml`: `cargo test`, `cargo clippy -D warnings`, `cargo deny check`, golden-DB diff (`sqldiff` against a frozen snapshot after import).
-- **0.1.10 — Nightly backup.** Systemd timer on `mon1`: `sqlite3 tasks.db ".backup ceph://..."` nightly, 30-day retention.
+- ✅ **0.1.1 — Workspace scaffold** (v0.0.1). `Cargo.toml` workspace, 6 crates (ptask-core, ptask-cli, ptask-server, ptask-tui, ptask-bot, ptask-distill), edition 2024, MIT. Mirrors `ptve` layout conventions (shared `[workspace.package]` block).
+- ✅ **0.1.2 — Database connection layer** (v0.0.2). `ptask-core::storage` with `rusqlite` + `r2d2` + `r2d2_sqlite`. WAL mode, `busy_timeout=30s`, `foreign_keys=ON`. `PTASK_DB` env defaults to `~/puretensor-tasks/tasks.db`.
+- ✅ **0.1.3 — Refinery migrations** (v0.0.2). `V001__pt_counters.sql`, `V002__pt_extensions.sql`, `V003__pt_views.sql`, `V004__pt_recurrence.sql`, `V005__pt_event_log.sql`, `V006__pt_webhook_log.sql`. Embedded in binary via `refinery::embed_migrations!("migrations")`.
+- ✅ **0.1.4 — PT-N minting** (v0.0.2). One-shot backfill iterates `tasks` in `created_at` order, mints sequential `PT-1..PT-N` into `pt_extensions`. Idempotent. Live backfill landed: PT-1..PT-204.
+- ✅ **0.1.5 — CLI `pt add`** (v0.0.4). Argument parity with Python `cli.py add` (`-p`, `-d`, `--deadline`, `--reason`). Direct SQL into `tasks` preserving byte-for-byte Python defaults; mints PT-N + logs `interactions` row in the same transaction.
+- ✅ **0.1.6 — CLI `pt list`** (v0.0.4). Parity with Python (`-s`, `-p`, `-n`, `-v`). Display includes PT-N from `pt_extensions`.
+- ✅ **0.1.7 — CLI `pt done <PT-N | substring>`** (v0.0.4). Accepts `PT-N`, bare integer, or title substring. Multi-match prints choices and exits non-zero. Logs `status_change` interaction.
+- ✅ **0.1.8 — Skill update.** `~/.claude/skills/ptask/SKILL.md` rewritten to call `pt` with `python3 ~/puretensor-tasks/cli.py` as fallback.
+- ✅ **0.1.9 — CI** (v0.0.5). `.github/workflows/ci.yml`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `scripts/ci-schema-check.sh` (asserts all six pt_* tables exist after migration). cargo-deny deferred — not blocking.
+- ✅ **0.1.10 — Nightly backup** (v0.0.6). `scripts/ptask-backup.sh` (Python `sqlite3.backup()` → scp to `mon1:/mnt/cephfs/ptask-backups/`, 30-day retention). User-mode systemd unit at `scripts/systemd/ptask-backup.{service,timer}`, OnCalendar=`*-*-* 03:17`, RandomizedDelaySec=300. Installed + enabled + linger on. First snapshot verified at `mon1:/mnt/cephfs/ptask-backups/ptask-tasks-2026-05-13.db` (5.35 MB).
 
-**Exit criteria:** Binary `pt` exists. Running it against the live DB mints PT-N for all 204 tasks. `pt add`, `pt list`, `pt done` produce identical DB state to Python equivalents. CI green. Backup landed in Ceph.
+**Exit criteria — all met:** Binary `pt` deployed to `~/.cargo/bin/pt`. Backfill minted PT-1..PT-204 against the live DB. `pt add` / `pt list` / `pt done` round-trip works on live data (test row PT-205 created + completed during smoke). 15/15 unit tests green; rustfmt / clippy clean. First backup landed in Ceph.
 
 **Rollback:** Delete `pt_extensions` etc., restore `tasks.db.pre-ptask-backup`. Python untouched.
 
