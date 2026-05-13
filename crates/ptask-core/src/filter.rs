@@ -1,0 +1,579 @@
+//! Todoist-style filter DSL — parser + SQL compiler.
+//!
+//! Grammar (subset of Todoist's; expanded in later phases):
+//!
+//! ```text
+//! expr       := or_expr
+//! or_expr    := and_expr ('|' and_expr)*
+//! and_expr   := not_expr ('&' not_expr)*
+//! not_expr   := '!' atom | atom
+//! atom       := '(' expr ')' | term
+//! term       := today
+//!             | overdue
+//!             | tomorrow
+//!             | yesterday
+//!             | no date
+//!             | recurring
+//!             | p1 | p2 | p3 | p4
+//!             | @label
+//!             | #project
+//!             | due:        <phrase>
+//!             | due before: <phrase>
+//!             | due after:  <phrase>
+//!             | search:     <keyword>
+//! ```
+//!
+//! Examples:
+//! - `today & p1`
+//! - `(today | overdue) & #fleet`
+//! - `@waiting & no date`
+//! - `due before: next friday & !recurring`
+//! - `search: ceph & @ops`
+
+use crate::dates;
+use crate::error::{Error, Result};
+use jiff::Zoned;
+
+/// Parsed filter AST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expr {
+    And(Box<Expr>, Box<Expr>),
+    Or(Box<Expr>, Box<Expr>),
+    Not(Box<Expr>),
+
+    Today,
+    Tomorrow,
+    Yesterday,
+    Overdue,
+    NoDate,
+    Recurring,
+    Priority(i64), // pTask 1..=4 (after Todoist→pTask mapping)
+    Label(String),
+    Project(String),
+    DueOn(String), // ISO yyyy-mm-dd
+    DueBefore(String),
+    DueAfter(String),
+    Search(String),
+}
+
+/// Compiled SQL fragment + bound parameter values (positional).
+pub struct Sql {
+    pub where_clause: String,
+    pub params: Vec<rusqlite::types::Value>,
+}
+
+/// Public entry point: parse a filter DSL string into an AST.
+pub fn parse(input: &str) -> Result<Expr> {
+    let mut p = ParseCtx::new(input);
+    p.skip_ws();
+    let expr = p.parse_or()?;
+    p.skip_ws();
+    if p.peek().is_some() {
+        return Err(Error::Other(format!(
+            "filter: unexpected trailing input at byte {}: {:?}",
+            p.pos,
+            &input[p.pos..]
+        )));
+    }
+    Ok(expr)
+}
+
+/// Compile an AST to a SQL WHERE-clause fragment + positional params.
+/// The fragment is intended to be appended to a base query of the shape:
+/// `SELECT ... FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid=t.id`.
+pub fn to_sql(expr: &Expr, now: &Zoned) -> Result<Sql> {
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    let clause = compile(expr, now, &mut params)?;
+    Ok(Sql {
+        where_clause: clause,
+        params,
+    })
+}
+
+fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -> Result<String> {
+    use rusqlite::types::Value;
+    Ok(match expr {
+        Expr::And(l, r) => format!(
+            "({} AND {})",
+            compile(l, now, params)?,
+            compile(r, now, params)?
+        ),
+        Expr::Or(l, r) => format!(
+            "({} OR {})",
+            compile(l, now, params)?,
+            compile(r, now, params)?
+        ),
+        Expr::Not(inner) => format!("(NOT ({}))", compile(inner, now, params)?),
+
+        Expr::Today => {
+            params.push(Value::Text(now.date().to_string()));
+            format!("substr(t.deadline,1,10) = ?{}", params.len())
+        }
+        Expr::Tomorrow => {
+            let d = now.date().checked_add(jiff::Span::new().days(1)).unwrap();
+            params.push(Value::Text(d.to_string()));
+            format!("substr(t.deadline,1,10) = ?{}", params.len())
+        }
+        Expr::Yesterday => {
+            let d = now.date().checked_sub(jiff::Span::new().days(1)).unwrap();
+            params.push(Value::Text(d.to_string()));
+            format!("substr(t.deadline,1,10) = ?{}", params.len())
+        }
+        Expr::Overdue => {
+            params.push(Value::Text(dates::format_iso(now)));
+            format!(
+                "(t.deadline IS NOT NULL AND t.deadline < ?{} AND t.status != 'done')",
+                params.len()
+            )
+        }
+        Expr::NoDate => "t.deadline IS NULL".to_string(),
+        Expr::Recurring => "t.id IN (SELECT task_uuid FROM pt_recurrence)".to_string(),
+        Expr::Priority(p) => {
+            params.push(Value::Integer(*p));
+            format!("t.priority = ?{}", params.len())
+        }
+        Expr::Label(name) => {
+            params.push(Value::Text(format!("%\"{}\"%", name.replace('"', "\\\""))));
+            format!("x.labels LIKE ?{}", params.len())
+        }
+        Expr::Project(name) => {
+            params.push(Value::Text(name.clone()));
+            format!("x.project = ?{}", params.len())
+        }
+        Expr::DueOn(d) => {
+            params.push(Value::Text(d.clone()));
+            format!("substr(t.deadline,1,10) = ?{}", params.len())
+        }
+        Expr::DueBefore(d) => {
+            params.push(Value::Text(d.clone()));
+            format!("substr(t.deadline,1,10) < ?{}", params.len())
+        }
+        Expr::DueAfter(d) => {
+            params.push(Value::Text(d.clone()));
+            format!("substr(t.deadline,1,10) > ?{}", params.len())
+        }
+        Expr::Search(kw) => {
+            // LIKE wildcards escaped same way as tasks::resolve.
+            let pat = format!("%{}%", escape_like(&kw.to_ascii_lowercase()));
+            params.push(Value::Text(pat));
+            format!(
+                "(lower(t.title) LIKE ?{n} ESCAPE '\\' OR lower(t.description) LIKE ?{n} ESCAPE '\\')",
+                n = params.len()
+            )
+        }
+    })
+}
+
+fn escape_like(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+// ---- hand-rolled recursive-descent parser ----
+//
+// The grammar is small enough that a winnow combinator chain would obscure
+// rather than clarify. Each method returns a parsed Expr and advances `pos`.
+
+struct ParseCtx<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> ParseCtx<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.input[self.pos..].chars().next()
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(c) = self.peek() {
+            if c.is_whitespace() {
+                self.pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Peek whether the upcoming bytes (case-insensitive) match `s`.
+    fn lookahead(&self, s: &str) -> bool {
+        let rest = &self.input[self.pos..];
+        rest.as_bytes()
+            .get(..s.len())
+            .map(|b| b.eq_ignore_ascii_case(s.as_bytes()))
+            .unwrap_or(false)
+    }
+
+    fn parse_or(&mut self) -> Result<Expr> {
+        let mut left = self.parse_and()?;
+        loop {
+            self.skip_ws();
+            if self.peek() == Some('|') {
+                self.pos += 1;
+                let right = self.parse_and()?;
+                left = Expr::Or(Box::new(left), Box::new(right));
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_and(&mut self) -> Result<Expr> {
+        let mut left = self.parse_not()?;
+        loop {
+            self.skip_ws();
+            if self.peek() == Some('&') {
+                self.pos += 1;
+                let right = self.parse_not()?;
+                left = Expr::And(Box::new(left), Box::new(right));
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_not(&mut self) -> Result<Expr> {
+        self.skip_ws();
+        if self.peek() == Some('!') {
+            self.pos += 1;
+            let inner = self.parse_atom()?;
+            Ok(Expr::Not(Box::new(inner)))
+        } else {
+            self.parse_atom()
+        }
+    }
+
+    fn parse_atom(&mut self) -> Result<Expr> {
+        self.skip_ws();
+        if self.peek() == Some('(') {
+            self.pos += 1;
+            let inner = self.parse_or()?;
+            self.skip_ws();
+            if self.peek() != Some(')') {
+                return Err(Error::Other(format!(
+                    "filter: expected ')' at byte {}",
+                    self.pos
+                )));
+            }
+            self.pos += 1;
+            Ok(inner)
+        } else {
+            self.parse_term()
+        }
+    }
+
+    fn parse_term(&mut self) -> Result<Expr> {
+        self.skip_ws();
+        // Order matters: longer keywords before shorter overlapping ones.
+        for (kw, expr) in &[
+            ("today", Expr::Today),
+            ("tomorrow", Expr::Tomorrow),
+            ("yesterday", Expr::Yesterday),
+            ("overdue", Expr::Overdue),
+            ("no date", Expr::NoDate),
+            ("no deadline", Expr::NoDate),
+            ("recurring", Expr::Recurring),
+        ] {
+            if self.match_keyword(kw) {
+                return Ok(expr.clone());
+            }
+        }
+        // due before: / due after: / due:   (order: longest first)
+        if self.match_keyword("due before:") {
+            let phrase = self.consume_phrase();
+            return Ok(Expr::DueBefore(self.resolve_date(&phrase)?));
+        }
+        if self.match_keyword("due after:") {
+            let phrase = self.consume_phrase();
+            return Ok(Expr::DueAfter(self.resolve_date(&phrase)?));
+        }
+        if self.match_keyword("due:") {
+            let phrase = self.consume_phrase();
+            return Ok(Expr::DueOn(self.resolve_date(&phrase)?));
+        }
+        if self.match_keyword("search:") {
+            let phrase = self.consume_phrase();
+            return Ok(Expr::Search(phrase));
+        }
+        // p1..p4
+        if self.lookahead("p") {
+            let save = self.pos;
+            self.pos += 1;
+            let rest = &self.input[self.pos..];
+            if let Some(first) = rest.chars().next()
+                && let Some(n) = first.to_digit(10)
+                && (1..=4).contains(&n)
+            {
+                self.pos += first.len_utf8();
+                // Map Todoist p1 (urgent) → pTask 4; p4 (low) → 1.
+                let pt = 5 - n as i64;
+                return Ok(Expr::Priority(pt));
+            }
+            self.pos = save;
+        }
+        // @label  / #project
+        match self.peek() {
+            Some('@') => {
+                self.pos += 1;
+                let name = self.consume_ident();
+                if name.is_empty() {
+                    return Err(Error::Other(format!(
+                        "filter: empty @label at byte {}",
+                        self.pos
+                    )));
+                }
+                return Ok(Expr::Label(name));
+            }
+            Some('#') => {
+                self.pos += 1;
+                let name = self.consume_ident();
+                if name.is_empty() {
+                    return Err(Error::Other(format!(
+                        "filter: empty #project at byte {}",
+                        self.pos
+                    )));
+                }
+                return Ok(Expr::Project(name));
+            }
+            _ => {}
+        }
+        Err(Error::Other(format!(
+            "filter: unrecognised term at byte {}: {:?}",
+            self.pos,
+            self.peek_word()
+        )))
+    }
+
+    /// Match a literal keyword on a word boundary. Advances on success.
+    fn match_keyword(&mut self, kw: &str) -> bool {
+        if !self.lookahead(kw) {
+            return false;
+        }
+        // Boundary check: char after kw must not be alphanumeric, except for
+        // keywords that themselves end in `:` (where any following char is fine).
+        let after = self.pos + kw.len();
+        let boundary_ok = kw.ends_with(':')
+            || self.input[after..]
+                .chars()
+                .next()
+                .map(|c| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(true);
+        if boundary_ok {
+            self.pos = after;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consume an identifier (letters/digits/`_`/`-`). Trims trailing whitespace.
+    fn consume_ident(&mut self) -> String {
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                self.pos += c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        self.input[start..self.pos].to_string()
+    }
+
+    /// Consume the rest of the phrase up to the next boolean operator
+    /// (`&` / `|` / `)`) or end of input. Trims surrounding whitespace.
+    /// Used for `due:`, `due before:`, `due after:`, `search:` payloads.
+    fn consume_phrase(&mut self) -> String {
+        self.skip_ws();
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c == '&' || c == '|' || c == ')' {
+                break;
+            }
+            self.pos += c.len_utf8();
+        }
+        self.input[start..self.pos].trim().to_string()
+    }
+
+    /// For error messages.
+    fn peek_word(&self) -> &str {
+        let rest = &self.input[self.pos..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '&' || c == '|' || c == ')')
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// Resolve a date phrase to ISO yyyy-mm-dd using the dates module.
+    fn resolve_date(&self, phrase: &str) -> Result<String> {
+        let now = dates::now_in_operator_tz()?;
+        let z = dates::parse_at(phrase, now)?;
+        Ok(z.date().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ast(s: &str) -> Expr {
+        parse(s).unwrap()
+    }
+
+    fn anchor() -> Zoned {
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        jiff::civil::date(2026, 5, 13)
+            .at(12, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap()
+    }
+
+    #[test]
+    fn keywords_today_overdue() {
+        assert!(matches!(ast("today"), Expr::Today));
+        assert!(matches!(ast("overdue"), Expr::Overdue));
+        assert!(matches!(ast("no date"), Expr::NoDate));
+        assert!(matches!(ast("recurring"), Expr::Recurring));
+    }
+
+    #[test]
+    fn priority_p1_through_p4() {
+        // Todoist scale → pTask: p1=4, p2=3, p3=2, p4=1
+        for (input, expected) in &[("p1", 4), ("p2", 3), ("p3", 2), ("p4", 1)] {
+            match ast(input) {
+                Expr::Priority(n) => assert_eq!(n, *expected),
+                other => panic!("input {input} parsed as {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn label_and_project_tokens() {
+        assert!(matches!(ast("@home"), Expr::Label(ref s) if s == "home"));
+        assert!(matches!(ast("#fleet"), Expr::Project(ref s) if s == "fleet"));
+    }
+
+    #[test]
+    fn precedence_and_binds_tighter_than_or() {
+        // a & b | c  -->  (a & b) | c
+        let e = ast("today & p1 | overdue");
+        match e {
+            Expr::Or(l, r) => {
+                assert!(matches!(*l, Expr::And(_, _)));
+                assert!(matches!(*r, Expr::Overdue));
+            }
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parens_force_or_first() {
+        let e = ast("(today | overdue) & p1");
+        match e {
+            Expr::And(l, r) => {
+                assert!(matches!(*l, Expr::Or(_, _)));
+                assert!(matches!(*r, Expr::Priority(4)));
+            }
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn not_negates() {
+        let e = ast("!recurring");
+        assert!(matches!(e, Expr::Not(inner) if matches!(*inner, Expr::Recurring)));
+    }
+
+    #[test]
+    fn due_before_with_natural_phrase() {
+        let e = ast("due before: tomorrow");
+        match e {
+            Expr::DueBefore(d) => {
+                // dates::parse uses live "now", so just sanity-check shape.
+                assert_eq!(d.len(), 10);
+                assert!(d.starts_with("20"));
+            }
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn search_consumes_keyword() {
+        let e = ast("search: ceph");
+        assert!(matches!(e, Expr::Search(ref s) if s == "ceph"));
+    }
+
+    #[test]
+    fn search_stops_at_operator() {
+        let e = ast("search: ceph & @ops");
+        match e {
+            Expr::And(l, r) => {
+                assert!(matches!(*l, Expr::Search(ref s) if s == "ceph"));
+                assert!(matches!(*r, Expr::Label(ref s) if s == "ops"));
+            }
+            other => panic!("got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trailing_garbage_is_error() {
+        assert!(parse("today garbage").is_err());
+    }
+
+    #[test]
+    fn compile_today_emits_substring_match() {
+        let sql = to_sql(&ast("today"), &anchor()).unwrap();
+        assert_eq!(sql.where_clause, "substr(t.deadline,1,10) = ?1");
+        assert_eq!(sql.params.len(), 1);
+    }
+
+    #[test]
+    fn compile_complex_combines_parens() {
+        let sql = to_sql(&ast("(today | overdue) & p1"), &anchor()).unwrap();
+        assert!(sql.where_clause.contains(" OR "));
+        assert!(sql.where_clause.contains(" AND "));
+        assert!(sql.where_clause.contains("priority"));
+    }
+
+    #[test]
+    fn compile_label_escapes_quotes() {
+        let sql = to_sql(&ast("@waiting"), &anchor()).unwrap();
+        assert!(sql.where_clause.contains("labels LIKE"));
+        assert!(matches!(
+            &sql.params[0],
+            rusqlite::types::Value::Text(s) if s == "%\"waiting\"%"
+        ));
+    }
+
+    #[test]
+    fn compile_search_lowercases_and_escapes() {
+        let sql = to_sql(&ast("search: CEPH"), &anchor()).unwrap();
+        assert!(sql.where_clause.contains("lower(t.title)"));
+        assert!(matches!(
+            &sql.params[0],
+            rusqlite::types::Value::Text(s) if s == "%ceph%"
+        ));
+    }
+
+    #[test]
+    fn compile_no_date() {
+        let sql = to_sql(&ast("no date"), &anchor()).unwrap();
+        assert_eq!(sql.where_clause, "t.deadline IS NULL");
+    }
+
+    #[test]
+    fn compile_recurring_subquery() {
+        let sql = to_sql(&ast("recurring"), &anchor()).unwrap();
+        assert!(sql.where_clause.contains("pt_recurrence"));
+    }
+}

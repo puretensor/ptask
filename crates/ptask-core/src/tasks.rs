@@ -157,6 +157,89 @@ pub fn create_with_extensions(db: &Db, new: NewTask, ext: Extensions) -> Result<
     })
 }
 
+/// List tasks against an optional DSL filter, optionally intersected with
+/// status + priority. Replaces `list()` when filter support is needed; the
+/// existing `list()` remains for parity callers that don't use the DSL.
+pub fn list_with_filter(
+    db: &Db,
+    filter_expr: Option<&crate::filter::Expr>,
+    status: Option<&str>,
+    priority_filter: Option<i64>,
+    limit: usize,
+) -> Result<Vec<Task>> {
+    let conn = db.get()?;
+    let mut sql = String::from(
+        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+         FROM tasks t
+         LEFT JOIN pt_extensions x ON x.task_uuid = t.id",
+    );
+    let mut conds: Vec<String> = Vec::new();
+    let mut bound: Vec<rusqlite::types::Value> = Vec::new();
+
+    if let Some(expr) = filter_expr {
+        let now = crate::dates::now_in_operator_tz()?;
+        let compiled = crate::filter::to_sql(expr, &now)?;
+        // Shift the filter's positional placeholders to start after our offset.
+        let shift = bound.len();
+        let shifted = renumber_placeholders(&compiled.where_clause, shift);
+        conds.push(shifted);
+        bound.extend(compiled.params);
+    }
+    if let Some(s) = status {
+        bound.push(rusqlite::types::Value::Text(s.to_string()));
+        conds.push(format!("t.status = ?{}", bound.len()));
+    }
+    if let Some(p) = priority_filter {
+        bound.push(rusqlite::types::Value::Integer(p));
+        conds.push(format!("t.priority = ?{}", bound.len()));
+    }
+    if !conds.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conds.join(" AND "));
+    }
+    sql.push_str(" ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC LIMIT ?");
+    bound.push(rusqlite::types::Value::Integer(limit as i64));
+    // Final placeholder index for LIMIT.
+    let limit_idx = bound.len();
+    sql = sql.replacen("LIMIT ?", &format!("LIMIT ?{}", limit_idx), 1);
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::ToSql> =
+        bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), row_to_task)?;
+    let out: Vec<Task> = rows.collect::<std::result::Result<_, _>>()?;
+    Ok(out)
+}
+
+/// Shift positional `?N` placeholders in `sql` by `shift` so they don't
+/// collide with externally-bound parameters that precede them.
+fn renumber_placeholders(sql: &str, shift: usize) -> String {
+    if shift == 0 {
+        return sql.to_string();
+    }
+    let mut out = String::with_capacity(sql.len() + 4);
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'?' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 {
+                let n: usize = sql[i + 1..j].parse().unwrap();
+                out.push_str(&format!("?{}", n + shift));
+                i = j;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 /// List tasks (optionally filtered by status + priority). Mirrors Python `get_tasks`.
 pub fn list(
     db: &Db,

@@ -67,7 +67,12 @@ struct AddArgs {
 
 #[derive(clap::Args, Debug)]
 struct ListArgs {
-    /// Filter by status.
+    /// Optional Todoist-style filter DSL.
+    /// Examples: "today & p1", "(today | overdue) & #fleet",
+    /// "@waiting & no date", "due before: next friday & !recurring",
+    /// "search: ceph & @ops".
+    filter: Option<String>,
+    /// Filter by status (or `all`).
     #[arg(short = 's', long = "status", default_value = "pending")]
     status: String,
     /// Filter by priority.
@@ -192,12 +197,20 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
         .map(priority::parse)
         .transpose()
         .map_err(anyhow::Error::msg)?;
+    // When a filter is supplied, default status to "all" so the DSL is
+    // authoritative. Explicit -s still wins if the user typed one.
     let status_filter = if a.status == "all" {
         None
     } else {
         Some(a.status.as_str())
     };
-    let rows = tasks::list(db, status_filter, p, a.limit)?;
+    let filter_expr = a
+        .filter
+        .as_deref()
+        .map(ptask_core::filter::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let rows = tasks::list_with_filter(db, filter_expr.as_ref(), status_filter, p, a.limit)?;
     if rows.is_empty() {
         println!("No tasks found.");
         return Ok(());
