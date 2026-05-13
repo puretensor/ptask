@@ -11,12 +11,14 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let filter_bar_h: u16 = if app.filter_input.is_some() { 1 } else { 0 };
+    let prompt_bar_h: u16 = if app.prompt.is_some() { 1 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),            // header
             Constraint::Min(0),               // body
             Constraint::Length(filter_bar_h), // filter input bar
+            Constraint::Length(prompt_bar_h), // prompt bar
             Constraint::Length(1),            // status bar
         ])
         .split(area);
@@ -39,7 +41,27 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if filter_bar_h > 0 {
         render_filter_bar(frame, chunks[2], app);
     }
-    render_status(frame, chunks[3], app);
+    if prompt_bar_h > 0 {
+        render_prompt_bar(frame, chunks[3], app);
+    }
+    render_status(frame, chunks[4], app);
+}
+
+fn render_prompt_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let Some(p) = app.prompt.as_ref() else {
+        return;
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            format!("{}> ", p.label()),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(p.buf().to_string()),
+        Span::styled("_", Style::default().fg(Color::Magenta)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_filter_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
@@ -259,6 +281,14 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         Span::raw(" peek  "),
         keybind("/"),
         Span::raw(" filter  "),
+        keybind("d"),
+        Span::raw(" done  "),
+        keybind("p"),
+        Span::raw(" prio  "),
+        keybind("c"),
+        Span::raw(" new  "),
+        keybind("Del"),
+        Span::raw(" rm  "),
         Span::raw(" | "),
         Span::raw(app.status_msg.clone()),
     ]);

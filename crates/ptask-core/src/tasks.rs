@@ -543,6 +543,39 @@ pub fn priority_label(p: i64) -> &'static str {
     priority::label(p)
 }
 
+/// Set a task's priority (1..=5). Logs a `priority_change` interaction.
+pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
+    if !(1..=5).contains(&priority) {
+        return Err(crate::Error::Other(format!(
+            "priority {} out of range 1..=5",
+            priority
+        )));
+    }
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
+        params![priority, now, task_uuid],
+    )?;
+    tx.execute(
+        "INSERT INTO interactions (task_id, action, ts, details)
+         VALUES (?1, 'priority_change', ?2, ?3)",
+        params![task_uuid, now, format!("priority → {}", priority)],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Delete a task (and any side-table rows via ON DELETE CASCADE). The row
+/// vanishes; the audit trail in `interactions` is wiped with it. Use with
+/// care.
+pub fn delete_task(db: &Db, task_uuid: &str) -> Result<()> {
+    let conn = db.get()?;
+    conn.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
+    Ok(())
+}
+
 /// Extension fields for a single task, loaded on demand. Used by the TUI
 /// detail pane and any other surface that wants the full row + side-table
 /// state without paying the cost for every list query.

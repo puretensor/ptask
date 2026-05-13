@@ -41,6 +41,51 @@ pub struct App {
     /// The String is the in-progress filter text.
     pub filter_input: Option<String>,
     matcher: Matcher,
+
+    /// When Some, an input prompt is open (Create / etc.). Keys go to
+    /// the prompt buffer until Enter / Esc.
+    pub prompt: Option<Prompt>,
+
+    /// Most-recent confirmation request. When Some, the next y/n press
+    /// resolves it.
+    pub confirm: Option<Confirm>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Prompt {
+    /// Quick-add new task (Enter parses the buffer via quickadd::parse).
+    Create { buf: String },
+}
+
+impl Prompt {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Prompt::Create { .. } => "create",
+        }
+    }
+    pub fn buf(&self) -> &str {
+        match self {
+            Prompt::Create { buf } => buf,
+        }
+    }
+    pub fn push(&mut self, c: char) {
+        match self {
+            Prompt::Create { buf } => buf.push(c),
+        }
+    }
+    pub fn pop(&mut self) {
+        match self {
+            Prompt::Create { buf } => {
+                buf.pop();
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Confirm {
+    /// Delete the selected task UUID. y → delete, n/Esc → cancel.
+    Delete { task_uuid: String, title: String },
 }
 
 impl App {
@@ -67,6 +112,8 @@ impl App {
             filter_query: String::new(),
             filter_input: None,
             matcher: Matcher::default(),
+            prompt: None,
+            confirm: None,
         })
     }
 
@@ -188,6 +235,35 @@ impl App {
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
+        // Confirmation pending (e.g. Del): consume y/n/Esc.
+        if let Some(c) = self.confirm.clone() {
+            self.confirm = None;
+            self.pending_g = false;
+            match (c, key.code) {
+                (Confirm::Delete { task_uuid, title }, KeyCode::Char('y'))
+                | (Confirm::Delete { task_uuid, title }, KeyCode::Char('Y')) => {
+                    match ptask_core::tasks::delete_task(&self.db, &task_uuid) {
+                        Ok(_) => {
+                            self.status_msg = format!("deleted: {}", title);
+                            if let Err(e) = self.reload() {
+                                self.status_msg = format!("delete ok; reload failed: {}", e);
+                            }
+                        }
+                        Err(e) => self.status_msg = format!("delete failed: {}", e),
+                    }
+                }
+                _ => self.status_msg = "delete cancelled".into(),
+            }
+            return;
+        }
+
+        // Prompt open — capture text input.
+        if self.prompt.is_some() {
+            self.handle_prompt(key);
+            self.pending_g = false;
+            return;
+        }
+
         // When the filter bar is open, all keypresses edit the filter (except
         // Enter / Esc which close it, and Ctrl-C which still quits).
         if let Some(buf) = self.filter_input.as_mut() {
@@ -272,7 +348,141 @@ impl App {
             KeyCode::Char('/') => {
                 self.filter_input = Some(self.filter_query.clone());
             }
+
+            // Single-key actions on the current selection.
+            KeyCode::Char('d') if !ctrl => self.action_done(),
+            KeyCode::Char('p') if !ctrl => self.action_cycle_priority(),
+            KeyCode::Char('c') if !ctrl => {
+                self.prompt = Some(Prompt::Create { buf: String::new() });
+            }
+            KeyCode::Delete => self.action_delete_prompt(),
             _ => {}
+        }
+    }
+
+    fn handle_prompt(&mut self, key: crossterm::event::KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.prompt = None;
+                self.status_msg = "prompt cancelled".into();
+            }
+            KeyCode::Enter => {
+                let taken = self.prompt.take().unwrap();
+                match taken {
+                    Prompt::Create { buf } => self.action_create(&buf),
+                }
+            }
+            KeyCode::Backspace => prompt.pop(),
+            KeyCode::Char('c') if ctrl => self.quit = true,
+            KeyCode::Char(c) => prompt.push(c),
+            _ => {}
+        }
+    }
+
+    fn action_done(&mut self) {
+        let Some(task) = self.selected_task().cloned() else {
+            return;
+        };
+        let pt = task.pt_id.clone().unwrap_or_default();
+        match tasks::mark_done(&self.db, &task) {
+            Ok(tasks::DoneOutcome::Completed) => {
+                self.status_msg = format!("done: {} {}", pt, task.title);
+            }
+            Ok(tasks::DoneOutcome::Advanced { next_deadline }) => {
+                self.status_msg =
+                    format!("advanced: {} {} → next {}", pt, task.title, next_deadline);
+            }
+            Err(e) => {
+                self.status_msg = format!("done failed: {}", e);
+                return;
+            }
+        }
+        if let Err(e) = self.reload() {
+            self.status_msg = format!("reload after done failed: {}", e);
+        }
+    }
+
+    fn action_cycle_priority(&mut self) {
+        let Some(task) = self.selected_task().cloned() else {
+            return;
+        };
+        // Cycle: low(1) → normal(2) → high(3) → urgent(4) → critical(5) → low(1)
+        let next = if task.priority >= 5 {
+            1
+        } else {
+            task.priority + 1
+        };
+        match tasks::update_priority(&self.db, &task.id, next) {
+            Ok(_) => {
+                self.status_msg = format!(
+                    "{} → priority {} ({})",
+                    task.pt_id.as_deref().unwrap_or("?"),
+                    next,
+                    ptask_core::priority::label(next)
+                );
+                if let Err(e) = self.reload() {
+                    self.status_msg = format!("priority ok; reload failed: {}", e);
+                }
+            }
+            Err(e) => self.status_msg = format!("priority failed: {}", e),
+        }
+    }
+
+    fn action_delete_prompt(&mut self) {
+        let Some(task) = self.selected_task().cloned() else {
+            return;
+        };
+        let pt = task.pt_id.clone().unwrap_or_else(|| "?".into());
+        self.confirm = Some(Confirm::Delete {
+            task_uuid: task.id.clone(),
+            title: task.title.clone(),
+        });
+        self.status_msg = format!("delete {}? y/n", pt);
+    }
+
+    fn action_create(&mut self, buf: &str) {
+        let trimmed = buf.trim();
+        if trimmed.is_empty() {
+            self.status_msg = "create: empty input".into();
+            return;
+        }
+        let q = match ptask_core::quickadd::parse(trimmed) {
+            Ok(q) => q,
+            Err(e) => {
+                self.status_msg = format!("create failed: {}", e);
+                return;
+            }
+        };
+        let new = ptask_core::NewTask {
+            title: q.title.clone(),
+            description: q.description.clone(),
+            priority: q.priority.unwrap_or(2),
+            deadline: q.deadline.clone(),
+            source_type: "tui".into(),
+            ai_confidence: 1.0,
+            ai_reasoning: String::new(),
+        };
+        let ext = ptask_core::Extensions {
+            labels: q.labels.clone(),
+            project: q.project.clone(),
+            duration_min: q.duration_min,
+            planned_at: None,
+            energy: None,
+            recurrence: q.recurrence.clone(),
+        };
+        match tasks::create_with_extensions(&self.db, new, ext) {
+            Ok(t) => {
+                self.status_msg =
+                    format!("created {}: {}", t.pt_id.as_deref().unwrap_or("?"), t.title);
+                if let Err(e) = self.reload() {
+                    self.status_msg = format!("create ok; reload failed: {}", e);
+                }
+            }
+            Err(e) => self.status_msg = format!("create failed: {}", e),
         }
     }
 
