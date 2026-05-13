@@ -1,0 +1,16 @@
+[Unit]
+Description=pTask nightly SQLite backup to Ceph
+Documentation=https://github.com/puretensor/ptask
+ConditionPathExists=%h/puretensor-tasks/tasks.db
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/ptask/scripts/ptask-backup.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Keep stderr/stdout, journald captures it.
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,14 @@
+[Unit]
+Description=Nightly pTask SQLite backup to Ceph (mon1:/mnt/cephfs)
+Documentation=https://github.com/puretensor/ptask
+
+[Timer]
+# Fire daily at 03:17 local time. Slight offset keeps it out of the busy
+# midnight window where every systemd timer in the fleet wakes up.
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=300
+Persistent=true
+Unit=ptask-backup.service
+
+[Install]
+WantedBy=timers.target
