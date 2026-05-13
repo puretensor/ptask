@@ -27,3 +27,4 @@ hf-hub = { workspace = true }
 
 [dev-dependencies]
 rusqlite = { workspace = true }
+axum = { workspace = true }

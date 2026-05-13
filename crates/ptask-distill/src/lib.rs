@@ -10,6 +10,7 @@
 //! `embeddings` submodule. The Python `ingest.distill` subprocess shim
 //! stays the cutover entry point until Phase 9 retires it at v0.9.0.
 
+pub mod classifier;
 pub mod embeddings;
 
 use anyhow::{Context, Result};
