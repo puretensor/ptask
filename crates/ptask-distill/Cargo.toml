@@ -1,0 +1,18 @@
+[package]
+name = "ptask-distill"
+description = "pTask 6-stage distillation pipeline. Scaffold — shim in v0.6.5, native in v0.9.0."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ptask-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
