@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ptask_core::{Db, Extensions, NewTask, dag, priority, pt_id, quickadd, tasks, views};
+use std::io::IsTerminal;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -145,10 +146,14 @@ fn main() -> Result<()> {
         Some(Command::View(c)) => cmd_view(&db, c),
         Some(Command::Tui) => ptask_tui::run(db),
         Some(Command::Backfill) => cmd_backfill(&db),
+        None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
+            ptask_tui::run(db)
+        }
         None => {
-            // No subcommand → quick help banner. TUI lands in v0.3.0.
+            // Non-interactive fallback: avoid trying to enter alt-screen when
+            // stdin/stdout is not a TTY. Interactive `pt` opens the TUI.
             println!("pt {} — sovereign task manager.", ptask_core::VERSION);
-            println!("Try: pt add \"...\" | pt list | pt done PT-N | pt --help");
+            println!("Try: pt tui | pt add \"...\" | pt list | pt done PT-N | pt --help");
             Ok(())
         }
     }

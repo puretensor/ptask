@@ -13,6 +13,8 @@ use ptask_core::{Db, Task, tasks, views};
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
 
+const TUI_TASK_LIMIT: usize = 1000;
+
 pub struct App {
     pub db: Db,
     pub tasks: Vec<Task>,
@@ -114,7 +116,7 @@ pub enum Confirm {
 
 impl App {
     pub fn new(db: Db) -> Result<Self> {
-        let tasks = tasks::list_with_filter(&db, None, Some("pending"), None, 200)
+        let tasks = tasks::list_with_filter(&db, None, Some("pending"), None, TUI_TASK_LIMIT)
             .context("loading initial task list")?;
         let saved_views = views::list(&db).unwrap_or_default();
         let mut list_state = ListState::default();
@@ -233,17 +235,19 @@ impl App {
     /// on the active [`ViewSel`].
     pub fn reload(&mut self) -> Result<()> {
         self.tasks = match &self.view {
-            ViewSel::Pending => tasks::list_with_filter(&self.db, None, Some("pending"), None, 200)
-                .context("reloading pending list")?,
+            ViewSel::Pending => {
+                tasks::list_with_filter(&self.db, None, Some("pending"), None, TUI_TASK_LIMIT)
+                    .context("reloading pending list")?
+            }
             ViewSel::Saved { dsl, .. } => {
                 let expr = ptask_core::filter::parse(dsl)
                     .map_err(|e| anyhow::anyhow!("saved view DSL parse failed: {}", e))?;
-                tasks::list_with_filter(&self.db, Some(&expr), None, None, 200)
+                tasks::list_with_filter(&self.db, Some(&expr), None, None, TUI_TASK_LIMIT)
                     .context("reloading saved view")?
             }
         };
         self.apply_filter();
-        if self.tasks.is_empty() {
+        if self.filtered.is_empty() {
             self.list_state.select(None);
         } else if self.list_state.selected().is_none() {
             self.list_state.select(Some(0));
@@ -589,5 +593,86 @@ impl App {
 
     fn half_page(&self) -> i64 {
         (self.viewport_rows / 2).max(1) as i64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ptask_core::NewTask;
+
+    fn fresh_db() -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                    id               TEXT PRIMARY KEY,
+                    title            TEXT NOT NULL,
+                    description      TEXT DEFAULT '',
+                    priority         INTEGER DEFAULT 2,
+                    status           TEXT DEFAULT 'pending',
+                    created_at       TEXT NOT NULL,
+                    updated_at       TEXT NOT NULL,
+                    deadline         TEXT,
+                    source_type      TEXT DEFAULT 'manual',
+                    source_files     TEXT DEFAULT '[]',
+                    ai_confidence    REAL DEFAULT 1.0,
+                    ai_reasoning     TEXT DEFAULT '',
+                    depends_on       TEXT DEFAULT '[]',
+                    blocks_tasks     TEXT DEFAULT '[]',
+                    escalation_level INTEGER DEFAULT 0,
+                    dismissal_count  INTEGER DEFAULT 0,
+                    last_reminded    TEXT,
+                    next_reminder    TEXT,
+                    priority_score   REAL DEFAULT 0.0,
+                    score_urgency    REAL DEFAULT 0.0,
+                    score_dependency REAL DEFAULT 0.0,
+                    score_neglect    REAL DEFAULT 0.0,
+                    subtasks         TEXT DEFAULT '[]',
+                    task_type        TEXT DEFAULT 'operational',
+                    cluster_keywords TEXT DEFAULT '[]'
+                );
+                CREATE TABLE interactions (
+                    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    action  TEXT NOT NULL,
+                    ts      TEXT NOT NULL,
+                    details TEXT DEFAULT ''
+                );",
+            )
+            .unwrap();
+        }
+        (dir, Db::open(&path).unwrap())
+    }
+
+    #[test]
+    fn reload_keeps_no_selection_when_filter_matches_nothing() {
+        let (_dir, db) = fresh_db();
+        ptask_core::tasks::create(&db, NewTask::minimal("alpha task")).unwrap();
+
+        let mut app = App::new(db).unwrap();
+        app.filter_query = "zzzz-no-match".into();
+        app.apply_filter();
+        assert!(app.filtered.is_empty());
+        assert_eq!(app.list_state.selected(), None);
+
+        app.reload().unwrap();
+        assert!(app.filtered.is_empty());
+        assert_eq!(app.list_state.selected(), None);
+        assert_eq!(app.selected_task_index(), None);
+    }
+
+    #[test]
+    fn initial_load_covers_phase_three_task_volume() {
+        let (_dir, db) = fresh_db();
+        for i in 0..205 {
+            ptask_core::tasks::create(&db, NewTask::minimal(format!("task {i:03}"))).unwrap();
+        }
+
+        let app = App::new(db).unwrap();
+        assert_eq!(app.tasks.len(), 205);
+        assert_eq!(app.filtered.len(), 205);
     }
 }
