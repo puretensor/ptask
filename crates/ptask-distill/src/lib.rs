@@ -11,6 +11,7 @@
 //! stays the cutover entry point until Phase 9 retires it at v0.9.0.
 
 pub mod classifier;
+pub mod clustering;
 pub mod embeddings;
 pub mod semantic_dedup;
 pub mod temporal_dedup;
