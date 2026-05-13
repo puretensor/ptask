@@ -293,18 +293,18 @@ Bonus this phase:
 
 ---
 
-### v0.6.0 — Email + Git Magic Words
+### v0.6.0 — Email + Git Magic Words ✅ shipped (in_progress transitions deferred)
 
 **Goal:** Email-to-inbox endpoint. Gitea + GitHub webhooks parse `Fixes PT-N` from commits/branches/PRs and auto-transition.
 
 **Sub-sections:**
-- **0.6.1 — Email forward landing zone.** `inbox@ops.puretensor.ai` MX → forwarder → `POST /capture`. `mail-parser` on the JSON wrapper.
-- **0.6.2 — Gitea webhook handler.** `POST /webhook/gitea` HMAC-verified. Parse commit messages, branch names, PR titles for `Fixes PT-N`, `Closes PT-N`, `Ref PT-N`, `Skip PT-N`.
-- **0.6.3 — GitHub webhook handler.** Same shape, GitHub HMAC.
-- **0.6.4 — Magic-word state transitions.** Configurable: branch created → `in_progress`, PR opened → `in_progress` (no separate "in review" — single op, no team), PR merged to `main` → `done`. `Skip` opts out.
-- **0.6.5 — Branch name helper.** `pt branch PT-123` prints `feature/PT-123-buy-bread-tomorrow-10am` (Linear-style). Copy via shell pipe.
+- ✅ **0.6.1 — Email landing zone** (v0.5.5). `POST /email` accepts raw RFC 822 message bodies (`message/rfc822`). `mail_parser::MessageParser` extracts Subject + body_text(0); `raw_items` row written with `source='email'`, `source_file='email:<Message-Id>'`, text = "Subject\n\nBody". Python distill picks up downstream. Stays provider-agnostic — Mailgun/Postmark JSON-wrapped envelopes need a tiny upstream forwarder that hands us the raw `.eml`.
+- ✅ **0.6.2 — Gitea webhook** (v0.5.4). `POST /webhook/gitea` HMAC-SHA256-verifies `X-Gitea-Signature` against `PTASK_GITEA_WEBHOOK_SECRET`. Bad signature → 401; tampered body → 401; empty secret → reject (no silent-accept on misconfig). Verified envelopes get logged to `pt_webhook_log` with `signature_ok=1`.
+- ✅ **0.6.3 — GitHub webhook** (v0.5.4 — same module). `POST /webhook/github` uses `X-Hub-Signature-256: sha256=<hex>` against `PTASK_GITHUB_WEBHOOK_SECRET`. Both providers ship the same push-event shape so the handlers share a single `handle()` implementation.
+- 🟡 **0.6.4 — Magic-word state transitions** (v0.5.3 + v0.5.4). Parser: `ptask_core::magic_words` recognises `Fixes`/`Closes`/`Ref`/`Skip PT-N` (case-insensitive verbs, canonical PT-N output, word-boundary required, dedup within a message, Skip suppresses Fixes/Closes on the same PT-N). Webhook handlers walk every commit message and route Closes/Fixes through `tasks::mark_done` (recurring tasks advance via `DoneOutcome::Advanced`). Branch-created → `in_progress` and PR-opened → `in_progress` transitions deferred to a v0.6.x patch — they need pt_extensions.status_category writes that aren't wired through `mark_done` yet.
+- ✅ **0.6.5 — Branch name helper** (v0.5.6). `pt branch <PT-N|substring>` resolves the task and prints `feature/PT-N-<slug>`. Slug = lowercase ASCII, hyphen-joined, 50-char cap with edge-trim, non-ASCII stripped. Pure helper in `ptask_core::tasks::branch_name`.
 
-**Exit criteria:** Pushing a commit `git commit -m "Fixes PT-42: buy bread"` transitions PT-42 to `done` automatically once the push lands.
+**Exit criteria — met:** Pushing a commit `git commit -m "Fixes PT-42: buy bread"` to a repo with a Gitea or GitHub webhook pointed at `/webhook/{gitea,github}` (HMAC-secret configured) marks PT-42 done automatically once the push lands. `pt branch PT-42` produces the matching Linear-style branch name for shell-pipe use. `POST /email` lands inbound captures in `raw_items` for distill. Branch-created / PR-opened → `in_progress` transitions are the one feature gap, deferred behind a pt_extensions status_category writer.
 
 ---
 
