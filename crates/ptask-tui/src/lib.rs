@@ -1,9 +1,7 @@
 //! pTask terminal UI.
 //!
-//! v0.2.4 skeleton: enters/leaves the alternate screen, renders a header,
-//! a task list placeholder, and a status bar, polls keyboard events, exits
-//! on `q` / `Esc` / `Ctrl-C`. Real navigation/edit verbs land in subsequent
-//! sub-versions of phase 3.
+//! Phase 3 of v1.0.0. `pt tui` enters the alternate screen, runs an
+//! [`App`] event loop, exits cleanly on `q` / `Esc` / `Ctrl-C`.
 
 mod app;
 mod event;
