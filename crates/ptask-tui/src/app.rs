@@ -4,6 +4,7 @@ use crate::event::{Event, poll_event};
 use crate::ui;
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyModifiers};
+use ptask_core::tasks::TaskDetail;
 use ptask_core::{Db, Task, tasks};
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
@@ -19,6 +20,14 @@ pub struct App {
     pub pending_g: bool,
     /// Last viewport height — captured during render so PageDown/Up scale.
     pub viewport_rows: u16,
+
+    /// Peek (detail) pane state. When on, the layout splits horizontally
+    /// and the right pane shows TaskDetail for the selected task.
+    pub peek_open: bool,
+    /// Cached detail; invalidated when selection or task list changes.
+    pub peek_detail: Option<TaskDetail>,
+    /// task_uuid of the currently-cached peek_detail, for invalidation.
+    pub peek_uuid: Option<String>,
 }
 
 impl App {
@@ -37,11 +46,47 @@ impl App {
             quit: false,
             pending_g: false,
             viewport_rows: 20,
+            peek_open: false,
+            peek_detail: None,
+            peek_uuid: None,
         })
     }
 
     pub fn selected(&self) -> Option<usize> {
         self.list_state.selected()
+    }
+
+    pub fn selected_task(&self) -> Option<&Task> {
+        self.list_state.selected().and_then(|i| self.tasks.get(i))
+    }
+
+    /// Refresh the cached peek detail to match the current selection.
+    /// No-op when peek is closed or selection unchanged.
+    pub fn refresh_peek(&mut self) {
+        if !self.peek_open {
+            self.peek_detail = None;
+            self.peek_uuid = None;
+            return;
+        }
+        let Some(task) = self.selected_task() else {
+            self.peek_detail = None;
+            self.peek_uuid = None;
+            return;
+        };
+        if self.peek_uuid.as_deref() == Some(task.id.as_str()) {
+            return;
+        }
+        match tasks::load_detail(&self.db, &task.id) {
+            Ok(d) => {
+                self.peek_uuid = Some(task.id.clone());
+                self.peek_detail = Some(d);
+            }
+            Err(e) => {
+                self.peek_detail = None;
+                self.peek_uuid = None;
+                self.status_msg = format!("peek load failed: {}", e);
+            }
+        }
     }
 
     /// Reload the visible task list from the DB. Currently fixed to
@@ -64,6 +109,7 @@ impl App {
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
+            self.refresh_peek();
             terminal.draw(|f| ui::render(f, self))?;
             if let Some(ev) = poll_event(std::time::Duration::from_millis(200))? {
                 self.handle(ev);
@@ -109,6 +155,10 @@ impl App {
                 } else {
                     self.status_msg = format!("reloaded — {} pending", self.tasks.len());
                 }
+            }
+            KeyCode::Char(' ') => {
+                self.peek_open = !self.peek_open;
+                self.peek_uuid = None; // force reload
             }
             _ => {}
         }

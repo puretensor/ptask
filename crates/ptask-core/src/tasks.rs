@@ -543,6 +543,87 @@ pub fn priority_label(p: i64) -> &'static str {
     priority::label(p)
 }
 
+/// Extension fields for a single task, loaded on demand. Used by the TUI
+/// detail pane and any other surface that wants the full row + side-table
+/// state without paying the cost for every list query.
+#[derive(Debug, Clone)]
+pub struct TaskDetail {
+    pub labels: Vec<String>,
+    pub project: Option<String>,
+    pub duration_min: Option<i64>,
+    pub planned_at: Option<String>,
+    pub energy: Option<String>,
+    pub depends_on: Vec<String>,
+    pub blocks_tasks: Vec<String>,
+    pub recurrence_input: Option<String>,
+    pub recurrence_mode: Option<String>,
+    pub recurrence_next: Option<String>,
+}
+
+/// Load the side-table state for one task. Returns defaults for missing rows.
+pub fn load_detail(db: &Db, task_uuid: &str) -> Result<TaskDetail> {
+    let conn = db.get()?;
+    // pt_extensions row (always present for PT-N-minted tasks).
+    let ext: (
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT labels, project, duration_min, planned_at, energy
+             FROM pt_extensions WHERE task_uuid = ?1",
+            [task_uuid],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0).unwrap_or_else(|_| "[]".into()),
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                ))
+            },
+        )
+        .unwrap_or(("[]".into(), None, None, None, None));
+    let labels: Vec<String> = serde_json::from_str(&ext.0).unwrap_or_default();
+
+    // depends_on / blocks_tasks from the Python tasks table.
+    let dep_row: (String, String) = conn
+        .query_row(
+            "SELECT COALESCE(depends_on,'[]'), COALESCE(blocks_tasks,'[]')
+             FROM tasks WHERE id = ?1",
+            [task_uuid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or(("[]".into(), "[]".into()));
+    let depends_on: Vec<String> = serde_json::from_str(&dep_row.0).unwrap_or_default();
+    let blocks_tasks: Vec<String> = serde_json::from_str(&dep_row.1).unwrap_or_default();
+
+    // pt_recurrence (optional).
+    let rec: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT original_input, mode, next_occurrence
+             FROM pt_recurrence WHERE task_uuid = ?1",
+            [task_uuid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+
+    Ok(TaskDetail {
+        labels,
+        project: ext.1,
+        duration_min: ext.2,
+        planned_at: ext.3,
+        energy: ext.4,
+        depends_on,
+        blocks_tasks,
+        recurrence_input: rec.as_ref().map(|r| r.0.clone()),
+        recurrence_mode: rec.as_ref().map(|r| r.1.clone()),
+        recurrence_next: rec.as_ref().map(|r| r.2.clone()),
+    })
+}
+
 fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         id: r.get(0)?,
