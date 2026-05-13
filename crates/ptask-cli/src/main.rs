@@ -44,8 +44,18 @@ enum Command {
     View(ViewCommand),
     /// Launch the terminal UI (ratatui).
     Tui,
+    /// Run the HTTP server (sync API, capture, webhooks, metrics).
+    Serve(ServeArgs),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
+}
+
+#[derive(clap::Args, Debug)]
+struct ServeArgs {
+    /// Bind address. Default 127.0.0.1:9501 (leaves :9500 for legacy
+    /// Python FastAPI during the parallel-ops window).
+    #[arg(long = "bind")]
+    bind: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -145,6 +155,7 @@ fn main() -> Result<()> {
         Some(Command::Next(a)) => cmd_next(&db, a),
         Some(Command::View(c)) => cmd_view(&db, c),
         Some(Command::Tui) => ptask_tui::run(db),
+        Some(Command::Serve(a)) => cmd_serve(db, a),
         Some(Command::Backfill) => cmd_backfill(&db),
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
             ptask_tui::run(db)
@@ -358,6 +369,20 @@ fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_serve(db: Db, a: ServeArgs) -> Result<()> {
+    let addr = match a.bind.as_deref() {
+        Some(s) => s
+            .parse()
+            .with_context(|| format!("parsing --bind {:?}", s))?,
+        None => ptask_server::default_bind(),
+    };
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    rt.block_on(ptask_server::serve(db, addr))
 }
 
 fn cmd_backfill(db: &Db) -> Result<()> {
