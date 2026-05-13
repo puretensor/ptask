@@ -8,8 +8,11 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod error;
 pub mod migrations;
+pub mod priority;
 pub mod pt_id;
 pub mod storage;
+pub mod tasks;
 
 pub use error::{Error, Result};
 pub use storage::{Db, default_db_path};
+pub use tasks::{NewTask, Task};
