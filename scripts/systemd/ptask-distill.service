@@ -1,0 +1,17 @@
+[Unit]
+Description=pTask distillation pipeline (Python subprocess shim until v0.9)
+Documentation=https://github.com/puretensor/ptask
+ConditionPathExists=%h/puretensor-tasks/.env
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/puretensor-tasks/.env
+ExecStart=%h/.cargo/bin/pt distill --days 60
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=30min
