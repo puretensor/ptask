@@ -557,6 +557,45 @@ pub fn priority_label(p: i64) -> &'static str {
     priority::label(p)
 }
 
+/// Build a Linear-style branch name from a PT-N + title.
+/// `feature/PT-123-slug-of-title`. Slug is lowercase, ASCII, hyphen-joined,
+/// capped at 50 chars of title (after the prefix). Re-running with the
+/// same inputs returns the same string — safe to copy into a shell pipe.
+pub fn branch_name(pt_id: &str, title: &str) -> String {
+    let mut slug = String::with_capacity(title.len());
+    let mut last_was_hyphen = true;
+    for ch in title.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch.is_whitespace() || matches!(ch, '-' | '_' | '/' | '\\') {
+            Some('-')
+        } else {
+            None
+        };
+        match mapped {
+            Some('-') => {
+                if !last_was_hyphen {
+                    slug.push('-');
+                    last_was_hyphen = true;
+                }
+            }
+            Some(c) => {
+                slug.push(c);
+                last_was_hyphen = false;
+            }
+            None => {} // strip
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug: String = slug.chars().take(50).collect();
+    let slug = slug.trim_end_matches('-').to_string();
+    if slug.is_empty() {
+        format!("feature/{}", pt_id)
+    } else {
+        format!("feature/{}-{}", pt_id, slug)
+    }
+}
+
 /// Set a task's priority (1..=5). Logs a `priority_change` interaction.
 pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
     if !(1..=5).contains(&priority) {
@@ -868,6 +907,38 @@ mod tests {
             "msg was: {}",
             msg
         );
+    }
+
+    #[test]
+    fn branch_name_lowercases_and_hyphenates() {
+        assert_eq!(
+            branch_name("PT-42", "Buy bread tomorrow 10am"),
+            "feature/PT-42-buy-bread-tomorrow-10am"
+        );
+    }
+
+    #[test]
+    fn branch_name_strips_unicode_and_punctuation() {
+        // The em-dash, comma, and ñ are non-ASCII / non-alphanum and get
+        // collapsed to hyphens (or stripped, in the case of ñ).
+        assert_eq!(
+            branch_name("PT-1", "Café, deploy — now ñ"),
+            "feature/PT-1-caf-deploy-now"
+        );
+    }
+
+    #[test]
+    fn branch_name_empty_title_returns_prefix_only() {
+        assert_eq!(branch_name("PT-99", "   ,,, "), "feature/PT-99");
+    }
+
+    #[test]
+    fn branch_name_truncates_long_title() {
+        let t = "a".repeat(200);
+        let b = branch_name("PT-1", &t);
+        assert!(b.starts_with("feature/PT-1-"));
+        // Slug is capped at 50 chars; total length therefore ~50+13.
+        assert!(b.len() <= 50 + "feature/PT-1-".len());
     }
 
     #[test]

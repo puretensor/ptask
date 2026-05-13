@@ -48,8 +48,16 @@ enum Command {
     Serve(ServeArgs),
     /// Run the Telegram bot (teloxide long-poll).
     Bot,
+    /// Print a Linear-style branch name for a task.
+    Branch(BranchArgs),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
+}
+
+#[derive(clap::Args, Debug)]
+struct BranchArgs {
+    /// PT-N (or bare integer, or title substring).
+    query: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -159,6 +167,7 @@ fn main() -> Result<()> {
         Some(Command::Tui) => ptask_tui::run(db),
         Some(Command::Serve(a)) => cmd_serve(db, a),
         Some(Command::Bot) => cmd_bot(db),
+        Some(Command::Branch(a)) => cmd_branch(&db, a),
         Some(Command::Backfill) => cmd_backfill(&db),
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
             ptask_tui::run(db)
@@ -394,6 +403,13 @@ fn cmd_bot(db: Db) -> Result<()> {
         .build()
         .context("building tokio runtime")?;
     rt.block_on(ptask_bot::run(db))
+}
+
+fn cmd_branch(db: &Db, a: BranchArgs) -> Result<()> {
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    let pt = task.pt_id.clone().unwrap_or_else(|| "PT-?".into());
+    println!("{}", tasks::branch_name(&pt, &task.title));
+    Ok(())
 }
 
 fn cmd_backfill(db: &Db) -> Result<()> {
