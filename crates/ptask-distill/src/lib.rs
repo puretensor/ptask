@@ -12,6 +12,7 @@
 
 pub mod classifier;
 pub mod embeddings;
+pub mod semantic_dedup;
 
 use anyhow::{Context, Result};
 use ptask_core::Db;
