@@ -23,6 +23,7 @@
 use crate::dates;
 use crate::error::{Error, Result};
 use crate::priority;
+use crate::recurrence::{self, Recurrence};
 use jiff::Zoned;
 
 /// Result of parsing a quick-add string.
@@ -37,6 +38,9 @@ pub struct QuickAdd {
     pub project: Option<String>,
     pub duration_min: Option<i64>,
     pub reminder: Option<String>,
+    /// Parsed recurrence rule, if the input contained an `every` / `every!`
+    /// clause. The deadline above is the first occurrence.
+    pub recurrence: Option<Recurrence>,
 }
 
 /// Words that can start a date phrase. Used to bound the greedy date scan.
@@ -160,6 +164,26 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             continue;
         }
 
+        // Recurrence: `every X` / `every! X`. Greedy consumption up to next
+        // explicit marker. Optional trailing " at <time>" sets the time-of-day
+        // for the first (and subsequent) occurrence.
+        if (tok.eq_ignore_ascii_case("every") || tok.eq_ignore_ascii_case("every!"))
+            && let Some((rec, time_of_day, consumed, phrase)) =
+                try_recurrence_match(&raw, idx, &now)
+        {
+            let first = recurrence::next_after(&rec, &now)?;
+            let deadline = if let Some(t) = time_of_day {
+                combine_date_with_time(&first, &t)?
+            } else {
+                first
+            };
+            out.deadline_phrase = Some(phrase);
+            out.deadline = Some(dates::format_iso(&deadline));
+            out.recurrence = Some(rec);
+            idx += consumed;
+            continue;
+        }
+
         // Date phrase: greedy longest match from this position.
         if (is_date_starter(tok)
             || looks_like_iso_date(tok)
@@ -264,6 +288,69 @@ fn is_relative_unit(tok: &str) -> bool {
 
 fn parse_quickadd_date(phrase: &str, now: &Zoned) -> Result<Zoned> {
     dates::parse_at(normalise_date_phrase(phrase), now.clone())
+}
+
+/// Consume tokens starting at `start` (`every` / `every!`) up to the next
+/// explicit marker or end-of-input. Returns the parsed Recurrence, an optional
+/// time-of-day (from a trailing " at <time>"), the number of tokens consumed,
+/// and the original phrase string (for `deadline_phrase`).
+fn try_recurrence_match(
+    toks: &[&str],
+    start: usize,
+    now: &Zoned,
+) -> Option<(Recurrence, Option<Zoned>, usize, String)> {
+    let mut end = start + 1;
+    while end < toks.len() {
+        let t = toks[end];
+        if is_explicit_marker(t) {
+            break;
+        }
+        // Don't fold a second `every` clause into this one.
+        if t.eq_ignore_ascii_case("every") || t.eq_ignore_ascii_case("every!") {
+            break;
+        }
+        end += 1;
+    }
+    if end == start + 1 {
+        // Bare `every` with no rule body.
+        return None;
+    }
+    let phrase = toks[start..end].join(" ");
+
+    // Split off " at <time>" suffix if present (case-insensitive).
+    let lower = phrase.to_ascii_lowercase();
+    let (rec_part, time_part) = match lower.rfind(" at ") {
+        Some(at_idx) => {
+            let rec = phrase[..at_idx].to_string();
+            let time = phrase[at_idx + 4..].trim().to_string();
+            (rec, if time.is_empty() { None } else { Some(time) })
+        }
+        None => (phrase.clone(), None),
+    };
+
+    // recurrence::parse stores only the rule body in `original_input` (the
+    // bit before any " at <time>" split). That's intentional — mark_done
+    // re-parses original_input via recurrence::parse during advancement, so
+    // it must be a phrase that round-trips through that parser. The time-of-
+    // day is preserved on the task's deadline timestamp, so no info is lost.
+    let rec = recurrence::parse(&rec_part).ok()?;
+    let time = time_part.and_then(|t| dates::parse_at(&format!("today {}", t), now.clone()).ok());
+    Some((rec, time, end - start, phrase))
+}
+
+/// Replace the time-of-day of `date_z` with the time-of-day of `time_z`,
+/// keeping `date_z`'s timezone.
+fn combine_date_with_time(date_z: &Zoned, time_z: &Zoned) -> Result<Zoned> {
+    let tz = date_z.time_zone().clone();
+    let civil = date_z.date().at(
+        time_z.hour(),
+        time_z.minute(),
+        time_z.second(),
+        time_z.subsec_nanosecond(),
+    );
+    civil
+        .to_zoned(tz)
+        .map_err(|e| Error::Other(format!("combine date+time: {}", e)))
 }
 
 fn normalise_date_phrase(phrase: &str) -> &str {
@@ -428,6 +515,57 @@ mod tests {
             "got {:?}",
             q.deadline
         );
+    }
+
+    #[test]
+    fn recurrence_every_monday_extracted() {
+        // Wed 2026-05-13 anchor → next monday = 2026-05-18.
+        let q = parse_at("Standup every monday @ops", anchor()).unwrap();
+        assert_eq!(q.title, "Standup");
+        assert_eq!(q.labels, vec!["ops"]);
+        let rec = q.recurrence.expect("recurrence parsed");
+        assert_eq!(rec.original_input, "every monday");
+        assert!(
+            q.deadline.as_deref().unwrap().starts_with("2026-05-18"),
+            "got {:?}",
+            q.deadline
+        );
+    }
+
+    #[test]
+    fn recurrence_every_monday_at_9am_sets_time_of_day() {
+        let q = parse_at("Standup every monday at 9am", anchor()).unwrap();
+        let rec = q.recurrence.expect("recurrence parsed");
+        // original_input is the rule body only ("at 9am" is split off into
+        // the deadline time-of-day). This keeps original_input parseable
+        // when mark_done re-parses it during advancement.
+        assert_eq!(rec.original_input, "every monday");
+        assert_eq!(q.deadline_phrase.as_deref(), Some("every monday at 9am"));
+        // Mon 2026-05-18 09:00 in operator tz (BST = +01:00 in May).
+        let dl = q.deadline.expect("deadline set");
+        assert!(dl.starts_with("2026-05-18T09:00"), "got {dl}");
+    }
+
+    #[test]
+    fn recurrence_every_bang_5_days_is_completion_mode() {
+        let q = parse_at("Water plants every! 5 days", anchor()).unwrap();
+        let rec = q.recurrence.expect("recurrence parsed");
+        assert_eq!(rec.mode, crate::recurrence::Mode::Completion);
+        // First occurrence = anchor + 5 days = 2026-05-18.
+        assert!(
+            q.deadline.as_deref().unwrap().starts_with("2026-05-18"),
+            "got {:?}",
+            q.deadline
+        );
+    }
+
+    #[test]
+    fn recurrence_weekday_list_with_commas() {
+        let q = parse_at("Workout every mon, wed, fri @gym", anchor()).unwrap();
+        assert_eq!(q.title, "Workout");
+        assert_eq!(q.labels, vec!["gym"]);
+        let rec = q.recurrence.expect("recurrence parsed");
+        assert!(rec.rrule_str.contains("BYDAY=MO,WE,FR"));
     }
 
     #[test]

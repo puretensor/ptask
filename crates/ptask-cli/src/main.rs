@@ -186,6 +186,7 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         duration_min: q.duration_min,
         planned_at: None,
         energy: None,
+        recurrence: q.recurrence.clone(),
     };
 
     let task = tasks::create_with_extensions(db, new, ext)?;
@@ -218,6 +219,9 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
     }
     if let Some(r) = &q.reminder {
         println!("  Reminder: {}", r);
+    }
+    if let Some(rec) = &q.recurrence {
+        println!("  Recurring: {}", rec.original_input);
     }
     Ok(())
 }
@@ -268,12 +272,19 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
 
 fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    tasks::mark_done(db, &task)?;
-    println!(
-        "Marked done: {} {}",
-        task.pt_id.as_deref().unwrap_or(""),
-        task.title
-    );
+    let outcome = tasks::mark_done(db, &task)?;
+    let pt = task.pt_id.as_deref().unwrap_or("");
+    match outcome {
+        tasks::DoneOutcome::Completed => {
+            println!("Marked done: {} {}", pt, task.title);
+        }
+        tasks::DoneOutcome::Advanced { next_deadline } => {
+            println!(
+                "Recurring task advanced: {} {}\n  Next deadline: {}",
+                pt, task.title, next_deadline
+            );
+        }
+    }
     Ok(())
 }
 

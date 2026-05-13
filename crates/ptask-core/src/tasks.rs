@@ -63,6 +63,10 @@ pub struct Extensions {
     pub duration_min: Option<i64>,
     pub planned_at: Option<String>,
     pub energy: Option<String>,
+    /// Optional recurrence rule. When set, a row is written to
+    /// `pt_recurrence` in the same transaction as the task insert.
+    /// `next_occurrence` is initialised from the task's deadline.
+    pub recurrence: Option<crate::recurrence::Recurrence>,
 }
 
 /// Insert a task with byte-for-byte Python defaults, mint a PT-N, log a
@@ -132,6 +136,26 @@ pub fn create_with_extensions(db: &Db, new: NewTask, ext: Extensions) -> Result<
             ext.energy,
         ],
     )?;
+
+    // Recurrence: persist a pt_recurrence row when the caller supplies one.
+    // next_occurrence is seeded from the task's deadline (must be Some for
+    // a recurring task — the quick-add layer always sets one).
+    if let Some(rec) = ext.recurrence.as_ref() {
+        let next_occ = new.deadline.clone().ok_or_else(|| {
+            crate::Error::Other(
+                "recurrence requires a deadline (first occurrence); none provided".into(),
+            )
+        })?;
+        let mode_str = match rec.mode {
+            crate::recurrence::Mode::Fixed => "fixed",
+            crate::recurrence::Mode::Completion => "completion",
+        };
+        tx.execute(
+            "INSERT INTO pt_recurrence (task_uuid, rrule, mode, original_input, next_occurrence)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, rec.rrule_str, mode_str, rec.original_input, next_occ],
+        )?;
+    }
 
     // Audit-log the creation. Reuses Python `interactions` table verbatim.
     tx.execute(
@@ -369,11 +393,81 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     }
 }
 
-/// Mark a task done. Updates `tasks.status`, logs an interaction.
-pub fn mark_done(db: &Db, task: &Task) -> Result<()> {
+/// Outcome of `mark_done`: either the task was completed, or it was
+/// recurring and the deadline was advanced in-place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DoneOutcome {
+    Completed,
+    Advanced { next_deadline: String },
+}
+
+/// Mark a task done. If the task has a `pt_recurrence` row, the deadline
+/// is advanced in-place and `status` stays `pending` (Todoist-style).
+/// Otherwise the task is set to `status='done'`. Either way an
+/// `interactions` row is logged.
+pub fn mark_done(db: &Db, task: &Task) -> Result<DoneOutcome> {
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
     let now = iso_now();
+
+    // Look up the recurrence rule, if any.
+    let rec_row: Option<(String, String)> = tx
+        .query_row(
+            "SELECT mode, original_input FROM pt_recurrence WHERE task_uuid = ?1",
+            [&task.id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })?;
+
+    if let Some((mode_str, original)) = rec_row {
+        let rec = crate::recurrence::parse(&original)
+            .map_err(|e| crate::Error::Other(format!("re-parse recurrence: {}", e)))?;
+        // Pick the anchor for next_after based on mode:
+        //   Fixed      → from the current deadline (preserves cadence)
+        //   Completion → from now (drifts forward with completions)
+        let anchor: jiff::Zoned = match mode_str.as_str() {
+            "fixed" => match &task.deadline {
+                Some(d) => parse_iso_zoned(d)?,
+                None => crate::dates::now_in_operator_tz()?,
+            },
+            "completion" => crate::dates::now_in_operator_tz()?,
+            other => {
+                return Err(crate::Error::Other(format!(
+                    "recurrence: unknown mode in pt_recurrence: {:?}",
+                    other
+                )));
+            }
+        };
+        let next_z = crate::recurrence::next_after(&rec, &anchor)?;
+        let next_iso = crate::dates::format_iso(&next_z);
+
+        tx.execute(
+            "UPDATE tasks SET deadline=?1, updated_at=?2 WHERE id=?3",
+            params![next_iso, now, task.id],
+        )?;
+        tx.execute(
+            "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
+            params![next_iso, task.id],
+        )?;
+        tx.execute(
+            "INSERT INTO interactions (task_id, action, ts, details)
+             VALUES (?1, 'recurrence_advance', ?2, ?3)",
+            params![
+                task.id,
+                now,
+                format!("Recurring task advanced to {}", next_iso),
+            ],
+        )?;
+        tx.commit()?;
+        return Ok(DoneOutcome::Advanced {
+            next_deadline: next_iso,
+        });
+    }
+
     tx.execute(
         "UPDATE tasks SET status='done', updated_at=?1 WHERE id=?2",
         params![now, task.id],
@@ -384,7 +478,31 @@ pub fn mark_done(db: &Db, task: &Task) -> Result<()> {
         params![task.id, now],
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(DoneOutcome::Completed)
+}
+
+/// Parse an ISO-formatted deadline string (as produced by `dates::format_iso`,
+/// or any ISO-8601 with an offset) back to a `Zoned` anchored in the operator
+/// timezone. Bare date strings (`YYYY-MM-DD`) are interpreted at midnight in
+/// the operator tz.
+fn parse_iso_zoned(s: &str) -> Result<jiff::Zoned> {
+    let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ)
+        .map_err(|e| crate::Error::Other(format!("operator tz: {}", e)))?;
+    // ISO with offset → Timestamp → Zoned in operator tz.
+    if let Ok(ts) = s.parse::<jiff::Timestamp>() {
+        return Ok(ts.to_zoned(tz));
+    }
+    // Bare date.
+    if let Ok(d) = s.parse::<jiff::civil::Date>() {
+        return d
+            .at(0, 0, 0, 0)
+            .to_zoned(tz)
+            .map_err(|e| crate::Error::Other(format!("date→zoned {}: {}", s, e)));
+    }
+    Err(crate::Error::Other(format!(
+        "parse iso zoned {:?}: not a Timestamp or Date",
+        s
+    )))
 }
 
 /// Status label formatter for CLI parity with Python output.
@@ -592,7 +710,112 @@ mod tests {
     }
 
     #[test]
-    fn mark_done_updates_status_and_logs() {
+    fn mark_done_returns_completed_for_non_recurring() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("solo task")).unwrap();
+        let outcome = mark_done(&db, &t).unwrap();
+        assert_eq!(outcome, DoneOutcome::Completed);
+    }
+
+    #[test]
+    fn create_with_recurrence_writes_pt_recurrence_row() {
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every monday").unwrap();
+        let mut new = NewTask::minimal("standup");
+        new.deadline = Some("2026-05-18T09:00:00+01:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec.clone()),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext).unwrap();
+        db.with_conn(|c| {
+            let (rrule, mode, next): (String, String, String) = c
+                .query_row(
+                    "SELECT rrule, mode, next_occurrence FROM pt_recurrence WHERE task_uuid=?1",
+                    [&t.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(rrule, rec.rrule_str);
+            assert_eq!(mode, "fixed");
+            assert_eq!(next, "2026-05-18T09:00:00+01:00");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn mark_done_advances_fixed_recurring_from_current_deadline() {
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every monday").unwrap();
+        let mut new = NewTask::minimal("standup");
+        // Mon 2026-05-18 09:00 BST.
+        new.deadline = Some("2026-05-18T09:00:00+01:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext).unwrap();
+        let outcome = mark_done(&db, &t).unwrap();
+        match outcome {
+            DoneOutcome::Advanced { next_deadline } => {
+                // Fixed mode anchors on the original deadline → next Monday.
+                assert!(
+                    next_deadline.starts_with("2026-05-25T09:00"),
+                    "got {next_deadline}"
+                );
+            }
+            other => panic!("expected Advanced, got {:?}", other),
+        }
+        db.with_conn(|c| {
+            let status: String = c
+                .query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| r.get(0))
+                .unwrap();
+            // Status stays pending — Todoist-style advance-in-place.
+            assert_eq!(status, "pending");
+            let n: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM interactions WHERE task_id=?1 AND action='recurrence_advance'",
+                    [&t.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn mark_done_advances_completion_recurring_from_now() {
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every! 5 days").unwrap();
+        let mut new = NewTask::minimal("water plants");
+        // Stale deadline well in the past; Completion mode ignores it.
+        new.deadline = Some("2024-01-01T12:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext).unwrap();
+        let outcome = mark_done(&db, &t).unwrap();
+        match outcome {
+            DoneOutcome::Advanced { next_deadline } => {
+                // Completion mode → 5 days from now, so the new deadline must
+                // be in the future, NOT 2024-01-06.
+                assert!(
+                    !next_deadline.starts_with("2024-"),
+                    "got {next_deadline} — should be ~5 days from now"
+                );
+            }
+            other => panic!("expected Advanced, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mark_done_for_existing_test_keeps_status_done() {
+        // Preserves prior behaviour test of non-recurring completion path,
+        // including the interaction details string.
         let (_dir, db) = fresh_db();
         let t = create(&db, NewTask::minimal("write tests")).unwrap();
         mark_done(&db, &t).unwrap();

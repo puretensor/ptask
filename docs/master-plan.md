@@ -226,7 +226,7 @@ Each phase below is a separable deliverable. End state: shippable binary, Python
 
 ---
 
-### v0.2.0 — DSL, Dates, Recurrence ✅ shipped (with one carryover)
+### v0.2.0 — DSL, Dates, Recurrence ✅ shipped (carryover closed in v0.2.2)
 
 **Goal:** Inline-token quick-add, filter DSL, natural-language dates, RFC 5545 recurrence with `every` (fixed) vs `every!` (completion-relative) semantics.
 
@@ -234,12 +234,12 @@ Each phase below is a separable deliverable. End state: shippable binary, Python
 - ✅ **0.2.1 — Inline-token grammar** (v0.1.3, v0.1.4 lint fix, v0.1.5 CLI wire). Hand-rolled token scanner (winnow was considered but the grammar is small enough that combinators added noise). Tokens: `@label`, `#project`, `p1..p4`, `~Nm`/`~Nh`/`~Nd` duration, `//description`, `!HH:MM` reminder. Free text is title. Date phrases extracted via the greedy try-longer-then-shorter scanner against `interim`. Persisted into `pt_extensions` (labels JSON, project, duration_min, energy, planned_at) via `tasks::create_with_extensions`. Migration V007 added the `project` column. `pt add` parses by default; `--raw` disables for literal titles.
 - ✅ **0.2.2 — Date parser** (v0.1.2). `interim` 0.2 with the `jiff_0_2` feature, `Dialect::Uk`. Operator tz constant Europe/London. `dates::format_iso` emits `+HH:MM` offset with 6-digit microseconds — matches Python `datetime.isoformat()` byte-for-byte.
 - ✅ **0.2.3 — Recurrence parser** (v0.1.8 + v0.1.9 lint fix). Patterns: `every day`, `every weekday`, `every N {days,weeks,months}`, `every <weekday[, weekday]+>`, `every <day-of-month[, day-of-month]+>`. `every!` toggles `Mode::Completion`. Serialised as RFC 5545-style `rrule_str` for forward compat. `next_after(&Recurrence, &Zoned)` computes the next instance.
-- 🚧 **0.2.4 — Recurrence advancement carryover.** Library function (`recurrence::next_after`) is shipped and tested, but the quick-add → `pt_recurrence` row write and the `pt done` → clone-with-next-deadline flow are not yet wired. Targeted for v0.2.1 (a phase-2 patch) before v0.3.0 begins.
+- ✅ **0.2.4 — Recurrence advancement** (v0.2.2). Quick-add detects `every X` / `every! X` clauses, consumes up to the next explicit marker, optionally splits a trailing ` at <time>` to set the first occurrence's time-of-day. Recurrence rule + mode + original_input persisted to `pt_recurrence` in the same transaction as the task insert. `tasks::mark_done` checks `pt_recurrence` first: if present, it advances the deadline in-place (Todoist-style — status stays `pending`), anchoring on the current deadline for `Fixed` mode or `now()` for `Completion` mode. Returns `DoneOutcome::{Completed, Advanced}` so the CLI can echo `Recurring task advanced` vs `Marked done`. Note: deviated from the master plan's original "clone with new due" wording — advance-in-place matches Todoist UX and avoids one-task-per-occurrence list bloat.
 - ✅ **0.2.5 — Filter DSL** (v0.1.6). Hand-rolled recursive-descent parser → SQL WHERE-fragment compiler. Operators `&` `|` `!` `(` `)`; terms `today` `tomorrow` `yesterday` `overdue` `no date` `recurring` `p1..p4` `@label` `#project` `due:` `due before:` `due after:` `search:`. Date phrases inside `due:*` clauses go through the dates module. Search and label LIKE patterns reuse the `\` escape from `tasks::resolve`. Wired into `pt list <filter>` and intersected with `-s`/`-p` flags.
 - ✅ **0.2.6 — Saved views** (v0.1.10). `pt_views` CRUD; CLI verbs `pt view save/list/show/rm`. `save` validates the DSL via `filter::parse` before writing. `show` re-parses and runs via `tasks::list_with_filter`.
 - ✅ **0.2.7 — `pt next`** (v0.1.7). DAG-ready query: pending tasks whose every `depends_on` UUID resolves to `status='done'` (or doesn't resolve at all, treated as satisfied). Order matches `list_with_filter`. Diagnostic `pending_with_missing_deps` available for a future `pt next --explain`. `petgraph` stays in workspace deps for future cycle-detection / critical-path work.
 
-**Exit criteria — met (with 0.2.4 wiring carrying over):** `pt add "gym monday 8am @health p2 ~45m"` parses every token. `pt list "(today | overdue) & p1"` returns expected set. `pt next` returns DAG-ready list. `pt view save NAME '<dsl>'` + `pt view show NAME` round-trip. Recurrence advancement library works (88 tests green) but the `pt done`-time clone is a v0.2.1 patch.
+**Exit criteria — met:** `pt add "gym monday 8am @health p2 ~45m"` parses every token. `pt list "(today | overdue) & p1"` returns expected set. `pt next` returns DAG-ready list. `pt view save NAME '<dsl>'` + `pt view show NAME` round-trip. `pt add "standup every monday at 9am @ops"` creates a recurring task; `pt done` advances the deadline in-place rather than completing. 103 tests green at v0.2.2.
 
 ---
 
