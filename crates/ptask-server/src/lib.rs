@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(routes::base::router())
         .merge(routes::capture::router())
+        .merge(routes::email::router())
         .merge(routes::sync::router())
         .merge(routes::metrics::router())
         .merge(routes::webhook_git::router())
@@ -503,6 +504,50 @@ mod tests {
         unsafe {
             std::env::remove_var("PTASK_GITEA_WEBHOOK_SECRET");
         }
+    }
+
+    #[tokio::test]
+    async fn email_endpoint_parses_subject_and_body() {
+        let db = open_test_db();
+        let app = router(AppState { db: db.clone() });
+        let raw = "Subject: Buy bread tomorrow\r\n\
+From: ops@example.test\r\n\
+Message-ID: <abc@example.test>\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Don't forget the sourdough.\r\n";
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/email")
+                    .method("POST")
+                    .header("content-type", "message/rfc822")
+                    .body(Body::from(raw))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["subject"], "Buy bread tomorrow");
+        assert!(parsed["id"].as_i64().unwrap() > 0);
+        // The raw_items row landed.
+        db.with_conn(|c| {
+            let n: i64 = c
+                .query_row("SELECT COUNT(*) FROM raw_items", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 1);
+            let text: String = c
+                .query_row("SELECT text FROM raw_items", [], |r| r.get(0))
+                .unwrap();
+            assert!(text.contains("Buy bread tomorrow"));
+            assert!(text.contains("sourdough"));
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[tokio::test]
