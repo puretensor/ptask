@@ -117,3 +117,44 @@ Non-zero Python exit → `pt distill` writes a `distill.failed` event to
 code. systemd records the failure; the operator's existing Telegram
 alert pipeline (or any HMAC webhook subscriber) can scrape
 `pt_event_log` for `distill.failed` events.
+
+## Accountability (v0.7.0)
+
+`pt accountability run` is the Rust port of the Python `accountability/engine.py`.
+It walks the 6-level escalation state machine, gates on the 22:00 — 08:00 UTC
+quiet window, respects a daily Telegram budget of 3, and enforces a 4-hour
+cooldown per task between reminders.
+
+### Config (env)
+
+| Variable | Purpose |
+|---|---|
+| `PTASK_TELEGRAM_BOT_TOKEN` *(or `TELEGRAM_BOT_TOKEN`)* | Telegram Bot API token |
+| `PTASK_ACCOUNTABILITY_CHAT_ID` *(falls back to `PTASK_TELEGRAM_DIGEST_CHATS[0]`, then `TELEGRAM_CHAT_ID`)* | int64 chat to nudge |
+| `PTASK_SMTP_HOST` *(or `SMTP_HOST`)* | SMTP server |
+| `PTASK_SMTP_PORT` *(or `SMTP_PORT`)* | default 587 |
+| `PTASK_SMTP_USER` / `PTASK_SMTP_PASS` *(or `SMTP_USER` / `SMTP_PASS`)* | STARTTLS creds |
+| `PTASK_NOTIFY_EMAIL` *(or `NOTIFY_EMAIL`)* | escalation recipient |
+| `PTASK_NOTIFY_CC` *(or `PTASK_OPS_EMAIL`)* | always CC'd (defaults to `ops@puretensor.ai` per CLAUDE.md) |
+| `PTASK_HAL_NUDGE_URL` | optional HAL endpoint that POSTs back `{message: "..."}`; falls back to static templates if unset |
+| `PTASK_ACCOUNTABILITY_DRY_RUN` | `1` / `true` to log without sending |
+
+### Cutover from `puretensor-tasks-accountability.timer`
+
+```bash
+sudo systemctl disable --now puretensor-tasks-accountability.timer
+mkdir -p ~/.config/systemd/user
+ln -sf ~/ptask/scripts/systemd/ptask-accountability.service ~/.config/systemd/user/
+ln -sf ~/ptask/scripts/systemd/ptask-accountability.timer   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ptask-accountability.timer
+loginctl enable-linger "$USER"
+```
+
+### Inspect
+
+```bash
+systemctl --user list-timers ptask-accountability.timer
+journalctl --user -u ptask-accountability.service -n 200
+pt accountability run --dry-run
+```

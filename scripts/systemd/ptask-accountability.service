@@ -1,0 +1,17 @@
+[Unit]
+Description=pTask accountability — escalation + dispatch
+Documentation=https://github.com/puretensor/ptask
+ConditionPathExists=%h/puretensor-tasks/.env
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/puretensor-tasks/.env
+ExecStart=%h/.cargo/bin/pt accountability run
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=5min

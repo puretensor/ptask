@@ -52,8 +52,24 @@ enum Command {
     Branch(BranchArgs),
     /// Run the distillation pipeline (Python subprocess shim until v0.9).
     Distill(DistillArgs),
+    /// Run one accountability cycle (escalation + Telegram/email).
+    #[command(subcommand)]
+    Accountability(AccountabilityCommand),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
+}
+
+#[derive(Subcommand, Debug)]
+enum AccountabilityCommand {
+    /// Run the state machine + dispatch once.
+    Run(AccountabilityRunArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct AccountabilityRunArgs {
+    /// Don't actually send anything; log what would have been dispatched.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -179,6 +195,7 @@ fn main() -> Result<()> {
         Some(Command::Bot) => cmd_bot(db),
         Some(Command::Branch(a)) => cmd_branch(&db, a),
         Some(Command::Distill(a)) => cmd_distill(&db, a),
+        Some(Command::Accountability(c)) => cmd_accountability(db, c),
         Some(Command::Backfill) => cmd_backfill(&db),
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
             ptask_tui::run(db)
@@ -421,6 +438,44 @@ fn cmd_branch(db: &Db, a: BranchArgs) -> Result<()> {
     let pt = task.pt_id.clone().unwrap_or_else(|| "PT-?".into());
     println!("{}", tasks::branch_name(&pt, &task.title));
     Ok(())
+}
+
+fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
+    match c {
+        AccountabilityCommand::Run(a) => {
+            let mut cfg = ptask_core::accountability::DispatchCfg::from_env();
+            if a.dry_run {
+                cfg.dry_run = true;
+            }
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .context("building tokio runtime")?;
+            let report = rt.block_on(ptask_core::accountability::run_check(&db, &cfg))?;
+            if report.quiet_hours {
+                println!("quiet hours — no dispatch");
+                return Ok(());
+            }
+            let tg = report.dispatched.iter().filter(|d| d.telegram_sent).count();
+            let em = report.dispatched.iter().filter(|d| d.email_sent).count();
+            println!(
+                "accountability ok — eligible={} dispatched={} telegrams={} emails={} budget={}/{}",
+                report.eligible,
+                report.dispatched.len(),
+                tg,
+                em,
+                report.budget_used_after,
+                ptask_core::accountability::DAILY_BUDGET_MAX,
+            );
+            for d in &report.dispatched {
+                println!(
+                    "  {} level={} telegram={} email={}",
+                    d.task_uuid, d.level, d.telegram_sent, d.email_sent
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 fn cmd_distill(db: &Db, a: DistillArgs) -> Result<()> {

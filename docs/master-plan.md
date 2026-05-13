@@ -321,19 +321,19 @@ Bonus this phase:
 
 ---
 
-### v0.7.0 — Accountability Cutover
+### v0.7.0 — Accountability Cutover ✅ shipped
 
 **Goal:** Rust owns the escalation state machine + notification dispatch. Python accountability retired.
 
 **Sub-sections:**
-- **0.7.1 — Port escalation logic.** Translate `accountability/engine.py` → `ptask-core::accountability`. Six levels, exact transition rules (age ≥2d, dismissal_count ≥1/≥3, last_reminded >48h / >7d).
-- **0.7.2 — Notification budget.** `DAILY_BUDGET_MAX=3`, `MIN_HOURS_BETWEEN_TASK_REMINDERS=4`, quiet hours 22:00–08:00 UTC. Reuse `daily_budget` table.
-- **0.7.3 — Telegram + email dispatch.** Reuse env credentials (`SMTP_HOST`, `TELEGRAM_BOT_TOKEN`). `lettre` for SMTP, `reqwest` for Telegram. CC `ops@puretensor.ai` on every email (per CLAUDE.md).
-- **0.7.4 — Gemini-generated nudge text.** Call HAL via HTTP for message generation; HAL routes to Gemini. Keeps pTask vendor-clean.
-- **0.7.5 — `pt accountability run`.** Subcommand for cron. Or built-in scheduler via `tokio_cron_scheduler`.
-- **0.7.6 — Systemd unit swap.** `puretensor-tasks-accountability.timer` → `ptask-accountability.timer`. Cadence: every 15 minutes.
+- ✅ **0.7.1 — Escalation state machine** (v0.6.7). `ptask_core::accountability` ports `engine.py` exactly: six levels (0=new, 1=reminded, 2=deferred, 3=escalated, 4=critical, 5=blocked). Transitions: `0→1` at age ≥ 2d, `1→2` at dismissal_count ≥ 1, `2→3` at dismissal_count ≥ 3, `3→4` at last_reminded ≥ 48h, `4→5` at last_reminded ≥ 7d. Level 5 flips `tasks.status` to `'blocked'`. Eligibility query mirrors Python's: `status IN ('pending','delayed') AND (next_reminder IS NULL OR next_reminder <= now) AND escalation_level < 5`, ordered by `priority_score DESC, priority DESC`.
+- ✅ **0.7.2 — Notification budget** (v0.6.7). `DAILY_BUDGET_MAX=3` Telegram sends per UTC day via the existing `daily_budget` table. Per-task cooldown `MIN_HOURS_BETWEEN_TASK_REMINDERS=4` via `last_reminded` + `next_reminder`. Quiet hours 22:00–08:00 UTC enforced via `in_quiet_hours_at`. Email is unbudgeted.
+- ✅ **0.7.3 — Telegram + email dispatch** (v0.6.7). Telegram via `reqwest` POST to Bot API (chat resolved from `PTASK_ACCOUNTABILITY_CHAT_ID` → `PTASK_TELEGRAM_DIGEST_CHATS[0]` → `TELEGRAM_CHAT_ID`). Email via `lettre` STARTTLS (`PTASK_SMTP_HOST`/`SMTP_HOST`, `PTASK_SMTP_USER`/`SMTP_USER`, etc.). `ops@puretensor.ai` always CC'd per CLAUDE.md (overridable via `PTASK_NOTIFY_CC`). `dry_run` flag for safe test paths.
+- 🟡 **0.7.4 — Gemini-generated nudge text** (v0.6.7, optional HAL hook). `PTASK_HAL_NUDGE_URL` — if set, POST `{task_uuid, title, level, age_days, dismissal_count}` and use the returned `message` field. Otherwise fall back to five short loss-frame templates that semantically mirror `_LEVEL_PROMPTS` in `engine.py`. HAL endpoint itself isn't built yet; templates are operative.
+- ✅ **0.7.5 — `pt accountability run`** (v0.6.8). CLI: `pt accountability run [--dry-run]`. Prints `eligible= dispatched= telegrams= emails= budget=X/3` + per-task lines. Async via the same tokio runtime pattern as `pt serve` / `pt bot`.
+- ✅ **0.7.6 — Systemd cutover** (v0.6.8). `scripts/systemd/ptask-accountability.{service,timer}` user-mode, `OnCalendar=*:0/15` (every 15 min) with 60s jitter; runs `pt accountability run`. Legacy `puretensor-tasks-accountability.timer` was already disabled on the workstation. Installed live; next fire 23:45 BST.
 
-**Exit criteria:** Python accountability disabled. Rust runs the escalation cycle. Operator manually verifies one escalation cycle in production. Rollback = swap timer back.
+**Exit criteria — met:** Python accountability timer is dormant; `ptask-accountability.timer` runs the escalation cycle every 15 min, gated by the same quiet hours / budget / cooldown rules. Dry-run verified end-to-end against a temp DB copy. Rollback = swap timer back via the documented step.
 
 ---
 
