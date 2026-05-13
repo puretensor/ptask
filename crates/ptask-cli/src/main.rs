@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ptask_core::{Db, Extensions, NewTask, priority, pt_id, quickadd, tasks};
+use ptask_core::{Db, Extensions, NewTask, dag, priority, pt_id, quickadd, tasks};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,8 +36,17 @@ enum Command {
     List(ListArgs),
     /// Mark a task done (by PT-N or title substring).
     Done(DoneArgs),
+    /// Show ready-to-start tasks (all dependencies done).
+    Next(NextArgs),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
+}
+
+#[derive(clap::Args, Debug)]
+struct NextArgs {
+    /// Max ready tasks to show.
+    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    limit: usize,
 }
 
 #[derive(clap::Args, Debug)]
@@ -109,6 +118,7 @@ fn main() -> Result<()> {
         Some(Command::Add(a)) => cmd_add(&db, a),
         Some(Command::List(a)) => cmd_list(&db, a),
         Some(Command::Done(a)) => cmd_done(&db, a),
+        Some(Command::Next(a)) => cmd_next(&db, a),
         Some(Command::Backfill) => cmd_backfill(&db),
         None => {
             // No subcommand → quick help banner. TUI lands in v0.3.0.
@@ -242,6 +252,22 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
         task.pt_id.as_deref().unwrap_or(""),
         task.title
     );
+    Ok(())
+}
+
+fn cmd_next(db: &Db, a: NextArgs) -> Result<()> {
+    let rows = dag::next_ready(db, a.limit)?;
+    if rows.is_empty() {
+        println!("No ready tasks.");
+        return Ok(());
+    }
+    for t in &rows {
+        let label = priority::label(t.priority).to_ascii_uppercase();
+        let pt = t.pt_id.as_deref().unwrap_or("------");
+        let due = t.deadline.as_deref().unwrap_or("--");
+        println!("[{:8}] {:7} {:10} {}", label, pt, due, t.title);
+    }
+    println!("\nShowing {} ready task(s).", rows.len());
     Ok(())
 }
 

@@ -6,6 +6,7 @@
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod dag;
 pub mod dates;
 pub mod error;
 pub mod filter;
