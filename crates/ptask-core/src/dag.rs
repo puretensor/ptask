@@ -20,7 +20,7 @@ use std::collections::HashMap;
 /// Return pending tasks ready to start: all `depends_on` UUIDs resolve to
 /// rows with `status='done'`, or `depends_on` is empty. Order is the same
 /// as `tasks::list_with_filter` (priority_score DESC, priority DESC,
-/// deadline ASC NULLS LAST, created_at DESC).
+/// created_at DESC).
 pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
     let conn = db.get()?;
 
@@ -46,8 +46,6 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
          WHERE t.status = 'pending'
          ORDER BY t.priority_score DESC,
                   t.priority DESC,
-                  CASE WHEN t.deadline IS NULL THEN 1 ELSE 0 END,
-                  t.deadline ASC,
                   t.created_at DESC",
     )?;
 
@@ -254,6 +252,39 @@ mod tests {
         .unwrap();
         let ready = next_ready(&db, 10).unwrap();
         assert_eq!(ready[0].title, "high score");
+    }
+
+    #[test]
+    fn ordering_matches_task_list_without_deadline_sort() {
+        let (_dir, db) = fresh_db();
+        let older_due = crate::tasks::create(&db, NewTask::minimal("older due")).unwrap();
+        let newer_no_due = crate::tasks::create(&db, NewTask::minimal("newer no due")).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks
+                 SET created_at='2026-01-01T00:00:00+00:00',
+                     deadline='2026-01-02'
+                 WHERE id=?1",
+                [&older_due.id],
+            )?;
+            c.execute(
+                "UPDATE tasks
+                 SET created_at='2026-01-03T00:00:00+00:00',
+                     deadline=NULL
+                 WHERE id=?1",
+                [&newer_no_due.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let ready = next_ready(&db, 10).unwrap();
+        let listed = crate::tasks::list_with_filter(&db, None, Some("pending"), None, 10).unwrap();
+        assert_eq!(ready[0].title, "newer no due");
+        assert_eq!(
+            ready.iter().map(|t| &t.id).collect::<Vec<_>>(),
+            listed.iter().map(|t| &t.id).collect::<Vec<_>>()
+        );
     }
 
     #[test]

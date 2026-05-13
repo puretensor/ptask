@@ -120,10 +120,14 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             format!("substr(t.deadline,1,10) = ?{}", params.len())
         }
         Expr::Overdue => {
+            params.push(Value::Text(now.date().to_string()));
+            let today = params.len();
             params.push(Value::Text(dates::format_iso(now)));
+            let now_iso = params.len();
             format!(
-                "(t.deadline IS NOT NULL AND t.deadline < ?{} AND t.status != 'done')",
-                params.len()
+                "(t.deadline IS NOT NULL AND t.status != 'done' AND \
+                 (substr(t.deadline,1,10) < ?{today} OR \
+                  (substr(t.deadline,1,10) = ?{today} AND length(t.deadline) > 10 AND t.deadline < ?{now_iso})))"
             )
         }
         Expr::NoDate => "t.deadline IS NULL".to_string(),
@@ -133,8 +137,10 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             format!("t.priority = ?{}", params.len())
         }
         Expr::Label(name) => {
-            params.push(Value::Text(format!("%\"{}\"%", name.replace('"', "\\\""))));
-            format!("x.labels LIKE ?{}", params.len())
+            let json_string = serde_json::to_string(name)
+                .map_err(|e| Error::Other(format!("label serialise: {}", e)))?;
+            params.push(Value::Text(format!("%{}%", escape_like(&json_string))));
+            format!("x.labels LIKE ?{} ESCAPE '\\'", params.len())
         }
         Expr::Project(name) => {
             params.push(Value::Text(name.clone()));
@@ -425,6 +431,7 @@ impl<'a> ParseCtx<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::ToSql;
 
     fn ast(s: &str) -> Expr {
         parse(s).unwrap()
@@ -436,6 +443,10 @@ mod tests {
             .at(12, 0, 0, 0)
             .to_zoned(tz)
             .unwrap()
+    }
+
+    fn bind_refs(values: &[rusqlite::types::Value]) -> Vec<&dyn ToSql> {
+        values.iter().map(|v| v as &dyn ToSql).collect()
     }
 
     #[test]
@@ -546,13 +557,40 @@ mod tests {
     }
 
     #[test]
-    fn compile_label_escapes_quotes() {
-        let sql = to_sql(&ast("@waiting"), &anchor()).unwrap();
+    fn compile_label_escapes_like_wildcards() {
+        let sql = to_sql(&ast("@a_b"), &anchor()).unwrap();
         assert!(sql.where_clause.contains("labels LIKE"));
+        assert!(sql.where_clause.contains("ESCAPE"));
         assert!(matches!(
             &sql.params[0],
-            rusqlite::types::Value::Text(s) if s == "%\"waiting\"%"
+            rusqlite::types::Value::Text(s) if s == "%\"a\\_b\"%"
         ));
+    }
+
+    #[test]
+    fn label_like_treats_underscore_literally() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pt_extensions (task_uuid TEXT, labels TEXT NOT NULL DEFAULT '[]');
+             INSERT INTO pt_extensions (task_uuid, labels) VALUES
+               ('literal', '[\"a_b\"]'),
+               ('wildcard-lookalike', '[\"axb\"]');",
+        )
+        .unwrap();
+        let sql = to_sql(&ast("@a_b"), &anchor()).unwrap();
+        let query = format!(
+            "SELECT task_uuid FROM pt_extensions x WHERE {} ORDER BY task_uuid",
+            sql.where_clause
+        );
+        let params = bind_refs(&sql.params);
+        let rows: Vec<String> = conn
+            .prepare(&query)
+            .unwrap()
+            .query_map(params.as_slice(), |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, vec!["literal"]);
     }
 
     #[test]
@@ -575,5 +613,35 @@ mod tests {
     fn compile_recurring_subquery() {
         let sql = to_sql(&ast("recurring"), &anchor()).unwrap();
         assert!(sql.where_clause.contains("pt_recurrence"));
+    }
+
+    #[test]
+    fn overdue_does_not_treat_today_date_only_as_overdue() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (title TEXT, deadline TEXT, status TEXT);
+             CREATE TABLE pt_extensions (task_uuid TEXT, labels TEXT);
+             INSERT INTO tasks (title, deadline, status) VALUES
+               ('yesterday date-only', '2026-05-12', 'pending'),
+               ('today date-only', '2026-05-13', 'pending'),
+               ('earlier today time', '2026-05-13T10:00:00+01:00', 'pending'),
+               ('later today time', '2026-05-13T18:00:00+01:00', 'pending'),
+               ('done yesterday', '2026-05-12', 'done');",
+        )
+        .unwrap();
+        let sql = to_sql(&ast("overdue"), &anchor()).unwrap();
+        let query = format!(
+            "SELECT title FROM tasks t LEFT JOIN pt_extensions x ON 1=0 WHERE {} ORDER BY title",
+            sql.where_clause
+        );
+        let params = bind_refs(&sql.params);
+        let rows: Vec<String> = conn
+            .prepare(&query)
+            .unwrap()
+            .query_map(params.as_slice(), |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, vec!["earlier today time", "yesterday date-only"]);
     }
 }
