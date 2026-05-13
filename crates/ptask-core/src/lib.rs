@@ -14,6 +14,7 @@ pub mod migrations;
 pub mod priority;
 pub mod pt_id;
 pub mod quickadd;
+pub mod recurrence;
 pub mod storage;
 pub mod tasks;
 
