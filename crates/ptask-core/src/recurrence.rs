@@ -220,8 +220,9 @@ fn next_weekday(after: &Zoned, days: &[Weekday]) -> Result<Zoned> {
 }
 
 fn next_monthday(after: &Zoned, days: &[i8]) -> Result<Zoned> {
-    // Walk forward day-by-day up to 60 days.
-    for delta in 1..=60 {
+    // Walk forward day-by-day up to a year. A 60-day window misses valid
+    // "every 31" advances such as Mar 31 -> May 31 across a 30-day month.
+    for delta in 1..=370 {
         let candidate = after
             .checked_add(jiff::Span::new().days(delta))
             .map_err(|e| Error::Other(format!("monthday advance: {}", e)))?;
@@ -230,7 +231,7 @@ fn next_monthday(after: &Zoned, days: &[i8]) -> Result<Zoned> {
         }
     }
     Err(Error::Other(
-        "monthday advance: no match within 60 days".into(),
+        "monthday advance: no match within one year".into(),
     ))
 }
 
@@ -361,6 +362,15 @@ mod tests {
         let r = parse("every 1, 15, 27").unwrap();
         let n = next_after(&r, &anchor()).unwrap();
         assert_eq!(n.date(), date(2026, 5, 15));
+    }
+
+    #[test]
+    fn next_after_monthday_31_skips_short_months() {
+        let r = parse("every 31").unwrap();
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        let mar31 = date(2026, 3, 31).at(12, 0, 0, 0).to_zoned(tz).unwrap();
+        let n = next_after(&r, &mar31).unwrap();
+        assert_eq!(n.date(), date(2026, 5, 31));
     }
 
     #[test]

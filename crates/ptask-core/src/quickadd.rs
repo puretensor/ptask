@@ -21,7 +21,7 @@
 //!      project="fleet", priority=1, duration_min=30, description="grocery list"
 
 use crate::dates;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::priority;
 use jiff::Zoned;
 
@@ -161,10 +161,14 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         }
 
         // Date phrase: greedy longest match from this position.
-        if (is_date_starter(tok) || looks_like_iso_date(tok) || looks_like_clock_time(tok))
+        if (is_date_starter(tok)
+            || looks_like_iso_date(tok)
+            || looks_like_clock_time(tok)
+            || starts_relative_interval(&raw, idx)
+            || starts_in_relative_interval(&raw, idx))
             && let Some((phrase, consumed)) = try_date_match(&raw, idx, &now)
         {
-            let parsed = dates::parse_at(&phrase, now.clone())?;
+            let parsed = parse_quickadd_date(&phrase, &now)?;
             out.deadline_phrase = Some(phrase);
             out.deadline = Some(dates::format_iso(&parsed));
             idx += consumed;
@@ -177,6 +181,12 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     }
 
     out.title = title_words.join(" ").trim().to_string();
+    if out.title.is_empty() {
+        return Err(Error::Other(
+            "quick-add: title is empty after parsing inline tokens; use --raw for a literal token-only title"
+                .into(),
+        ));
+    }
     // Priority default = normal (2).
     if out.priority.is_none() {
         out.priority = Some(2);
@@ -218,6 +228,58 @@ fn looks_like_clock_time(tok: &str) -> bool {
     lower.ends_with("am") || lower.ends_with("pm") || lower.contains(':')
 }
 
+fn starts_relative_interval(toks: &[&str], start: usize) -> bool {
+    toks.get(start).is_some_and(|tok| is_quantity(tok))
+        && toks.get(start + 1).is_some_and(|tok| is_relative_unit(tok))
+}
+
+fn starts_in_relative_interval(toks: &[&str], start: usize) -> bool {
+    toks.get(start)
+        .is_some_and(|tok| tok.eq_ignore_ascii_case("in"))
+        && toks.get(start + 1).is_some_and(|tok| is_quantity(tok))
+        && toks.get(start + 2).is_some_and(|tok| is_relative_unit(tok))
+}
+
+fn is_quantity(tok: &str) -> bool {
+    !tok.is_empty() && tok.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_relative_unit(tok: &str) -> bool {
+    matches!(
+        tok.to_ascii_lowercase().as_str(),
+        "minute"
+            | "minutes"
+            | "min"
+            | "mins"
+            | "hour"
+            | "hours"
+            | "day"
+            | "days"
+            | "week"
+            | "weeks"
+            | "month"
+            | "months"
+    )
+}
+
+fn parse_quickadd_date(phrase: &str, now: &Zoned) -> Result<Zoned> {
+    dates::parse_at(normalise_date_phrase(phrase), now.clone())
+}
+
+fn normalise_date_phrase(phrase: &str) -> &str {
+    let trimmed = phrase.trim();
+    if let Some(after_in) = trimmed
+        .get(..2)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("in"))
+        .and_then(|_| trimmed.get(2..))
+        && after_in.chars().next().is_some_and(|ch| ch.is_whitespace())
+    {
+        after_in.trim_start()
+    } else {
+        trimmed
+    }
+}
+
 /// Greedy longest-match: extend a date phrase by appending subsequent tokens
 /// while `interim::parse_date_string` still accepts the result. Stops at the
 /// first token that is an explicit non-date marker (`@`, `#`, `p[1-4]`, `~`,
@@ -233,7 +295,7 @@ fn try_date_match(toks: &[&str], start: usize, now: &Zoned) -> Option<(String, u
             break;
         }
         let phrase = toks[start..end].join(" ");
-        if dates::parse_at(&phrase, now.clone()).is_ok() {
+        if parse_quickadd_date(&phrase, now).is_ok() {
             best = Some((phrase, end - start));
         }
     }
@@ -357,6 +419,30 @@ mod tests {
     }
 
     #[test]
+    fn relative_interval_extracted() {
+        let q = parse_at("Water plants 5 days", anchor()).unwrap();
+        assert_eq!(q.title, "Water plants");
+        assert_eq!(q.deadline_phrase.as_deref(), Some("5 days"));
+        assert!(
+            q.deadline.as_deref().unwrap().starts_with("2026-05-18"),
+            "got {:?}",
+            q.deadline
+        );
+    }
+
+    #[test]
+    fn in_relative_interval_extracted() {
+        let q = parse_at("Water plants in 5 days", anchor()).unwrap();
+        assert_eq!(q.title, "Water plants");
+        assert_eq!(q.deadline_phrase.as_deref(), Some("in 5 days"));
+        assert!(
+            q.deadline.as_deref().unwrap().starts_with("2026-05-18"),
+            "got {:?}",
+            q.deadline
+        );
+    }
+
+    #[test]
     fn duration_units() {
         let q = parse_at("review pr ~2h", anchor()).unwrap();
         assert_eq!(q.duration_min, Some(120));
@@ -405,6 +491,12 @@ mod tests {
         // p5 is out of Todoist range; stays as a title word.
         let q = parse_at("foo p5 bar", anchor()).unwrap();
         assert!(q.title.contains("p5"), "got title {:?}", q.title);
+    }
+
+    #[test]
+    fn token_only_input_is_rejected() {
+        let err = parse_at("@ops p1 ~5m", anchor()).unwrap_err();
+        assert!(format!("{}", err).contains("title is empty"));
     }
 
     #[test]
