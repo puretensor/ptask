@@ -171,12 +171,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             && let Some((rec, time_of_day, consumed, phrase)) =
                 try_recurrence_match(&raw, idx, &now)
         {
-            let first = recurrence::next_after(&rec, &now)?;
-            let deadline = if let Some(t) = time_of_day {
-                combine_date_with_time(&first, &t)?
-            } else {
-                first
-            };
+            let deadline = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())?;
             out.deadline_phrase = Some(phrase);
             out.deadline = Some(dates::format_iso(&deadline));
             out.recurrence = Some(rec);
@@ -317,25 +312,33 @@ fn try_recurrence_match(
     }
     let phrase = toks[start..end].join(" ");
 
-    // Split off " at <time>" suffix if present (case-insensitive).
-    let lower = phrase.to_ascii_lowercase();
-    let (rec_part, time_part) = match lower.rfind(" at ") {
-        Some(at_idx) => {
-            let rec = phrase[..at_idx].to_string();
-            let time = phrase[at_idx + 4..].trim().to_string();
-            (rec, if time.is_empty() { None } else { Some(time) })
-        }
-        None => (phrase.clone(), None),
-    };
-
-    // recurrence::parse stores only the rule body in `original_input` (the
-    // bit before any " at <time>" split). That's intentional — mark_done
-    // re-parses original_input via recurrence::parse during advancement, so
-    // it must be a phrase that round-trips through that parser. The time-of-
-    // day is preserved on the task's deadline timestamp, so no info is lost.
-    let rec = recurrence::parse(&rec_part).ok()?;
+    let rec = recurrence::parse(&phrase).ok()?;
+    let (_rule_part, time_part) = recurrence::split_time_suffix(&phrase);
     let time = time_part.and_then(|t| dates::parse_at(&format!("today {}", t), now.clone()).ok());
     Some((rec, time, end - start, phrase))
+}
+
+fn first_recurrence_deadline(
+    rec: &Recurrence,
+    now: &Zoned,
+    time_of_day: Option<&Zoned>,
+) -> Result<Zoned> {
+    let first = recurrence::next_after(rec, now)?;
+    let Some(time) = time_of_day else {
+        return Ok(first);
+    };
+
+    let today = combine_date_with_time(now, time)?;
+    let can_occur_today = match rec.freq {
+        recurrence::Freq::Daily => rec.interval == 1,
+        recurrence::Freq::Weekly => rec.bydays.contains(&now.weekday()),
+        recurrence::Freq::Monthly => rec.bymonthday.contains(&now.day()),
+    };
+    if can_occur_today && today > now.clone() {
+        return Ok(today);
+    }
+
+    combine_date_with_time(&first, time)
 }
 
 /// Replace the time-of-day of `date_z` with the time-of-day of `time_z`,
@@ -536,12 +539,37 @@ mod tests {
     fn recurrence_every_monday_at_9am_sets_time_of_day() {
         let q = parse_at("Standup every monday at 9am", anchor()).unwrap();
         let rec = q.recurrence.expect("recurrence parsed");
-        // original_input is the rule body only ("at 9am" is split off into
-        // the deadline time-of-day). This keeps original_input parseable
-        // when mark_done re-parses it during advancement.
-        assert_eq!(rec.original_input, "every monday");
+        assert_eq!(rec.original_input, "every monday at 9am");
         assert_eq!(q.deadline_phrase.as_deref(), Some("every monday at 9am"));
         // Mon 2026-05-18 09:00 in operator tz (BST = +01:00 in May).
+        let dl = q.deadline.expect("deadline set");
+        assert!(dl.starts_with("2026-05-18T09:00"), "got {dl}");
+    }
+
+    #[test]
+    fn recurrence_every_day_at_future_time_can_land_today() {
+        let q = parse_at("Backup every day at 9pm", anchor()).unwrap();
+        assert_eq!(q.title, "Backup");
+        let dl = q.deadline.expect("deadline set");
+        assert!(dl.starts_with("2026-05-13T21:00"), "got {dl}");
+    }
+
+    #[test]
+    fn recurrence_every_day_at_past_time_lands_tomorrow() {
+        let q = parse_at("Backup every day at 9am", anchor()).unwrap();
+        assert_eq!(q.title, "Backup");
+        let dl = q.deadline.expect("deadline set");
+        assert!(dl.starts_with("2026-05-14T09:00"), "got {dl}");
+    }
+
+    #[test]
+    fn recurrence_weekday_at_future_time_can_land_today() {
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        let monday_morning = jiff::civil::date(2026, 5, 18)
+            .at(8, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        let q = parse_at("Standup every monday at 9am", monday_morning).unwrap();
         let dl = q.deadline.expect("deadline set");
         assert!(dl.starts_with("2026-05-18T09:00"), "got {dl}");
     }
