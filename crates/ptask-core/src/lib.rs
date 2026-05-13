@@ -20,6 +20,7 @@ pub mod recurrence;
 pub mod storage;
 pub mod tasks;
 pub mod views;
+pub mod webhook_log;
 
 pub use error::{Error, Result};
 pub use storage::{Db, default_db_path};

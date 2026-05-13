@@ -103,6 +103,14 @@ async fn sync(State(state): State<AppState>, Json(req): Json<SyncReq>) -> impl I
                 ) {
                     warn!(target: "ptask::sync", error = %e, "event_log record failed");
                 }
+                // Outbound webhook fan-out (env-driven; no-op if unconfigured).
+                crate::webhooks::dispatch(
+                    &state,
+                    &payload.event_type,
+                    task_uuid.as_deref(),
+                    &payload.payload,
+                )
+                .await;
                 status.insert(cmd.uuid.clone(), Value::String("ok".into()));
             }
             Err(e) => {

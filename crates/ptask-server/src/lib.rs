@@ -9,6 +9,7 @@
 //! and `/metrics`.
 
 mod routes;
+pub mod webhooks;
 
 use anyhow::Result;
 use axum::Router;
@@ -320,6 +321,37 @@ mod tests {
         let tasks = parsed["resources"]["tasks"].as_array().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0]["status"], "done");
+    }
+
+    #[test]
+    fn webhook_sign_is_stable_hex() {
+        let sig = webhooks::sign(b"hello world", "secret-key");
+        // Known answer for HMAC-SHA256 with these inputs.
+        assert_eq!(
+            sig,
+            "095d5a21fe6d0646db223fdf3de6436bb8dfb2fab0b51677ecf6441fcf5f2a67"
+        );
+    }
+
+    #[test]
+    fn webhook_sign_empty_secret_returns_empty() {
+        assert_eq!(webhooks::sign(b"hello", ""), "");
+    }
+
+    #[test]
+    fn webhook_log_records_outbound_send() {
+        // Force-record a log row via the public helper to prove the schema
+        // bind path works against the test stub.
+        let db = open_test_db();
+        let id = ptask_core::webhook_log::record(
+            &db,
+            ptask_core::webhook_log::Direction::Out,
+            "https://example.test/hook",
+            &serde_json::json!({"event": "task.created"}),
+            true,
+        )
+        .unwrap();
+        assert!(id > 0);
     }
 
     #[tokio::test]
