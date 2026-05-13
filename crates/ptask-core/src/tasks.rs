@@ -54,9 +54,27 @@ impl NewTask {
     }
 }
 
+/// Optional pTask-native fields written to `pt_extensions` alongside a `tasks` row.
+/// Any None / empty entry leaves the corresponding column at its default.
+#[derive(Debug, Default, Clone)]
+pub struct Extensions {
+    pub labels: Vec<String>,
+    pub project: Option<String>,
+    pub duration_min: Option<i64>,
+    pub planned_at: Option<String>,
+    pub energy: Option<String>,
+}
+
 /// Insert a task with byte-for-byte Python defaults, mint a PT-N, log a
 /// `create` interaction. Returns the created Task.
 pub fn create(db: &Db, new: NewTask) -> Result<Task> {
+    create_with_extensions(db, new, Extensions::default())
+}
+
+/// Variant that also writes pTask-native fields into `pt_extensions`
+/// (labels JSON, project, duration_min, planned_at, energy) in the same
+/// transaction. Used by the inline-token quick-add path.
+pub fn create_with_extensions(db: &Db, new: NewTask, ext: Extensions) -> Result<Task> {
     let id = Uuid::new_v4().to_string();
     let now = iso_now();
 
@@ -90,16 +108,29 @@ pub fn create(db: &Db, new: NewTask) -> Result<Task> {
         ],
     )?;
 
-    // Mint PT-N. Reuse the same tx for atomicity.
+    // Mint PT-N + write extension columns. Reuse the same tx for atomicity.
     let n: i64 = tx.query_row(
         "UPDATE pt_counters SET value = value + 1 WHERE name='pt_id' RETURNING value",
         [],
         |r| r.get(0),
     )?;
     let pt_id_str = pt_id::format_pt_id(n);
+    let labels_json = serde_json::to_string(&ext.labels)
+        .map_err(|e| crate::Error::Other(format!("labels serialise: {}", e)))?;
     tx.execute(
-        "INSERT INTO pt_extensions (task_uuid, pt_id, created_by_pt) VALUES (?1, ?2, 1)",
-        params![id, pt_id_str],
+        "INSERT INTO pt_extensions (
+            task_uuid, pt_id, status_category, labels, project,
+            duration_min, planned_at, energy, created_by_pt
+         ) VALUES (?1, ?2, 'todo', ?3, ?4, ?5, ?6, ?7, 1)",
+        params![
+            id,
+            pt_id_str,
+            labels_json,
+            ext.project,
+            ext.duration_min,
+            ext.planned_at,
+            ext.energy,
+        ],
     )?;
 
     // Audit-log the creation. Reuses Python `interactions` table verbatim.

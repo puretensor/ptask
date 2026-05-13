@@ -17,4 +17,4 @@ pub mod tasks;
 
 pub use error::{Error, Result};
 pub use storage::{Db, default_db_path};
-pub use tasks::{NewTask, Task};
+pub use tasks::{Extensions, NewTask, Task};

@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ptask_core::{Db, NewTask, priority, pt_id, tasks};
+use ptask_core::{Db, Extensions, NewTask, priority, pt_id, quickadd, tasks};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -42,20 +42,27 @@ enum Command {
 
 #[derive(clap::Args, Debug)]
 struct AddArgs {
-    /// Task title.
+    /// Task title (parsed as quick-add unless --raw is set).
+    /// Inline tokens: @label, #project, p1..p4, ~30m/~2h/~1d, !HH:MM,
+    /// //description (rest of string), date phrases (today/tomorrow/
+    /// weekday with this|next|last/ N days/ISO dates).
     title: String,
-    /// Priority: low|normal|high|urgent|critical or 1..=5. Default: normal.
-    #[arg(short = 'p', long = "priority", default_value = "normal")]
-    priority: String,
-    /// Task description (long-form body).
-    #[arg(short = 'd', long = "description", default_value = "")]
-    description: String,
-    /// Deadline (ISO date, e.g. 2026-05-20).
+    /// Priority override (low|normal|high|urgent|critical or 1..=5).
+    /// If omitted, uses quick-add priority or "normal".
+    #[arg(short = 'p', long = "priority")]
+    priority: Option<String>,
+    /// Description override.
+    #[arg(short = 'd', long = "description")]
+    description: Option<String>,
+    /// Deadline override (ISO date, e.g. 2026-05-20).
     #[arg(long = "deadline")]
     deadline: Option<String>,
     /// Why this task was created — stored as ai_reasoning.
     #[arg(long = "reason")]
     reason: Option<String>,
+    /// Disable quick-add parsing — treat the title literally.
+    #[arg(long = "raw")]
+    raw: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -108,19 +115,44 @@ fn main() -> Result<()> {
 }
 
 fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
-    let p = priority::parse(&a.priority).map_err(anyhow::Error::msg)?;
-    let task = tasks::create(
-        db,
-        NewTask {
+    // Default: quick-add parse. --raw disables it for literal titles.
+    let q = if a.raw {
+        quickadd::QuickAdd {
             title: a.title.clone(),
-            description: a.description.clone(),
-            priority: p,
-            deadline: a.deadline.clone(),
-            source_type: "claude_code".into(),
-            ai_confidence: 1.0,
-            ai_reasoning: a.reason.unwrap_or_default(),
-        },
-    )?;
+            priority: Some(2),
+            ..Default::default()
+        }
+    } else {
+        quickadd::parse(&a.title).map_err(anyhow::Error::msg)?
+    };
+
+    // CLI flags override parsed values.
+    let priority = match a.priority.as_deref() {
+        Some(s) => priority::parse(s).map_err(anyhow::Error::msg)?,
+        None => q.priority.unwrap_or(2),
+    };
+    let description = a.description.clone().unwrap_or(q.description.clone());
+    let deadline = a.deadline.clone().or_else(|| q.deadline.clone());
+
+    let new = NewTask {
+        title: q.title.clone(),
+        description,
+        priority,
+        deadline,
+        source_type: "claude_code".into(),
+        ai_confidence: 1.0,
+        ai_reasoning: a.reason.unwrap_or_default(),
+    };
+    let ext = Extensions {
+        labels: q.labels.clone(),
+        project: q.project.clone(),
+        duration_min: q.duration_min,
+        planned_at: None,
+        energy: None,
+    };
+
+    let task = tasks::create_with_extensions(db, new, ext)?;
+
     let label = priority::label(task.priority).to_ascii_uppercase();
     println!("Task created [{}]: {}", label, task.title);
     if let Some(pid) = &task.pt_id {
@@ -137,6 +169,18 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
     }
     if !task.description.is_empty() {
         println!("  Description: {}", task.description);
+    }
+    if !q.labels.is_empty() {
+        println!("  Labels: {}", q.labels.join(", "));
+    }
+    if let Some(p) = &q.project {
+        println!("  Project: {}", p);
+    }
+    if let Some(m) = q.duration_min {
+        println!("  Duration: {}m", m);
+    }
+    if let Some(r) = &q.reminder {
+        println!("  Reminder: {}", r);
     }
     Ok(())
 }
