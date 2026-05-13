@@ -84,8 +84,8 @@ async fn sync(State(state): State<AppState>, Json(req): Json<SyncReq>) -> impl I
     // Apply commands sequentially. Each command's `uuid` is its idempotency
     // key — replays return "ok" without re-executing.
     for cmd in &req.commands {
-        let already = event_log::exists(&state.db, &cmd.uuid).unwrap_or(false);
-        if already {
+        if let Some(event) = event_log::get_by_uuid(&state.db, &cmd.uuid).unwrap_or(None) {
+            replay_temp_mapping(cmd, &event, &mut temp_map);
             status.insert(cmd.uuid.clone(), Value::String("ok".into()));
             continue;
         }
@@ -124,17 +124,25 @@ async fn sync(State(state): State<AppState>, Json(req): Json<SyncReq>) -> impl I
 
     // Delta: tasks touched since the supplied cursor. Full-sync sentinel "*"
     // or a missing/zero token returns everything.
-    let since: i64 = match req.sync_token.as_deref() {
-        None | Some("*") | Some("") => 0,
-        Some(s) => s.parse().unwrap_or(0),
-    };
-    let delta_uuids = event_log::changed_task_uuids_since(&state.db, since).unwrap_or_default();
-    let mut delta_tasks: Vec<tasks::Task> = Vec::new();
-    for u in &delta_uuids {
-        if let Ok(t) = task_by_uuid(&state.db, u) {
-            delta_tasks.push(t);
+    let (full_sync, since): (bool, i64) = match req.sync_token.as_deref() {
+        None | Some("*") | Some("") => (true, 0),
+        Some(s) => {
+            let parsed = s.parse().unwrap_or(0);
+            (parsed <= 0, parsed)
         }
-    }
+    };
+    let delta_tasks: Vec<tasks::Task> = if full_sync {
+        tasks::list_all(&state.db).unwrap_or_default()
+    } else {
+        let delta_uuids = event_log::changed_task_uuids_since(&state.db, since).unwrap_or_default();
+        let mut rows = Vec::new();
+        for u in &delta_uuids {
+            if let Ok(t) = task_by_uuid(&state.db, u) {
+                rows.push(t);
+            }
+        }
+        rows
+    };
 
     let new_cursor = event_log::current_cursor(&state.db).unwrap_or(0);
 
@@ -153,6 +161,18 @@ async fn sync(State(state): State<AppState>, Json(req): Json<SyncReq>) -> impl I
 struct EventPayload {
     event_type: String,
     payload: Value,
+}
+
+fn replay_temp_mapping(
+    cmd: &Command,
+    event: &event_log::LoggedEvent,
+    temp_map: &mut BTreeMap<String, String>,
+) {
+    if cmd.kind == "task_create"
+        && let (Some(temp_id), Some(task_uuid)) = (cmd.temp_id.as_ref(), event.task_uuid.as_ref())
+    {
+        temp_map.insert(temp_id.clone(), task_uuid.clone());
+    }
 }
 
 /// Apply one command. Returns the (task_uuid, event_payload) so the caller

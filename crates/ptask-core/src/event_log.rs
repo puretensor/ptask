@@ -11,6 +11,13 @@ use crate::storage::Db;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 
+#[derive(Debug, Clone)]
+pub struct LoggedEvent {
+    pub id: i64,
+    pub task_uuid: Option<String>,
+    pub event_type: String,
+}
+
 /// Record an event. Returns the new `pt_event_log.id`.
 pub fn record(
     db: &Db,
@@ -40,6 +47,25 @@ pub fn exists(db: &Db, uuid: &str) -> Result<bool> {
         })
         .optional()?;
     Ok(found.is_some())
+}
+
+/// Fetch a recorded command/event by idempotency UUID.
+pub fn get_by_uuid(db: &Db, uuid: &str) -> Result<Option<LoggedEvent>> {
+    let conn = db.get()?;
+    let found = conn
+        .query_row(
+            "SELECT id, task_uuid, event_type FROM pt_event_log WHERE uuid = ?1",
+            [uuid],
+            |r| {
+                Ok(LoggedEvent {
+                    id: r.get(0)?,
+                    task_uuid: r.get(1)?,
+                    event_type: r.get(2)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(found)
 }
 
 /// Highest `id` currently in the log, or 0 if empty. The sync token.
@@ -118,6 +144,23 @@ mod tests {
         assert!(!exists(&db, "u1").unwrap());
         record(&db, "u1", None, "x", &serde_json::json!({})).unwrap();
         assert!(exists(&db, "u1").unwrap());
+    }
+
+    #[test]
+    fn get_by_uuid_returns_recorded_task_uuid() {
+        let (_dir, db) = fresh_db();
+        record(
+            &db,
+            "u1",
+            Some("task-1"),
+            "task.created",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let event = get_by_uuid(&db, "u1").unwrap().unwrap();
+        assert_eq!(event.id, 1);
+        assert_eq!(event.task_uuid.as_deref(), Some("task-1"));
+        assert_eq!(event.event_type, "task.created");
     }
 
     #[test]

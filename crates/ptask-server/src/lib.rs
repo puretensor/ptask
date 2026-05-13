@@ -292,6 +292,10 @@ mod tests {
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["sync_status"]["cmd-1"], "ok");
+        assert_eq!(
+            parsed["temp_id_mapping"]["tmp-a"].as_str().unwrap(),
+            real_uuid
+        );
 
         // Third call: mark done by task_uuid; sync_token = first_token so
         // we only get the delta from the done event.
@@ -322,6 +326,41 @@ mod tests {
         let tasks = parsed["resources"]["tasks"].as_array().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0]["status"], "done");
+    }
+
+    #[tokio::test]
+    async fn sync_full_sync_returns_existing_tasks_without_events() {
+        let db = open_test_db();
+        let existing =
+            ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("preexisting")).unwrap();
+        assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), 0);
+
+        let app = router(AppState { db });
+        let req = serde_json::json!({"sync_token": "*", "commands": []});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tasks = parsed["resources"]["tasks"].as_array().unwrap();
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task["id"].as_str() == Some(existing.id.as_str())),
+            "full sync should include tasks that predate pt_event_log"
+        );
     }
 
     #[test]
