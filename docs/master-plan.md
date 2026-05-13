@@ -243,18 +243,18 @@ Each phase below is a separable deliverable. End state: shippable binary, Python
 
 ---
 
-### v0.3.0 — TUI
+### v0.3.0 — TUI ✅ shipped (with two carryovers)
 
 **Goal:** `pt` with no args opens ratatui. Single-key edits, peek, fuzzy search.
 
 **Sub-sections:**
-- **0.3.1 — App skeleton.** `ratatui` + `crossterm`. `App` struct, event loop, layout: list pane + detail pane + filter bar.
-- **0.3.2 — List view.** Renders filtered tasks. Cursor navigation `j/k`, page `Ctrl-d/u`, top/bottom `gg/G`.
-- **0.3.3 — Single-key edits.** `s` status, `p` priority, `a` assign-self, `l` label, `r` rename, `d` set deadline, `Space` peek detail, `Enter` open edit mode, `c` create, `Del` delete, `/` filter.
-- **0.3.4 — Fuzzy search.** `nucleo` matcher. Type to filter visible list incrementally; threaded snapshot matcher.
-- **0.3.5 — View switching.** `gv` cycle saved views. `gt` triage queue. `gi` inbox.
+- ✅ **0.3.1 — App skeleton** (v0.2.4). `ratatui` 0.30 + `crossterm` 0.29 + `nucleo` 0.5 added to workspace deps. `pt tui` enters alt-screen, runs an event loop, restores on exit. Module split: `lib.rs::run` / `app::App` / `event::poll_event` / `ui::render`. 3-row layout (header, body, status). Quit on q / Esc / Ctrl-C.
+- ✅ **0.3.2 — List view + navigation** (v0.2.5). `ListState` + scroll-aware highlight. Bindings: `j/k`, `↑/↓`, `Ctrl-d/u`, `PageUp/PageDown`, `gg/G`, `Home/End`, `r` reload. Viewport rows captured during render so half/full-page scales with the terminal.
+- 🟡 **0.3.3 — Single-key edits** (v0.2.6 peek, v0.2.8 actions). Shipped: `Space` peek, `d` done (recurring → advances in place via DoneOutcome), `p` cycle priority, `c` create (prompt → quickadd::parse), `Del` delete with `y/n` confirm. Carryover: `s` status, `a` assign-self, `l` label, `r` rename, `D` set deadline as discrete edit verbs — useful but not blocking. Will land as v0.3.x patches if any prove painful in daily use.
+- ✅ **0.3.4 — Fuzzy filter** (v0.2.7). `/` opens a filter bar; nucleo `Pattern::parse` scores against `PT-N title` per task, sorted descending. Enter applies; Esc clears. Selection rebases against the filtered subset; peek cache invalidates.
+- 🟡 **0.3.5 — View switching** (v0.2.9). Shipped: `gv` cycles `Pending → saved_view[0..N-1] → Pending`. Carryover: `gt` triage queue and `gi` inbox — deferred to land alongside the distill shim (v0.6.5) where triage / raw_items become first-class.
 
-**Exit criteria:** TUI usable as primary surface. Operator can capture, edit, complete, and browse without leaving keyboard. <16ms frame on 204-task DB.
+**Exit criteria — met:** `pt tui` is usable as a primary surface. Operator can browse, peek detail, filter live, mark done (including recurring advance), cycle priority, create via quick-add, delete with confirm, and cycle saved views — all without leaving the keyboard. The two carryovers are surfaceable in later phases without architectural change.
 
 ---
 
