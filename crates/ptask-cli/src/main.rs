@@ -127,7 +127,11 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         println!("  {}", pid);
     }
     println!("  ID: {}", task.id);
-    println!("  Priority: {} ({})", task.priority, priority::label(task.priority));
+    println!(
+        "  Priority: {} ({})",
+        task.priority,
+        priority::label(task.priority)
+    );
     if let Some(d) = &task.deadline {
         println!("  Deadline: {}", d);
     }
@@ -138,8 +142,17 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
 }
 
 fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
-    let p = a.priority.as_deref().map(priority::parse).transpose().map_err(anyhow::Error::msg)?;
-    let status_filter = if a.status == "all" { None } else { Some(a.status.as_str()) };
+    let p = a
+        .priority
+        .as_deref()
+        .map(priority::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let status_filter = if a.status == "all" {
+        None
+    } else {
+        Some(a.status.as_str())
+    };
     let rows = tasks::list(db, status_filter, p, a.limit)?;
     if rows.is_empty() {
         println!("No tasks found.");

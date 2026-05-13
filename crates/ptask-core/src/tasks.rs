@@ -6,7 +6,7 @@
 
 use crate::error::Result;
 use crate::storage::Db;
-use crate::{pt_id, priority};
+use crate::{priority, pt_id};
 use jiff::Zoned;
 use rusqlite::params;
 use serde::Serialize;
@@ -105,11 +105,7 @@ pub fn create(db: &Db, new: NewTask) -> Result<Task> {
     // Audit-log the creation. Reuses Python `interactions` table verbatim.
     tx.execute(
         "INSERT INTO interactions (task_id, action, ts, details) VALUES (?1, 'create', ?2, ?3)",
-        params![
-            id,
-            now,
-            format!("pt add: {}", new.title),
-        ],
+        params![id, now, format!("pt add: {}", new.title),],
     )?;
 
     tx.commit()?;
@@ -183,9 +179,11 @@ pub fn list(
 }
 
 /// Resolve a query string to a task. Accepts:
-///   - PT-N (case-insensitive) -> exact pt_id match
-///   - Bare integer N         -> treated as PT-N
-///   - Otherwise              -> case-insensitive substring on title (status='pending')
+///
+/// - PT-N (case-insensitive) -> exact pt_id match
+/// - Bare integer N         -> treated as PT-N
+/// - Otherwise              -> case-insensitive substring on title (status='pending')
+///
 /// Returns the matched task, or an error describing zero / multiple matches.
 pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     let conn = db.get()?;
@@ -420,7 +418,9 @@ mod tests {
         mark_done(&db, &t).unwrap();
         db.with_conn(|c| {
             let status: String = c
-                .query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| r.get(0))
+                .query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+                    r.get(0)
+                })
                 .unwrap();
             assert_eq!(status, "done");
             let n: i64 = c

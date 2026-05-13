@@ -21,7 +21,9 @@ pub fn default_db_path() -> PathBuf {
     }
     // Home dir → ~/puretensor-tasks/tasks.db
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    PathBuf::from(home).join("puretensor-tasks").join("tasks.db")
+    PathBuf::from(home)
+        .join("puretensor-tasks")
+        .join("tasks.db")
 }
 
 #[derive(Clone)]
@@ -150,7 +152,11 @@ mod tests {
             }
             // The counter seed should be present.
             let counter: i64 = c
-                .query_row("SELECT value FROM pt_counters WHERE name='pt_id'", [], |r| r.get(0))
+                .query_row(
+                    "SELECT value FROM pt_counters WHERE name='pt_id'",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap();
             assert_eq!(counter, 0);
             Ok(())
