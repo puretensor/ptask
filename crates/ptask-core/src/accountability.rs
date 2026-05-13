@@ -466,13 +466,12 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
     let budget_used = get_daily_budget(db, &date_utc)?;
     report.budget_used_before = budget_used;
     report.budget_used_after = budget_used;
-    let remaining = (DAILY_BUDGET_MAX - budget_used).max(0);
-    if remaining == 0 {
+    let telegram_remaining = (DAILY_BUDGET_MAX - budget_used).max(0);
+    if telegram_remaining == 0 {
         info!(
             target: "ptask::accountability",
-            used = budget_used, max = DAILY_BUDGET_MAX, "daily budget exhausted"
+            used = budget_used, max = DAILY_BUDGET_MAX, "telegram budget exhausted"
         );
-        return Ok(report);
     }
 
     let eligible = fetch_eligible(db, &now_iso_utc)?;
@@ -480,30 +479,41 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
     let mut sent_telegrams = 0i64;
 
     for mut task in eligible {
-        if sent_telegrams >= remaining {
-            break;
-        }
         let age_days = task_age_days(&task, &now_utc);
 
-        if should_advance(&task, age_days, &now_utc) {
-            let new_level = (task.escalation_level + 1).min(5);
-            set_escalation_level(db, &task.id, new_level)?;
-            task.escalation_level = new_level;
-            info!(
-                target: "ptask::accountability",
-                task_uuid = %task.id,
-                level = new_level,
-                title = %task.title.chars().take(60).collect::<String>(),
-                "escalated"
-            );
-        }
-        let level = task.escalation_level;
-        if level == 0 {
+        let level_after_transition = if should_advance(&task, age_days, &now_utc) {
+            (task.escalation_level + 1).min(5)
+        } else {
+            task.escalation_level
+        };
+        if level_after_transition == 0 {
             continue;
         }
         if !can_remind(&task, &now_utc) {
             continue;
         }
+
+        let channels = channels_for(level_after_transition);
+        let telegram_only = channels == ["telegram"];
+        if telegram_only && sent_telegrams >= telegram_remaining {
+            continue;
+        }
+
+        if level_after_transition != task.escalation_level {
+            if !cfg.dry_run {
+                set_escalation_level(db, &task.id, level_after_transition)?;
+            }
+            task.escalation_level = level_after_transition;
+            info!(
+                target: "ptask::accountability",
+                task_uuid = %task.id,
+                level = level_after_transition,
+                dry_run = cfg.dry_run,
+                title = %task.title.chars().take(60).collect::<String>(),
+                "escalated"
+            );
+        }
+        let level = task.escalation_level;
 
         let message = match maybe_compose_via_hal(cfg, &task, level, age_days).await {
             Some(m) => m,
@@ -516,17 +526,23 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
             ..Default::default()
         };
 
-        for channel in channels_for(level) {
+        for channel in channels {
             let ok = match *channel {
                 "telegram" => {
-                    let prefixed = format!("<b>Task #{}:</b> {}", level, message);
-                    let r = send_telegram(cfg, &prefixed).await?;
-                    if r {
-                        dispatched.telegram_sent = true;
-                        sent_telegrams += 1;
-                        increment_daily_budget(db, &date_utc)?;
+                    if sent_telegrams >= telegram_remaining {
+                        false
+                    } else {
+                        let prefixed = format!("<b>Task #{}:</b> {}", level, message);
+                        let r = send_telegram(cfg, &prefixed).await?;
+                        if r {
+                            dispatched.telegram_sent = true;
+                            sent_telegrams += 1;
+                            if !cfg.dry_run {
+                                increment_daily_budget(db, &date_utc)?;
+                            }
+                        }
+                        r
                     }
-                    r
                 }
                 "email" => {
                     let subject = format!(
@@ -542,15 +558,19 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
                 }
                 _ => false,
             };
-            if ok {
+            if ok && !cfg.dry_run {
                 log_notification(db, &task.id, channel, level, &message)?;
             }
         }
-        if level == 5 {
+        if level == 5 && !cfg.dry_run {
             set_status(db, &task.id, "blocked")?;
         }
-        stamp_reminder(db, &task.id, &now_utc)?;
-        report.dispatched.push(dispatched);
+        if dispatched.telegram_sent || dispatched.email_sent {
+            if !cfg.dry_run {
+                stamp_reminder(db, &task.id, &now_utc)?;
+            }
+            report.dispatched.push(dispatched);
+        }
     }
     report.budget_used_after = get_daily_budget(db, &date_utc)?;
     info!(
@@ -742,10 +762,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_check_advances_age_two_task_then_sends_dry_run() {
+    async fn dry_run_reports_dispatch_without_mutating_database() {
         let (_dir, db) = fresh_db();
         let anchor = noon_utc();
-        // Two-day-old task — should advance to level 1 and dispatch via telegram.
+        // Two-day-old task would advance to level 1 and dispatch via Telegram.
         let task_uuid = aged_task_before(&db, "Renew SSL certs", 2, &anchor);
         let cfg = DispatchCfg {
             telegram_token: Some("test".into()),
@@ -758,26 +778,27 @@ mod tests {
         assert_eq!(report.dispatched.len(), 1);
         assert!(report.dispatched[0].telegram_sent);
         assert_eq!(report.dispatched[0].level, 1);
-        // Budget consumed once.
-        assert_eq!(report.budget_used_after, 1);
-        // Cooldown stamped + escalation row in interactions + notification row.
+        assert_eq!(report.budget_used_before, 0);
+        assert_eq!(report.budget_used_after, 0);
+
         db.with_conn(|c| {
-            let last: Option<String> = c
+            let (level, last): (i64, Option<String>) = c
                 .query_row(
-                    "SELECT last_reminded FROM tasks WHERE id=?1",
+                    "SELECT escalation_level, last_reminded FROM tasks WHERE id=?1",
+                    [&task_uuid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(level, 0);
+            assert!(last.is_none());
+            let notifications: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM notifications WHERE task_id=?1",
                     [&task_uuid],
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert!(last.is_some());
-            let n: i64 = c
-                .query_row(
-                    "SELECT COUNT(*) FROM notifications WHERE task_id=?1 AND channel='telegram'",
-                    [&task_uuid],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(n, 1);
+            assert_eq!(notifications, 0);
             let escalations: i64 = c
                 .query_row(
                     "SELECT COUNT(*) FROM interactions WHERE task_id=?1 AND action='escalation'",
@@ -785,7 +806,9 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(escalations, 1);
+            assert_eq!(escalations, 0);
+            let budget = get_daily_budget(&db, &anchor.date().to_string()).unwrap();
+            assert_eq!(budget, 0);
             Ok(())
         })
         .unwrap();
@@ -809,6 +832,43 @@ mod tests {
         };
         let report = run_check_at(&db, &cfg, &anchor).await.unwrap();
         assert_eq!(report.dispatched.len(), 0);
+        assert_eq!(report.budget_used_before, DAILY_BUDGET_MAX);
+        assert_eq!(report.budget_used_after, DAILY_BUDGET_MAX);
+    }
+
+    #[tokio::test]
+    async fn exhausted_telegram_budget_still_allows_unbudgeted_email() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        let today = anchor.date().to_string();
+        for _ in 0..DAILY_BUDGET_MAX {
+            increment_daily_budget(&db, &today).unwrap();
+        }
+        let task_uuid = aged_task_before(&db, "email escalation", 5, &anchor);
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET escalation_level=3 WHERE id=?1",
+                [&task_uuid],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let cfg = DispatchCfg {
+            telegram_token: Some("test".into()),
+            telegram_chat_id: Some(1),
+            smtp_host: Some("smtp.example.test".into()),
+            smtp_user: Some("hal@puretensor.ai".into()),
+            smtp_pass: Some("secret".into()),
+            notify_email: Some("heimir@example.test".into()),
+            dry_run: true,
+            ..Default::default()
+        };
+        let report = run_check_at(&db, &cfg, &anchor).await.unwrap();
+        assert_eq!(report.dispatched.len(), 1);
+        assert!(!report.dispatched[0].telegram_sent);
+        assert!(report.dispatched[0].email_sent);
+        assert_eq!(report.dispatched[0].level, 3);
         assert_eq!(report.budget_used_before, DAILY_BUDGET_MAX);
         assert_eq!(report.budget_used_after, DAILY_BUDGET_MAX);
     }
