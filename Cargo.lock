@@ -2865,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-bot"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "jiff",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-cli"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-core"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "interim",
@@ -2924,19 +2924,23 @@ dependencies = [
 
 [[package]]
 name = "ptask-distill"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "axum",
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "hex",
  "hf-hub",
+ "jiff",
  "ptask-core",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokenizers 0.23.1",
  "tokio",
  "tracing",
@@ -2945,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-server"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -2970,7 +2974,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-tui"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "crossterm",
