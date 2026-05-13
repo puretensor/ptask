@@ -337,17 +337,17 @@ Bonus this phase:
 
 ---
 
-### v0.8.0 — Scoring Cutover
+### v0.8.0 — Scoring Cutover ✅ shipped
 
 **Goal:** Rust owns the composite priority scoring. Python scoring retired.
 
 **Sub-sections:**
-- **0.8.1 — Port scoring formulas.** `ptask-core::scoring`. Urgency sigmoid (deadline-driven, 7-day horizon, age decay 21d for undated), dependency centrality via `petgraph::algo::betweenness_centrality`, neglect (view/reopen ratio 14d), manual ((priority-1)/4).
-- **0.8.2 — Weighted composite.** 30% urgency + 20% dependency + 20% neglect + 30% manual = `priority_score`. Update all 4 `score_*` columns + `priority_score`.
-- **0.8.3 — `pt scoring run`.** Subcommand for hourly cron.
-- **0.8.4 — Systemd unit swap.** `puretensor-tasks-scoring.timer` → `ptask-scoring.timer`. Hourly.
+- ✅ **0.8.1 — Port scoring formulas** (v0.7.2). `ptask_core::scoring` ports `api/scoring.py` exactly. Urgency: sigmoid `1/(1+exp((days_until−7)/2))` for deadlined tasks, `0.7·exp(−age_days/21)` decay for undated, clamped `[0,1]`. Manual: `(priority−1)/4`, clamped `[1,5]`. Neglect: `(0.3·views + 0.5·reopens) / max(1, 0.5·recent_count)` over last 14d, clamped to 1.0; "reopen" = `status_change` action with `'pending'` somewhere in `details`. Dependency centrality: in-tree Brandes implementation (petgraph 0.8 ships no betweenness) directed-normalised by `(n−1)(n−2)`, matching NetworkX default, plus `0.1·descendants_count`, clamped to 1.0. `DepGraph::from_pairs` silently adds UUIDs referenced in `depends_on` that aren't in the scoring set — mirrors `nx.DiGraph.add_edge` semantics.
+- ✅ **0.8.2 — Weighted composite** (v0.7.2). `composite = 0.30·urgency + 0.20·dependency + 0.20·neglect + 0.30·manual`, clamped `[0,1]`. `run_once_at(db, dry_run, now)` walks all `status NOT IN ('done', 'dismissed')` tasks, computes the dependency graph once, writes all four `score_*` columns + `priority_score`. `dry_run=true` logs without mutating (applying the v0.7.1 accountability fix preemptively).
+- ✅ **0.8.3 — `pt scoring run`** (v0.7.3). CLI: `pt scoring run [--dry-run]`. Synchronous (no tokio runtime). Prints `tasks_scored=N`.
+- ✅ **0.8.4 — Systemd cutover** (v0.7.3). `scripts/systemd/ptask-scoring.{service,timer}` user-mode, `OnCalendar=hourly` with 60s jitter (matches legacy cadence). Legacy `/etc/systemd/system/puretensor-tasks-scoring.timer` disabled. Installed live.
 
-**Exit criteria:** Python scoring disabled. Rust recomputes scores hourly. Manual spot-check shows reasonable rankings. Rollback = swap timer back.
+**Exit criteria — met:** Python scoring timer is dormant; `ptask-scoring.timer` runs the hourly recompute. Smoke-verified: ran Python `recompute_all_scores` and `pt scoring run` against two copies of the live `tasks.db` snapshot — all 14 active tasks produced bit-identical `priority_score`, `score_urgency`, `score_dependency`, `score_neglect` (max delta 0, sum-of-squares 0). Rollback = swap timer back via the documented step.
 
 ---
 
