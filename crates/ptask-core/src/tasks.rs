@@ -316,6 +316,20 @@ pub fn list(
     Ok(out)
 }
 
+/// List every task row, including completed tasks.
+pub fn list_all(db: &Db) -> Result<Vec<Task>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+         FROM tasks t
+         LEFT JOIN pt_extensions x ON x.task_uuid = t.id
+         ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC",
+    )?;
+    let rows = stmt.query_map([], row_to_task)?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// Resolve a query string to a task. Accepts:
 ///
 /// - PT-N (case-insensitive) -> exact pt_id match
