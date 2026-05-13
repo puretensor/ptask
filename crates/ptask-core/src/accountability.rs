@@ -36,8 +36,9 @@
 //!   - Otherwise use a static template per-level.
 
 use crate::Db;
+use crate::dates::parse_iso_to_utc;
 use crate::error::{Error, Result};
-use jiff::{Timestamp, Zoned};
+use jiff::Zoned;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
 use tracing::{info, warn};
@@ -136,12 +137,6 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
-}
-
-fn parse_iso_to_utc(s: &str) -> Option<Zoned> {
-    s.parse::<Timestamp>()
-        .ok()
-        .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC))
 }
 
 fn task_age_days(task: &EligibleTask, now: &Zoned) -> i64 {
