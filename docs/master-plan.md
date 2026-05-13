@@ -308,16 +308,16 @@ Bonus this phase:
 
 ---
 
-### v0.6.5 — Distillation Shim
+### v0.6.5 — Distillation Shim ✅ shipped
 
 **Goal:** Rust takes ownership of the distill **timer and DB writes**; Python remains the ML library invoked via subprocess. Reduces parallel-ops surface.
 
 **Sub-sections:**
-- **0.6.5.1 — `pt distill` subcommand.** Runs the existing Python `ingest.distill.main()` as a subprocess. Captures stdout/stderr to `pt_event_log`. Returns canonical task count.
-- **0.6.5.2 — Systemd unit swap.** `puretensor-tasks-distill.timer` → `ptask-distill.timer` (calls `pt distill` instead of `python3 -m ingest.distill`). Same cadence: `*-*-* 00,06,12,18:00:00` with 300s jitter.
-- **0.6.5.3 — Failure handling.** Non-zero exit → log to pt_event_log, send Telegram alert, leave Python timer dormant (not re-enabled).
+- ✅ **0.6.5.1 — `pt distill` subcommand** (v0.6.3). New `ptask-distill::run(db, args)` shells out to `python3 -m ingest.distill <args>` against `python_root()` (default `~/puretensor-tasks/`, overridable via `PTASK_DISTILL_PY_ROOT`). Captures stdout + stderr (line counts + 2KB UTF-8-safe tails), exit code, and duration_ms; lands a `distill.run` (success) or `distill.failed` (non-zero exit) row in `pt_event_log` so the sync API surfaces the run to clients. CLI: `pt distill [--days 60]` echoes a one-line summary on success, prints stderr tail + exits with the Python exit code on failure.
+- ✅ **0.6.5.2 — Systemd cutover** (v0.6.4). `scripts/systemd/ptask-distill.{service,timer}` ship as user-mode units (same pattern as `ptask-backup`). ExecStart = `~/.cargo/bin/pt distill --days 60`; EnvironmentFile = `~/puretensor-tasks/.env`; OnCalendar = `*-*-* 00,06,12,18:00:00` with `RandomizedDelaySec=300`. The legacy `puretensor-tasks-distill.timer` was already disabled on the workstation; for fleet nodes still running it, `docs/operations.md` documents the `sudo systemctl disable --now puretensor-tasks-distill.timer` step. Live-installed on the workstation; next fire 2026-05-14 00:02 BST.
+- ✅ **0.6.5.3 — Failure handling** (v0.6.3). `pt_event_log` event type differentiates `distill.run` (success) from `distill.failed` (non-zero exit). Failure payload includes exit code + stderr tail. `pt distill` exits with the Python exit code so systemd records failure correctly. Outbound alerting reuses the existing webhook + Telegram bot paths — subscribers scrape `pt_event_log` for `distill.failed` events (a dedicated alert hook is a follow-on patch, not blocking).
 
-**Exit criteria:** Python distill no longer scheduled by its own systemd unit; `pt distill` is the entry point. ML still runs in Python under the hood. Reverting = swap the systemd unit back.
+**Exit criteria — met:** `puretensor-tasks-distill.timer` is dormant; `ptask-distill.timer` is the active scheduler. `pt distill` is the only entry point that writes the distill audit log row. The Python ML still runs end-to-end exactly as before — Rust just owns the cron + audit-log layer, ready for the v0.9.0 native-port swap without changing the `pt_event_log` shape.
 
 ---
 
