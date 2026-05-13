@@ -11,6 +11,7 @@ pub mod error;
 pub mod migrations;
 pub mod priority;
 pub mod pt_id;
+pub mod quickadd;
 pub mod storage;
 pub mod tasks;
 
