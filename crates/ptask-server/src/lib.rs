@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(routes::base::router())
         .merge(routes::capture::router())
+        .merge(routes::sync::router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
@@ -83,15 +84,45 @@ mod tests {
     fn open_test_db() -> Db {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
-        // Minimal Python schema stub: tasks (FK target for migrations) +
-        // raw_items (capture endpoint writes here).
+        // Production-shape stubs: tasks + interactions + raw_items. Mirrors
+        // what `ptask_core::tasks` tests do — but extended with raw_items
+        // for the /capture endpoint.
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE tasks (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    id               TEXT PRIMARY KEY,
+                    title            TEXT NOT NULL,
+                    description      TEXT DEFAULT '',
+                    priority         INTEGER DEFAULT 2,
+                    status           TEXT DEFAULT 'pending',
+                    created_at       TEXT NOT NULL,
+                    updated_at       TEXT NOT NULL,
+                    deadline         TEXT,
+                    source_type      TEXT DEFAULT 'manual',
+                    source_files     TEXT DEFAULT '[]',
+                    ai_confidence    REAL DEFAULT 1.0,
+                    ai_reasoning     TEXT DEFAULT '',
+                    depends_on       TEXT DEFAULT '[]',
+                    blocks_tasks     TEXT DEFAULT '[]',
+                    escalation_level INTEGER DEFAULT 0,
+                    dismissal_count  INTEGER DEFAULT 0,
+                    last_reminded    TEXT,
+                    next_reminder    TEXT,
+                    priority_score   REAL DEFAULT 0.0,
+                    score_urgency    REAL DEFAULT 0.0,
+                    score_dependency REAL DEFAULT 0.0,
+                    score_neglect    REAL DEFAULT 0.0,
+                    subtasks         TEXT DEFAULT '[]',
+                    task_type        TEXT DEFAULT 'operational',
+                    cluster_keywords TEXT DEFAULT '[]'
+                 );
+                 CREATE TABLE interactions (
+                    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                    action  TEXT NOT NULL,
+                    ts      TEXT NOT NULL,
+                    details TEXT DEFAULT ''
                  );
                  CREATE TABLE raw_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,8 +140,6 @@ mod tests {
             )
             .unwrap();
         }
-        // Leak the tempdir so the Db outlives this function. Tests are
-        // short-lived; the OS cleans /tmp on reboot.
         std::mem::forget(dir);
         Db::open(&path).unwrap()
     }
@@ -200,6 +229,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn sync_round_trip_create_then_done() {
+        let db = open_test_db();
+        let app = router(AppState { db: db.clone() });
+
+        // First call: create one task via sync command.
+        let req1 = serde_json::json!({
+            "sync_token": "*",
+            "commands": [{
+                "type": "task_create",
+                "uuid": "cmd-1",
+                "temp_id": "tmp-a",
+                "args": { "text": "buy bread" }
+            }]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req1).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["sync_status"]["cmd-1"], "ok");
+        let real_uuid = parsed["temp_id_mapping"]["tmp-a"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!real_uuid.is_empty());
+        let first_token = parsed["sync_token"].as_str().unwrap().to_string();
+        assert_eq!(parsed["resources"]["tasks"].as_array().unwrap().len(), 1);
+
+        // Second call with same uuid → idempotent "ok", no double-create.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req1).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["sync_status"]["cmd-1"], "ok");
+
+        // Third call: mark done by task_uuid; sync_token = first_token so
+        // we only get the delta from the done event.
+        let req3 = serde_json::json!({
+            "sync_token": first_token,
+            "commands": [{
+                "type": "task_done",
+                "uuid": "cmd-2",
+                "args": { "task_uuid": real_uuid }
+            }]
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req3).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["sync_status"]["cmd-2"], "ok");
+        let tasks = parsed["resources"]["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["status"], "done");
     }
 
     #[tokio::test]

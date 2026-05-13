@@ -2,3 +2,4 @@
 
 pub mod base;
 pub mod capture;
+pub mod sync;
