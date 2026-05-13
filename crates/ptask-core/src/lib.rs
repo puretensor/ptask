@@ -19,6 +19,7 @@ pub mod pt_id;
 pub mod quickadd;
 pub mod raw_items;
 pub mod recurrence;
+pub mod scoring;
 pub mod storage;
 pub mod tasks;
 pub mod views;
