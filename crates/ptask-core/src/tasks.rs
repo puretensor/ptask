@@ -105,7 +105,7 @@ pub fn create(db: &Db, new: NewTask) -> Result<Task> {
     // Audit-log the creation. Reuses Python `interactions` table verbatim.
     tx.execute(
         "INSERT INTO interactions (task_id, action, ts, details) VALUES (?1, 'create', ?2, ?3)",
-        params![id, now, format!("pt add: {}", new.title),],
+        params![id, now, format!("Claude Code manual insert: {}", new.title),],
     )?;
 
     tx.commit()?;
@@ -154,7 +154,7 @@ pub fn list(
         sql.push_str(" WHERE ");
         sql.push_str(&conds.join(" AND "));
     }
-    sql.push_str(" ORDER BY t.priority DESC, t.created_at DESC LIMIT ?");
+    sql.push_str(" ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC LIMIT ?");
     bound.push(Box::new(limit as i64));
 
     let mut stmt = conn.prepare(&sql)?;
@@ -220,9 +220,10 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
         "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
          FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid = t.id
-         WHERE t.status = 'pending' AND lower(t.title) LIKE ?1",
+         WHERE t.status = 'pending' AND lower(t.title) LIKE ?1 ESCAPE '\\'
+         ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC",
     )?;
-    let pat = format!("%{}%", q.to_ascii_lowercase());
+    let pat = format!("%{}%", escape_like_pattern(&q.to_ascii_lowercase()));
     let rows: Vec<Task> = stmt
         .query_map([&pat], row_to_task)?
         .collect::<std::result::Result<_, _>>()?;
@@ -265,7 +266,7 @@ pub fn mark_done(db: &Db, task: &Task) -> Result<()> {
     )?;
     tx.execute(
         "INSERT INTO interactions (task_id, action, ts, details)
-         VALUES (?1, 'status_change', ?2, 'Completed via pt cli')",
+         VALUES (?1, 'status_change', ?2, 'Completed via Claude Code')",
         params![task.id, now],
     )?;
     tx.commit()?;
@@ -297,7 +298,24 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 /// (e.g. `2026-05-13T17:34:56.789012+00:00`).
 fn iso_now() -> String {
     let now: Zoned = Zoned::now().with_time_zone(jiff::tz::TimeZone::UTC);
-    now.timestamp().to_string() // e.g. 2026-05-13T17:34:56.789012Z
+    let base = now.strftime("%Y-%m-%dT%H:%M:%S").to_string();
+    let micros = now.subsec_nanosecond().div_euclid(1_000);
+    if micros == 0 {
+        format!("{base}+00:00")
+    } else {
+        format!("{base}.{micros:06}+00:00")
+    }
+}
+
+fn escape_like_pattern(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -369,6 +387,14 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(n, 1);
+            let details: String = c
+                .query_row(
+                    "SELECT details FROM interactions WHERE task_id=?1 AND action='create'",
+                    [&t.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(details, "Claude Code manual insert: Buy bread");
             Ok(())
         })
         .unwrap();
@@ -387,6 +413,28 @@ mod tests {
         let only_high = list(&db, Some("pending"), Some(4), 100).unwrap();
         assert_eq!(only_high.len(), 1);
         assert_eq!(only_high[0].title, "high task");
+    }
+
+    #[test]
+    fn list_orders_by_priority_score_before_priority() {
+        let (_dir, db) = fresh_db();
+        let mut critical = NewTask::minimal("critical but unscored");
+        critical.priority = 5;
+        create(&db, critical).unwrap();
+        let scored = create(&db, NewTask::minimal("normal but scored")).unwrap();
+
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET priority_score=10.0 WHERE id=?1",
+                [&scored.id],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let rows = list(&db, Some("pending"), None, 100).unwrap();
+        assert_eq!(rows[0].title, "normal but scored");
     }
 
     #[test]
@@ -412,6 +460,24 @@ mod tests {
     }
 
     #[test]
+    fn resolve_substring_treats_like_wildcards_literally() {
+        let (_dir, db) = fresh_db();
+        create(&db, NewTask::minimal("literal percent % task")).unwrap();
+        create(&db, NewTask::minimal("plain task")).unwrap();
+
+        let by_percent = resolve(&db, "%").unwrap();
+        assert_eq!(by_percent.title, "literal percent % task");
+
+        let err = resolve(&db, "_").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("no pending task matching '_'"),
+            "msg was: {}",
+            msg
+        );
+    }
+
+    #[test]
     fn mark_done_updates_status_and_logs() {
         let (_dir, db) = fresh_db();
         let t = create(&db, NewTask::minimal("write tests")).unwrap();
@@ -431,8 +497,33 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(n, 1);
+            let details: String = c
+                .query_row(
+                    "SELECT details FROM interactions WHERE task_id=?1 AND action='status_change'",
+                    [&t.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(details, "Completed via Claude Code");
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn iso_now_uses_python_utc_offset_format() {
+        let ts = iso_now();
+        assert!(ts.ends_with("+00:00"), "timestamp was {ts}");
+        assert!(!ts.ends_with('Z'), "timestamp was {ts}");
+
+        let core = ts.strip_suffix("+00:00").unwrap();
+        let (datetime, micros) = core
+            .split_once('.')
+            .map_or((core, None), |(dt, frac)| (dt, Some(frac)));
+        assert_eq!(datetime.len(), "2026-05-13T17:34:56".len());
+        if let Some(frac) = micros {
+            assert_eq!(frac.len(), 6);
+            assert!(frac.chars().all(|ch| ch.is_ascii_digit()));
+        }
     }
 }
