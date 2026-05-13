@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::capture::router())
         .merge(routes::sync::router())
         .merge(routes::metrics::router())
+        .merge(routes::webhook_git::router())
         .with_state(state)
         .layer(TraceLayer::new_for_http())
 }
@@ -423,6 +424,85 @@ mod tests {
         assert!(s.contains("pt_raw_items_unprocessed "));
         assert!(s.contains("pt_event_log_cursor "));
         assert!(s.contains("pt_views_total "));
+    }
+
+    #[tokio::test]
+    async fn gitea_webhook_closes_pt_n_on_fixes() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let db = open_test_db();
+        // Create a task we can close via the magic word.
+        let t = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("close me")).unwrap();
+        let pt = t.pt_id.clone().unwrap();
+        // Set the secret for this test scope.
+        unsafe {
+            std::env::set_var("PTASK_GITEA_WEBHOOK_SECRET", "test-secret");
+        }
+        let body = serde_json::json!({
+            "ref": "refs/heads/main",
+            "commits": [
+                { "id": "abc123", "message": format!("Fixes {}: ship it", pt) }
+            ]
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-secret").unwrap();
+        mac.update(&body_bytes);
+        let sig = hex::encode(mac.finalize().into_bytes());
+        let app = router(AppState { db: db.clone() });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/webhook/gitea")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("X-Gitea-Signature", sig)
+                    .body(Body::from(body_bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Task should now be done.
+        db.with_conn(|c| {
+            let status: String = c
+                .query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "done");
+            Ok(())
+        })
+        .unwrap();
+        // Cleanup.
+        unsafe {
+            std::env::remove_var("PTASK_GITEA_WEBHOOK_SECRET");
+        }
+    }
+
+    #[tokio::test]
+    async fn gitea_webhook_rejects_bad_signature() {
+        let db = open_test_db();
+        unsafe {
+            std::env::set_var("PTASK_GITEA_WEBHOOK_SECRET", "test-secret");
+        }
+        let body = serde_json::json!({"ref": "refs/heads/main", "commits": []});
+        let app = router(AppState { db });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/webhook/gitea")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("X-Gitea-Signature", "deadbeef")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        unsafe {
+            std::env::remove_var("PTASK_GITEA_WEBHOOK_SECRET");
+        }
     }
 
     #[tokio::test]
