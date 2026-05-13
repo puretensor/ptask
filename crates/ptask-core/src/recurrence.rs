@@ -46,18 +46,37 @@ pub struct Recurrence {
     pub rrule_str: String,
 }
 
+/// Split an optional trailing ` at <time>` suffix from a recurrence phrase.
+///
+/// The returned rule part is what the recurrence grammar consumes. The full
+/// original phrase can still be persisted for operator-facing audit/debug
+/// output.
+pub fn split_time_suffix(input: &str) -> (&str, Option<&str>) {
+    let trimmed = input.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(at_idx) = lower.rfind(" at ") {
+        let rule = trimmed[..at_idx].trim_end();
+        let time = trimmed[at_idx + 4..].trim();
+        if !time.is_empty() {
+            return (rule, Some(time));
+        }
+    }
+    (trimmed, None)
+}
+
 /// Parse a recurrence phrase. Accepts an explicit leading marker:
 /// - "every X"  → Fixed
 /// - "every! X" → Completion
 /// - bare "X"   → Fixed (caller may strip the prefix beforehand)
 pub fn parse(input: &str) -> Result<Recurrence> {
     let trimmed = input.trim();
-    let (mode, rest) = if let Some(r) = trimmed.strip_prefix("every!") {
+    let (rule, _time) = split_time_suffix(trimmed);
+    let (mode, rest) = if let Some(r) = rule.strip_prefix("every!") {
         (Mode::Completion, r.trim())
-    } else if let Some(r) = trimmed.strip_prefix("every") {
+    } else if let Some(r) = rule.strip_prefix("every") {
         (Mode::Fixed, r.trim())
     } else {
-        (Mode::Fixed, trimmed)
+        (Mode::Fixed, rule)
     };
     if rest.is_empty() {
         return Err(Error::Other(format!(
@@ -303,6 +322,14 @@ mod tests {
             vec![Weekday::Monday, Weekday::Wednesday, Weekday::Friday]
         );
         assert_eq!(r.rrule_str, "FREQ=WEEKLY;BYDAY=MO,WE,FR");
+    }
+
+    #[test]
+    fn every_monday_at_time_preserves_original_but_parses_rule() {
+        let r = parse("every monday at 9am").unwrap();
+        assert_eq!(r.original_input, "every monday at 9am");
+        assert_eq!(r.bydays, vec![Weekday::Monday]);
+        assert_eq!(r.rrule_str, "FREQ=WEEKLY;BYDAY=MO");
     }
 
     #[test]

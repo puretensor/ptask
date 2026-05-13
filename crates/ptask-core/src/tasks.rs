@@ -426,15 +426,17 @@ pub fn mark_done(db: &Db, task: &Task) -> Result<DoneOutcome> {
     if let Some((mode_str, original)) = rec_row {
         let rec = crate::recurrence::parse(&original)
             .map_err(|e| crate::Error::Other(format!("re-parse recurrence: {}", e)))?;
+        let completion_now = crate::dates::now_in_operator_tz()?;
+        let explicit_time = recurrence_time_of_day(&original, &completion_now)?;
         // Pick the anchor for next_after based on mode:
         //   Fixed      → from the current deadline (preserves cadence)
         //   Completion → from now (drifts forward with completions)
         let anchor: jiff::Zoned = match mode_str.as_str() {
             "fixed" => match &task.deadline {
                 Some(d) => parse_iso_zoned(d)?,
-                None => crate::dates::now_in_operator_tz()?,
+                None => completion_now.clone(),
             },
-            "completion" => crate::dates::now_in_operator_tz()?,
+            "completion" => completion_now.clone(),
             other => {
                 return Err(crate::Error::Other(format!(
                     "recurrence: unknown mode in pt_recurrence: {:?}",
@@ -442,7 +444,17 @@ pub fn mark_done(db: &Db, task: &Task) -> Result<DoneOutcome> {
                 )));
             }
         };
-        let next_z = crate::recurrence::next_after(&rec, &anchor)?;
+        let mut next_z = crate::recurrence::next_after(&rec, &anchor)?;
+        if mode_str == "fixed" {
+            while next_z <= completion_now {
+                next_z = crate::recurrence::next_after(&rec, &next_z)?;
+            }
+        }
+        if mode_str == "completion"
+            && let Some(time) = explicit_time.as_ref()
+        {
+            next_z = combine_date_with_time(&next_z, time)?;
+        }
         let next_iso = crate::dates::format_iso(&next_z);
 
         tx.execute(
@@ -503,6 +515,27 @@ fn parse_iso_zoned(s: &str) -> Result<jiff::Zoned> {
         "parse iso zoned {:?}: not a Timestamp or Date",
         s
     )))
+}
+
+fn recurrence_time_of_day(original: &str, now: &jiff::Zoned) -> Result<Option<jiff::Zoned>> {
+    let (_rule, time) = crate::recurrence::split_time_suffix(original);
+    time.map(|t| crate::dates::parse_at(&format!("today {}", t), now.clone()))
+        .transpose()
+}
+
+/// Replace the time-of-day of `date_z` with the time-of-day of `time_z`,
+/// keeping `date_z`'s timezone.
+fn combine_date_with_time(date_z: &jiff::Zoned, time_z: &jiff::Zoned) -> Result<jiff::Zoned> {
+    let tz = date_z.time_zone().clone();
+    let civil = date_z.date().at(
+        time_z.hour(),
+        time_z.minute(),
+        time_z.second(),
+        time_z.subsec_nanosecond(),
+    );
+    civil
+        .to_zoned(tz)
+        .map_err(|e| crate::Error::Other(format!("combine date+time: {}", e)))
 }
 
 /// Status label formatter for CLI parity with Python output.
@@ -720,7 +753,7 @@ mod tests {
     #[test]
     fn create_with_recurrence_writes_pt_recurrence_row() {
         let (_dir, db) = fresh_db();
-        let rec = crate::recurrence::parse("every monday").unwrap();
+        let rec = crate::recurrence::parse("every monday at 9am").unwrap();
         let mut new = NewTask::minimal("standup");
         new.deadline = Some("2026-05-18T09:00:00+01:00".into());
         let ext = Extensions {
@@ -738,6 +771,7 @@ mod tests {
                 .unwrap();
             assert_eq!(rrule, rec.rrule_str);
             assert_eq!(mode, "fixed");
+            assert_eq!(rec.original_input, "every monday at 9am");
             assert_eq!(next, "2026-05-18T09:00:00+01:00");
             Ok(())
         })
@@ -787,6 +821,30 @@ mod tests {
     }
 
     #[test]
+    fn mark_done_fixed_recurring_skips_missed_occurrences() {
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every day").unwrap();
+        let mut new = NewTask::minimal("daily stale");
+        new.deadline = Some("2024-01-01T09:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext).unwrap();
+        let outcome = mark_done(&db, &t).unwrap();
+        match outcome {
+            DoneOutcome::Advanced { next_deadline } => {
+                assert!(
+                    !next_deadline.starts_with("2024-"),
+                    "got {next_deadline} — fixed mode should skip missed occurrences"
+                );
+                assert!(next_deadline.contains("T09:00:00"), "got {next_deadline}");
+            }
+            other => panic!("expected Advanced, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn mark_done_advances_completion_recurring_from_now() {
         let (_dir, db) = fresh_db();
         let rec = crate::recurrence::parse("every! 5 days").unwrap();
@@ -807,6 +865,26 @@ mod tests {
                     !next_deadline.starts_with("2024-"),
                     "got {next_deadline} — should be ~5 days from now"
                 );
+            }
+            other => panic!("expected Advanced, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mark_done_completion_recurring_preserves_explicit_time_of_day() {
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every! 5 days at 9am").unwrap();
+        let mut new = NewTask::minimal("water plants");
+        new.deadline = Some("2024-01-01T09:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext).unwrap();
+        let outcome = mark_done(&db, &t).unwrap();
+        match outcome {
+            DoneOutcome::Advanced { next_deadline } => {
+                assert!(next_deadline.contains("T09:00:00"), "got {next_deadline}");
             }
             other => panic!("expected Advanced, got {:?}", other),
         }
