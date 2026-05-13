@@ -573,12 +573,11 @@ pub fn branch_name(pt_id: &str, title: &str) -> String {
             None
         };
         match mapped {
-            Some('-') => {
-                if !last_was_hyphen {
-                    slug.push('-');
-                    last_was_hyphen = true;
-                }
+            Some('-') if !last_was_hyphen => {
+                slug.push('-');
+                last_was_hyphen = true;
             }
+            Some('-') => {} // duplicate hyphen — already collapsed
             Some(c) => {
                 slug.push(c);
                 last_was_hyphen = false;
