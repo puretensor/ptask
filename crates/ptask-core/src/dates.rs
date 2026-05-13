@@ -41,6 +41,36 @@ pub fn parse(input: &str) -> Result<Zoned> {
     parse_at(input, now_in_operator_tz()?)
 }
 
+/// Parse one of the timestamp shapes used by the legacy SQLite store and
+/// return it in UTC. Handles Python `datetime.isoformat()` strings with an
+/// offset, bare UTC timestamps from SQLite `datetime('now')`, and date-only
+/// values as midnight UTC.
+pub fn parse_iso_to_utc(input: &str) -> Option<Zoned> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let utc = jiff::tz::TimeZone::UTC;
+    if let Ok(z) = s.parse::<Zoned>() {
+        return Some(z.with_time_zone(utc));
+    }
+    if let Ok(t) = s.parse::<jiff::Timestamp>() {
+        return Some(t.to_zoned(utc));
+    }
+    // SQLite `datetime('now', ...)` returns 'YYYY-MM-DD HH:MM:SS' (UTC, no offset).
+    if let Ok(t) = format!("{}Z", s.replace(' ', "T")).parse::<jiff::Timestamp>() {
+        return Some(t.to_zoned(utc));
+    }
+    // Date-only fallback.
+    if !s.contains('T')
+        && !s.contains(' ')
+        && let Ok(t) = format!("{}T00:00:00Z", s).parse::<jiff::Timestamp>()
+    {
+        return Some(t.to_zoned(utc));
+    }
+    None
+}
+
 /// Format a `Zoned` as the canonical pTask ISO string.
 /// Matches Python `datetime.now(timezone.utc).isoformat()` exactly:
 /// `YYYY-MM-DDTHH:MM:SS.ffffff+HH:MM` (or `+00:00` for UTC).
@@ -157,6 +187,31 @@ mod tests {
             .unwrap();
         let s = format_iso(&z);
         assert!(s.contains(".123456+"), "got {s}");
+    }
+
+    #[test]
+    fn parse_iso_to_utc_handles_offset_timestamp() {
+        let z = parse_iso_to_utc("2026-05-13T12:00:00+01:00").unwrap();
+        assert_eq!(z.time_zone(), &jiff::tz::TimeZone::UTC);
+        assert_eq!(z.hour(), 11);
+        assert_eq!(z.minute(), 0);
+    }
+
+    #[test]
+    fn parse_iso_to_utc_handles_sqlite_datetime() {
+        let z = parse_iso_to_utc("2026-05-13 12:34:56").unwrap();
+        assert_eq!(z.date(), date(2026, 5, 13));
+        assert_eq!(z.hour(), 12);
+        assert_eq!(z.minute(), 34);
+        assert_eq!(z.second(), 56);
+    }
+
+    #[test]
+    fn parse_iso_to_utc_handles_date_only() {
+        let z = parse_iso_to_utc("2026-05-13").unwrap();
+        assert_eq!(z.date(), date(2026, 5, 13));
+        assert_eq!(z.hour(), 0);
+        assert_eq!(z.minute(), 0);
     }
 
     #[test]

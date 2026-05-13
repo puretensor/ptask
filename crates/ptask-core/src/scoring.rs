@@ -31,6 +31,7 @@
 //! to Python.
 
 use crate::Db;
+use crate::dates::parse_iso_to_utc;
 use crate::error::Result;
 use jiff::Zoned;
 use rusqlite::params;
@@ -145,7 +146,10 @@ impl DepGraph {
                     g.nodes.push(dep.clone());
                     g.adj.insert(dep.clone(), Vec::new());
                 }
-                g.adj.entry(dep.clone()).or_default().push(id.clone());
+                let targets = g.adj.entry(dep.clone()).or_default();
+                if !targets.iter().any(|target| target == id) {
+                    targets.push(id.clone());
+                }
             }
         }
         g
@@ -236,6 +240,7 @@ impl DepGraph {
                 }
             }
         }
+        visited.remove(node);
         visited.len() as i64
     }
 }
@@ -257,6 +262,15 @@ struct ScoringRow {
     created_at: String,
     deadline: Option<String>,
     depends_on: String,
+}
+
+#[derive(Debug, Clone)]
+struct ScoreWrite {
+    id: String,
+    composite: f64,
+    urgency: f64,
+    dependency: f64,
+    neglect: f64,
 }
 
 /// Recompute scores for every task with `status NOT IN ('done', 'dismissed')`,
@@ -284,9 +298,10 @@ pub fn run_once_at(db: &Db, dry_run: bool, now: &Zoned) -> Result<ScoringReport>
     let centrality = graph.betweenness_centrality();
 
     let mut scored = 0usize;
+    let mut writes = Vec::with_capacity(rows.len());
     for row in &rows {
-        let created_at = parse_iso(&row.created_at).unwrap_or_else(|| now.clone());
-        let deadline = row.deadline.as_deref().and_then(parse_iso);
+        let created_at = parse_iso_to_utc(&row.created_at).unwrap_or_else(|| now.clone());
+        let deadline = row.deadline.as_deref().and_then(parse_iso_to_utc);
 
         let interactions = load_interactions_14d(db, &row.id)?;
 
@@ -311,9 +326,19 @@ pub fn run_once_at(db: &Db, dry_run: bool, now: &Zoned) -> Result<ScoringReport>
         );
 
         if !dry_run {
-            write_scores(db, &row.id, composite, urgency, dep, neglect)?;
+            writes.push(ScoreWrite {
+                id: row.id.clone(),
+                composite,
+                urgency,
+                dependency: dep,
+                neglect,
+            });
         }
         scored += 1;
+    }
+
+    if !dry_run {
+        write_scores_batch(db, &writes)?;
     }
 
     Ok(ScoringReport {
@@ -368,7 +393,7 @@ fn load_interactions_14d(db: &Db, task_id: &str) -> Result<Vec<Interaction>> {
         Ok(Interaction {
             action: r.get(0)?,
             details: r.get(1)?,
-            ts: ts_str.as_deref().and_then(parse_iso),
+            ts: ts_str.as_deref().and_then(parse_iso_to_utc),
         })
     })?;
     let mut v = Vec::new();
@@ -378,46 +403,33 @@ fn load_interactions_14d(db: &Db, task_id: &str) -> Result<Vec<Interaction>> {
     Ok(v)
 }
 
-fn write_scores(
-    db: &Db,
-    task_id: &str,
-    composite: f64,
-    urgency: f64,
-    dependency: f64,
-    neglect: f64,
-) -> Result<()> {
-    let conn = db.get()?;
-    conn.execute(
-        "UPDATE tasks
-         SET priority_score = ?1,
-             score_urgency = ?2,
-             score_dependency = ?3,
-             score_neglect = ?4
-         WHERE id = ?5",
-        params![composite, urgency, dependency, neglect, task_id],
-    )?;
-    Ok(())
-}
-
-fn parse_iso(s: &str) -> Option<Zoned> {
-    if let Ok(z) = s.parse::<Zoned>() {
-        return Some(z);
+fn write_scores_batch(db: &Db, rows: &[ScoreWrite]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
     }
-    if let Ok(t) = s.parse::<jiff::Timestamp>() {
-        return Some(t.to_zoned(jiff::tz::TimeZone::UTC));
-    }
-    // SQLite `datetime('now', ...)` returns 'YYYY-MM-DD HH:MM:SS' (UTC, no offset).
-    if let Ok(t) = format!("{}Z", s.replace(' ', "T")).parse::<jiff::Timestamp>() {
-        return Some(t.to_zoned(jiff::tz::TimeZone::UTC));
-    }
-    // Date-only fallback.
-    if !s.contains('T')
-        && !s.contains(' ')
-        && let Ok(t) = format!("{}T00:00:00Z", s).parse::<jiff::Timestamp>()
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
     {
-        return Some(t.to_zoned(jiff::tz::TimeZone::UTC));
+        let mut stmt = tx.prepare(
+            "UPDATE tasks
+             SET priority_score = ?1,
+                 score_urgency = ?2,
+                 score_dependency = ?3,
+                 score_neglect = ?4
+             WHERE id = ?5",
+        )?;
+        for row in rows {
+            stmt.execute(params![
+                row.composite,
+                row.urgency,
+                row.dependency,
+                row.neglect,
+                row.id
+            ])?;
+        }
     }
-    None
+    tx.commit()?;
+    Ok(())
 }
 
 // -------- tests --------------------------------------------------------------
@@ -548,10 +560,30 @@ mod tests {
         assert!((s - 1.0).abs() < 1e-9, "got {s}");
     }
 
+    #[test]
+    fn neglect_future_interaction_matches_python_timedelta_days() {
+        let future = now().checked_add(jiff::Span::new().hours(1)).unwrap();
+        let v = vec![Interaction {
+            action: "view".to_string(),
+            details: String::new(),
+            ts: Some(future),
+        }];
+        let s = neglect_score(&v, &now());
+        assert!((s - 0.3).abs() < 1e-9, "got {s}");
+    }
+
     // ---- dependency / Brandes --------------------------------------------
 
     fn pair(id: &str, deps: &[&str]) -> (String, Vec<String>) {
         (id.to_string(), deps.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn assert_close(actual: &HashMap<String, f64>, key: &str, expected: f64) {
+        let got = actual[key];
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "{key}: got {got}, expected {expected}; full={actual:?}"
+        );
     }
 
     #[test]
@@ -575,6 +607,58 @@ mod tests {
     }
 
     #[test]
+    fn graph_diamond_centrality_matches_networkx() {
+        // NetworkX DiGraph: a→b, a→c, b→d, c→d. b and c each carry
+        // half of the shortest paths from a to d, normalised by 6.
+        let g = DepGraph::from_pairs(&[
+            pair("a", &[]),
+            pair("b", &["a"]),
+            pair("c", &["a"]),
+            pair("d", &["b", "c"]),
+        ]);
+        let c = g.betweenness_centrality();
+        assert_close(&c, "a", 0.0);
+        assert_close(&c, "b", 1.0 / 12.0);
+        assert_close(&c, "c", 1.0 / 12.0);
+        assert_close(&c, "d", 0.0);
+    }
+
+    #[test]
+    fn graph_sparse_dag_centrality_matches_networkx() {
+        // Expected values from nx.betweenness_centrality on the same directed graph.
+        let g = DepGraph::from_pairs(&[
+            pair("a", &[]),
+            pair("b", &[]),
+            pair("c", &["a", "b"]),
+            pair("d", &["b"]),
+            pair("e", &["c", "d"]),
+            pair("f", &["e", "c"]),
+        ]);
+        let c = g.betweenness_centrality();
+        assert_close(&c, "a", 0.0);
+        assert_close(&c, "b", 0.0);
+        assert_close(&c, "c", 0.175);
+        assert_close(&c, "d", 0.025);
+        assert_close(&c, "e", 0.05);
+        assert_close(&c, "f", 0.0);
+    }
+
+    #[test]
+    fn graph_duplicate_dep_edges_match_networkx_digraph() {
+        // NetworkX DiGraph.add_edge is idempotent. Duplicate depends_on entries
+        // must not overweight one side of a diamond.
+        let g = DepGraph::from_pairs(&[
+            pair("a", &[]),
+            pair("b", &["a", "a"]),
+            pair("c", &["a"]),
+            pair("d", &["b", "c"]),
+        ]);
+        let c = g.betweenness_centrality();
+        assert_close(&c, "b", 1.0 / 12.0);
+        assert_close(&c, "c", 1.0 / 12.0);
+    }
+
+    #[test]
     fn graph_descendants_count() {
         // a → b, a → c, b → d
         let g = DepGraph::from_pairs(&[
@@ -587,6 +671,17 @@ mod tests {
         assert_eq!(g.descendants_count("b"), 1);
         assert_eq!(g.descendants_count("c"), 0);
         assert_eq!(g.descendants_count("d"), 0);
+    }
+
+    #[test]
+    fn graph_descendants_excludes_source_on_cycles_and_self_loops() {
+        let g = DepGraph::from_pairs(&[pair("a", &["a"]), pair("b", &["a"])]);
+        assert_eq!(g.descendants_count("a"), 1);
+        assert_eq!(g.descendants_count("b"), 0);
+
+        let cycle = DepGraph::from_pairs(&[pair("a", &["b"]), pair("b", &["a"])]);
+        assert_eq!(cycle.descendants_count("a"), 1);
+        assert_eq!(cycle.descendants_count("b"), 1);
     }
 
     #[test]
