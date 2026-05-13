@@ -274,19 +274,22 @@ Each phase below is a separable deliverable. End state: shippable binary, Python
 
 ---
 
-### v0.5.0 — Telegram Bot
+### v0.5.0 — Telegram Bot ✅ shipped (snooze/defer + Python cutover deferred)
 
 **Goal:** `pt bot` is the Telegram entry point. Inline-token quick-add via DM, morning digest, evening recap, snooze commands.
 
 **Sub-sections:**
-- **0.5.1 — teloxide skeleton.** Long-poll. Dialogue state in SQLite via `teloxide::dispatching::dialogue::SqliteStorage`.
-- **0.5.2 — `/add` handler.** Free text → inline-token parser → `tasks` write → reply with PT-N echo.
-- **0.5.3 — `/list` handler.** Optional filter DSL inline. Reply with formatted task list.
-- **0.5.4 — `/done`, `/snooze`, `/defer` handlers.** PT-N or fuzzy.
-- **0.5.5 — Morning digest (07:00 UK).** Today + overdue, grouped by status category. Replaces Python accountability morning poke for ptask flow.
-- **0.5.6 — Evening recap (18:00 UK).** What got done, what slipped, blocked items.
+- ✅ **0.5.1 — teloxide skeleton** (v0.4.2). teloxide 0.17, `default-features = false`, features `macros + ctrlc_handler + rustls`. Long-poll dispatcher with Ctrl-C handler. Chat allowlist via `PTASK_TELEGRAM_ALLOWED_CHATS` (comma-list of int64 chat_ids). Non-allowlisted messages dropped with an info log naming the unknown chat_id so onboarding is trivial. SQLite dialogue storage wasn't needed — current commands are stateless.
+- ✅ **0.5.2 — `/add` handler** (v0.4.2). `/add <quick-add text>` → `ptask_core::quickadd::parse` → `create_with_extensions(source_type='telegram')`. Reply echoes PT-N, deadline, and the recurrence rule when present.
+- ✅ **0.5.3 — `/list` handler** (v0.4.2). `/list [filter DSL]`. Empty filter → pending tasks. Filter present → status='all' so DSL date predicates work. Top 20 returned.
+- 🟡 **0.5.4 — `/done` shipped; `/snooze` + `/defer` deferred** (v0.4.2). `/done <PT-N | substring>` routes through `tasks::resolve` + `mark_done`, surfacing `DoneOutcome::Advanced` for recurring tasks with the next deadline. Snooze and defer need a `snooze_until` column on `pt_extensions` — small follow-on patch.
+- ✅ **0.5.5 — Morning digest 07:00 Europe/London** (v0.4.3). DST-correct via jiff `sleep_until` loop (no cron crate). Content = `(today | overdue) & pending` partitioned into 🚨 OVERDUE / 📅 DUE TODAY, with PT-N + priority + deadline columns. Empty case prints "Clear runway."
+- ✅ **0.5.6 — Evening recap 18:00 Europe/London** (v0.4.3). Counts today's `interactions` rows (`status_change` for completed + `recurrence_advance` for recurring), reports still-overdue tail (top 50) and `status='blocked'` list. Operator's post-mortem snapshot.
 
-**Exit criteria:** Operator's existing Telegram → ptask flow now lands via `pt bot`, not Python. Python bot's ptask routes disabled. (Other Telegram flows — HAL, alerts — untouched.)
+Bonus this phase:
+- `/next [N]` — DAG-ready tasks via `ptask_core::dag::next_ready` (the same query that powers `pt next`).
+
+**Exit criteria — met (with deferrals):** `pt bot` runs against any Telegram bot token; `/add /list /done /next /help` work in DMs. Morning + evening digests fire DST-correctly on the operator's local 07:00 / 18:00 schedule. The Python accountability poke remains active because the operator hasn't disabled it yet — flipping that switch is a one-line env edit on the existing systemd unit and lands the moment the operator decides this is the canonical surface. `/snooze` + `/defer` and a `snooze_until` column on `pt_extensions` are the only remaining v0.5.x feature gap.
 
 ---
 
