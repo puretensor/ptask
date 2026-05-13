@@ -3,16 +3,17 @@
 //! Parses a single free-form string into a structured [`QuickAdd`].
 //!
 //! Grammar (whitespace-separated tokens, order-independent except `//`):
-//!   - `@label`        — single label (multiple `@labels` accepted)
-//!   - `#project`      — single project (last one wins if repeated)
-//!   - `p1` `p2` `p3` `p4` — priority (defaults to "normal" / 2 if absent)
-//!   - `~30m` `~2h` `~1d` — duration estimate in minutes
-//!   - `!HH:MM`        — reminder time-of-day
-//!   - `//rest of line` — everything after the `//` is the description
-//!   - Date phrase     — `today` / `tomorrow` / `yesterday` / weekday names
-//!                       (with optional `this|next|last` prefix), `N days`,
-//!                       month names, ISO dates, optionally followed by time.
-//!   - Anything else   — title words
+//!
+//! - `@label`        — single label (multiple `@labels` accepted)
+//! - `#project`      — single project (last one wins if repeated)
+//! - `p1` `p2` `p3` `p4` — priority (defaults to "normal" / 2 if absent)
+//! - `~30m` `~2h` `~1d` — duration estimate in minutes
+//! - `!HH:MM`        — reminder time-of-day
+//! - `//rest of line` — everything after the `//` is the description
+//! - Date phrase — `today` / `tomorrow` / `yesterday` / weekday names (with
+//!   optional `this|next|last` prefix), `N days`, month names, ISO dates,
+//!   optionally followed by time.
+//! - Anything else   — title words
 //!
 //! Example:
 //!   `Buy bread tomorrow 10am @home #fleet p1 ~30m //grocery list`
@@ -115,62 +116,59 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         let tok = raw[idx];
 
         // Explicit @label
-        if let Some(rest) = tok.strip_prefix('@') {
-            if !rest.is_empty() {
-                out.labels.push(rest.to_string());
-                idx += 1;
-                continue;
-            }
+        if let Some(rest) = tok.strip_prefix('@')
+            && !rest.is_empty()
+        {
+            out.labels.push(rest.to_string());
+            idx += 1;
+            continue;
         }
         // Explicit #project
-        if let Some(rest) = tok.strip_prefix('#') {
-            if !rest.is_empty() {
-                out.project = Some(rest.to_string());
-                idx += 1;
-                continue;
-            }
+        if let Some(rest) = tok.strip_prefix('#')
+            && !rest.is_empty()
+        {
+            out.project = Some(rest.to_string());
+            idx += 1;
+            continue;
         }
-        // Priority pN (1..=4)
-        if let Some(rest) = tok.strip_prefix('p') {
-            if let Ok(n) = rest.parse::<i64>() {
-                if (1..=4).contains(&n) {
-                    // Quick-add uses Todoist's p1..p4 convention. Map to pTask
-                    // 5..1 scale (p1=urgent=4 in pTask). Concretely:
-                    //   p1 → 4 (urgent), p2 → 3 (high),
-                    //   p3 → 2 (normal), p4 → 1 (low)
-                    let pt_priority = 5 - n;
-                    out.priority = Some(pt_priority);
-                    idx += 1;
-                    continue;
-                }
-            }
+        // Priority pN (1..=4). Quick-add uses Todoist's p1..p4 convention.
+        // Map to pTask 5..1 scale (p1 → 4 urgent, p2 → 3 high,
+        // p3 → 2 normal, p4 → 1 low).
+        if let Some(rest) = tok.strip_prefix('p')
+            && let Ok(n) = rest.parse::<i64>()
+            && (1..=4).contains(&n)
+        {
+            out.priority = Some(5 - n);
+            idx += 1;
+            continue;
         }
         // Duration ~Nm / ~Nh / ~Nd
-        if let Some(rest) = tok.strip_prefix('~') {
-            if let Some(mins) = parse_duration(rest) {
-                out.duration_min = Some(mins);
-                idx += 1;
-                continue;
-            }
+        if let Some(rest) = tok.strip_prefix('~')
+            && let Some(mins) = parse_duration(rest)
+        {
+            out.duration_min = Some(mins);
+            idx += 1;
+            continue;
         }
         // Reminder !HH:MM
-        if let Some(rest) = tok.strip_prefix('!') {
-            if !rest.is_empty() && rest.contains(':') {
-                out.reminder = Some(rest.to_string());
-                idx += 1;
-                continue;
-            }
+        if let Some(rest) = tok.strip_prefix('!')
+            && !rest.is_empty()
+            && rest.contains(':')
+        {
+            out.reminder = Some(rest.to_string());
+            idx += 1;
+            continue;
         }
 
         // Date phrase: greedy longest match from this position.
-        if is_date_starter(tok) || looks_like_iso_date(tok) || looks_like_clock_time(tok) {
-            if let Some((phrase, consumed)) = try_date_match(&raw, idx, &now) {
-                let parsed = dates::parse_at(&phrase, now.clone())?;
-                out.deadline_phrase = Some(phrase);
-                out.deadline = Some(dates::format_iso(&parsed));
-                idx += consumed;
-                continue;
-            }
+        if (is_date_starter(tok) || looks_like_iso_date(tok) || looks_like_clock_time(tok))
+            && let Some((phrase, consumed)) = try_date_match(&raw, idx, &now)
+        {
+            let parsed = dates::parse_at(&phrase, now.clone())?;
+            out.deadline_phrase = Some(phrase);
+            out.deadline = Some(dates::format_iso(&parsed));
+            idx += consumed;
+            continue;
         }
 
         // Fallback: title word.
@@ -251,12 +249,11 @@ fn is_explicit_marker(tok: &str) -> bool {
     if tok.starts_with("//") {
         return true;
     }
-    if let Some(rest) = tok.strip_prefix('p') {
-        if let Ok(n) = rest.parse::<i64>() {
-            if (1..=4).contains(&n) {
-                return true;
-            }
-        }
+    if let Some(rest) = tok.strip_prefix('p')
+        && let Ok(n) = rest.parse::<i64>()
+        && (1..=4).contains(&n)
+    {
+        return true;
     }
     false
 }
