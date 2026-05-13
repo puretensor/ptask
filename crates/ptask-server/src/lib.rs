@@ -85,6 +85,8 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn open_test_db() -> Db {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
@@ -427,10 +429,11 @@ mod tests {
         assert!(s.contains("pt_views_total "));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn gitea_webhook_closes_pt_n_on_fixes() {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
+        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
         // Create a task we can close via the magic word.
         let t = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("close me")).unwrap();
@@ -442,7 +445,8 @@ mod tests {
         let body = serde_json::json!({
             "ref": "refs/heads/main",
             "commits": [
-                { "id": "abc123", "message": format!("Fixes {}: ship it", pt) }
+                { "id": "abc123", "message": format!("Fixes {}: ship it", pt) },
+                { "id": "def456", "message": format!("Closes {}: duplicate in same push", pt) }
             ]
         });
         let body_bytes = serde_json::to_vec(&body).unwrap();
@@ -451,18 +455,37 @@ mod tests {
         let sig = hex::encode(mac.finalize().into_bytes());
         let app = router(AppState { db: db.clone() });
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/webhook/gitea")
                     .method("POST")
                     .header("content-type", "application/json")
-                    .header("X-Gitea-Signature", sig)
+                    .header("X-Gitea-Signature", &sig)
+                    .body(Body::from(body_bytes.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Duplicate provider delivery should be idempotent: no second
+        // status_change row, and the git-originated task event is in
+        // pt_event_log so /sync clients can see the change.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/webhook/gitea")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("X-Gitea-Signature", &sig)
                     .body(Body::from(body_bytes))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+
         // Task should now be done.
         db.with_conn(|c| {
             let status: String = c
@@ -471,6 +494,24 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(status, "done");
+            let interactions: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM interactions
+                     WHERE task_id=?1 AND action='status_change'",
+                    [&t.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(interactions, 1);
+            let events: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM pt_event_log
+                     WHERE event_type='task.completed' AND task_uuid=?1",
+                    [&t.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(events, 1);
             Ok(())
         })
         .unwrap();
@@ -480,8 +521,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn gitea_webhook_rejects_bad_signature() {
+        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
         unsafe {
             std::env::set_var("PTASK_GITEA_WEBHOOK_SECRET", "test-secret");

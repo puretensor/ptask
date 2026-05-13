@@ -34,7 +34,7 @@ impl Directive {
 
 /// Parse all directives from a free-text blob. Returns them in input order.
 pub fn parse(text: &str) -> Vec<Directive> {
-    let mut out = Vec::new();
+    let mut found: Vec<(usize, Directive)> = Vec::new();
     // Iterate over the lowercased text but cut PT-N from the original so
     // the verb match is case-insensitive while PT-N stays canonical.
     let lower = text.to_ascii_lowercase();
@@ -64,17 +64,21 @@ pub fn parse(text: &str) -> Vec<Directive> {
             }
             let after = abs + needle.len();
             if let Some(pt) = extract_pt_id(&text[after..]) {
-                out.push(Directive {
-                    verb: verb.clone(),
-                    pt_id: pt,
-                });
+                found.push((
+                    abs,
+                    Directive {
+                        verb: verb.clone(),
+                        pt_id: pt,
+                    },
+                ));
             }
             let step = pos + needle.len();
             search = &search[step..];
             offset += step;
         }
     }
-    out
+    found.sort_by_key(|(pos, _)| *pos);
+    found.into_iter().map(|(_, d)| d).collect()
 }
 
 /// Resolve directives into a set of PT-Ns to close. Closes/Fixes mark, but
@@ -144,6 +148,20 @@ mod tests {
         // Order of appearance.
         let pts: Vec<&str> = d.iter().map(|x| x.pt_id.as_str()).collect();
         assert_eq!(pts, vec!["PT-1", "PT-2", "PT-3"]);
+    }
+
+    #[test]
+    fn mixed_verbs_preserve_input_order_not_verb_order() {
+        let d = parse("Ref PT-3 first, then Closes PT-2, finally Fixes PT-1");
+        let pairs: Vec<(&Verb, &str)> = d.iter().map(|x| (&x.verb, x.pt_id.as_str())).collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (&Verb::Ref, "PT-3"),
+                (&Verb::Closes, "PT-2"),
+                (&Verb::Fixes, "PT-1"),
+            ]
+        );
     }
 
     #[test]
