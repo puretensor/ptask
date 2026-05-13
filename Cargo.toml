@@ -10,7 +10,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 authors = ["PureTensor, Inc. <hal@puretensor.ai>"]
@@ -35,12 +35,16 @@ r2d2_sqlite = "0.25"
 refinery = { version = "0.8", features = ["rusqlite"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 jiff = { version = "0.2", features = ["serde"] }
+interim = { version = "0.2", features = ["jiff_0_2"] }
+winnow = "1"
+rrule = "0.14"
+petgraph = "0.8"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
 # Internal crates
-ptask-core = { path = "crates/ptask-core", version = "0.1.1" }
+ptask-core = { path = "crates/ptask-core", version = "0.1.2" }
 
 [profile.release]
 opt-level = 3
