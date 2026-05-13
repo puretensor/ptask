@@ -10,12 +10,14 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    let filter_bar_h: u16 = if app.filter_input.is_some() { 1 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header
-            Constraint::Min(0),    // body
-            Constraint::Length(1), // status bar
+            Constraint::Length(1),            // header
+            Constraint::Min(0),               // body
+            Constraint::Length(filter_bar_h), // filter input bar
+            Constraint::Length(1),            // status bar
         ])
         .split(area);
 
@@ -34,7 +36,25 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_list(frame, chunks[1], app);
     }
 
-    render_status(frame, chunks[2], app);
+    if filter_bar_h > 0 {
+        render_filter_bar(frame, chunks[2], app);
+    }
+    render_status(frame, chunks[3], app);
+}
+
+fn render_filter_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    let buf = app.filter_input.as_deref().unwrap_or("");
+    let line = Line::from(vec![
+        Span::styled(
+            "/",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(buf.to_string()),
+        Span::styled("_", Style::default().fg(Color::Cyan)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
@@ -179,8 +199,9 @@ fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
 
 fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App) {
     let items: Vec<ListItem> = app
-        .tasks
+        .visible()
         .iter()
+        .filter_map(|&i| app.tasks.get(i))
         .map(|t| {
             let pt = t.pt_id.as_deref().unwrap_or("------");
             let label = priority::label(t.priority).to_ascii_uppercase();
@@ -199,9 +220,17 @@ fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App) {
             ListItem::new(line)
         })
         .collect();
+    let total = app.tasks.len();
+    let visible = app.visible().len();
     let title = match app.list_state.selected() {
-        Some(i) => format!(" pending  {}/{} ", i + 1, app.tasks.len()),
-        None => " pending ".into(),
+        Some(i) if visible > 0 => {
+            if visible == total {
+                format!(" pending  {}/{} ", i + 1, total)
+            } else {
+                format!(" pending  {}/{} ({} total) ", i + 1, visible, total)
+            }
+        }
+        _ => format!(" pending  ({}/{}) ", visible, total),
     };
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
@@ -228,6 +257,8 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         Span::raw(" reload  "),
         keybind("Space"),
         Span::raw(" peek  "),
+        keybind("/"),
+        Span::raw(" filter  "),
         Span::raw(" | "),
         Span::raw(app.status_msg.clone()),
     ]);
