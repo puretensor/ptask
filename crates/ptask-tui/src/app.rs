@@ -8,7 +8,8 @@ use nucleo::Matcher;
 use nucleo::Utf32String;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use ptask_core::tasks::TaskDetail;
-use ptask_core::{Db, Task, tasks};
+use ptask_core::views::View;
+use ptask_core::{Db, Task, tasks, views};
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
 
@@ -49,6 +50,29 @@ pub struct App {
     /// Most-recent confirmation request. When Some, the next y/n press
     /// resolves it.
     pub confirm: Option<Confirm>,
+
+    /// Active view selector. Drives the task list query in `reload`.
+    pub view: ViewSel,
+    /// Cached saved views from pt_views (alphabetical). Refreshed on
+    /// startup and after view CRUD (deferred to a later iteration).
+    pub saved_views: Vec<View>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewSel {
+    /// All pending tasks (the default).
+    Pending,
+    /// A user-saved view (filter DSL).
+    Saved { name: String, dsl: String },
+}
+
+impl ViewSel {
+    pub fn label(&self) -> String {
+        match self {
+            ViewSel::Pending => "pending".into(),
+            ViewSel::Saved { name, .. } => format!("view:{}", name),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +116,7 @@ impl App {
     pub fn new(db: Db) -> Result<Self> {
         let tasks = tasks::list_with_filter(&db, None, Some("pending"), None, 200)
             .context("loading initial task list")?;
+        let saved_views = views::list(&db).unwrap_or_default();
         let mut list_state = ListState::default();
         if !tasks.is_empty() {
             list_state.select(Some(0));
@@ -114,6 +139,8 @@ impl App {
             matcher: Matcher::default(),
             prompt: None,
             confirm: None,
+            view: ViewSel::Pending,
+            saved_views,
         })
     }
 
@@ -202,12 +229,19 @@ impl App {
         }
     }
 
-    /// Reload the visible task list from the DB. Currently fixed to
-    /// pending + ordered by `list_with_filter`. Filtering/view switching
-    /// will reshape this in later sub-versions.
+    /// Reload the visible task list from the DB. The query shape depends
+    /// on the active [`ViewSel`].
     pub fn reload(&mut self) -> Result<()> {
-        self.tasks = tasks::list_with_filter(&self.db, None, Some("pending"), None, 200)
-            .context("reloading task list")?;
+        self.tasks = match &self.view {
+            ViewSel::Pending => tasks::list_with_filter(&self.db, None, Some("pending"), None, 200)
+                .context("reloading pending list")?,
+            ViewSel::Saved { dsl, .. } => {
+                let expr = ptask_core::filter::parse(dsl)
+                    .map_err(|e| anyhow::anyhow!("saved view DSL parse failed: {}", e))?;
+                tasks::list_with_filter(&self.db, Some(&expr), None, None, 200)
+                    .context("reloading saved view")?
+            }
+        };
         self.apply_filter();
         if self.tasks.is_empty() {
             self.list_state.select(None);
@@ -215,6 +249,50 @@ impl App {
             self.list_state.select(Some(0));
         }
         Ok(())
+    }
+
+    /// Cycle to the next saved view. Order: Pending → views[0] → views[1] →
+    /// ... → views[N-1] → Pending. If no saved views exist, no-op with a
+    /// status message.
+    pub fn action_cycle_view(&mut self) {
+        // Always re-read saved views so newly-saved ones from the CLI surface.
+        if let Ok(v) = views::list(&self.db) {
+            self.saved_views = v;
+        }
+        if self.saved_views.is_empty() {
+            self.status_msg = "no saved views — use `pt view save NAME 'DSL'`".into();
+            return;
+        }
+        let next = match &self.view {
+            ViewSel::Pending => Some(0),
+            ViewSel::Saved { name, .. } => {
+                let cur = self.saved_views.iter().position(|v| v.name == *name);
+                match cur {
+                    Some(i) if i + 1 < self.saved_views.len() => Some(i + 1),
+                    _ => None, // wrap back to Pending
+                }
+            }
+        };
+        self.view = match next {
+            Some(i) => {
+                let v = &self.saved_views[i];
+                ViewSel::Saved {
+                    name: v.name.clone(),
+                    dsl: v.filter_dsl.clone(),
+                }
+            }
+            None => ViewSel::Pending,
+        };
+        match self.reload() {
+            Ok(_) => {
+                self.status_msg = format!(
+                    "view → {}  ({} task(s))",
+                    self.view.label(),
+                    self.tasks.len()
+                );
+            }
+            Err(e) => self.status_msg = format!("view switch reload failed: {}", e),
+        }
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -327,6 +405,7 @@ impl App {
                     self.pending_g = true;
                 }
             }
+            KeyCode::Char('v') if was_g => self.action_cycle_view(),
             KeyCode::Home => self.cursor_to(0),
             KeyCode::End => self.cursor_to_last(),
 

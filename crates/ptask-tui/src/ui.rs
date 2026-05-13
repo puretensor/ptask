@@ -212,7 +212,14 @@ fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         ),
         Span::raw(format!("v{}  ", ptask_core::VERSION)),
         Span::styled(
-            format!("{} pending", app.tasks.len()),
+            app.view.label(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("{} task(s)", app.tasks.len()),
             Style::default().fg(Color::Yellow),
         ),
     ]);
@@ -289,6 +296,8 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         Span::raw(" new  "),
         keybind("Del"),
         Span::raw(" rm  "),
+        keybind("gv"),
+        Span::raw(" view  "),
         Span::raw(" | "),
         Span::raw(app.status_msg.clone()),
     ]);
