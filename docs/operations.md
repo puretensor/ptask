@@ -158,3 +158,47 @@ systemctl --user list-timers ptask-accountability.timer
 journalctl --user -u ptask-accountability.service -n 200
 pt accountability run --dry-run
 ```
+
+## Scoring (v0.7.3)
+
+`pt scoring run` is the Rust port of `~/puretensor-tasks/api/scoring.py`. It
+recomputes the composite priority score (and the four `score_*` columns) for
+every task with `status NOT IN ('done', 'dismissed')`. Pure-local: no
+network, no LLM call. Reads `tasks` + `interactions`, writes
+`priority_score`, `score_urgency`, `score_dependency`, `score_neglect`.
+
+```text
+composite = 0.30·urgency + 0.20·dependency + 0.20·neglect + 0.30·manual
+```
+
+### Cutover from `puretensor-tasks-scoring.timer`
+
+The legacy system-mode timer at `/etc/systemd/system/puretensor-tasks-scoring.timer`
+fires hourly. Disable it before enabling the Rust one:
+
+```bash
+sudo systemctl disable --now puretensor-tasks-scoring.timer
+mkdir -p ~/.config/systemd/user
+ln -sf ~/ptask/scripts/systemd/ptask-scoring.service ~/.config/systemd/user/
+ln -sf ~/ptask/scripts/systemd/ptask-scoring.timer   ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ptask-scoring.timer
+loginctl enable-linger "$USER"
+```
+
+Cadence: `OnCalendar=hourly` with 60s jitter (matches the legacy unit).
+
+### Inspect
+
+```bash
+systemctl --user list-timers ptask-scoring.timer
+journalctl --user -u ptask-scoring.service -n 200
+pt scoring run --dry-run
+```
+
+### Rollback
+
+```bash
+systemctl --user disable --now ptask-scoring.timer
+sudo systemctl enable --now puretensor-tasks-scoring.timer
+```

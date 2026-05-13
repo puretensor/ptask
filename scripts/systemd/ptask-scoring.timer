@@ -1,0 +1,14 @@
+[Unit]
+Description=pTask scoring — hourly recompute
+Documentation=https://github.com/puretensor/ptask
+
+[Timer]
+# Mirrors the legacy puretensor-tasks-scoring.timer cadence (OnCalendar=hourly).
+# 60s jitter to avoid lining up exactly with accountability fires.
+OnCalendar=hourly
+RandomizedDelaySec=60
+Persistent=true
+Unit=ptask-scoring.service
+
+[Install]
+WantedBy=timers.target

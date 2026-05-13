@@ -55,6 +55,9 @@ enum Command {
     /// Run one accountability cycle (escalation + Telegram/email).
     #[command(subcommand)]
     Accountability(AccountabilityCommand),
+    /// Recompute composite priority scores for all active tasks.
+    #[command(subcommand)]
+    Scoring(ScoringCommand),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
 }
@@ -68,6 +71,20 @@ enum AccountabilityCommand {
 #[derive(clap::Args, Debug)]
 struct AccountabilityRunArgs {
     /// Don't actually send anything; log what would have been dispatched.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum ScoringCommand {
+    /// Recompute the four score_* columns + priority_score for every
+    /// task with status NOT IN ('done', 'dismissed').
+    Run(ScoringRunArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct ScoringRunArgs {
+    /// Compute and log scores but don't write them back to the DB.
     #[arg(long = "dry-run")]
     dry_run: bool,
 }
@@ -196,6 +213,7 @@ fn main() -> Result<()> {
         Some(Command::Branch(a)) => cmd_branch(&db, a),
         Some(Command::Distill(a)) => cmd_distill(&db, a),
         Some(Command::Accountability(c)) => cmd_accountability(db, c),
+        Some(Command::Scoring(c)) => cmd_scoring(&db, c),
         Some(Command::Backfill) => cmd_backfill(&db),
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
             ptask_tui::run(db)
@@ -473,6 +491,20 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     d.task_uuid, d.level, d.telegram_sent, d.email_sent
                 );
             }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
+    match c {
+        ScoringCommand::Run(a) => {
+            let report = ptask_core::scoring::run_once(db, a.dry_run)?;
+            println!(
+                "scoring ok — tasks_scored={}{}",
+                report.tasks_scored,
+                if report.dry_run { " (dry-run)" } else { "" }
+            );
             Ok(())
         }
     }
