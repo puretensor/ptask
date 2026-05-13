@@ -1,6 +1,6 @@
 [package]
 name = "ptask-distill"
-description = "pTask 6-stage distillation pipeline. Scaffold — shim in v0.6.5, native in v0.9.0."
+description = "pTask distillation orchestrator. v0.6.x shims Python; v0.9.0 ports to Rust."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,3 +16,4 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }

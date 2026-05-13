@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-bot"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "jiff",
@@ -2062,13 +2062,14 @@ dependencies = [
 
 [[package]]
 name = "ptask-cli"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
  "ptask-bot",
  "ptask-core",
+ "ptask-distill",
  "ptask-server",
  "ptask-tui",
  "serde_json",
@@ -2079,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-core"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "interim",
@@ -2101,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-distill"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "ptask-core",
@@ -2110,11 +2111,12 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "ptask-server"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -2139,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-tui"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "anyhow",
  "crossterm",

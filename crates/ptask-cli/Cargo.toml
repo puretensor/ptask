@@ -13,10 +13,11 @@ name = "pt"
 path = "src/main.rs"
 
 [dependencies]
-ptask-core   = { workspace = true }
-ptask-tui    = { workspace = true }
-ptask-server = { workspace = true }
-ptask-bot    = { workspace = true }
+ptask-core    = { workspace = true }
+ptask-tui     = { workspace = true }
+ptask-server  = { workspace = true }
+ptask-bot     = { workspace = true }
+ptask-distill = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 tokio = { workspace = true }

@@ -50,8 +50,18 @@ enum Command {
     Bot,
     /// Print a Linear-style branch name for a task.
     Branch(BranchArgs),
+    /// Run the distillation pipeline (Python subprocess shim until v0.9).
+    Distill(DistillArgs),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
+}
+
+#[derive(clap::Args, Debug)]
+struct DistillArgs {
+    /// Days of history for the Python pipeline to ingest (defaults to 60,
+    /// matching the legacy systemd unit).
+    #[arg(long = "days", default_value_t = 60)]
+    days: u32,
 }
 
 #[derive(clap::Args, Debug)]
@@ -168,6 +178,7 @@ fn main() -> Result<()> {
         Some(Command::Serve(a)) => cmd_serve(db, a),
         Some(Command::Bot) => cmd_bot(db),
         Some(Command::Branch(a)) => cmd_branch(&db, a),
+        Some(Command::Distill(a)) => cmd_distill(&db, a),
         Some(Command::Backfill) => cmd_backfill(&db),
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
             ptask_tui::run(db)
@@ -410,6 +421,27 @@ fn cmd_branch(db: &Db, a: BranchArgs) -> Result<()> {
     let pt = task.pt_id.clone().unwrap_or_else(|| "PT-?".into());
     println!("{}", tasks::branch_name(&pt, &task.title));
     Ok(())
+}
+
+fn cmd_distill(db: &Db, a: DistillArgs) -> Result<()> {
+    let days = a.days.to_string();
+    let report = ptask_distill::run(db, &["--days", &days])?;
+    if report.success {
+        println!(
+            "distill ok ({}ms; {} stdout lines, {} stderr lines)",
+            report.duration_ms, report.stdout_lines, report.stderr_lines
+        );
+        Ok(())
+    } else {
+        eprintln!(
+            "distill FAILED (exit={:?}, {}ms)",
+            report.exit_code, report.duration_ms
+        );
+        if !report.stderr_tail.is_empty() {
+            eprintln!("--- stderr tail ---\n{}", report.stderr_tail);
+        }
+        std::process::exit(report.exit_code.unwrap_or(1));
+    }
 }
 
 fn cmd_backfill(db: &Db) -> Result<()> {
