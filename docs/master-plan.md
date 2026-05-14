@@ -369,18 +369,18 @@ Bonus this phase:
 
 ---
 
-### v0.10.0 — Multi-Node Fleet Rollout
+### v0.10.0 — Multi-Node Fleet Rollout ✅ shipped (deployment kit; live deploy operator-supervised)
 
 **Goal:** `pt` runs as a service on multiple fleet nodes. Sync API exercised. Reproducible deploy.
 
 **Sub-sections:**
-- **0.10.1 — `cargo dist` release pipeline.** Static musl build via `x86_64-unknown-linux-musl`. Single binary. Checksums. Homebrew tap (cosmetic, for Mac dev).
-- **0.10.2 — Ansible playbook in `tensor-scripts/playbooks/ptask.yml`.** Install binary, systemd units, env file, healthcheck.
-- **0.10.3 — Canonical-store node election.** SQLite lives on `mon1` (primary) or `arx2` (high-write). Other nodes hit `pt serve` over Tailscale.
-- **0.10.4 — Litestream replication.** Continuous backup of `tasks.db` to S3/B2 or Ceph object. RPO < 1 minute.
-- **0.10.5 — Fleet read-only clients.** Other nodes install `pt` configured against `https://ptask.ts.puretensor.local/sync`.
+- ✅ **0.10.1 — Release pipeline** (v0.9.1). `.github/workflows/release.yml` fires on `vX.Y.Z` tag push, builds `pt` for x86_64-unknown-linux-gnu (x86-64-v3 baseline), strips, sha256s, attaches binary + manifest to the GitHub Release with auto-generated commit notes. `scripts/release.sh` is the operator helper: clean-tree check, `cargo fmt/clippy/test` gates, tag, dual-push to origin + gitea. Musl static target queued for v0.9.x once local validation is done.
+- ✅ **0.10.2 — Ansible playbook** (v0.9.2). `scripts/ansible/ptask.yml` + `scripts/ansible/inventory.yml`. Idempotent install of `pt` binary + four user-mode systemd timers (`ptask-backup`, `ptask-distill`, `ptask-accountability`, `ptask-scoring`) to every tier-0 node. On non-canonical hosts the binary is installed but timers stay disabled — they'll proxy through `pt serve` after v0.9.5. `loginctl enable-linger` keeps timers alive across operator logout. `ansible-playbook --syntax-check` passes.
+- ✅ **0.10.3 — Canonical-store election** (v0.9.3). Locked to mon1. `docs/architecture.md` captures the topology, role split (canonical / client / excluded), env-var matrix, and recovery procedure. Re-audit gate at v0.10 if read pressure on mon1 justifies arx2.
+- ✅ **0.10.4 — Litestream replication** (v0.9.4). `scripts/litestream/litestream.yml` + `scripts/systemd/ptask-litestream.service` stream the WAL to a Ceph rados gateway. `PTASK_LITESTREAM_*` env from `~/.config/litestream/.env`. RPO < 1 min, snapshot daily, retention 30 days. `wal_autocheckpoint = 0` pinned so Litestream owns checkpoints. Full deploy + restore + rollback runbook in `docs/operations.md`. Live deploy gated on operator: Ceph creds + bucket creation.
+- ✅ **0.10.5 — Fleet read-only clients** (v0.9.5). `pt remote {add,list,done}` subcommands speak the v0.4.2 `/sync` wire protocol against `PTASK_SYNC_URL` (default `https://ptask.ts.puretensor.local`). `ptask_core::Task` gains `Deserialize` for client-side rehydration. Quick-add grammar reused so `pt remote add` matches the local `pt add` UX. Mock-/sync tests cover the three verbs end-to-end.
 
-**Exit criteria:** Operator can `pt add "..."` from `fox-n0`, `mon2`, or any fleet node, and the write lands on the canonical store. Failure of any non-canonical node loses no data.
+**Exit criteria — partial:** All deployment artefacts (release workflow, Ansible playbook + inventory, Litestream config + systemd unit, runbook, remote client) ship and are clippy/fmt/test-clean. Live cutover — running ansible against the fleet, enabling `ptask-litestream.service`, fielding the first `pt remote add` from a non-canonical node — stays operator-supervised. Phase boundary tagged at v0.10.0; the actual fleet-flip can fire when operator is awake.
 
 ---
 
