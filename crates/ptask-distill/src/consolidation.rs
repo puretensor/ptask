@@ -218,7 +218,7 @@ impl Consolidator {
                 after = GLOBAL_MAX_TASKS,
                 "trimming to global cap"
             );
-            canonical.sort_by(|a, b| b.priority.cmp(&a.priority));
+            canonical.sort_by_key(|t| std::cmp::Reverse(t.priority));
             canonical.truncate(GLOBAL_MAX_TASKS);
         }
 
