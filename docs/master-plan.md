@@ -400,6 +400,27 @@ Bonus this phase:
 
 ---
 
+### v1.0.4 — k3s puretensor-tasks namespace retired ✅ shipped
+
+Discovered during v1.0.3 verification that a second pTask deployment had been running in k3s the entire time (namespace `puretensor-tasks` on mon1, image `100.92.245.5:3002/puretensor/puretensor-tasks:v2.0.4`, behind `https://tasks.fox/`). Up 63 days, last redeployed 15 days ago. The operator's day-to-day surface was this k3s pod, not tensor-core's Rust binary; v1.0.3's "canonical = tensor-core" was correct after the activation but missed the live shadow deployment.
+
+UUID union: 132 overlap, 306 mon1-only, 72 tc-only → **510 tasks** on the consolidated tensor-core DB. Soft-merge preserves both histories — neither side's recent work was lost.
+
+Post-merge cleanup:
+- k3s cronjobs `tasks-distill` / `tasks-scoring` / `tasks-accountability` suspended.
+- Deployment scaled to 0; pod terminated.
+- `kubectl delete namespace puretensor-tasks` — namespace + IngressRoutes (`tasks-ingress`, `tasks-ingress-tls`) + PVCs (`tasks-data-rwm`, `tasks-data-rwo`) gone.
+- `https://tasks.fox/` now returns 404 from Traefik (host unrecognised).
+- Litestream replica restarted with a fresh generation `6aa7408a...` reflecting the merged DB.
+
+Tangential: mon1's `k3s.service` unit had a malformed `ExecStart` (`/usr/local/bin/k3s \ --nodeport-addresses primary`) from a prior hand-edit, crash-looping. Restored to baseline `ExecStart=/usr/local/bin/k3s server`; broken unit preserved at `/etc/systemd/system/k3s.service.bak-malformed-20260514T041017`. The `--nodeport-addresses` intent is operator's to re-introduce correctly (`--kube-proxy-arg=nodeport-addresses=...`).
+
+Rollback artefacts at `/tmp/ptask-migration/`:
+- `tensor-core-pre-merge.db` (the prior 204-task DB).
+- `from-mon1.db` (the 438-task snapshot pulled out of k3s).
+- `tc-only-tasks.json` (the 72 tensor-core-only rows the soft-merge re-injected).
+- Old Litestream replica at `/mnt/ceph-backup/ptask-litestream/tasks.db.pre-mon1-merge-20260514T035601`.
+
 ### v1.0.3 — Doc reality reconciliation ✅ shipped
 
 Post-activation patch. The pre-1.0 docs nominated mon1 as the canonical host and an S3 rados-gateway as the Litestream backend; the actual activation runs on tensor-core with a CephFS file replica. v1.0.3 brings the repo in line with reality:

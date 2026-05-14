@@ -18,6 +18,8 @@ All five activation steps executed, with one deliberate withdrawal:
 | 5. Archive `~/puretensor-tasks/` → `~/puretensor-tasks-legacy/` read-only | ✅ done | Python code + `.git` + legacy unit files moved; live `.env` + `tasks.db` + WAL kept in place so `ptask-*` services keep firing. `chmod -R a-w`. |
 | 6. Fleet ansible deploy | ✅ done | `pt 1.0.2` on all tier-0 nodes. Timers only enabled on tensor-core. `/etc/profile.d/ptask.sh` sets `PTASK_SYNC_URL=http://100.121.42.54:9501` fleet-wide. |
 | ~~7. Bretalon post~~ | ❌ withdrawn | Category error — Bretalon is a separate UK Ltd with its own editorial surface for external subjects. PureTensor internal-tool announcements don't belong there. Internal repo + the activation report are the launch artefacts. |
+| 8. Retire k3s `puretensor-tasks` namespace (v1.0.4) | ✅ done | Discovered post-activation: a parallel Python deployment had been running in k3s on mon1 for 63 days, serving `https://tasks.fox/`. UUID-union-merged into tensor-core (132 overlap, 306 mon1-only, 72 tc-only → 510 tasks total). Namespace + IngressRoutes + PVCs deleted; `tasks.fox` now 404. Snapshots preserved at `/tmp/ptask-migration/`. |
+| 9. Fix mon1 `k3s.service` (v1.0.4) | ✅ done | Unrelated to pTask but blocked step 8: ExecStart had a literal `\` from a hand-edit, crash-looping. Restored baseline `/usr/local/bin/k3s server`. Broken unit at `/etc/systemd/system/k3s.service.bak-malformed-20260514T041017` for operator to re-introduce `--nodeport-addresses` correctly. |
 
 ## Key deviations from the pre-v1.0 plan
 

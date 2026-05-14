@@ -60,6 +60,7 @@ completes the rest of the fleet's reconfiguration.
 | **canonical** | `tensor-core` | `tasks.db` + WAL on local NVMe; `ptask-serve` on `0.0.0.0:9501`; Litestream → CephFS; all four user-mode timers active |
 | **client** | `mon1-3`, `arx1-4`, `fox-n0/1` | Same `pt` binary; timers **disabled**; reads/writes route through `pt remote` → `PTASK_SYNC_URL=http://100.121.42.54:9501` |
 | **excluded** | `coldiron`, `spore-azure-1`, `spore-gcp-1` | No `pt` install — these are GCP/Azure-ephemeral and shouldn't carry task state. The Ansible inventory deliberately omits them. |
+| **retired** | k3s `puretensor-tasks` namespace on mon1 | Was a long-running Python deployment behind `https://tasks.fox/` with its own k3s-PVC-backed DB. Discovered post-v1.0.3 activation; merged into tensor-core via UUID union (132 overlap, 306 mon1-only, 72 tc-only → 510 final). Namespace + IngressRoutes deleted at v1.0.4. |
 
 ### Arch / glibc heterogeneity
 
@@ -118,4 +119,5 @@ invocation to override the default `target/release/pt`.
 | v0.10.0 | Phase 10 close — fleet kit | 10 close |
 | v1.0.0 | Phase 1.0 close — polish | 1.0 close |
 | v1.0.2 | DB-free client dispatch + temp_id + lint fix | post-1.0 |
-| **v1.0.3** | **Doc reality reconciliation (canonical = tensor-core)** | post-1.0 |
+| v1.0.3 | Doc reality reconciliation (canonical = tensor-core) | post-1.0 |
+| **v1.0.4** | **k3s puretensor-tasks namespace retired (DB merged into tensor-core)** | post-1.0 |
