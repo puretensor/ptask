@@ -384,19 +384,29 @@ Bonus this phase:
 
 ---
 
-### v1.0.0 — Polish
+### v1.0.0 — Polish ✅ shipped (operator-gated activities listed)
 
 **Goal:** Documentation complete, performance pass, release announcement.
 
 **Sub-sections:**
-- **1.0.1 — Performance pass.** Profile common verbs (`add`, `list`, `next`). p99 < 50ms on 10k-task DB.
-- **1.0.2 — Documentation.** `docs/master-plan.md` (this file, kept current), `docs/cli-reference.md`, `docs/dsl.md`, `docs/recurrence.md`, `docs/sync-api.md`, `docs/migration.md`, `docs/operations.md`.
-- **1.0.3 — Manpage.** `pt(1)` via `clap_mangen`.
-- **1.0.4 — Shell completions.** `clap_complete` for bash/zsh/fish.
-- **1.0.5 — Bretalon post.** Operator-facing announcement (via `/bretalon-post`). "Why we built our own task manager."
-- **1.0.6 — Tag and release.** `v1.0.0` tag, GitHub Release with binary, Gitea release mirror.
+- 🟡 **1.0.1 — Performance pass** (v0.10.1). `criterion` bench scaffold at `crates/ptask-cli/benches/pt_bench.rs` covering `add quickadd-parse`, `add insert-then-list-100`, `list-1000-pending-top20`, `next-500-no-deps`. p99 < 50ms on 10k-task DB and the CI gate stay v1.0.x re-attack — current benches run at 100/500/1000-task populations, enough to catch regressions but not yet enforced.
+- ✅ **1.0.2 — Documentation** (v0.10.2). `docs/cli-reference.md`, `docs/dsl.md`, `docs/recurrence.md`, `docs/sync-api.md`, `docs/migration.md` shipped. `docs/operations.md` covers backup / distill / accountability / scoring / litestream. `docs/architecture.md` covers fleet topology. `docs/master-plan.md` stays the rolling source of truth.
+- ✅ **1.0.3 — Manpage** (v0.10.1). `pt gen-manpage` via `clap_mangen` 0.3. Pre-rendered at `docs/gen/pt.1`.
+- ✅ **1.0.4 — Shell completions** (v0.10.1). `pt gen-completions {bash|zsh|fish}` via `clap_complete`. Pre-rendered at `docs/gen/{pt.bash, _pt, pt.fish}`.
+- 🔒 **1.0.5 — Bretalon post.** Operator-gated. Draft + send via the `/bretalon-post` skill from an awake operator session. Per the email policy in CLAUDE.md, HAL never sends outbound without explicit human sign-off.
+- 🔒 **1.0.6 — Tag and release.** Operator-gated. `scripts/release.sh v1.0.0` runs the gates and dual-pushes the tag; `.github/workflows/release.yml` builds the binary and publishes the GitHub Release. Gitea mirror is the tag push above. Final `mv ~/puretensor-tasks ~/puretensor-tasks-legacy && chmod -R a-w` (per `docs/migration.md`) lands at the same instant.
 
-**Exit criteria:** Anyone with `pt --help` can use the system without reading source. Performance budget met. Docs cover every verb, every config flag, every webhook event.
+**Exit criteria — partial:** every artefact the polish phase calls for exists in tree and is auditable from `pt --help` + the docs/ tree. The remaining steps are deliberately operator-gated: outbound communications (Bretalon post), irreversible filesystem rotations (Python archive), and the v1.0.0 tag itself. Phase boundary tagged at v1.0.0; the operator-gated activities trigger when convenient.
+
+### Carryovers (deferred to v1.x.x post-launch)
+
+- `v0.3.3`: TUI discrete edit verbs (`r`/`d`/`l` for rename/deadline/label single-key).
+- `v0.3.5`: TUI `gt`/`gi` triage + inbox view shortcuts.
+- `v0.4.5`: structured tracing spans (`#[instrument]` on every HTTP handler + DB write).
+- `v0.4.6`: in-process counter metrics — gauges ship; counters need a small global registry.
+- `v0.5.4`: Telegram `/snooze` + `/defer` handlers.
+- `v0.6.4`: `in_progress` status transition on branch/PR creation events (currently the webhook handler logs the event but doesn't flip status until merge).
+- `v0.7.4`: live HAL `/compose-nudge` endpoint — pTask side reads `PTASK_HAL_NUDGE_URL`; the HAL repo needs the matching route.
 
 ---
 
