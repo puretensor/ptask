@@ -202,3 +202,97 @@ pt scoring run --dry-run
 systemctl --user disable --now ptask-scoring.timer
 sudo systemctl enable --now puretensor-tasks-scoring.timer
 ```
+
+## Litestream WAL replication (v0.9.4 — mon1 canonical only)
+
+`tasks.db` is continuously replicated to the Ceph rados-gateway. Target
+recovery-point objective: < 1 minute. Litestream owns the SQLite WAL
+checkpoint cadence — anything else doing `PRAGMA wal_checkpoint(...)`
+on the live DB races the replicator.
+
+### Pre-requisites
+
+1. Litestream binary in `/usr/local/bin/litestream`. The pre-built
+   tarball ships from <https://github.com/benbjohnson/litestream/releases>;
+   verify the checksum before extracting.
+   ```bash
+   curl -L https://github.com/benbjohnson/litestream/releases/download/v0.3.x/litestream-v0.3.x-linux-amd64.tar.gz | \
+       sudo tar -xz -C /usr/local/bin litestream
+   ```
+2. Ceph rados gateway reachable. Either the cluster RGW
+   (`https://ceph-rgw.ts.puretensor.local`) or a per-cluster S3 endpoint.
+3. A pre-created bucket the operator can write to (e.g. `ptask-wal`).
+4. `~/.config/litestream/.env` with the Ceph credentials, e.g.
+   ```ini
+   PTASK_LITESTREAM_ENDPOINT=https://ceph-rgw.ts.puretensor.local
+   PTASK_LITESTREAM_BUCKET=ptask-wal
+   LITESTREAM_ACCESS_KEY_ID=...
+   LITESTREAM_SECRET_ACCESS_KEY=...
+   ```
+   Mode `0600`. Never commit.
+
+### One-time SQLite tunings
+
+```bash
+sqlite3 ~/puretensor-tasks/tasks.db <<'SQL'
+PRAGMA journal_mode = WAL;
+PRAGMA wal_autocheckpoint = 0;   -- Litestream owns checkpoints
+PRAGMA synchronous = NORMAL;
+SQL
+```
+
+### Install
+
+```bash
+mkdir -p ~/.config/litestream ~/.config/systemd/user
+ln -sf ~/ptask/scripts/litestream/litestream.yml ~/.config/litestream/litestream.yml
+ln -sf ~/ptask/scripts/systemd/ptask-litestream.service ~/.config/systemd/user/
+
+systemctl --user daemon-reload
+systemctl --user enable --now ptask-litestream.service
+loginctl enable-linger "$USER"
+```
+
+### Inspect
+
+```bash
+systemctl --user status ptask-litestream.service
+journalctl --user -u ptask-litestream.service -n 200 --follow
+litestream snapshots -config ~/.config/litestream/litestream.yml ~/puretensor-tasks/tasks.db
+litestream wal -config ~/.config/litestream/litestream.yml ~/puretensor-tasks/tasks.db
+```
+
+### Recovery
+
+Point-in-time restore to a different file (does not touch live DB):
+
+```bash
+litestream restore -config ~/.config/litestream/litestream.yml \
+    -o /tmp/tasks-restored.db \
+    -timestamp $(date -u -d '5 minutes ago' '+%FT%TZ') \
+    ~/puretensor-tasks/tasks.db
+sqlite3 /tmp/tasks-restored.db 'SELECT count(*) FROM tasks'
+```
+
+Promote a restore over the live DB (requires stopping `pt distill`,
+`ptask-backup`, etc. first):
+
+```bash
+systemctl --user stop ptask-backup.timer ptask-distill.timer \
+    ptask-accountability.timer ptask-scoring.timer ptask-litestream.service
+cp /tmp/tasks-restored.db ~/puretensor-tasks/tasks.db
+systemctl --user start ptask-litestream.service
+systemctl --user start ptask-backup.timer ptask-distill.timer \
+    ptask-accountability.timer ptask-scoring.timer
+```
+
+### Rollback
+
+```bash
+systemctl --user disable --now ptask-litestream.service
+sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA wal_autocheckpoint = 1000;'
+```
+
+Nightly Ceph snapshot via `ptask-backup.timer` keeps a 30-day file
+backup independent of Litestream — it is the recovery path of last
+resort if Litestream itself misbehaves.

@@ -1,0 +1,26 @@
+[Unit]
+Description=pTask Litestream WAL → Ceph replication (canonical host only)
+Documentation=https://github.com/puretensor/ptask
+Documentation=https://litestream.io/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5
+# Operator drops endpoint + bucket creds into this file. The unit
+# refuses to start without it.
+ConditionPathExists=%h/.config/litestream/.env
+EnvironmentFile=%h/.config/litestream/.env
+ExecStart=/usr/local/bin/litestream replicate -config %h/.config/litestream/litestream.yml
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+# Litestream is a long-running daemon; it must keep going during
+# operator logout. ptask-litestream.service is paired with
+# `loginctl enable-linger` in the ansible playbook.
+
+[Install]
+WantedBy=default.target
