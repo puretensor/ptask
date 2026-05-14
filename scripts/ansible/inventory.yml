@@ -6,31 +6,46 @@
 # Spore (GCP/Azure ephemeral) deliberately excluded — they don't own
 # task state and the systemd timers would conflict.
 #
-# Canonical-store election locked to mon1 per master-plan v0.9.3. Other
-# tier-0 nodes will eventually proxy writes through `pt serve` on
-# `ptask.ts.puretensor.local`. Until v0.9.5 lands, install the binary
-# everywhere but only enable timers on the canonical host.
+# Canonical-store election locked to **tensor-core** at the v1.0
+# activation (2026-05-14). Pre-v1.0 docs nominated mon1, but the live
+# DB lives on tensor-core and that's where the timers run. Reachable
+# fleet-wide as 100.121.42.54:9501 over Tailscale. Other tier-0 nodes
+# install the binary but keep timers disabled and proxy writes via
+# `pt remote` (PTASK_SYNC_URL set by /etc/profile.d/ptask.sh).
+#
+# Fleet is heterogeneous — see `ptask_arch_override` per-host:
+#   - mon2 glibc 2.35 (build x86_64 against ubuntu 22.04)
+#   - mon3 aarch64
+# everything else: stock x86_64 against ubuntu 24.04 (controller default).
 
 all:
   vars:
     ansible_user: puretensorai
-    ptask_canonical_host: mon1
-    ptask_serve_url: https://ptask.ts.puretensor.local
+    ptask_canonical_host: tensor-core
+    ptask_serve_url: http://100.121.42.54:9501
 
   children:
     ptask:
       children:
         ptask_canonical:
           hosts:
-            mon1:
-              ansible_host: mon1.ts.puretensor.local
+            tensor-core:
+              ansible_host: tensor-core.ts.puretensor.local
 
         ptask_tier0:
           hosts:
+            mon1:
+              ansible_host: mon1.ts.puretensor.local
             mon2:
               ansible_host: mon2.ts.puretensor.local
+              # glibc 2.35 — build with `cargo build --release` inside
+              # an ubuntu:22.04 container, override via -e ptask_binary=...
+              ptask_arch_override: x86_64-ubuntu22
             mon3:
               ansible_host: mon3.ts.puretensor.local
+              # aarch64 — build with `--target aarch64-unknown-linux-gnu`
+              # natively or in an arm64 container, override via -e ptask_binary=...
+              ptask_arch_override: aarch64
             arx1:
               ansible_host: arx1.ts.puretensor.local
             arx2:
@@ -43,5 +58,3 @@ all:
               ansible_host: fox-n0.ts.puretensor.local
             fox-n1:
               ansible_host: fox-n1.ts.puretensor.local
-            tensor-core:
-              ansible_host: tensor-core.ts.puretensor.local

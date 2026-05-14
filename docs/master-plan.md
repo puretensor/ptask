@@ -380,23 +380,38 @@ Bonus this phase:
 - ✅ **0.10.4 — Litestream replication** (v0.9.4). `scripts/litestream/litestream.yml` + `scripts/systemd/ptask-litestream.service` stream the WAL to a Ceph rados gateway. `PTASK_LITESTREAM_*` env from `~/.config/litestream/.env`. RPO < 1 min, snapshot daily, retention 30 days. `wal_autocheckpoint = 0` pinned so Litestream owns checkpoints. Full deploy + restore + rollback runbook in `docs/operations.md`. Live deploy gated on operator: Ceph creds + bucket creation.
 - ✅ **0.10.5 — Fleet read-only clients** (v0.9.5). `pt remote {add,list,done}` subcommands speak the v0.4.2 `/sync` wire protocol against `PTASK_SYNC_URL` (default `https://ptask.ts.puretensor.local`). `ptask_core::Task` gains `Deserialize` for client-side rehydration. Quick-add grammar reused so `pt remote add` matches the local `pt add` UX. Mock-/sync tests cover the three verbs end-to-end.
 
-**Exit criteria — partial:** All deployment artefacts (release workflow, Ansible playbook + inventory, Litestream config + systemd unit, runbook, remote client) ship and are clippy/fmt/test-clean. Live cutover — running ansible against the fleet, enabling `ptask-litestream.service`, fielding the first `pt remote add` from a non-canonical node — stays operator-supervised. Phase boundary tagged at v0.10.0; the actual fleet-flip can fire when operator is awake.
+**Exit criteria — met (v1.0.3):** all deployment artefacts ship. Live fleet activation completed 2026-05-14 on **tensor-core** (not mon1; pre-v1.0 docs were ahead of reality). Multi-arch handling on mon2 (glibc 2.35) + mon3 (aarch64) documented in `scripts/ansible/inventory.yml` and `docs/architecture.md`.
 
 ---
 
-### v1.0.0 — Polish ✅ shipped (operator-gated activities listed)
+### v1.0.0 — Polish ✅ shipped
 
-**Goal:** Documentation complete, performance pass, release announcement.
+**Goal:** Documentation complete, performance pass, internal release.
 
 **Sub-sections:**
 - 🟡 **1.0.1 — Performance pass** (v0.10.1). `criterion` bench scaffold at `crates/ptask-cli/benches/pt_bench.rs` covering `add quickadd-parse`, `add insert-then-list-100`, `list-1000-pending-top20`, `next-500-no-deps`. p99 < 50ms on 10k-task DB and the CI gate stay v1.0.x re-attack — current benches run at 100/500/1000-task populations, enough to catch regressions but not yet enforced.
-- ✅ **1.0.2 — Documentation** (v0.10.2). `docs/cli-reference.md`, `docs/dsl.md`, `docs/recurrence.md`, `docs/sync-api.md`, `docs/migration.md` shipped. `docs/operations.md` covers backup / distill / accountability / scoring / litestream. `docs/architecture.md` covers fleet topology. `docs/master-plan.md` stays the rolling source of truth.
+- ✅ **1.0.2 — Documentation** (v0.10.2). `docs/cli-reference.md`, `docs/dsl.md`, `docs/recurrence.md`, `docs/sync-api.md`, `docs/migration.md` shipped. `docs/operations.md` covers backup / distill / accountability / scoring / litestream / pt serve. `docs/architecture.md` covers fleet topology (canonical = tensor-core post-v1.0.3). `docs/master-plan.md` stays the rolling source of truth.
 - ✅ **1.0.3 — Manpage** (v0.10.1). `pt gen-manpage` via `clap_mangen` 0.3. Pre-rendered at `docs/gen/pt.1`.
 - ✅ **1.0.4 — Shell completions** (v0.10.1). `pt gen-completions {bash|zsh|fish}` via `clap_complete`. Pre-rendered at `docs/gen/{pt.bash, _pt, pt.fish}`.
-- 🔒 **1.0.5 — Bretalon post.** Operator-gated. Draft + send via the `/bretalon-post` skill from an awake operator session. Per the email policy in CLAUDE.md, HAL never sends outbound without explicit human sign-off.
-- 🔒 **1.0.6 — Tag and release.** Operator-gated. `scripts/release.sh v1.0.0` runs the gates and dual-pushes the tag; `.github/workflows/release.yml` builds the binary and publishes the GitHub Release. Gitea mirror is the tag push above. Final `mv ~/puretensor-tasks ~/puretensor-tasks-legacy && chmod -R a-w` (per `docs/migration.md`) lands at the same instant.
+- ❌ **1.0.5 — Bretalon post.** Withdrawn (category error). Bretalon is a separate UK Ltd with its own editorial surface for external subjects; cross-publishing a PureTensor internal-tool announcement there doesn't make sense. The launch is internal — repo + the activation report at `~/reports/cc/2026-05-14_04-41_ptask-v1-final-activation-handover.md` are the artefacts.
+- ✅ **1.0.6 — Tag and release.** v1.0.0 tagged on both remotes 2026-05-14; v1.0.2 fix-up landed via PR #11. `~/puretensor-tasks/` archived to `~/puretensor-tasks-legacy/` read-only on tensor-core during the activation pass, with live `.env` + `tasks.db` carved out so timers keep firing.
 
-**Exit criteria — partial:** every artefact the polish phase calls for exists in tree and is auditable from `pt --help` + the docs/ tree. The remaining steps are deliberately operator-gated: outbound communications (Bretalon post), irreversible filesystem rotations (Python archive), and the v1.0.0 tag itself. Phase boundary tagged at v1.0.0; the operator-gated activities trigger when convenient.
+**Exit criteria — met:** `pt --help` covers every verb, docs cover every config flag, the binary is live fleet-wide, the Python tree is archived, the skills no longer reference Python fallbacks.
+
+---
+
+### v1.0.3 — Doc reality reconciliation ✅ shipped
+
+Post-activation patch. The pre-1.0 docs nominated mon1 as the canonical host and an S3 rados-gateway as the Litestream backend; the actual activation runs on tensor-core with a CephFS file replica. v1.0.3 brings the repo in line with reality:
+
+- `docs/architecture.md` rewritten — canonical = tensor-core, Litestream = CephFS, multi-arch handling, recovery procedures keyed off the live setup.
+- `scripts/ansible/inventory.yml` — tensor-core canonical, per-host `ptask_arch_override` for mon2 (glibc 2.35) + mon3 (aarch64).
+- `scripts/litestream/litestream.yml` — CephFS replica active, S3 path retained as documented alternate.
+- `crates/ptask-cli/src/remote.rs` — `default_url` falls back to tensor-core's Tailscale IP `http://100.121.42.54:9501` instead of the unresolving `ptask.ts.puretensor.local`.
+- `docs/operations.md` — Litestream section rewritten; `ptask-serve.service` documented.
+- `scripts/systemd/ptask-serve.service` — new, mirrors the live unit on tensor-core.
+- `docs/WAKE_HANDOFF.md` — all gates marked complete with execution log.
+- `docs/announcement.md` — removed (1.0.5 category error).
 
 ### Carryovers (deferred to v1.x.x post-launch)
 

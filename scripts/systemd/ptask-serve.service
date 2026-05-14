@@ -1,0 +1,17 @@
+[Unit]
+Description=pTask HTTP sync API (Rust pt serve)
+Documentation=https://github.com/puretensor/ptask
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/puretensor-tasks/.env
+ExecStart=%h/.cargo/bin/pt serve --bind 0.0.0.0:9501
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

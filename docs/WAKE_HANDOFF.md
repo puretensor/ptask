@@ -1,186 +1,59 @@
-# WAKE HANDOFF — pTask v1.0.0 final activation
+# WAKE HANDOFF — pTask v1.0 activation (closed)
 
-*Generated 2026-05-14 ~01:30 UTC after an autonomous run that closed
-every phase architecturally. The four steps below are the only items
-left to fully retire `~/puretensor-tasks/` and ship the launch. None
-are autonomous: each one was deliberately gated on operator presence.*
+*Activation completed 2026-05-14 ~04:41 BST on tensor-core. Full
+report at `~/reports/cc/2026-05-14_04-41_ptask-v1-final-activation-handover.md`.
+This file is kept for historical reference; consult it when reasoning
+about the cutover from the v0.6.5 Python shim → v1.0 native fleet.*
 
----
+## What ran
 
-## State at wake
+All five activation steps executed, with one deliberate withdrawal:
 
-- Branch: `main` at `b52bb03 v1.0.1: Bretalon announcement draft`
-- Tags on both remotes: `v0.9.0`, `v0.10.0`, `v1.0.0`
-- Binary installed: `pt --version` reports the latest installed
-  build; rerun `cargo install --path crates/ptask-cli --offline --force`
-  if needed.
-- Tests: 259 green workspace-wide.
-- GitHub Release for v1.0.0: the `release.yml` workflow fires on the
-  tag push; check <https://github.com/puretensor/ptask/releases/tag/v1.0.0>
-  for the auto-published binary.
+| Step | Status | Notes |
+|---|---|---|
+| 1. Drop Python fallback in `~/.claude/skills/ptask/SKILL.md` | ✅ done | Also updated `~/.codex/skills/ptask/SKILL.md`. Both backed up to `.bak-20260514T041459+0100`. |
+| 2. Litestream live on canonical host | ✅ done | tensor-core, CephFS file replica at `/mnt/ceph-backup/ptask-litestream/tasks.db`. RGW/S3 wasn't reachable so the CephFS path took over — see `scripts/litestream/litestream.yml`. |
+| 3. Bring up `ptask-serve` on canonical host | ✅ done | `0.0.0.0:9501`, `/healthz` returns `ok`, `/version` returns `1.0.2`. |
+| 4. Retire legacy `puretensor-tasks.service` | ✅ done | `sudo systemctl disable --now puretensor-tasks.service`. Port `:9500` (legacy FastAPI) is dead. |
+| 5. Archive `~/puretensor-tasks/` → `~/puretensor-tasks-legacy/` read-only | ✅ done | Python code + `.git` + legacy unit files moved; live `.env` + `tasks.db` + WAL kept in place so `ptask-*` services keep firing. `chmod -R a-w`. |
+| 6. Fleet ansible deploy | ✅ done | `pt 1.0.2` on all tier-0 nodes. Timers only enabled on tensor-core. `/etc/profile.d/ptask.sh` sets `PTASK_SYNC_URL=http://100.121.42.54:9501` fleet-wide. |
+| ~~7. Bretalon post~~ | ❌ withdrawn | Category error — Bretalon is a separate UK Ltd with its own editorial surface for external subjects. PureTensor internal-tool announcements don't belong there. Internal repo + the activation report are the launch artefacts. |
 
-## Step 1 — Bretalon post (operator-gated by CLAUDE.md)
+## Key deviations from the pre-v1.0 plan
 
-```bash
-# Review the draft.
-$EDITOR ~/ptask/docs/announcement.md
+These triggered the v1.0.3 doc-reality patch:
 
-# Publish via the Bretalon Report Bot flow. Per CLAUDE.md, HAL never
-# autoposts to external surfaces without explicit operator approval.
-/bretalon-post ~/ptask/docs/announcement.md
-```
+1. **Canonical = tensor-core, not mon1.** mon1 has no `~/puretensor-tasks` and never did in this cycle. The pre-v1.0 docs were ahead of reality.
+2. **Litestream uses CephFS file replica, not S3 RGW.** RGW endpoint wasn't reachable; CephFS at `/mnt/ceph-backup` was. The repo config now documents the CephFS path as active and keeps the S3 path as a documented alternate.
+3. **Fleet is heterogeneous.** mon2 needs glibc 2.35 binary (Ubuntu 22.04); mon3 needs aarch64. Documented in `scripts/ansible/inventory.yml` per-host `ptask_arch_override`. Ansible playbook still assumes one controller-side binary works everywhere — the multi-arch build/dispatch logic is a v1.x.x follow-up.
+4. **`pt distill` still calls Python.** The Rust pipeline modules exist (v0.8.2 – v0.8.8) but aren't wired through `pt distill` yet. A systemd drop-in at `~/.config/systemd/user/ptask-distill.service.d/python-root.conf` sets `PTASK_DISTILL_PY_ROOT=/home/puretensorai/puretensor-tasks-legacy` so the shim still finds the archived Python tree. Native cutover is queued for v1.x.x.
 
-## Step 2 — Fleet deploy
-
-Pre-flight: ssh + Tailscale ACL access to mon1, mon2, mon3, arx1-4,
-fox-n0, fox-n1, tensor-core.
+## Quick verification commands
 
 ```bash
-cd ~/ptask
-cargo build --release --bin pt
-ansible-playbook -i scripts/ansible/inventory.yml scripts/ansible/ptask.yml
+# On tensor-core:
+pt --version                                              # → 1.0.3+
+systemctl --user list-units 'ptask-*' --no-pager
+systemctl is-active puretensor-tasks.service              # → inactive
+curl -fsS http://127.0.0.1:9501/healthz                   # → ok
+pt remote list --url http://127.0.0.1:9501 -n 3
+litestream snapshots -config ~/.config/litestream/litestream.yml ~/puretensor-tasks/tasks.db
+
+# From any other fleet node:
+pt --version
+pt remote list -n 1                                        # uses PTASK_SYNC_URL
 ```
 
-Verify on each node: `ssh <node> pt --version`. Only mon1 should have
-the four user-mode timers active; other nodes should report the
-binary present + timers disabled.
+## Carryovers still to land (v1.x.x)
 
-## Step 3 — Litestream live
+See `docs/master-plan.md` § Carryovers. None are deployment-blocking.
 
-Pre-flight: Ceph rados-gateway endpoint + bucket + access keys.
-
-```bash
-mkdir -p ~/.config/litestream
-cat > ~/.config/litestream/.env <<'EOF'
-PTASK_LITESTREAM_ENDPOINT=https://ceph-rgw.ts.puretensor.local
-PTASK_LITESTREAM_BUCKET=ptask-wal
-LITESTREAM_ACCESS_KEY_ID=...
-LITESTREAM_SECRET_ACCESS_KEY=...
-EOF
-chmod 600 ~/.config/litestream/.env
-
-# Install Litestream binary if not present (verify checksum first).
-# Then:
-ln -sf ~/ptask/scripts/litestream/litestream.yml ~/.config/litestream/
-ln -sf ~/ptask/scripts/systemd/ptask-litestream.service \
-       ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now ptask-litestream.service
-
-# One-time SQLite tunings on the canonical DB:
-sqlite3 ~/puretensor-tasks/tasks.db <<'EOSQL'
-PRAGMA journal_mode = WAL;
-PRAGMA wal_autocheckpoint = 0;
-PRAGMA synchronous = NORMAL;
-EOSQL
-```
-
-## Step 4 — Archive `~/puretensor-tasks/` (was blocked autonomously)
-
-The auto-mode classifier correctly refused this move during the
-overnight run because:
-1. Four live `ptask-*` user-mode services reference
-   `~/puretensor-tasks/{.env, tasks.db}`.
-2. I had explicitly marked the archive operator-gated in the v1.0.0
-   commit message.
-
-The safe archive carves the *live data* out of the move so timers
-keep working:
-
-```bash
-cd ~
-mkdir -p puretensor-tasks-legacy
-
-# Move the Python code subtree + legacy systemd units + git history.
-# Leave tasks.db + .env in place so the new ptask-* services keep
-# finding them at the original paths.
-cd ~/puretensor-tasks
-mv accountability api ingest scripts static templates logs \
-   ~/puretensor-tasks-legacy/
-mv cli.py requirements.txt README.md .gitignore \
-   ~/puretensor-tasks-legacy/
-mv .git ~/puretensor-tasks-legacy/.git
-mv puretensor-tasks.service \
-   puretensor-tasks-accountability.service \
-   puretensor-tasks-accountability.timer \
-   puretensor-tasks-distill.service \
-   puretensor-tasks-distill.timer \
-   puretensor-tasks-scoring.service \
-   puretensor-tasks-scoring.timer \
-   ~/puretensor-tasks-legacy/
-mv tasks.db.pre-ptask-backup ~/puretensor-tasks-legacy/
-
-# Drop a pointer.
-cat > ~/puretensor-tasks-legacy/LEGACY.md <<'EOF'
-# Archived — see https://github.com/puretensor/ptask
-This tree is the pre-v1.0.0 Python implementation of pTask, retired
-at the v1.0.0 launch. Active code lives in ~/ptask. Re-enabling any
-puretensor-tasks-*.timer is at your own risk; it conflicts with the
-live ptask-*.timer set.
-EOF
-
-# Lock it read-only.
-chmod -R a-w ~/puretensor-tasks-legacy
-
-# What's left in puretensor-tasks/ (active data only):
-ls -la ~/puretensor-tasks/
-#   tasks.db
-#   tasks.db-shm
-#   tasks.db-wal
-#   .env
-
-# Drop a stub README so the directory reads as data-only.
-cat > ~/puretensor-tasks/README.md <<'EOF'
-# Active pTask data
-
-This is the runtime state for pTask, not the codebase. Live SQLite
-DB + secrets are here; everything else moved to
-~/puretensor-tasks-legacy on 2026-MM-DD (v1.0.0 launch).
-
-Code: https://github.com/puretensor/ptask
-EOF
-```
-
-## Step 5 — Drop the Python fallback in `/ptask` skill
-
-```bash
-$EDITOR ~/.claude/skills/ptask/SKILL.md
-# Remove any `python3 ~/puretensor-tasks/cli.py` fallback path.
-# The Rust `pt` binary is now the only entry point.
-```
-
-## Final check — definition-of-done
-
-After steps 1-5 the goal phrasing fully holds:
-
-- [x] `~/puretensor-tasks/` Python tree archived read-only to
-      `~/puretensor-tasks-legacy/` (step 4).
-- [x] Operator captures, finds, finishes, reviews tasks exclusively
-      through `pt` (skill update in step 5; `puretensor-tasks-*`
-      timers are dormant — none re-enable).
-- [x] Every tier-0 fleet node runs the same `pt` binary (step 2).
-- [x] `v1.0.0` tagged on both remotes (already done overnight).
-- [x] Bretalon announcement live (step 1).
-
----
-
-## Phase ladder (final)
-
-```
-v0.1.1 → v0.2.3 → v0.3.1 → v0.4.1 → v0.5.2 → v0.6.2 →
-v0.6.6 → v0.7.1 → v0.8.1 → v0.9.0 → v0.10.0 → v1.0.0
-```
-
-Overnight work (29 commits, 259 tests green):
-
-- Phase 9 close at `v0.9.0` (SBERT via candle, classifier via HAL,
-  semantic + temporal dedup, clustering, consolidation, file
-  collectors).
-- Phase 10 close at `v0.10.0` (cargo release pipeline, Ansible
-  playbook, Litestream config + runbook, `pt remote` client).
-- Phase 1.0 close at `v1.0.0` (manpage, completions, criterion
-  bench scaffold, reference docs).
-- `v1.0.1` Bretalon announcement draft.
-
-Codex reviews still pending: Phase 9, Phase 10, Phase 1.0. Operator
-can fire them on the existing cadence.
+- Native `pt distill` (drop the Python shim entirely).
+- Multi-arch / old-glibc build matrix in `release.yml` and the Ansible
+  playbook.
+- DNS: either point `ptask.ts.puretensor.local` at tensor-core:9501 or
+  drop the name from the docs.
+- TUI single-key edit verbs (`r`/`d`/`l`), `gt`/`gi` triage views,
+  structured tracing spans, in-process counter metrics, Telegram
+  `/snooze` + `/defer`, branch/PR-creation → `in_progress`, live HAL
+  `/compose-nudge` endpoint.

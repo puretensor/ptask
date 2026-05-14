@@ -203,33 +203,45 @@ systemctl --user disable --now ptask-scoring.timer
 sudo systemctl enable --now puretensor-tasks-scoring.timer
 ```
 
-## Litestream WAL replication (v0.9.4 — mon1 canonical only)
+## Litestream WAL replication (v0.9.4 / v1.0.3 — tensor-core canonical)
 
-`tasks.db` is continuously replicated to the Ceph rados-gateway. Target
-recovery-point objective: < 1 minute. Litestream owns the SQLite WAL
-checkpoint cadence — anything else doing `PRAGMA wal_checkpoint(...)`
-on the live DB races the replicator.
+`tasks.db` is continuously replicated. Target recovery-point objective:
+< 1 minute. Litestream owns the SQLite WAL checkpoint cadence — anything
+else doing `PRAGMA wal_checkpoint(...)` on the live DB races the
+replicator.
+
+**Active replica (v1.0.3): CephFS file** at
+`/mnt/ceph-backup/ptask-litestream/tasks.db`. The original v0.9.4 plan
+was an S3 rados-gateway replica, but no RGW endpoint was live at
+activation. The config still documents the RGW path as the alternate
+config — see `scripts/litestream/litestream.yml`.
 
 ### Pre-requisites
 
-1. Litestream binary in `/usr/local/bin/litestream`. The pre-built
-   tarball ships from <https://github.com/benbjohnson/litestream/releases>;
-   verify the checksum before extracting.
+1. Litestream binary at `/usr/local/bin/litestream`. Operator installed
+   `v0.3.13` via the upstream `.deb`:
    ```bash
-   curl -L https://github.com/benbjohnson/litestream/releases/download/v0.3.x/litestream-v0.3.x-linux-amd64.tar.gz | \
-       sudo tar -xz -C /usr/local/bin litestream
+   wget https://github.com/benbjohnson/litestream/releases/download/v0.3.13/litestream-v0.3.13-linux-amd64.deb
+   sudo dpkg -i litestream-v0.3.13-linux-amd64.deb
+   # /usr/bin/litestream → symlink /usr/local/bin/litestream if needed
+   sudo ln -sf /usr/bin/litestream /usr/local/bin/litestream
    ```
-2. Ceph rados gateway reachable. Either the cluster RGW
-   (`https://ceph-rgw.ts.puretensor.local`) or a per-cluster S3 endpoint.
-3. A pre-created bucket the operator can write to (e.g. `ptask-wal`).
-4. `~/.config/litestream/.env` with the Ceph credentials, e.g.
+2. CephFS mounted at `/mnt/ceph-backup` on the canonical host (already
+   in place on tensor-core).
+3. `~/.config/litestream/.env` exists (can be empty — required by the
+   service's `ConditionPathExists=` gate, but the CephFS replica has no
+   env-driven knobs):
+   ```bash
+   touch ~/.config/litestream/.env
+   chmod 600 ~/.config/litestream/.env
+   ```
+   For the alternate RGW config, populate with:
    ```ini
    PTASK_LITESTREAM_ENDPOINT=https://ceph-rgw.ts.puretensor.local
    PTASK_LITESTREAM_BUCKET=ptask-wal
    LITESTREAM_ACCESS_KEY_ID=...
    LITESTREAM_SECRET_ACCESS_KEY=...
    ```
-   Mode `0600`. Never commit.
 
 ### One-time SQLite tunings
 
@@ -245,6 +257,8 @@ SQL
 
 ```bash
 mkdir -p ~/.config/litestream ~/.config/systemd/user
+sudo mkdir -p /mnt/ceph-backup/ptask-litestream  # CephFS replica root
+sudo chown puretensorai:puretensorai /mnt/ceph-backup/ptask-litestream
 ln -sf ~/ptask/scripts/litestream/litestream.yml ~/.config/litestream/litestream.yml
 ln -sf ~/ptask/scripts/systemd/ptask-litestream.service ~/.config/systemd/user/
 
@@ -252,6 +266,23 @@ systemctl --user daemon-reload
 systemctl --user enable --now ptask-litestream.service
 loginctl enable-linger "$USER"
 ```
+
+### Rust API server (`ptask-serve.service`)
+
+The canonical host also runs the Rust HTTP server so fleet clients can
+hit `/sync`. v1.0.3 ships the unit file in the repo:
+
+```bash
+ln -sf ~/ptask/scripts/systemd/ptask-serve.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now ptask-serve.service
+
+curl http://127.0.0.1:9501/healthz   # → ok
+curl http://127.0.0.1:9501/version   # → {"ptask_core":"1.0.3"}
+```
+
+Fleet clients reach this via Tailscale at `http://100.121.42.54:9501`;
+`/etc/profile.d/ptask.sh` sets `PTASK_SYNC_URL` everywhere.
 
 ### Inspect
 
