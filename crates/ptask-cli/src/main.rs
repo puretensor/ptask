@@ -12,6 +12,8 @@ use clap::{Parser, Subcommand};
 use ptask_core::{Db, Extensions, NewTask, dag, priority, pt_id, quickadd, tasks, views};
 use std::io::IsTerminal;
 
+mod remote;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "pt",
@@ -58,6 +60,9 @@ enum Command {
     /// Recompute composite priority scores for all active tasks.
     #[command(subcommand)]
     Scoring(ScoringCommand),
+    /// Talk to a remote canonical `pt serve` (no local DB).
+    #[command(subcommand)]
+    Remote(RemoteCommand),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
 }
@@ -80,6 +85,48 @@ enum ScoringCommand {
     /// Recompute the four score_* columns + priority_score for every
     /// task with status NOT IN ('done', 'dismissed').
     Run(ScoringRunArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum RemoteCommand {
+    /// `pt remote add "..."` — create a task on the canonical host
+    /// without opening a local DB. Uses PTASK_SYNC_URL (default
+    /// https://ptask.ts.puretensor.local).
+    Add(RemoteAddArgs),
+    /// `pt remote list` — fetch the live task set from the canonical host.
+    #[command(alias = "ls")]
+    List(RemoteListArgs),
+    /// `pt remote done <query>` — mark a task done by PT-N or title substring.
+    Done(RemoteDoneArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteAddArgs {
+    /// Quick-add text. Same grammar as local `pt add`.
+    text: String,
+    /// Override the canonical endpoint.
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteListArgs {
+    #[arg(short = 's', long = "status", default_value = "pending")]
+    status: String,
+    #[arg(short = 'p', long = "priority")]
+    priority: Option<String>,
+    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    limit: usize,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteDoneArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -214,6 +261,7 @@ fn main() -> Result<()> {
         Some(Command::Distill(a)) => cmd_distill(&db, a),
         Some(Command::Accountability(c)) => cmd_accountability(db, c),
         Some(Command::Scoring(c)) => cmd_scoring(&db, c),
+        Some(Command::Remote(c)) => cmd_remote(c),
         Some(Command::Backfill) => cmd_backfill(&db),
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
             ptask_tui::run(db)
@@ -491,6 +539,64 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     d.task_uuid, d.level, d.telegram_sent, d.email_sent
                 );
             }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_remote(c: RemoteCommand) -> Result<()> {
+    match c {
+        RemoteCommand::Add(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let task = client.add(&a.text)?;
+            println!(
+                "remote add ok — {} {}",
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title
+            );
+            Ok(())
+        }
+        RemoteCommand::List(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let priority_filter = a
+                .priority
+                .as_deref()
+                .map(priority::parse)
+                .transpose()
+                .context("parsing --priority")?;
+            let status_filter = if a.status == "all" {
+                None
+            } else {
+                Some(a.status.as_str())
+            };
+            let tasks_out = client.list(status_filter, priority_filter, a.limit)?;
+            if tasks_out.is_empty() {
+                println!("remote list — no tasks");
+                return Ok(());
+            }
+            for t in &tasks_out {
+                let label = t.pt_id.clone().unwrap_or_else(|| t.id[..8].to_string());
+                println!("{:8}  p{}  {:9}  {}", label, t.priority, t.status, t.title);
+            }
+            Ok(())
+        }
+        RemoteCommand::Done(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let task = client.done(&a.query)?;
+            println!(
+                "remote done ok — {} {}",
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title
+            );
             Ok(())
         }
     }

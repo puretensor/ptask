@@ -25,3 +25,11 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+
+# Remote client (v0.9.5).
+reqwest = { workspace = true, features = ["json", "rustls-tls", "blocking"], default-features = false }
+uuid = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }

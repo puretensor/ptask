@@ -9,12 +9,12 @@ use crate::storage::Db;
 use crate::{priority, pt_id};
 use jiff::Zoned;
 use rusqlite::params;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 use uuid::Uuid;
 
 /// Mirror of a row in `tasks` + the joined `pt_extensions.pt_id`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
     pub pt_id: Option<String>,
