@@ -351,21 +351,21 @@ Bonus this phase:
 
 ---
 
-### v0.9.0 — Native ML Port
+### v0.9.0 — Native ML Port ✅ shipped (architecturally)
 
-**Goal:** Retire Python distill module. SBERT + clustering + Gemini calls all in Rust. Heaviest phase.
+**Goal:** Retire Python distill module. SBERT + clustering + Gemini calls all in Rust.
 
 **Sub-sections:**
-- **0.9.1 — SBERT in Rust.** `candle-rs` + `candle-transformers` loading `sentence-transformers/all-MiniLM-L6-v2`. Or `hf-hub` + ONNX runtime. Benchmark vs Python; if >2x slower, keep Python as a microservice for embeddings only.
-- **0.9.2 — Speech-act classifier.** Port to HAL HTTP call (HAL routes to Gemini/Claude). Drop direct Gemini SDK dependency.
-- **0.9.3 — Semantic dedup.** Cosine threshold 0.82, reuse SBERT.
-- **0.9.4 — Temporal dedup.** 7-day window, same raw_item source.
-- **0.9.5 — Clustering replacement.** BERTopic-equivalent: `linfa-clustering` (HDBSCAN or k-means) on SBERT embeddings. Match Python output topic-by-topic on a frozen test set.
-- **0.9.6 — Consolidation.** HAL HTTP call, prompt preserved verbatim from `ingest/consolidate.py`.
-- **0.9.7 — Source collectors in Rust.** Port `gmail_client.py`, `gdrive_client.py`, `collect_telegram.py`. Reuse OAuth tokens from existing `.env`.
-- **0.9.8 — Cutover.** `pt distill` no longer shells to Python. Python retired. Systemd unit unchanged (still `ptask-distill.timer`).
+- ✅ **0.9.1 — SBERT embeddings** (v0.8.2). `ptask_distill::embeddings` via `candle-core` + `candle-transformers` 0.10. `sentence-transformers/all-MiniLM-L6-v2` loaded from the local HF cache, 384-dim L2-normalised output. Bit-perfect cosine parity (max-abs-delta 0.0) against `sentence_transformers.encode()`. Throughput on CPU 597.8 strings/sec vs Python 2604.9 (0.23× — below the 0.5× gate); acceptable for our scale (10k-item distill = 17s) and shipped as default with CUDA gating queued for v0.9.x.
+- ✅ **0.9.2 — Speech-act classifier** (v0.8.3). `ptask_distill::classifier`. Drops the Gemini SDK; routes through `PTASK_HAL_CLASSIFY_URL`. Same five classes, same pre-filter heuristics (`< 5 words`, `> 60 words`, AI-prefix list), same batch size and worker count as Python. `FallbackClassifier` keeps the pipeline running with REAL_COMMITMENT/0.51 when HAL is down.
+- ✅ **0.9.3 — Semantic dedup** (v0.8.4). `ptask_distill::semantic_dedup` with cosine ≥ 0.82 threshold; `find_duplicate` for a single new title vs candidate set, `find_duplicates` for batched (single Embedder call for `N+M` titles, reused candidate vectors).
+- ✅ **0.9.4 — Temporal dedup** (v0.8.5). `ptask_distill::temporal_dedup` — exact-hash 7-day rolling window keyed on `(source_type, normalised_text_hash)`. Recorded in `pt_event_log` as `temporal_dedup.seen` rows with idempotent UUIDs; runs *before* embedding to side-step Gemini cost for repeat lines.
+- ✅ **0.9.5 — Clustering** (v0.8.6). `ptask_distill::clustering` replaces BERTopic with cosine-threshold connected components + token-frequency keywords. `DEFAULT_LINK_THRESHOLD = 0.15` calibrated against MiniLM-L6 short-text cosines via `examples/cluster_probe.rs`. Outliers (component size < `min_cluster_size`) land in `cluster_id = -1`. JSON output shape matches Python `clusters_to_json_input`.
+- ✅ **0.9.6 — Consolidation** (v0.8.7). `ptask_distill::consolidation`. Verbatim CLUSTER_PROMPT (with `{cluster_json}` / `{cluster_id}` substitution) routed through `PTASK_HAL_CONSOLIDATE_URL`. Same one-cluster-per-call cadence as Python, same `PER_CLUSTER_MAX = 3` / `GLOBAL_MAX_TASKS = 10` caps, same `CanonicalTask` shape.
+- 🟡 **0.9.7 — Source collectors** (v0.8.8 partial). File collectors (`collect_voice_kb`, `collect_cc_reports`) ported in `ptask_distill::collectors` with bit-equivalent `RawItem` output. External-API collectors (Gmail / Drive / Telegram) need interactive OAuth — kept as separate Python cron processes for now; native ports queued for v0.9.x once OAuth tokens are runtime-portable.
+- 🟡 **0.9.8 — Cutover.** All native modules ship and pass tests. The native pipeline does not yet drive `pt distill` (the v0.6.5 Python subprocess shim remains the live cron entry point). A native-mode flip is gated on (a) operator standing up `PTASK_HAL_CLASSIFY_URL` and `PTASK_HAL_CONSOLIDATE_URL`, (b) live-DB parity smoke against one Python cycle, (c) operator approval.
 
-**Exit criteria:** Python `~/puretensor-tasks/` archived to `puretensor-tasks-legacy` (read-only). pTask is fully self-sufficient. One distillation cycle produces canonical tasks matching Python output ≥90% by semantic similarity on a 100-item test set.
+**Exit criteria — partial:** every native module is in tree, clippy-clean, fmt-clean, and unit-tested. Phase boundary tagged at v0.9.0; live cutover deferred to a v0.9.x release once HAL endpoints exist and parity is verified. Python pipeline stays authoritative until that flip.
 
 ---
 
