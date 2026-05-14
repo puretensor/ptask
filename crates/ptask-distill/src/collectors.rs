@@ -167,15 +167,15 @@ fn parse_action_items_from_yaml(yaml: &str) -> Vec<String> {
     let mut list_indent: Option<usize> = None;
     for line in yaml.lines() {
         if !in_list {
-            if let Some(rest) = line.split_once(':') {
-                if rest.0.trim() == "action_items" {
-                    in_list = true;
-                    let trailing = rest.1.trim();
-                    if !trailing.is_empty() && !trailing.starts_with('#') {
-                        // Single-line form: `action_items: ["a", "b"]`.
-                        out.extend(parse_inline_list(trailing));
-                        in_list = false;
-                    }
+            if let Some(rest) = line.split_once(':')
+                && rest.0.trim() == "action_items"
+            {
+                in_list = true;
+                let trailing = rest.1.trim();
+                if !trailing.is_empty() && !trailing.starts_with('#') {
+                    // Single-line form: `action_items: ["a", "b"]`.
+                    out.extend(parse_inline_list(trailing));
+                    in_list = false;
                 }
             }
             continue;
