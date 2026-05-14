@@ -2,6 +2,9 @@
 Description=pTask Litestream WAL → Ceph replication (canonical host only)
 Documentation=https://github.com/puretensor/ptask
 Documentation=https://litestream.io/
+# Operator drops endpoint + bucket creds into this file. Refuse to
+# start without it.
+ConditionPathExists=%h/.config/litestream/.env
 After=network-online.target
 Wants=network-online.target
 
@@ -9,9 +12,6 @@ Wants=network-online.target
 Type=simple
 Restart=on-failure
 RestartSec=5
-# Operator drops endpoint + bucket creds into this file. The unit
-# refuses to start without it.
-ConditionPathExists=%h/.config/litestream/.env
 EnvironmentFile=%h/.config/litestream/.env
 ExecStart=/usr/local/bin/litestream replicate -config %h/.config/litestream/litestream.yml
 Nice=10

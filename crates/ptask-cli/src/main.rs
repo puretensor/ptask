@@ -261,37 +261,48 @@ fn main() -> Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let db = match cli.db.as_deref() {
-        Some(p) => Db::open(p).with_context(|| format!("opening db at {}", p))?,
-        None => Db::open_default().context("opening default db")?,
-    };
+    let command = cli.command;
 
-    match cli.command {
-        Some(Command::Add(a)) => cmd_add(&db, a),
-        Some(Command::List(a)) => cmd_list(&db, a),
-        Some(Command::Done(a)) => cmd_done(&db, a),
-        Some(Command::Next(a)) => cmd_next(&db, a),
-        Some(Command::View(c)) => cmd_view(&db, c),
-        Some(Command::Tui) => ptask_tui::run(db),
-        Some(Command::Serve(a)) => cmd_serve(db, a),
-        Some(Command::Bot) => cmd_bot(db),
-        Some(Command::Branch(a)) => cmd_branch(&db, a),
-        Some(Command::Distill(a)) => cmd_distill(&db, a),
-        Some(Command::Accountability(c)) => cmd_accountability(db, c),
-        Some(Command::Scoring(c)) => cmd_scoring(&db, c),
+    // These commands are deliberately DB-free: they must work on fleet client
+    // nodes before a local SQLite store exists. Keep them before Db::open_*().
+    match command {
         Some(Command::Remote(c)) => cmd_remote(c),
         Some(Command::GenManpage) => cmd_gen_manpage(),
         Some(Command::GenCompletions(a)) => cmd_gen_completions(a),
-        Some(Command::Backfill) => cmd_backfill(&db),
-        None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
-            ptask_tui::run(db)
-        }
-        None => {
-            // Non-interactive fallback: avoid trying to enter alt-screen when
-            // stdin/stdout is not a TTY. Interactive `pt` opens the TUI.
-            println!("pt {} — sovereign task manager.", ptask_core::VERSION);
-            println!("Try: pt tui | pt add \"...\" | pt list | pt done PT-N | pt --help");
-            Ok(())
+        other => {
+            let db = match cli.db.as_deref() {
+                Some(p) => Db::open(p).with_context(|| format!("opening db at {}", p))?,
+                None => Db::open_default().context("opening default db")?,
+            };
+
+            match other {
+                Some(Command::Add(a)) => cmd_add(&db, a),
+                Some(Command::List(a)) => cmd_list(&db, a),
+                Some(Command::Done(a)) => cmd_done(&db, a),
+                Some(Command::Next(a)) => cmd_next(&db, a),
+                Some(Command::View(c)) => cmd_view(&db, c),
+                Some(Command::Tui) => ptask_tui::run(db),
+                Some(Command::Serve(a)) => cmd_serve(db, a),
+                Some(Command::Bot) => cmd_bot(db),
+                Some(Command::Branch(a)) => cmd_branch(&db, a),
+                Some(Command::Distill(a)) => cmd_distill(&db, a),
+                Some(Command::Accountability(c)) => cmd_accountability(db, c),
+                Some(Command::Scoring(c)) => cmd_scoring(&db, c),
+                Some(Command::Backfill) => cmd_backfill(&db),
+                None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
+                    ptask_tui::run(db)
+                }
+                None => {
+                    // Non-interactive fallback: avoid trying to enter alt-screen when
+                    // stdin/stdout is not a TTY. Interactive `pt` opens the TUI.
+                    println!("pt {} — sovereign task manager.", ptask_core::VERSION);
+                    println!("Try: pt tui | pt add \"...\" | pt list | pt done PT-N | pt --help");
+                    Ok(())
+                }
+                Some(Command::Remote(_))
+                | Some(Command::GenManpage)
+                | Some(Command::GenCompletions(_)) => unreachable!("handled before DB open"),
+            }
         }
     }
 }
