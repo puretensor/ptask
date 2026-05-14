@@ -12,6 +12,7 @@
 
 pub mod classifier;
 pub mod clustering;
+pub mod collectors;
 pub mod consolidation;
 pub mod embeddings;
 pub mod semantic_dedup;

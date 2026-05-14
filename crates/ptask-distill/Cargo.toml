@@ -34,3 +34,4 @@ jiff = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 tempfile = "3"
+jiff = { workspace = true }
