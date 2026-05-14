@@ -20,6 +20,7 @@ ptask-bot     = { workspace = true }
 ptask-distill = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
+clap_mangen = "0.3"
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
@@ -33,3 +34,9 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
+criterion = "0.5"
+tempfile = "3"
+
+[[bench]]
+name = "pt_bench"
+harness = false

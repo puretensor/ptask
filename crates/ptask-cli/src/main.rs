@@ -65,6 +65,10 @@ enum Command {
     Remote(RemoteCommand),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
+    /// Generate the `pt(1)` manpage to stdout.
+    GenManpage,
+    /// Generate shell completions (bash/zsh/fish) to stdout.
+    GenCompletions(GenCompletionsArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -235,6 +239,20 @@ struct DoneArgs {
     query: String,
 }
 
+#[derive(clap::Args, Debug)]
+struct GenCompletionsArgs {
+    /// Target shell.
+    #[arg(value_enum)]
+    shell: ShellChoice,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum ShellChoice {
+    Bash,
+    Zsh,
+    Fish,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -262,6 +280,8 @@ fn main() -> Result<()> {
         Some(Command::Accountability(c)) => cmd_accountability(db, c),
         Some(Command::Scoring(c)) => cmd_scoring(&db, c),
         Some(Command::Remote(c)) => cmd_remote(c),
+        Some(Command::GenManpage) => cmd_gen_manpage(),
+        Some(Command::GenCompletions(a)) => cmd_gen_completions(a),
         Some(Command::Backfill) => cmd_backfill(&db),
         None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
             ptask_tui::run(db)
@@ -542,6 +562,27 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_gen_manpage() -> Result<()> {
+    let cmd = <Cli as clap::CommandFactory>::command();
+    let man = clap_mangen::Man::new(cmd);
+    let mut buf: Vec<u8> = Vec::new();
+    man.render(&mut buf).context("render manpage")?;
+    std::io::Write::write_all(&mut std::io::stdout().lock(), &buf).context("write manpage")?;
+    Ok(())
+}
+
+fn cmd_gen_completions(args: GenCompletionsArgs) -> Result<()> {
+    use clap_complete::Shell;
+    let shell = match args.shell {
+        ShellChoice::Bash => Shell::Bash,
+        ShellChoice::Zsh => Shell::Zsh,
+        ShellChoice::Fish => Shell::Fish,
+    };
+    let mut cmd = <Cli as clap::CommandFactory>::command();
+    clap_complete::generate(shell, &mut cmd, "pt", &mut std::io::stdout().lock());
+    Ok(())
 }
 
 fn cmd_remote(c: RemoteCommand) -> Result<()> {

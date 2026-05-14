@@ -1,0 +1,1025 @@
+#compdef pt
+
+autoload -U is-at-least
+
+_pt() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_pt_commands" \
+"*::: :->pt" \
+&& ret=0
+    case $state in
+    (pt)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+'-p+[Priority override (low|normal|high|urgent|critical or 1..=5). If omitted, uses quick-add priority or "normal"]:PRIORITY:_default' \
+'--priority=[Priority override (low|normal|high|urgent|critical or 1..=5). If omitted, uses quick-add priority or "normal"]:PRIORITY:_default' \
+'-d+[Description override]:DESCRIPTION:_default' \
+'--description=[Description override]:DESCRIPTION:_default' \
+'--deadline=[Deadline override (ISO date, e.g. 2026-05-20)]:DEADLINE:_default' \
+'--reason=[Why this task was created — stored as ai_reasoning]:REASON:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--raw[Disable quick-add parsing — treat the title literally]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':title -- Task title (parsed as quick-add unless --raw is set). Inline tokens\: @label, #project, p1..p4, ~30m/~2h/~1d, !HH\:MM, //description (rest of string), date phrases (today/tomorrow/ weekday with this|next|last/ N days/ISO dates):_default' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'-s+[Filter by status (or \`all\`)]:STATUS:_default' \
+'--status=[Filter by status (or \`all\`)]:STATUS:_default' \
+'-p+[Filter by priority]:PRIORITY:_default' \
+'--priority=[Filter by priority]:PRIORITY:_default' \
+'-n+[Max rows]:LIMIT:_default' \
+'--limit=[Max rows]:LIMIT:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-v[Show description and UUID]' \
+'--verbose[Show description and UUID]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::filter -- Optional Todoist-style filter DSL. Examples\: "today & p1", "(today | overdue) & #fleet", "@waiting & no date", "due before\: next friday & !recurring", "search\: ceph & @ops":_default' \
+&& ret=0
+;;
+(done)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
+(next)
+_arguments "${_arguments_options[@]}" : \
+'-n+[Max ready tasks to show]:LIMIT:_default' \
+'--limit=[Max ready tasks to show]:LIMIT:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(view)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_pt__subcmd__view_commands" \
+"*::: :->view" \
+&& ret=0
+
+    case $state in
+    (view)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-view-command-$line[1]:"
+        case $line[1] in
+            (save)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':name:_default' \
+':filter:_default' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'-n+[Override row limit]:LIMIT:_default' \
+'--limit=[Override row limit]:LIMIT:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':name:_default' \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':name:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__view__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-view-help-command-$line[1]:"
+        case $line[1] in
+            (save)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(tui)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+'--bind=[Bind address. Default 127.0.0.1\:9501 (leaves \:9500 for legacy Python FastAPI during the parallel-ops window)]:BIND:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(bot)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(branch)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (or bare integer, or title substring):_default' \
+&& ret=0
+;;
+(distill)
+_arguments "${_arguments_options[@]}" : \
+'--days=[Days of history for the Python pipeline to ingest (defaults to 60, matching the legacy systemd unit)]:DAYS:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(accountability)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_pt__subcmd__accountability_commands" \
+"*::: :->accountability" \
+&& ret=0
+
+    case $state in
+    (accountability)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-accountability-command-$line[1]:"
+        case $line[1] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--dry-run[Don'\''t actually send anything; log what would have been dispatched]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__accountability__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-accountability-help-command-$line[1]:"
+        case $line[1] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(scoring)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_pt__subcmd__scoring_commands" \
+"*::: :->scoring" \
+&& ret=0
+
+    case $state in
+    (scoring)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-scoring-command-$line[1]:"
+        case $line[1] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--dry-run[Compute and log scores but don'\''t write them back to the DB]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__scoring__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-scoring-help-command-$line[1]:"
+        case $line[1] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(remote)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_pt__subcmd__remote_commands" \
+"*::: :->remote" \
+&& ret=0
+
+    case $state in
+    (remote)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-remote-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+'--url=[Override the canonical endpoint]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':text -- Quick-add text. Same grammar as local `pt add`:_default' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'-s+[]:STATUS:_default' \
+'--status=[]:STATUS:_default' \
+'-p+[]:PRIORITY:_default' \
+'--priority=[]:PRIORITY:_default' \
+'-n+[]:LIMIT:_default' \
+'--limit=[]:LIMIT:_default' \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(done)
+_arguments "${_arguments_options[@]}" : \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__remote__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-remote-help-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(done)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(backfill)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(gen-manpage)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(gen-completions)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':shell -- Target shell:(bash zsh fish)' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-help-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(done)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(next)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(view)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__help__subcmd__view_commands" \
+"*::: :->view" \
+&& ret=0
+
+    case $state in
+    (view)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-help-view-command-$line[1]:"
+        case $line[1] in
+            (save)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(tui)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(bot)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(branch)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(distill)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(accountability)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__help__subcmd__accountability_commands" \
+"*::: :->accountability" \
+&& ret=0
+
+    case $state in
+    (accountability)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-help-accountability-command-$line[1]:"
+        case $line[1] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(scoring)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__help__subcmd__scoring_commands" \
+"*::: :->scoring" \
+&& ret=0
+
+    case $state in
+    (scoring)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-help-scoring-command-$line[1]:"
+        case $line[1] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(remote)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__help__subcmd__remote_commands" \
+"*::: :->remote" \
+&& ret=0
+
+    case $state in
+    (remote)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-help-remote-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(done)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(backfill)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(gen-manpage)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(gen-completions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_pt_commands] )) ||
+_pt_commands() {
+    local commands; commands=(
+'add:Create a new task' \
+'list:List tasks' \
+'done:Mark a task done (by PT-N or title substring)' \
+'next:Show ready-to-start tasks (all dependencies done)' \
+'view:Manage saved views' \
+'tui:Launch the terminal UI (ratatui)' \
+'serve:Run the HTTP server (sync API, capture, webhooks, metrics)' \
+'bot:Run the Telegram bot (teloxide long-poll)' \
+'branch:Print a Linear-style branch name for a task' \
+'distill:Run the distillation pipeline (Python subprocess shim until v0.9)' \
+'accountability:Run one accountability cycle (escalation + Telegram/email)' \
+'scoring:Recompute composite priority scores for all active tasks' \
+'remote:Talk to a remote canonical \`pt serve\` (no local DB)' \
+'backfill:One-shot backfill PT-N for any tasks lacking one' \
+'gen-manpage:Generate the \`pt(1)\` manpage to stdout' \
+'gen-completions:Generate shell completions (bash/zsh/fish) to stdout' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__accountability_commands] )) ||
+_pt__subcmd__accountability_commands() {
+    local commands; commands=(
+'run:Run the state machine + dispatch once' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt accountability commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__accountability__subcmd__help_commands] )) ||
+_pt__subcmd__accountability__subcmd__help_commands() {
+    local commands; commands=(
+'run:Run the state machine + dispatch once' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt accountability help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__accountability__subcmd__help__subcmd__help_commands] )) ||
+_pt__subcmd__accountability__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt accountability help help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__accountability__subcmd__help__subcmd__run_commands] )) ||
+_pt__subcmd__accountability__subcmd__help__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt accountability help run commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__accountability__subcmd__run_commands] )) ||
+_pt__subcmd__accountability__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt accountability run commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__add_commands] )) ||
+_pt__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__backfill_commands] )) ||
+_pt__subcmd__backfill_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt backfill commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__bot_commands] )) ||
+_pt__subcmd__bot_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt bot commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__branch_commands] )) ||
+_pt__subcmd__branch_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt branch commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__distill_commands] )) ||
+_pt__subcmd__distill_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt distill commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__done_commands] )) ||
+_pt__subcmd__done_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt done commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__gen-completions_commands] )) ||
+_pt__subcmd__gen-completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt gen-completions commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__gen-manpage_commands] )) ||
+_pt__subcmd__gen-manpage_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt gen-manpage commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help_commands] )) ||
+_pt__subcmd__help_commands() {
+    local commands; commands=(
+'add:Create a new task' \
+'list:List tasks' \
+'done:Mark a task done (by PT-N or title substring)' \
+'next:Show ready-to-start tasks (all dependencies done)' \
+'view:Manage saved views' \
+'tui:Launch the terminal UI (ratatui)' \
+'serve:Run the HTTP server (sync API, capture, webhooks, metrics)' \
+'bot:Run the Telegram bot (teloxide long-poll)' \
+'branch:Print a Linear-style branch name for a task' \
+'distill:Run the distillation pipeline (Python subprocess shim until v0.9)' \
+'accountability:Run one accountability cycle (escalation + Telegram/email)' \
+'scoring:Recompute composite priority scores for all active tasks' \
+'remote:Talk to a remote canonical \`pt serve\` (no local DB)' \
+'backfill:One-shot backfill PT-N for any tasks lacking one' \
+'gen-manpage:Generate the \`pt(1)\` manpage to stdout' \
+'gen-completions:Generate shell completions (bash/zsh/fish) to stdout' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__accountability_commands] )) ||
+_pt__subcmd__help__subcmd__accountability_commands() {
+    local commands; commands=(
+'run:Run the state machine + dispatch once' \
+    )
+    _describe -t commands 'pt help accountability commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__accountability__subcmd__run_commands] )) ||
+_pt__subcmd__help__subcmd__accountability__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help accountability run commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__add_commands] )) ||
+_pt__subcmd__help__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__backfill_commands] )) ||
+_pt__subcmd__help__subcmd__backfill_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help backfill commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__bot_commands] )) ||
+_pt__subcmd__help__subcmd__bot_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help bot commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__branch_commands] )) ||
+_pt__subcmd__help__subcmd__branch_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help branch commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__distill_commands] )) ||
+_pt__subcmd__help__subcmd__distill_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help distill commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__done_commands] )) ||
+_pt__subcmd__help__subcmd__done_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help done commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__gen-completions_commands] )) ||
+_pt__subcmd__help__subcmd__gen-completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help gen-completions commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__gen-manpage_commands] )) ||
+_pt__subcmd__help__subcmd__gen-manpage_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help gen-manpage commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__help_commands] )) ||
+_pt__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__list_commands] )) ||
+_pt__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__next_commands] )) ||
+_pt__subcmd__help__subcmd__next_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help next commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote_commands] )) ||
+_pt__subcmd__help__subcmd__remote_commands() {
+    local commands; commands=(
+'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default https\://ptask.ts.puretensor.local)' \
+'list:\`pt remote list\` — fetch the live task set from the canonical host' \
+'done:\`pt remote done <query>\` — mark a task done by PT-N or title substring' \
+    )
+    _describe -t commands 'pt help remote commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__add_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__done_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__done_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote done commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__list_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__scoring_commands] )) ||
+_pt__subcmd__help__subcmd__scoring_commands() {
+    local commands; commands=(
+'run:Recompute the four score_* columns + priority_score for every task with status NOT IN ('\''done'\'', '\''dismissed'\'')' \
+    )
+    _describe -t commands 'pt help scoring commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__scoring__subcmd__run_commands] )) ||
+_pt__subcmd__help__subcmd__scoring__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help scoring run commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__serve_commands] )) ||
+_pt__subcmd__help__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help serve commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__tui_commands] )) ||
+_pt__subcmd__help__subcmd__tui_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help tui commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__view_commands] )) ||
+_pt__subcmd__help__subcmd__view_commands() {
+    local commands; commands=(
+'save:Save a filter DSL string under a name' \
+'list:List saved views' \
+'show:Run a saved view'\''s filter and print matching tasks' \
+'rm:Delete a saved view' \
+    )
+    _describe -t commands 'pt help view commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__view__subcmd__list_commands] )) ||
+_pt__subcmd__help__subcmd__view__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help view list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__view__subcmd__rm_commands] )) ||
+_pt__subcmd__help__subcmd__view__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help view rm commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__view__subcmd__save_commands] )) ||
+_pt__subcmd__help__subcmd__view__subcmd__save_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help view save commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__view__subcmd__show_commands] )) ||
+_pt__subcmd__help__subcmd__view__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help view show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__list_commands] )) ||
+_pt__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__next_commands] )) ||
+_pt__subcmd__next_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt next commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote_commands] )) ||
+_pt__subcmd__remote_commands() {
+    local commands; commands=(
+'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default https\://ptask.ts.puretensor.local)' \
+'list:\`pt remote list\` — fetch the live task set from the canonical host' \
+'done:\`pt remote done <query>\` — mark a task done by PT-N or title substring' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt remote commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__add_commands] )) ||
+_pt__subcmd__remote__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__done_commands] )) ||
+_pt__subcmd__remote__subcmd__done_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote done commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help_commands] )) ||
+_pt__subcmd__remote__subcmd__help_commands() {
+    local commands; commands=(
+'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default https\://ptask.ts.puretensor.local)' \
+'list:\`pt remote list\` — fetch the live task set from the canonical host' \
+'done:\`pt remote done <query>\` — mark a task done by PT-N or title substring' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt remote help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__add_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__done_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__done_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help done commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__help_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__list_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__list_commands] )) ||
+_pt__subcmd__remote__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__scoring_commands] )) ||
+_pt__subcmd__scoring_commands() {
+    local commands; commands=(
+'run:Recompute the four score_* columns + priority_score for every task with status NOT IN ('\''done'\'', '\''dismissed'\'')' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt scoring commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__scoring__subcmd__help_commands] )) ||
+_pt__subcmd__scoring__subcmd__help_commands() {
+    local commands; commands=(
+'run:Recompute the four score_* columns + priority_score for every task with status NOT IN ('\''done'\'', '\''dismissed'\'')' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt scoring help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__scoring__subcmd__help__subcmd__help_commands] )) ||
+_pt__subcmd__scoring__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt scoring help help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__scoring__subcmd__help__subcmd__run_commands] )) ||
+_pt__subcmd__scoring__subcmd__help__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt scoring help run commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__scoring__subcmd__run_commands] )) ||
+_pt__subcmd__scoring__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt scoring run commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__serve_commands] )) ||
+_pt__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt serve commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__tui_commands] )) ||
+_pt__subcmd__tui_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt tui commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view_commands] )) ||
+_pt__subcmd__view_commands() {
+    local commands; commands=(
+'save:Save a filter DSL string under a name' \
+'list:List saved views' \
+'show:Run a saved view'\''s filter and print matching tasks' \
+'rm:Delete a saved view' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt view commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__help_commands] )) ||
+_pt__subcmd__view__subcmd__help_commands() {
+    local commands; commands=(
+'save:Save a filter DSL string under a name' \
+'list:List saved views' \
+'show:Run a saved view'\''s filter and print matching tasks' \
+'rm:Delete a saved view' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt view help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__help__subcmd__help_commands] )) ||
+_pt__subcmd__view__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt view help help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__help__subcmd__list_commands] )) ||
+_pt__subcmd__view__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt view help list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__help__subcmd__rm_commands] )) ||
+_pt__subcmd__view__subcmd__help__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt view help rm commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__help__subcmd__save_commands] )) ||
+_pt__subcmd__view__subcmd__help__subcmd__save_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt view help save commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__help__subcmd__show_commands] )) ||
+_pt__subcmd__view__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt view help show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__list_commands] )) ||
+_pt__subcmd__view__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt view list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__rm_commands] )) ||
+_pt__subcmd__view__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt view rm commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__save_commands] )) ||
+_pt__subcmd__view__subcmd__save_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt view save commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__view__subcmd__show_commands] )) ||
+_pt__subcmd__view__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt view show commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_pt" ]; then
+    _pt "$@"
+else
+    compdef _pt pt
+fi
