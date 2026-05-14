@@ -1,0 +1,47 @@
+---
+# pTask deploy inventory.
+#
+# Tier 0 = nodes that host pt state and run the user-mode timers.
+# Tier 1 = nodes that run pt as a read-only client (post v0.9.5).
+# Spore (GCP/Azure ephemeral) deliberately excluded — they don't own
+# task state and the systemd timers would conflict.
+#
+# Canonical-store election locked to mon1 per master-plan v0.9.3. Other
+# tier-0 nodes will eventually proxy writes through `pt serve` on
+# `ptask.ts.puretensor.local`. Until v0.9.5 lands, install the binary
+# everywhere but only enable timers on the canonical host.
+
+all:
+  vars:
+    ansible_user: puretensorai
+    ptask_canonical_host: mon1
+    ptask_serve_url: https://ptask.ts.puretensor.local
+
+  children:
+    ptask:
+      children:
+        ptask_canonical:
+          hosts:
+            mon1:
+              ansible_host: mon1.ts.puretensor.local
+
+        ptask_tier0:
+          hosts:
+            mon2:
+              ansible_host: mon2.ts.puretensor.local
+            mon3:
+              ansible_host: mon3.ts.puretensor.local
+            arx1:
+              ansible_host: arx1.ts.puretensor.local
+            arx2:
+              ansible_host: arx2.ts.puretensor.local
+            arx3:
+              ansible_host: arx3.ts.puretensor.local
+            arx4:
+              ansible_host: arx4.ts.puretensor.local
+            fox-n0:
+              ansible_host: fox-n0.ts.puretensor.local
+            fox-n1:
+              ansible_host: fox-n1.ts.puretensor.local
+            tensor-core:
+              ansible_host: tensor-core.ts.puretensor.local

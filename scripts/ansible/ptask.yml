@@ -1,0 +1,144 @@
+---
+# pTask fleet deploy.
+#
+# Installs the `pt` binary into ~/.cargo/bin/, drops the four user-mode
+# systemd units (backup / distill / accountability / scoring), enables
+# the timers, and verifies the binary version.
+#
+# Usage from the workstation:
+#
+#   cd ~/ptask
+#   cargo build --release --bin pt
+#   ansible-playbook -i scripts/ansible/inventory.yml scripts/ansible/ptask.yml
+#
+# Override the binary path:
+#
+#   ansible-playbook ... -e ptask_binary=/path/to/pt
+#
+# Targets: tier-0 (mon, arx, fox-n, tensor-core). Spore tier excluded
+# at the inventory level — these are GCP/Azure ephemeral nodes that
+# don't host pt state.
+
+- name: deploy pt to fleet
+  hosts: ptask
+  gather_facts: true
+  become: false
+
+  vars:
+    ptask_binary: "{{ playbook_dir }}/../../target/release/pt"
+    ptask_systemd_dir: "{{ ansible_env.HOME }}/.config/systemd/user"
+    ptask_units:
+      - ptask-backup.service
+      - ptask-backup.timer
+      - ptask-distill.service
+      - ptask-distill.timer
+      - ptask-accountability.service
+      - ptask-accountability.timer
+      - ptask-scoring.service
+      - ptask-scoring.timer
+    # The canonical-store host owns `tasks.db`. Other tier-0 nodes will
+    # eventually proxy through `pt serve` over Tailscale (v0.9.5). Until
+    # that lands, only the canonical host runs the timers.
+    ptask_is_canonical: "{{ inventory_hostname == ptask_canonical_host }}"
+
+  pre_tasks:
+    - name: verify controller-side binary exists
+      delegate_to: localhost
+      ansible.builtin.stat:
+        path: "{{ ptask_binary }}"
+      register: pt_local
+      run_once: true
+
+    - name: fail if binary missing
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.fail:
+        msg: |
+          Binary not found at {{ ptask_binary }}.
+          Build it first: cargo build --release --bin pt
+      when: not pt_local.stat.exists
+
+  tasks:
+    - name: ensure ~/.cargo/bin exists
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.cargo/bin"
+        state: directory
+        mode: '0755'
+
+    - name: copy pt binary
+      ansible.builtin.copy:
+        src: "{{ ptask_binary }}"
+        dest: "{{ ansible_env.HOME }}/.cargo/bin/pt"
+        mode: '0755'
+        backup: true
+      notify: restart pt timers
+
+    - name: query pt --version
+      ansible.builtin.command: "{{ ansible_env.HOME }}/.cargo/bin/pt --version"
+      register: pt_version_out
+      changed_when: false
+
+    - name: show version
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} now runs {{ pt_version_out.stdout }}"
+
+    - name: ensure user systemd dir exists
+      ansible.builtin.file:
+        path: "{{ ptask_systemd_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: install systemd units
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../systemd/{{ item }}"
+        dest: "{{ ptask_systemd_dir }}/{{ item }}"
+        mode: '0644'
+      loop: "{{ ptask_units }}"
+      notify: daemon-reload
+
+    - name: ensure linger enabled (timers must run when operator is logged out)
+      ansible.builtin.command: "loginctl enable-linger {{ ansible_env.USER }}"
+      register: linger_result
+      changed_when: "'Linger=yes' not in linger_result.stdout"
+      failed_when: false
+
+    - name: flush handlers so daemon-reload runs before enable
+      ansible.builtin.meta: flush_handlers
+
+    - name: enable + start timers on canonical host
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        scope: user
+        enabled: true
+        state: started
+        daemon_reload: false
+      loop:
+        - ptask-backup.timer
+        - ptask-distill.timer
+        - ptask-accountability.timer
+        - ptask-scoring.timer
+      when: ptask_is_canonical
+
+    - name: keep timers disabled on non-canonical hosts
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        scope: user
+        enabled: false
+        state: stopped
+      loop:
+        - ptask-backup.timer
+        - ptask-distill.timer
+        - ptask-accountability.timer
+        - ptask-scoring.timer
+      when: not ptask_is_canonical
+      failed_when: false
+
+  handlers:
+    - name: daemon-reload
+      ansible.builtin.systemd:
+        scope: user
+        daemon_reload: true
+
+    - name: restart pt timers
+      ansible.builtin.debug:
+        msg: "binary updated; systemd handlers will re-pick on next fire (no service restart needed for oneshot timers)"
