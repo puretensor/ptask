@@ -62,23 +62,28 @@ impl RemoteClient {
     /// Returns the created `Task` row.
     pub fn add(&self, text: &str) -> Result<Task> {
         let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let temp_id = format!("tmp-{cmd_uuid}");
         let req = json!({
             "sync_token": "*",
             "resource_types": ["tasks"],
             "commands": [{
                 "type": "task_create",
                 "uuid": cmd_uuid,
+                "temp_id": temp_id,
                 "args": { "text": text, "source_type": "remote-cli" }
             }]
         });
         let resp = self.sync(&req)?;
         ensure_ok(&resp.sync_status, &cmd_uuid)?;
-        // The created task is the freshest entry in the delta.
+        let task_uuid = resp
+            .temp_id_mapping
+            .get(&temp_id)
+            .ok_or_else(|| anyhow!("remote: missing temp_id_mapping for created task"))?;
         resp.resources
             .tasks
             .into_iter()
-            .max_by(|a, b| a.created_at.cmp(&b.created_at))
-            .ok_or_else(|| anyhow!("remote: server returned no tasks"))
+            .find(|t| t.id == *task_uuid)
+            .ok_or_else(|| anyhow!("remote: created task {task_uuid} missing from /sync resources"))
     }
 
     /// `pt remote done <query>` — accepts PT-N, bare integer, or title
@@ -264,6 +269,14 @@ mod tests {
                         "updated_at": "2026-05-13T01:00:00+00:00",
                         "deadline": null, "source_type": "manual", "ai_reasoning": ""
                     }),
+                    json!({
+                        "id": "uuid-newer-existing", "pt_id": "PT-999",
+                        "title": "newer existing task should not be returned by add",
+                        "description": "", "priority": 5, "status": "pending",
+                        "created_at": "2026-05-15T00:00:00+00:00",
+                        "updated_at": "2026-05-15T00:00:00+00:00",
+                        "deadline": null, "source_type": "manual", "ai_reasoning": ""
+                    }),
                 ];
                 tasks.extend(existing);
                 axum::Json(json!({
@@ -312,6 +325,7 @@ mod tests {
         assert_eq!(task.title, "Resolve banking setup p4 @ops");
         let call = &calls.lock().unwrap()[0];
         assert_eq!(call["commands"][0]["type"], "task_create");
+        assert!(call["commands"][0]["temp_id"].as_str().is_some());
         assert_eq!(
             call["commands"][0]["args"]["text"],
             "Resolve banking setup p4 @ops"
