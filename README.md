@@ -108,5 +108,7 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
-v0.1.0 — initial triage cockpit (4 themes, live poll, critical strip, lanes,
-timeline, neglect heatmap).
+- **v0.1.1** — proper LCARS elbow-frame styling (shoulder headers, pill rail,
+  blocky asymmetric panels), scoped so the other three themes are unchanged.
+- **v0.1.0** — initial triage cockpit (4 themes, live poll, critical strip, lanes,
+  timeline, neglect heatmap).

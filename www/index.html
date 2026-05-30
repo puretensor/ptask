@@ -206,6 +206,81 @@ section{margin-top:22px}
 .heat td:hover{transform:scale(1.08)}
 .heat .rowlbl{font-family:var(--font);font-weight:800;font-size:12px;color:var(--text);background:transparent}
 
+/* ============================================================ LCARS DRESSING
+   Star-Trek ops console shape language, scoped entirely to [data-theme=lcars]
+   so the other three skins are untouched. Elbow frames, pill rails, blocky
+   asymmetric corners, the signature colour-block sidebar.
+   ============================================================ */
+[data-theme="lcars"] .wrap{padding-left:118px;position:relative}
+/* left vertical pill rail running down the page */
+[data-theme="lcars"] .wrap::before{
+  content:"";position:absolute;left:18px;top:6px;bottom:6px;width:74px;
+  background:
+    linear-gradient(#ff9f43 0 16%, #000 16% 18%,
+                    #cc88ff 18% 38%, #000 38% 40%,
+                    #ff5544 40% 58%, #000 58% 60%,
+                    #99ccff 60% 80%, #000 80% 82%,
+                    #ffcc66 82% 100%);
+  border-radius:38px 0 0 38px;
+}
+/* section header becomes an LCARS elbow: fat rounded shoulder + sweep bar */
+[data-theme="lcars"] .sec-h{
+  align-items:stretch;gap:0;margin:0 0 12px;
+}
+[data-theme="lcars"] .sec-h h2{
+  background:#ff9f43;color:#000;font-family:'Antonio','Arial Narrow',sans-serif;
+  font-weight:800;font-size:15px;letter-spacing:.12em;
+  padding:10px 22px 10px 18px;border-radius:0 0 0 26px;display:flex;align-items:center;
+  border-bottom:4px solid #000;
+}
+[data-theme="lcars"] .sec-h .ln{
+  background:#cc88ff;height:auto;flex:1;margin-left:6px;border-radius:0 14px 0 0;min-height:38px;
+}
+[data-theme="lcars"] .sec-h .ct{
+  background:#1d1d28;color:#ffcc66;padding:0 16px;display:flex;align-items:center;
+  margin-left:6px;border-radius:0 0 0 0;font-size:11px;letter-spacing:.04em;
+}
+[data-theme="lcars"] section{margin-top:18px}
+/* critical cards: hard left block + rounded right end (LCARS button look) */
+[data-theme="lcars"] .ccard{
+  border:none;border-left:none;border-radius:8px 26px 26px 8px;
+  background:#15151c;box-shadow:inset 14px 0 0 var(--p5);padding-left:26px;
+}
+[data-theme="lcars"] .ccard:hover{box-shadow:inset 14px 0 0 var(--p4)}
+[data-theme="lcars"] .ccard .scorebar{display:none}
+[data-theme="lcars"] .ccard h3{font-family:'Antonio','Arial Narrow',sans-serif;letter-spacing:.03em;text-transform:uppercase;font-size:15px}
+/* lanes: each lane gets a coloured cap header + rounded outer corner */
+[data-theme="lcars"] .lane{
+  background:#0d0d12;border:none;border-radius:24px 8px 8px 24px;padding:0 8px 10px;overflow:hidden;
+}
+[data-theme="lcars"] .lane-h{
+  margin:0 -8px 10px;padding:8px 14px;background:#1d1d28;border-radius:24px 8px 0 0;
+}
+[data-theme="lcars"] .lane.l5 .lane-h{background:#3a1418}
+[data-theme="lcars"] .lane.l4 .lane-h{background:#3a2510}
+[data-theme="lcars"] .lane.l3 .lane-h{background:#3a3214}
+[data-theme="lcars"] .lane.l2 .lane-h{background:#162a3a}
+[data-theme="lcars"] .lane.l1 .lane-h{background:#2a1f33}
+[data-theme="lcars"] .lane .lbl{font-family:'Antonio','Arial Narrow',sans-serif}
+[data-theme="lcars"] .tcard{
+  border:none;border-radius:6px 16px 16px 6px;background:#15151c;
+  box-shadow:inset 8px 0 0 #cc88ff;padding-left:16px;
+}
+[data-theme="lcars"] .lane.l5 .tcard{box-shadow:inset 8px 0 0 var(--p5)}
+[data-theme="lcars"] .lane.l4 .tcard{box-shadow:inset 8px 0 0 var(--p4)}
+[data-theme="lcars"] .lane.l3 .tcard{box-shadow:inset 8px 0 0 var(--p3)}
+[data-theme="lcars"] .lane.l2 .tcard{box-shadow:inset 8px 0 0 var(--p2)}
+[data-theme="lcars"] .lane.l1 .tcard{box-shadow:inset 8px 0 0 var(--p1)}
+/* timeline + heatmap panels: chunky asymmetric LCARS frame */
+[data-theme="lcars"] .timeline,[data-theme="lcars"] .heat{
+  border:none;border-radius:8px 30px 30px 8px;background:#0d0d12;
+  box-shadow:inset 16px 0 0 #ff9f43;padding-left:30px;
+}
+[data-theme="lcars"] .pbadge{border-radius:0 8px 8px 0}
+[data-theme="lcars"] .chip{border-radius:0 14px 14px 0;border:none;background:#1d1d28}
+[data-theme="lcars"] .statusbar{border:none;border-radius:8px 24px 24px 8px;background:#0d0d12;box-shadow:inset 14px 0 0 #cc88ff;padding-left:26px}
+[data-theme="lcars"] .brandtxt b{color:#ff9f43}
+
 /* footer / status */
 .statusbar{display:flex;align-items:center;gap:10px;margin-top:24px;padding:10px 14px;background:var(--bg2);border:var(--card-border);border-radius:10px;font-size:11px;color:var(--dim)}
 .live{display:flex;align-items:center;gap:6px;color:var(--teal)}

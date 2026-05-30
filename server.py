@@ -49,7 +49,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 # Columns we expose. Kept explicit so a schema change can't leak surprises.
 TASK_COLS = [
