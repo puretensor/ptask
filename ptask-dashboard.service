@@ -1,0 +1,20 @@
+[Unit]
+Description=PTASK Triage Cockpit — read-only dashboard sidecar over pt task DB
+Documentation=https://github.com/puretensor/ptask-dashboard
+After=network-online.target ptask-serve.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# PTASK_DASH_PASS lives here (chmod 600), never in git. PTASK_DB defaults to
+# ~/puretensor-tasks/tasks.db (read-only). Writes shell out to ~/.cargo/bin/pt.
+EnvironmentFile=%h/puretensor-tasks/.dashboard.env
+WorkingDirectory=%h/k8s-builds/ptask-dashboard
+ExecStart=/usr/bin/python3 %h/k8s-builds/ptask-dashboard/server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
