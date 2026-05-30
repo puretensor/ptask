@@ -108,6 +108,7 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.1.4** — Critical Now strip shows the top 12 by composite score (was 9).
 - **v0.1.3** — fail closed on non-loopback binds without auth, add security
   headers, cap POST bodies, harden the systemd user unit, and add accessibility
   landmarks / reduced-motion handling.

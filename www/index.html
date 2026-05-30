@@ -494,7 +494,7 @@ function renderHeat(h){
 async function load(){
   try{
     const [stats,crit,all,tl,heat]=await Promise.all([
-      api('/api/stats'),api('/api/critical?limit=9'),api('/api/tasks?status=pending&limit=600'),
+      api('/api/stats'),api('/api/critical?limit=12'),api('/api/tasks?status=pending&limit=600'),
       api('/api/timeline'),api('/api/heatmap')]);
     renderChips(stats); renderCritical(crit.tasks); renderLanes(all.tasks);
     renderTimeline(tl.items); renderHeat(heat);
