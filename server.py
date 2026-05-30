@@ -49,7 +49,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 # Columns we expose. Kept explicit so a schema change can't leak surprises.
 TASK_COLS = [
@@ -132,12 +132,18 @@ def _row_to_task(r: sqlite3.Row) -> dict:
 def q_tasks(status="pending", limit=500, order="priority_score DESC, priority DESC"):
     con = connect()
     try:
-        cols = ",".join(TASK_COLS)
+        # pt_id (PT-N) lives in pt_extensions; it is the handle `pt done` accepts
+        # (the bare task UUID is NOT accepted by the CLI). LEFT JOIN so a missing
+        # extension row still returns the task.
+        cols = ",".join("t." + c for c in TASK_COLS)
+        order_q = ", ".join("t." + o.strip() for o in order.split(","))
+        base = (f"SELECT {cols}, e.pt_id AS pt_id "
+                "FROM tasks t LEFT JOIN pt_extensions e ON e.task_uuid = t.id ")
         if status == "all":
-            sql = f"SELECT {cols} FROM tasks ORDER BY {order} LIMIT ?"
+            sql = base + f"ORDER BY {order_q} LIMIT ?"
             rows = con.execute(sql, (limit,)).fetchall()
         else:
-            sql = f"SELECT {cols} FROM tasks WHERE status=? ORDER BY {order} LIMIT ?"
+            sql = base + f"WHERE t.status=? ORDER BY {order_q} LIMIT ?"
             rows = con.execute(sql, (status, limit)).fetchall()
         return [_row_to_task(r) for r in rows]
     finally:

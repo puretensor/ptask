@@ -430,7 +430,7 @@ function renderCritical(tasks){
         <span class="score">${(t.priority_score).toFixed(3)}</span>${scoreMini(t.priority_score)}
         ${dueChip(t)}
         <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
-        <button class="btn-done" title="mark done" onclick="markDone('${t.id}')">✓</button>
+        <button class="btn-done" title="mark done" onclick="markDone('${t.pt_id||t.id}')">✓</button>
       </div></div>`;
   }).join('');
   seenCrit=new Set(tasks.map(t=>t.id));
@@ -445,7 +445,7 @@ function renderLanes(tasks){
       ${show.map(t=>`<div class="tcard fade">
         <div class="tt">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
-        <button class="btn-done" title="done" onclick="markDone('${t.id}')">✓</button></div>
+        <button class="btn-done" title="done" onclick="markDone('${t.pt_id||t.id}')">✓</button></div>
       </div>`).join('')}
       ${list.length>8?`<div class="more">+${list.length-8} more</div>`:''}
     </div>`;
