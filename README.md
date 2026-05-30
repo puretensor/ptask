@@ -2,7 +2,7 @@
 
 > Sovereign single-binary Rust task manager for PureTensor. Replaces `puretensor-tasks` (Python). Single command `pt` for capture, find, finish, review — from terminal, TUI, Telegram, email, or HAL.
 
-**Status:** v1.0.5 — Rust workspace is production-active on the PureTensor fleet. See [`docs/master-plan.md`](docs/master-plan.md) for the historical 12-phase build plan and current follow-ups.
+**Status:** v1.1.0 — Rust workspace is production-active on the PureTensor fleet. See [`docs/master-plan.md`](docs/master-plan.md) for the historical 12-phase build plan and current follow-ups.
 
 ## Quick Start (when shipped)
 

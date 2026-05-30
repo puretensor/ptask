@@ -86,6 +86,10 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
+    // Serializes tests that read/write the process-global PTASK_API_TOKEN env.
+    // ANY test that exercises a token-gated route (/sync, /capture, /email) MUST
+    // hold this lock, or a concurrent token-setting test can flip its request to
+    // 401. (This is why the env-mutating + every gated-route test below lock it.)
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn open_test_db() -> Db {
@@ -194,6 +198,9 @@ mod tests {
 
     #[tokio::test]
     async fn capture_inserts_raw_item() {
+        // Hits the token-gated /capture route; hold ENV_LOCK so a concurrent
+        // test that sets PTASK_API_TOKEN can't flip this to 401.
+        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
         let app = router(AppState { db: db.clone() });
         let body = serde_json::json!({"text": "buy bread", "source": "http-test"});
@@ -221,6 +228,9 @@ mod tests {
 
     #[tokio::test]
     async fn capture_rejects_empty_text() {
+        // Gated /capture route; hold ENV_LOCK (a leaked token would 401 before
+        // the 400 we assert).
+        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
         let app = router(AppState { db });
         let body = serde_json::json!({"text": "   "});
@@ -240,6 +250,9 @@ mod tests {
 
     #[tokio::test]
     async fn sync_round_trip_create_then_done() {
+        // Gated /sync route; hold ENV_LOCK so a concurrent token-setting test
+        // can't flip these 200s to 401.
+        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
         let app = router(AppState { db: db.clone() });
 
@@ -335,6 +348,8 @@ mod tests {
 
     #[tokio::test]
     async fn sync_full_sync_returns_existing_tasks_without_events() {
+        // Gated /sync route; hold ENV_LOCK against concurrent token-setting test.
+        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
         let existing =
             ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("preexisting")).unwrap();
@@ -593,6 +608,8 @@ mod tests {
 
     #[tokio::test]
     async fn email_endpoint_parses_subject_and_body() {
+        // Gated /email route; hold ENV_LOCK against concurrent token-setting test.
+        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
         let app = router(AppState { db: db.clone() });
         let raw = "Subject: Buy bread tomorrow\r\n\
