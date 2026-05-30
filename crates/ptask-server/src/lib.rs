@@ -8,6 +8,7 @@
 //! Subsequent v0.3.x sub-versions add `/capture`, `/sync`, `/webhook/*`,
 //! and `/metrics`.
 
+mod auth;
 mod routes;
 pub mod webhooks;
 
@@ -365,6 +366,48 @@ mod tests {
                 .any(|task| task["id"].as_str() == Some(existing.id.as_str())),
             "full sync should include tasks that predate pt_event_log"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_requires_api_token_when_configured() {
+        let _env = ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("PTASK_API_TOKEN", "test-token");
+        }
+        let db = open_test_db();
+        let app = router(AppState { db });
+        let req = serde_json::json!({"sync_token": "*", "commands": []});
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        unsafe {
+            std::env::remove_var("PTASK_API_TOKEN");
+        }
     }
 
     #[test]

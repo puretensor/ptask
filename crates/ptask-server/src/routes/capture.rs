@@ -3,7 +3,7 @@
 use crate::AppState;
 use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,14 @@ pub struct CaptureResp {
     pub source_date: String,
 }
 
-async fn capture(State(state): State<AppState>, Json(req): Json<CaptureReq>) -> impl IntoResponse {
+async fn capture(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CaptureReq>,
+) -> impl IntoResponse {
+    if let Some(resp) = crate::auth::require_write_token(&headers) {
+        return resp;
+    }
     let text = req.text.trim();
     if text.is_empty() {
         return (
