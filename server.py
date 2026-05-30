@@ -30,6 +30,7 @@ Config (env)
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import os
 import re
@@ -49,7 +50,8 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
+MAX_POST_BYTES = 16 * 1024
 
 # Columns we expose. Kept explicit so a schema change can't leak surprises.
 TASK_COLS = [
@@ -60,6 +62,21 @@ TASK_COLS = [
 ]
 
 _ID_RE = re.compile(r"^(PT-\d+|[0-9a-fA-F-]{8,36})$")
+
+
+def parse_bind(bind: str) -> tuple[str, int]:
+    if ":" not in bind:
+        raise ValueError("bind must be HOST:PORT")
+    host, port_s = bind.rsplit(":", 1)
+    host = host or "0.0.0.0"
+    port = int(port_s)
+    if not (1 <= port <= 65535):
+        raise ValueError("port out of range")
+    return host, port
+
+
+def is_loopback_host(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost", "::1"}
 
 
 # --------------------------------------------------------------------------- db
@@ -253,6 +270,7 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         body = json.dumps(obj).encode()
         self.send_response(code)
+        self._security_headers()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -262,10 +280,29 @@ class Handler(BaseHTTPRequestHandler):
     def _text(self, txt, code=200, ctype="text/plain; charset=utf-8"):
         body = txt.encode() if isinstance(txt, str) else txt
         self.send_response(code)
+        self._security_headers()
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "img-src 'self' data:; "
+            "style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "connect-src 'self'; "
+            "object-src 'none'; "
+            "base-uri 'none'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'",
+        )
 
     def _authed(self) -> bool:
         if not AUTH_PASS:  # auth disabled (local dev) when no pass configured
@@ -273,16 +310,34 @@ class Handler(BaseHTTPRequestHandler):
         hdr = self.headers.get("Authorization", "")
         if hdr.startswith("Basic "):
             try:
-                user, _, pw = base64.b64decode(hdr[6:]).decode().partition(":")
-                return user == AUTH_USER and pw == AUTH_PASS
+                user, _, pw = base64.b64decode(hdr[6:], validate=True).decode().partition(":")
+                return hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(pw, AUTH_PASS)
             except Exception:  # noqa: BLE001
                 return False
         return False
 
     def _need_auth(self):
         self.send_response(401)
+        self._security_headers()
         self.send_header("WWW-Authenticate", 'Basic realm="PTASK"')
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
+
+    def _read_json_body(self):
+        try:
+            n = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            self._json({"error": "bad content length"}, 400)
+            return None
+        if n > MAX_POST_BYTES:
+            self._json({"error": "request body too large"}, 413)
+            return None
+        raw = self.rfile.read(n) if n else b""
+        try:
+            return json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            self._json({"error": "bad json"}, 400)
+            return None
 
     def _serve_static(self, path):
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
@@ -332,12 +387,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return self._need_auth()
         u = urlparse(self.path)
-        n = int(self.headers.get("Content-Length", "0") or 0)
-        raw = self.rfile.read(n) if n else b""
-        try:
-            body = json.loads(raw or b"{}")
-        except json.JSONDecodeError:
-            return self._json({"error": "bad json"}, 400)
+        body = self._read_json_body()
+        if body is None:
+            return
 
         m = re.match(r"^/api/tasks/([^/]+)/done$", u.path)
         if m:
@@ -358,12 +410,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    host, _, port = BIND.partition(":")
+    try:
+        host, port = parse_bind(BIND)
+    except ValueError as e:
+        raise SystemExit(f"Invalid PTASK_DASH_BIND={BIND!r}: {e}") from e
+    if not AUTH_PASS and not is_loopback_host(host):
+        raise SystemExit(
+            "Refusing to serve without PTASK_DASH_PASS on non-loopback bind "
+            f"{host}:{port}. Set PTASK_DASH_PASS or bind to 127.0.0.1 for local dev."
+        )
     if not Path(DB_PATH).exists():
         raise SystemExit(f"DB not found: {DB_PATH}")
     print(f"ptask-dashboard v{VERSION}  db={DB_PATH}")
     print(f"  bind http://{host}:{port}  www={WWW_DIR}  auth={'on' if AUTH_PASS else 'OFF(dev)'}")
-    srv = ThreadingHTTPServer((host, int(port)), Handler)
+    srv = ThreadingHTTPServer((host, port), Handler)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
