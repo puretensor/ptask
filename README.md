@@ -54,7 +54,7 @@ self-contained `index.html`, vanilla JS + CSS custom properties).
 ```bash
 # against a copy of the DB (never the live one for dev)
 PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
-# open http://127.0.0.1:9519/  (auth disabled when PTASK_DASH_PASS is unset)
+# open http://127.0.0.1:9519/  (auth disabled only on loopback when PTASK_DASH_PASS is unset)
 ```
 
 ## Config (env)
@@ -65,7 +65,7 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_BIN` | `~/.cargo/bin/pt` | pt binary for write delegation |
 | `PTASK_DASH_BIND` | `0.0.0.0:9510` | bind address |
 | `PTASK_DASH_USER` | `ops` | basic-auth user |
-| `PTASK_DASH_PASS` | _(unset)_ | basic-auth pass; **auth disabled if unset** |
+| `PTASK_DASH_PASS` | _(unset)_ | basic-auth pass; **required for non-loopback binds** |
 | `PTASK_DASH_WWW` | `./www` | static dir |
 
 ## Deploy (tensor-core)
@@ -108,6 +108,10 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.1.3** — fail closed on non-loopback binds without auth, add security
+  headers, cap POST bodies, harden the systemd user unit, and add accessibility
+  landmarks / reduced-motion handling.
+- **v0.1.2** — fix done buttons to use `pt_id` (`PT-N`) rather than task UUID.
 - **v0.1.1** — proper LCARS elbow-frame styling (shoulder headers, pill rail,
   blocky asymmetric panels), scoped so the other three themes are unchanged.
 - **v0.1.0** — initial triage cockpit (4 themes, live poll, critical strip, lanes,

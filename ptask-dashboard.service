@@ -13,6 +13,10 @@ WorkingDirectory=%h/k8s-builds/ptask-dashboard
 ExecStart=/usr/bin/python3 %h/k8s-builds/ptask-dashboard/server.py
 Restart=on-failure
 RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
 StandardOutput=journal
 StandardError=journal
 
