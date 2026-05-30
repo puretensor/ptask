@@ -13,6 +13,23 @@
 | `/webhook/github` | POST | as above, GitHub HMAC |
 | `/metrics` | GET | Prometheus exposition |
 
+## Auth
+
+By default, `pt serve` preserves the original localhost/Tailscale-only
+operating mode and accepts mutating requests without an application token.
+Set `PTASK_API_TOKEN` to require application-level auth for `POST /sync`,
+`POST /capture`, and `POST /email`.
+
+When configured, clients must send one of:
+
+```text
+Authorization: Bearer <PTASK_API_TOKEN>
+X-PTask-Token: <PTASK_API_TOKEN>
+```
+
+`pt remote` automatically forwards `PTASK_API_TOKEN` as a bearer token when
+the environment variable is set on the client node.
+
 ## `POST /sync`
 
 ### Request
@@ -68,7 +85,7 @@
 | `type` | `args` | Side effects |
 |---|---|---|
 | `task_create` | `{ text, source_type? }` | runs quick-add parser, inserts to `tasks` + `pt_extensions`, optional `pt_recurrence`. |
-| `task_done` | `{ task_uuid }` or `{ pt_id }` | flips status to `done`, increments `dismissal_count`, logs an `interaction` row. |
+| `task_done` | `{ task_uuid }` or `{ pt_id }` | flips status to `done` or advances recurrence in-place, logs an `interaction` row. |
 
 More commands (`task_edit`, `task_delete`, `view_save`, …) land in v1.0.x;
 the wire format is stable, additions are backward-compatible.
@@ -84,19 +101,20 @@ true, "raw_item_id": N }`.
 
 ## Webhooks
 
-`POST /webhook/{gitea,github}` parses pushed commit messages, branch
-names, and PR titles for `Fixes PT-N`, `Closes PT-N`, `Ref PT-N`,
-`Skip PT-N` and triggers the corresponding state transitions
-(`in_progress` on branch/PR creation, `done` on merge to `main`).
+`POST /webhook/{gitea,github}` parses pushed commit messages for
+`Fixes PT-N` / `Closes PT-N` directives and marks matching tasks done.
+`Ref PT-N` and `Skip PT-N` are recognised by the magic-word parser but do
+not close tasks.
 
-HMAC verification: the secret comes from `PTASK_WEBHOOK_SECRET_GITEA` /
-`PTASK_WEBHOOK_SECRET_GITHUB`. Body signature is `X-Hub-Signature-256`
+HMAC verification: the secret comes from `PTASK_GITEA_WEBHOOK_SECRET` /
+`PTASK_GITHUB_WEBHOOK_SECRET`. Body signature is `X-Hub-Signature-256`
 (GitHub) or `X-Gitea-Signature` (Gitea).
 
 ## Outbound webhooks
 
-Configure `PTASK_WEBHOOK_ENDPOINTS=<url1>,<url2>` for HMAC-signed POSTs
-on every `task.created` / `task.done` / `task.status_changed` event.
+Configure `PTASK_WEBHOOK_URLS=<url1>,<url2>` and `PTASK_WEBHOOK_SECRET` for HMAC-signed POSTs
+on task events such as `task.created`, `task.completed`, and
+`task.recurrence_advanced`.
 Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
 
 ## Metrics

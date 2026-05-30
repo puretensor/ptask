@@ -28,6 +28,7 @@ pub fn default_url() -> String {
 #[derive(Debug, Clone)]
 pub struct RemoteClient {
     base: String,
+    api_token: Option<String>,
     client: reqwest::blocking::Client,
 }
 
@@ -43,18 +44,21 @@ impl RemoteClient {
             .context("build remote client")?;
         Ok(Self {
             base: base.trim_end_matches('/').to_string(),
+            api_token: std::env::var("PTASK_API_TOKEN")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             client,
         })
     }
 
     fn sync(&self, req: &Value) -> Result<SyncResp> {
         let url = format!("{}/sync", self.base);
-        let resp = self
-            .client
-            .post(&url)
-            .json(req)
-            .send()
-            .with_context(|| format!("POST {url}"))?;
+        let mut builder = self.client.post(&url).json(req);
+        if let Some(token) = self.api_token.as_ref() {
+            builder = builder.bearer_auth(token);
+        }
+        let resp = builder.send().with_context(|| format!("POST {url}"))?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().unwrap_or_default();

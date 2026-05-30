@@ -981,8 +981,25 @@ mod tests {
         let (_dir, db) = fresh_db();
         let rec = crate::recurrence::parse("every monday").unwrap();
         let mut new = NewTask::minimal("standup");
-        // Mon 2026-05-18 09:00 BST.
-        new.deadline = Some("2026-05-18T09:00:00+01:00".into());
+        let now = crate::dates::now_in_operator_tz().unwrap();
+        let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ).unwrap();
+        let mut current_deadline = now.clone();
+        loop {
+            current_deadline = current_deadline
+                .date()
+                .at(9, 0, 0, 0)
+                .to_zoned(tz.clone())
+                .unwrap();
+            if current_deadline > now && current_deadline.weekday() == jiff::civil::Weekday::Monday
+            {
+                break;
+            }
+            current_deadline = current_deadline
+                .checked_add(jiff::Span::new().days(1))
+                .unwrap();
+        }
+        let expected_next = crate::recurrence::next_after(&rec, &current_deadline).unwrap();
+        new.deadline = Some(crate::dates::format_iso(&current_deadline));
         let ext = Extensions {
             recurrence: Some(rec),
             ..Default::default()
@@ -992,10 +1009,7 @@ mod tests {
         match outcome {
             DoneOutcome::Advanced { next_deadline } => {
                 // Fixed mode anchors on the original deadline → next Monday.
-                assert!(
-                    next_deadline.starts_with("2026-05-25T09:00"),
-                    "got {next_deadline}"
-                );
+                assert_eq!(next_deadline, crate::dates::format_iso(&expected_next));
             }
             other => panic!("expected Advanced, got {:?}", other),
         }

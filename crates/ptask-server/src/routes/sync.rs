@@ -26,7 +26,7 @@
 use crate::AppState;
 use axum::Router;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use ptask_core::event_log;
@@ -77,7 +77,14 @@ pub struct Resources {
     pub tasks: Vec<tasks::Task>,
 }
 
-async fn sync(State(state): State<AppState>, Json(req): Json<SyncReq>) -> impl IntoResponse {
+async fn sync(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<SyncReq>,
+) -> impl IntoResponse {
+    if let Some(resp) = crate::auth::require_write_token(&headers) {
+        return resp;
+    }
     let mut status: BTreeMap<String, Value> = BTreeMap::new();
     let mut temp_map: BTreeMap<String, String> = BTreeMap::new();
 

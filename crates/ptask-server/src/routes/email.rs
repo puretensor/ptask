@@ -13,7 +13,7 @@ use crate::AppState;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use mail_parser::MessageParser;
@@ -30,7 +30,14 @@ pub struct EmailResp {
     pub source_file: String,
 }
 
-async fn email(State(state): State<AppState>, body: Bytes) -> impl IntoResponse {
+async fn email(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Some(resp) = crate::auth::require_write_token(&headers) {
+        return resp;
+    }
     let Some(msg) = MessageParser::default().parse(&body[..]) else {
         return (
             StatusCode::BAD_REQUEST,
