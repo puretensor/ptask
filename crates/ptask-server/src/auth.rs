@@ -2,13 +2,15 @@
 //!
 //! `pt serve` still defaults to unauthenticated localhost/Tailscale operation
 //! for backwards compatibility. Set `PTASK_API_TOKEN` to require callers of
-//! `/sync`, `/capture`, and `/email` to send either:
+//! `/sync`, `/capture`, `/email`, and `/metrics` to send either:
 //!   - `Authorization: Bearer <token>`
 //!   - `X-PTask-Token: <token>`
 
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use std::sync::Once;
+use tracing::warn;
 
 const API_TOKEN_ENV: &str = "PTASK_API_TOKEN";
 const TOKEN_HEADER: &str = "x-ptask-token";
@@ -24,6 +26,32 @@ pub fn require_write_token(headers: &HeaderMap) -> Option<Response> {
             )
                 .into_response(),
         ),
+    }
+}
+
+/// Read-path gate. Same `PTASK_API_TOKEN` as the write routes — used by
+/// `/metrics`, which leaks task/store counts. Aliased to `require_write_token`
+/// rather than duplicated so the enforce-if-configured + constant-time logic
+/// lives in exactly one place.
+pub fn require_read_token(headers: &HeaderMap) -> Option<Response> {
+    require_write_token(headers)
+}
+
+/// Emit a single loud warning at startup if `PTASK_API_TOKEN` is unset, so an
+/// operator running unauthenticated sees it once in the log without flooding
+/// it on every `/metrics` scrape. Mirrors the fail-open-but-warn-when-unset
+/// posture: auth enforces only once a token is configured.
+pub fn warn_if_unconfigured() {
+    static WARNED: Once = Once::new();
+    if configured_token().is_none() {
+        WARNED.call_once(|| {
+            warn!(
+                target: "ptask::auth",
+                "{} is unset — /sync, /capture, /email, and /metrics are UNAUTHENTICATED. \
+                 Set {} (and send `Authorization: Bearer <token>` from callers) to enforce auth.",
+                API_TOKEN_ENV, API_TOKEN_ENV
+            );
+        });
     }
 }
 

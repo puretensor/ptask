@@ -8,7 +8,7 @@
 use crate::AppState;
 use axum::Router;
 use axum::extract::State;
-use axum::http::header;
+use axum::http::{HeaderMap, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use ptask_core::Db;
@@ -18,7 +18,13 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/metrics", get(metrics))
 }
 
-async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    // Same enforce-if-configured gate as the write routes: /metrics leaks
+    // task/store counts. When PTASK_API_TOKEN is unset this returns None and
+    // the scrape is served (back-compat); when set, a missing/wrong token 401s.
+    if let Some(resp) = crate::auth::require_read_token(&headers) {
+        return resp;
+    }
     let body = render(&state.db).unwrap_or_else(|e| {
         format!(
             "# pt_metrics_render_error: {}\n",
@@ -32,6 +38,7 @@ async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
         )],
         body,
     )
+        .into_response()
 }
 
 fn render(db: &Db) -> ptask_core::Result<String> {
