@@ -277,12 +277,17 @@ ln -sf ~/ptask/scripts/systemd/ptask-serve.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ptask-serve.service
 
-curl http://127.0.0.1:9501/healthz   # → ok
-curl http://127.0.0.1:9501/version   # → {"ptask_core":"1.0.3"}
+# The shipped unit binds tensor-core's Tailscale IP (not 0.0.0.0), so probe
+# it on that address rather than loopback.
+curl http://100.121.42.54:9501/healthz   # → ok
+curl http://100.121.42.54:9501/version   # → {"ptask_core":"1.0.3"}
 ```
 
 Fleet clients reach this via Tailscale at `http://100.121.42.54:9501`;
-`/etc/profile.d/ptask.sh` sets `PTASK_SYNC_URL` everywhere.
+`/etc/profile.d/ptask.sh` sets `PTASK_SYNC_URL` everywhere. The unit binds
+that interface IP directly, keeping the API off the public/LAN NICs. To
+require application-level auth as well, set `PTASK_API_TOKEN` in
+`~/puretensor-tasks/.env`.
 
 ### Inspect
 
