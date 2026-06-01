@@ -42,6 +42,7 @@ pub fn router(state: AppState) -> Router {
 pub async fn serve(db: Db, addr: SocketAddr) -> Result<()> {
     let state = AppState { db };
     let app = router(state);
+    auth::warn_if_unconfigured();
     info!(target: "ptask::server", %addr, "starting pt serve");
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -456,8 +457,14 @@ mod tests {
         assert!(id > 0);
     }
 
-    #[tokio::test]
+    // /metrics is now token-gated (enforce-if-configured), so this test holds
+    // ENV_LOCK and asserts the back-compat path: token UNSET → scrape allowed.
+    #[tokio::test(flavor = "current_thread")]
     async fn metrics_returns_prometheus_text() {
+        let _env = ENV_LOCK.lock().await;
+        unsafe {
+            std::env::remove_var("PTASK_API_TOKEN");
+        }
         let db = open_test_db();
         let app = router(AppState { db });
         let resp = app
@@ -485,6 +492,83 @@ mod tests {
         assert!(s.contains("pt_raw_items_unprocessed "));
         assert!(s.contains("pt_event_log_cursor "));
         assert!(s.contains("pt_views_total "));
+    }
+
+    // env set + missing/wrong credential → 401; env set + correct → 200.
+    #[tokio::test(flavor = "current_thread")]
+    async fn metrics_requires_api_token_when_configured() {
+        let _env = ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("PTASK_API_TOKEN", "metrics-token");
+        }
+        let db = open_test_db();
+        let app = router(AppState { db });
+
+        // Missing credential → 401.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Wrong credential → 401.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("authorization", "Bearer wrong-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct bearer credential → 200 + Prometheus body.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("authorization", "Bearer metrics-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("pt_tasks_total")
+        );
+
+        // The X-PTask-Token header path is accepted too (parity with writes).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("x-ptask-token", "metrics-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        unsafe {
+            std::env::remove_var("PTASK_API_TOKEN");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
