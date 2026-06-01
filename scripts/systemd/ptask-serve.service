@@ -4,10 +4,16 @@ Documentation=https://github.com/puretensor/ptask
 After=network-online.target
 Wants=network-online.target
 
+# Bind the API to tensor-core's Tailscale interface IP, NOT 0.0.0.0.
+# Fleet clients reach the canonical host at this exact address (it is the
+# value of PTASK_SYNC_URL fleet-wide). Listening only here keeps the
+# /sync,/capture,/email surface off the public/LAN NICs. Application-level
+# auth is still recommended: set PTASK_API_TOKEN in the EnvironmentFile to
+# require a bearer/X-PTask-Token on the mutating routes.
 [Service]
 Type=simple
 EnvironmentFile=%h/puretensor-tasks/.env
-ExecStart=%h/.cargo/bin/pt serve --bind 0.0.0.0:9501
+ExecStart=%h/.cargo/bin/pt serve --bind 100.121.42.54:9501
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
