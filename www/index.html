@@ -170,6 +170,19 @@ section{margin-top:22px}
 }
 .btn-done:hover{background:var(--teal);color:#04211b;border-color:var(--teal)}
 
+/* priority stepper (promote ▲ / demote ▼) */
+.pctl{display:inline-flex;align-items:center;gap:4px}
+.psteps{display:inline-flex;flex-direction:column;gap:2px;vertical-align:middle}
+.pstep{
+  cursor:pointer;background:transparent;border:1px solid var(--border);color:var(--muted);
+  border-radius:4px;width:20px;height:13px;font-size:9px;line-height:1;padding:0;
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.pstep:hover{background:var(--accent);color:#04211b;border-color:var(--accent)}
+.pstep.off{opacity:.22;cursor:default;pointer-events:none}
+[data-theme="lcars"] .pstep{border-radius:0 6px 6px 0}
+[data-theme="exec"] .pstep:hover{color:#fff}
+
 /* lanes */
 .lanes{display:grid;grid-template-columns:repeat(5,1fr);gap:var(--gap)}
 @media(max-width:1100px){.lanes{grid-template-columns:repeat(2,1fr)}}
@@ -387,6 +400,19 @@ function dueChip(t){
   return `<span class="due ${cls}">${lbl}</span>`;
 }
 function pbadge(p){return `<span class="pbadge p${p}">P${p}</span>`;}
+/* priority stepper: ▲ promote / ▼ demote, disabled at the 5/1 bounds. */
+function psteps(t){
+  const p=t.priority, id=(t.pt_id||t.id);
+  const up = p<5
+    ? `<button class="pstep" title="promote → ${PNAME[p+1]}" aria-label="promote ${id}" onclick="setPriority('${id}',${p+1},event)">▲</button>`
+    : `<button class="pstep off" tabindex="-1" aria-hidden="true">▲</button>`;
+  const dn = p>1
+    ? `<button class="pstep" title="demote → ${PNAME[p-1]}" aria-label="demote ${id}" onclick="setPriority('${id}',${p-1},event)">▼</button>`
+    : `<button class="pstep off" tabindex="-1" aria-hidden="true">▼</button>`;
+  return `<span class="psteps">${up}${dn}</span>`;
+}
+/* priority badge + stepper as one control (used in the Critical strip). */
+function pctl(t){return `<span class="pctl">${pbadge(t.priority)}${psteps(t)}</span>`;}
 function scoreMini(s){const w=Math.min(100,Math.round(s*100));return `<span class="scoremini"><i style="width:${w}%"></i></span>`;}
 async function api(p){const r=await fetch(p,{headers:{'Accept':'application/json'}});if(!r.ok)throw new Error(p+' '+r.status);return r.json();}
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
@@ -395,6 +421,13 @@ function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');se
 async function markDone(id){
   try{const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/done',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     const j=await r.json(); toast(j.ok?('✓ '+id+' done'):('✗ '+(j.message||'failed'))); if(j.ok) load();
+  }catch(e){toast('✗ '+e.message);}
+}
+async function setPriority(id,level,ev){
+  if(ev) ev.stopPropagation();
+  if(level<1||level>5) return;
+  try{const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/priority',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({level})});
+    const j=await r.json(); toast(j.ok?('⇅ '+id+' → P'+level+' '+PNAME[level]):('✗ '+(j.message||'failed'))); if(j.ok) load();
   }catch(e){toast('✗ '+e.message);}
 }
 $('#qabtn').onclick=async()=>{
@@ -424,7 +457,7 @@ function renderCritical(tasks){
       <div class="scorebar"></div>
       <h3>${esc(t.title)}</h3>
       <div class="meta">
-        ${pbadge(t.priority)}
+        ${pctl(t)}
         <span class="score">${(t.priority_score).toFixed(3)}</span>${scoreMini(t.priority_score)}
         ${dueChip(t)}
         <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
@@ -443,6 +476,7 @@ function renderLanes(tasks){
       ${show.map(t=>`<div class="tcard fade">
         <div class="tt">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
+        ${psteps(t)}
         <button class="btn-done" title="done" onclick="markDone('${t.pt_id||t.id}')">✓</button></div>
       </div>`).join('')}
       ${list.length>8?`<div class="more">+${list.length-8} more</div>`:''}

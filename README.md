@@ -108,6 +108,10 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.2.0** — promote/demote priority controls (▲/▼ steppers) on Critical-strip
+  and lane cards. New `POST /api/tasks/<id>/priority {level:1..5}` endpoint shells
+  `pt priority <id> <level>` (requires `pt` ≥ 1.2.0), which re-runs scoring so the
+  composite ordering updates immediately.
 - **v0.1.4** — Critical Now strip shows the top 12 by composite score (was 9).
 - **v0.1.3** — fail closed on non-loopback binds without auth, add security
   headers, cap POST bodies, harden the systemd user unit, and add accessibility

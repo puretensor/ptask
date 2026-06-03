@@ -15,6 +15,7 @@ Endpoints
   GET  /api/timeline            -> pending tasks that have a deadline
   GET  /api/heatmap             -> priority x age-bucket matrix
   POST /api/tasks/<id>/done     -> shells `pt done <id>`
+  POST /api/tasks/<id>/priority {level:1..5} -> shells `pt priority <id> <level>`
   POST /api/tasks  {title:..}   -> shells `pt add "<title>"`
 
 Config (env)
@@ -50,7 +51,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.1.4"
+VERSION = "0.2.0"
 MAX_POST_BYTES = 16 * 1024
 
 # Columns we expose. Kept explicit so a schema change can't leak surprises.
@@ -397,6 +398,17 @@ class Handler(BaseHTTPRequestHandler):
             if not _ID_RE.match(tid):
                 return self._json({"error": "bad id"}, 400)
             ok, msg = pt_exec(["done", tid])
+            return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+
+        m = re.match(r"^/api/tasks/([^/]+)/priority$", u.path)
+        if m:
+            tid = m.group(1)
+            if not _ID_RE.match(tid):
+                return self._json({"error": "bad id"}, 400)
+            level = body.get("level")
+            if not isinstance(level, int) or isinstance(level, bool) or not (1 <= level <= 5):
+                return self._json({"error": "level must be an integer 1..5"}, 400)
+            ok, msg = pt_exec(["priority", tid, str(level)])
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         if u.path == "/api/tasks":
