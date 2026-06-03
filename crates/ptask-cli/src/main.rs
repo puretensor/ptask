@@ -39,6 +39,9 @@ enum Command {
     List(ListArgs),
     /// Mark a task done (by PT-N or title substring).
     Done(DoneArgs),
+    /// Promote/demote a task's priority (critical|urgent|high|normal|low or 1..=5).
+    #[command(alias = "pri")]
+    Priority(PriorityArgs),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
     /// Manage saved views.
@@ -240,6 +243,14 @@ struct DoneArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct PriorityArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    /// New level: low|normal|high|urgent|critical or 1..=5.
+    level: String,
+}
+
+#[derive(clap::Args, Debug)]
 struct GenCompletionsArgs {
     /// Target shell.
     #[arg(value_enum)]
@@ -279,6 +290,7 @@ fn main() -> Result<()> {
                 Some(Command::Add(a)) => cmd_add(&db, a),
                 Some(Command::List(a)) => cmd_list(&db, a),
                 Some(Command::Done(a)) => cmd_done(&db, a),
+                Some(Command::Priority(a)) => cmd_priority(&db, a),
                 Some(Command::Next(a)) => cmd_next(&db, a),
                 Some(Command::View(c)) => cmd_view(&db, c),
                 Some(Command::Tui) => ptask_tui::run(db),
@@ -441,6 +453,44 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn cmd_priority(db: &Db, a: PriorityArgs) -> Result<()> {
+    let level = priority::parse(&a.level).map_err(anyhow::Error::msg)?;
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    let old = task.priority;
+    if old == level {
+        println!(
+            "{} {} · already {} ({})",
+            task.pt_id.as_deref().unwrap_or(""),
+            task.title,
+            level,
+            priority::label(level)
+        );
+        return Ok(());
+    }
+    tasks::update_priority(db, &task.id, level)?;
+    // priority feeds manual_score -> the composite priority_score, so recompute
+    // immediately; otherwise ordering (and the dashboard's "Critical Now") lags
+    // until the next scheduled `pt scoring run`.
+    let note = match ptask_core::scoring::run_once(db, false) {
+        Ok(r) => format!(" · rescored {}", r.tasks_scored),
+        Err(e) => {
+            eprintln!("warning: priority set but rescore failed: {}", e);
+            String::new()
+        }
+    };
+    println!(
+        "{} {} · {} ({}) -> {} ({}){}",
+        task.pt_id.as_deref().unwrap_or(""),
+        task.title,
+        old,
+        priority::label(old),
+        level,
+        priority::label(level),
+        note
+    );
     Ok(())
 }
 
