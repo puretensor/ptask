@@ -619,6 +619,64 @@ pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
     Ok(())
 }
 
+/// Set or clear a task deadline. Logs a `deadline_change` interaction.
+pub fn update_deadline(db: &Db, task_uuid: &str, deadline: Option<&str>) -> Result<()> {
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+
+    let has_recurrence_table = tx
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pt_recurrence'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    let has_recurrence = if has_recurrence_table {
+        tx.query_row(
+            "SELECT COUNT(*) FROM pt_recurrence WHERE task_uuid=?1",
+            [task_uuid],
+            |r| r.get::<_, i64>(0),
+        )? > 0
+    } else {
+        false
+    };
+    if deadline.is_none() && has_recurrence {
+        return Err(crate::Error::Other(
+            "cannot clear deadline on a recurring task; update it instead".into(),
+        ));
+    }
+
+    let changed = tx.execute(
+        "UPDATE tasks SET deadline=?1, updated_at=?2 WHERE id=?3",
+        params![deadline, now, task_uuid],
+    )?;
+    if changed == 0 {
+        return Err(crate::Error::Other("task not found".into()));
+    }
+    if has_recurrence {
+        tx.execute(
+            "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
+            params![deadline, task_uuid],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO interactions (task_id, action, ts, details)
+         VALUES (?1, 'deadline_change', ?2, ?3)",
+        params![
+            task_uuid,
+            now,
+            match deadline {
+                Some(d) => format!("deadline → {}", d),
+                None => "deadline cleared".to_string(),
+            }
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Delete a task (and any side-table rows via ON DELETE CASCADE). The row
 /// vanishes; the audit trail in `interactions` is wiped with it. Use with
 /// care.
@@ -866,6 +924,52 @@ mod tests {
 
         let rows = list(&db, Some("pending"), None, 100).unwrap();
         assert_eq!(rows[0].title, "normal but scored");
+    }
+
+    #[test]
+    fn update_deadline_sets_and_logs_interaction() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("date me")).unwrap();
+
+        update_deadline(&db, &t.id, Some("2026-06-16")).unwrap();
+
+        db.with_conn(|c| {
+            let deadline: Option<String> = c
+                .query_row("SELECT deadline FROM tasks WHERE id=?1", [&t.id], |r| r.get(0))
+                .unwrap();
+            assert_eq!(deadline.as_deref(), Some("2026-06-16"));
+            let details: String = c
+                .query_row(
+                    "SELECT details FROM interactions WHERE task_id=?1 AND action='deadline_change'",
+                    [&t.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(details, "deadline → 2026-06-16");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn update_deadline_can_clear_non_recurring_task() {
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("clear me");
+        new.deadline = Some("2026-06-16".into());
+        let t = create(&db, new).unwrap();
+
+        update_deadline(&db, &t.id, None).unwrap();
+
+        db.with_conn(|c| {
+            let deadline: Option<String> = c
+                .query_row("SELECT deadline FROM tasks WHERE id=?1", [&t.id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert!(deadline.is_none());
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

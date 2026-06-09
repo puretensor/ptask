@@ -5,7 +5,7 @@
 //!   pt list        [-s STATUS]   [-p PRIORITY]    [-n LIMIT]       [-v]
 //!   pt done <query>
 //!
-//! Future phases add `next`, `edit`, `show`, `rm`, `view`, `serve`, `bot`, `tui`.
+//! Future phases add `show`, `rm`, richer `edit`, `serve`, `bot`, `tui`.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -42,6 +42,9 @@ enum Command {
     /// Promote/demote a task's priority (critical|urgent|high|normal|low or 1..=5).
     #[command(alias = "pri")]
     Priority(PriorityArgs),
+    /// Edit task fields.
+    #[command(alias = "update")]
+    Edit(EditArgs),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
     /// Manage saved views.
@@ -251,6 +254,18 @@ struct PriorityArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct EditArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    /// Set deadline to an ISO date/datetime, e.g. 2026-06-16.
+    #[arg(long = "deadline")]
+    deadline: Option<String>,
+    /// Clear the deadline.
+    #[arg(long = "clear-deadline")]
+    clear_deadline: bool,
+}
+
+#[derive(clap::Args, Debug)]
 struct GenCompletionsArgs {
     /// Target shell.
     #[arg(value_enum)]
@@ -291,6 +306,7 @@ fn main() -> Result<()> {
                 Some(Command::List(a)) => cmd_list(&db, a),
                 Some(Command::Done(a)) => cmd_done(&db, a),
                 Some(Command::Priority(a)) => cmd_priority(&db, a),
+                Some(Command::Edit(a)) => cmd_edit(&db, a),
                 Some(Command::Next(a)) => cmd_next(&db, a),
                 Some(Command::View(c)) => cmd_view(&db, c),
                 Some(Command::Tui) => ptask_tui::run(db),
@@ -492,6 +508,40 @@ fn cmd_priority(db: &Db, a: PriorityArgs) -> Result<()> {
         priority::label(old),
         level,
         priority::label(level),
+        note
+    );
+    Ok(())
+}
+
+fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
+    if a.deadline.is_some() && a.clear_deadline {
+        anyhow::bail!("use either --deadline or --clear-deadline, not both");
+    }
+    if a.deadline.is_none() && !a.clear_deadline {
+        anyhow::bail!("nothing to edit; currently supported: --deadline DATE or --clear-deadline");
+    }
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    let old = task.deadline.as_deref().unwrap_or("--").to_string();
+    let new_deadline = if a.clear_deadline {
+        None
+    } else {
+        a.deadline.as_deref()
+    };
+    tasks::update_deadline(db, &task.id, new_deadline)?;
+    // Deadline feeds urgency_score, so recompute immediately.
+    let note = match ptask_core::scoring::run_once(db, false) {
+        Ok(r) => format!(" · rescored {}", r.tasks_scored),
+        Err(e) => {
+            eprintln!("warning: deadline set but rescore failed: {}", e);
+            String::new()
+        }
+    };
+    println!(
+        "{} {} · deadline {} -> {}{}",
+        task.pt_id.as_deref().unwrap_or(""),
+        task.title,
+        old,
+        new_deadline.unwrap_or("--"),
         note
     );
     Ok(())
