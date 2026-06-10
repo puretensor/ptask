@@ -555,6 +555,68 @@ mod tests {
         assert!(s.contains("pt_views_total "));
     }
 
+    // PTASK_METRICS_TOKEN: read-only credential for /metrics. Accepted on
+    // the read path, rejected on the write path; the write token still
+    // covers reads (write ⊇ read).
+    #[tokio::test(flavor = "current_thread")]
+    async fn metrics_token_is_read_only() {
+        let _env = ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("PTASK_API_TOKEN", "write-secret");
+            std::env::set_var("PTASK_METRICS_TOKEN", "scrape-secret");
+        }
+        let db = open_test_db();
+        let app = router(AppState { db });
+
+        // Metrics token → /metrics 200.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("authorization", "Bearer scrape-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Write token still works on /metrics.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("authorization", "Bearer write-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Metrics token must NOT authorize a write route.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer scrape-secret")
+                    .body(Body::from(r#"{"sync_token":"*","commands":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        unsafe {
+            std::env::remove_var("PTASK_API_TOKEN");
+            std::env::remove_var("PTASK_METRICS_TOKEN");
+        }
+    }
+
     // env set + missing/wrong credential → 401; env set + correct → 200.
     #[tokio::test(flavor = "current_thread")]
     async fn metrics_requires_api_token_when_configured() {
