@@ -120,16 +120,6 @@ mod tests {
     fn opens_fresh_db_and_applies_migrations() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
-        // The migrations reference `tasks(id)` via FK. For tests we create a
-        // minimal stub of the Python schema first.
-        {
-            let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute(
-                "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL)",
-                [],
-            )
-            .unwrap();
-        }
         let db = Db::open(&path).expect("open ok");
         db.with_conn(|c| {
             // Each pt_* table should exist after migrations.
@@ -164,19 +154,89 @@ mod tests {
         .unwrap();
     }
 
+    /// Greenfield bootstrap: no Python stub, just `Db::open` on a fresh path.
+    /// V008 must create the legacy base schema so a brand-new install can
+    /// accept writes (previously: "no such table: tasks").
+    #[test]
+    fn greenfield_db_bootstraps_base_schema_and_accepts_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.db");
+        let db = Db::open(&path).expect("open ok");
+        db.with_conn(|c| {
+            for table in [
+                "tasks",
+                "interactions",
+                "notifications",
+                "raw_items",
+                "canonical_tasks",
+                "ingested_files",
+                "daily_budget",
+            ] {
+                let exists: i64 = c
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                        [table],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(exists, 1, "expected base table {} to exist", table);
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        // End-to-end write through the real task path.
+        let task = crate::tasks::create_with_extensions(
+            &db,
+            crate::tasks::NewTask::minimal("first task on a fresh install"),
+            crate::tasks::Extensions::default(),
+        )
+        .expect("create works on greenfield DB");
+        assert_eq!(task.pt_id.as_deref(), Some("PT-1"));
+    }
+
     #[test]
     fn migrations_are_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
+        let _db1 = Db::open(&path).unwrap();
+        let _db2 = Db::open(&path).unwrap(); // second open re-runs migrations harmlessly
+    }
+
+    /// A DB that already carries the legacy Python schema (the live-fleet
+    /// case) must keep working: V008's IF NOT EXISTS guards make it a no-op
+    /// over pre-existing tables, even ones created with a different column
+    /// set than V008 would write.
+    #[test]
+    fn legacy_python_db_still_opens_after_v008() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
         {
             let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute(
-                "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL)",
-                [],
+            // Live-shape excerpt: enough columns for the V008 indices.
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                    priority INTEGER DEFAULT 2, status TEXT DEFAULT 'pending',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    priority_score REAL DEFAULT 0.0
+                 );
+                 CREATE INDEX idx_tasks_status ON tasks(status);",
             )
             .unwrap();
         }
-        let _db1 = Db::open(&path).unwrap();
-        let _db2 = Db::open(&path).unwrap(); // second open re-runs migrations harmlessly
+        let db = Db::open(&path).expect("legacy-shaped DB opens");
+        db.with_conn(|c| {
+            // Pre-existing table kept (no clobber): the legacy column set
+            // survives, and the side tables exist.
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('tasks','pt_extensions')",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(n, 2);
+            Ok(())
+        })
+        .unwrap();
     }
 }

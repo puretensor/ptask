@@ -66,26 +66,7 @@ mod tests {
     fn fresh_db() -> (tempfile::TempDir, Db) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
-        {
-            let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, created_at TEXT NOT NULL);
-                 CREATE TABLE raw_items (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    text TEXT NOT NULL,
-                    source_type TEXT NOT NULL,
-                    source_file TEXT NOT NULL,
-                    source_date TEXT NOT NULL,
-                    commitment_score REAL DEFAULT 0.0,
-                    processed INTEGER DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    classification TEXT,
-                    classification_confidence REAL DEFAULT 0.0,
-                    classification_reasoning TEXT DEFAULT ''
-                 );",
-            )
-            .unwrap();
-        }
+        // V008 bootstraps the production-shape legacy schema — no stub.
         (dir, Db::open(&path).unwrap())
     }
 
