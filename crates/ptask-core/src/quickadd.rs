@@ -13,6 +13,8 @@
 //! - Date phrase — `today` / `tomorrow` / `yesterday` / weekday names (with
 //!   optional `this|next|last` prefix), `N days`, month names, ISO dates,
 //!   optionally followed by time.
+//! - `"quoted text"` — words inside double quotes are literal title text,
+//!   never interpreted as markers or dates (`add 'Review the "p1 incident"'`).
 //! - Anything else   — title words
 //!
 //! Example:
@@ -41,6 +43,9 @@ pub struct QuickAdd {
     /// Parsed recurrence rule, if the input contained an `every` / `every!`
     /// clause. The deadline above is the first occurrence.
     pub recurrence: Option<Recurrence>,
+    /// Non-fatal parse caveats the surface should echo to the operator —
+    /// e.g. a date phrase that resolved to a moment already in the past.
+    pub warnings: Vec<String>,
 }
 
 /// Words that can start a date phrase. Used to bound the greedy date scan.
@@ -111,13 +116,30 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     };
     out.description = desc;
 
-    // Tokenize the head by whitespace.
-    let raw: Vec<&str> = head.split_whitespace().collect();
+    // Tokenize the head by whitespace, honouring double-quoted spans:
+    // words inside "..." are literal title text, never parsed as markers
+    // or date phrases. (Note: the `//` description split above runs first,
+    // so a quoted `//` still starts the description.)
+    let (raw, literal) = tokenize_quoted(&head);
     let mut idx = 0usize;
     let mut title_words: Vec<&str> = Vec::new();
 
     while idx < raw.len() {
         let tok = raw[idx];
+
+        // Quoted: straight to the title, no token interpretation.
+        if literal[idx] {
+            title_words.push(tok);
+            idx += 1;
+            continue;
+        }
+        // Multi-token lookahead (dates, recurrence) must not consume into a
+        // quoted span; bound the scan at the next literal token.
+        let scan_end = literal[idx..]
+            .iter()
+            .position(|&l| l)
+            .map(|off| idx + off)
+            .unwrap_or(raw.len());
 
         // Explicit @label
         if let Some(rest) = tok.strip_prefix('@')
@@ -169,7 +191,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         // for the first (and subsequent) occurrence.
         if (tok.eq_ignore_ascii_case("every") || tok.eq_ignore_ascii_case("every!"))
             && let Some((rec, time_of_day, consumed, phrase)) =
-                try_recurrence_match(&raw, idx, &now)
+                try_recurrence_match(&raw[..scan_end], idx, &now)
         {
             let deadline = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())?;
             out.deadline_phrase = Some(phrase);
@@ -183,11 +205,18 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         if (is_date_starter(tok)
             || looks_like_iso_date(tok)
             || looks_like_clock_time(tok)
-            || starts_relative_interval(&raw, idx)
-            || starts_in_relative_interval(&raw, idx))
-            && let Some((phrase, consumed)) = try_date_match(&raw, idx, &now)
+            || starts_relative_interval(&raw[..scan_end], idx)
+            || starts_in_relative_interval(&raw[..scan_end], idx))
+            && let Some((phrase, consumed)) = try_date_match(&raw[..scan_end], idx, &now)
         {
             let parsed = parse_quickadd_date(&phrase, &now)?;
+            if parsed < now {
+                out.warnings.push(format!(
+                    "deadline '{}' resolved to {} — already in the past",
+                    phrase,
+                    dates::format_iso(&parsed)
+                ));
+            }
             out.deadline_phrase = Some(phrase);
             out.deadline = Some(dates::format_iso(&parsed));
             idx += consumed;
@@ -211,6 +240,45 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         out.priority = Some(2);
     }
     Ok(out)
+}
+
+/// Whitespace tokenizer with double-quote spans. Returns the tokens plus a
+/// parallel `literal` flag: words inside `"..."` are title text, exempt from
+/// marker/date interpretation. An unmatched `"` is kept as ordinary text.
+fn tokenize_quoted(head: &str) -> (Vec<&str>, Vec<bool>) {
+    let mut toks: Vec<&str> = Vec::new();
+    let mut lits: Vec<bool> = Vec::new();
+    let mut rest = head;
+    while let Some(q) = rest.find('"') {
+        for w in rest[..q].split_whitespace() {
+            toks.push(w);
+            lits.push(false);
+        }
+        let after = &rest[q + 1..];
+        match after.find('"') {
+            Some(close) => {
+                for w in after[..close].split_whitespace() {
+                    toks.push(w);
+                    lits.push(true);
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                // Unmatched quote: keep the remainder (quote included) as
+                // ordinary tokens rather than guessing intent.
+                for w in rest[q..].split_whitespace() {
+                    toks.push(w);
+                    lits.push(false);
+                }
+                rest = "";
+            }
+        }
+    }
+    for w in rest.split_whitespace() {
+        toks.push(w);
+        lits.push(false);
+    }
+    (toks, lits)
 }
 
 /// Parse a duration suffix `Nm`, `Nh`, or `Nd` to minutes. Returns None on
@@ -439,6 +507,72 @@ mod tests {
     fn anchor() -> Zoned {
         let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
         date(2026, 5, 13).at(12, 0, 0, 0).to_zoned(tz).unwrap()
+    }
+
+    #[test]
+    fn quoted_tokens_are_literal_title_text() {
+        // Verified live failure pre-fix: "p1" inside a sentence silently
+        // flipped the task to urgent. Quotes now protect literal text.
+        let q = parse_at("Review the \"p1 incident\" postmortem", anchor()).unwrap();
+        assert_eq!(q.title, "Review the p1 incident postmortem");
+        assert_eq!(q.priority, Some(2), "quoted p1 must not set priority");
+        assert!(q.deadline.is_none());
+    }
+
+    #[test]
+    fn quoted_date_words_are_not_parsed() {
+        let q = parse_at("Plan \"May offsite\" kickoff", anchor()).unwrap();
+        assert_eq!(q.title, "Plan May offsite kickoff");
+        assert!(q.deadline.is_none(), "quoted month name must not be a date");
+        assert!(q.warnings.is_empty());
+    }
+
+    #[test]
+    fn quoted_span_bounds_date_lookahead() {
+        // The greedy date scan must stop at the quote boundary: `tomorrow`
+        // parses, but the quoted `10am` stays title text.
+        let q = parse_at("Ship build tomorrow \"10am demo notes\"", anchor()).unwrap();
+        assert_eq!(q.title, "Ship build 10am demo notes");
+        let d = q.deadline.expect("tomorrow still parses");
+        assert!(d.starts_with("2026-05-14"), "deadline was {}", d);
+    }
+
+    #[test]
+    fn unmatched_quote_is_ordinary_text() {
+        let q = parse_at("say \"hello p1", anchor()).unwrap();
+        assert_eq!(q.title, "say \"hello");
+        // Outside any closed quote span, p1 still parses as priority.
+        assert_eq!(q.priority, Some(4));
+    }
+
+    #[test]
+    fn past_deadline_emits_warning() {
+        let q = parse_at("Pay invoice yesterday", anchor()).unwrap();
+        assert!(q.deadline.is_some());
+        assert_eq!(q.warnings.len(), 1, "warnings: {:?}", q.warnings);
+        assert!(q.warnings[0].contains("in the past"));
+    }
+
+    #[test]
+    fn bare_month_in_past_warns_instead_of_silently_backdating() {
+        // Anchor June: "May" resolves to May 1 of the current year — in the
+        // past. Verified live pre-fix: silent past deadline, no signal.
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        let june = date(2026, 6, 10).at(12, 0, 0, 0).to_zoned(tz).unwrap();
+        let q = parse_at("Plan May offsite", june).unwrap();
+        if q.deadline.is_some() {
+            assert!(
+                !q.warnings.is_empty(),
+                "past-resolving month must warn; got none"
+            );
+        }
+    }
+
+    #[test]
+    fn future_deadline_no_warning() {
+        let q = parse_at("Pay invoice tomorrow 10am", anchor()).unwrap();
+        assert!(q.deadline.is_some());
+        assert!(q.warnings.is_empty(), "warnings: {:?}", q.warnings);
     }
 
     #[test]
