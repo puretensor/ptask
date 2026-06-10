@@ -35,14 +35,10 @@ pub const DEFAULT_MIN_CLUSTER_SIZE: usize = 2;
 /// Outlier cluster id, mirrors Python's `9999` placeholder for `-1`.
 pub const OUTLIER_CLUSTER_ID: i64 = -1;
 
-/// One topical cluster.
-#[derive(Debug, Clone)]
-pub struct Cluster {
-    pub id: i64,
-    pub keywords: Vec<String>,
-    pub items: Vec<String>,
-    pub item_sources: Vec<serde_json::Value>,
-}
+/// One topical cluster. Defined in the always-on [`crate::types`] module
+/// (consolidation consumes it without `native-ml`); re-exported here so
+/// `clustering::Cluster` keeps working.
+pub use crate::types::Cluster;
 
 /// Cluster a batch of texts. `metadata` is an optional parallel slice
 /// (per-item source dicts that the consolidation prompt can surface).

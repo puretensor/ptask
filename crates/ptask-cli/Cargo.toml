@@ -32,6 +32,14 @@ serde = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls-tls", "blocking"], default-features = false }
 uuid = { workspace = true }
 
+[features]
+default = []
+# Build the candle-backed native ML pipeline into `pt`. Off by default:
+# the live distill path is the Python subprocess shim, and the native
+# stack nearly doubles the dependency tree (~170 crates) for code with
+# no production caller yet.
+native-ml = ["ptask-distill/native-ml"]
+
 [dev-dependencies]
 axum = { workspace = true }
 criterion = "0.5"
