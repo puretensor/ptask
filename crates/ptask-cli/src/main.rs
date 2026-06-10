@@ -330,6 +330,9 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
     } else {
         quickadd::parse(&a.title).map_err(anyhow::Error::msg)?
     };
+    for w in &q.warnings {
+        eprintln!("warning: {}", w);
+    }
 
     // CLI flags override parsed values.
     let priority = match a.priority.as_deref() {
