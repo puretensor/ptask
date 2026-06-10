@@ -23,7 +23,7 @@
 //!                ai_reasoning, deadline } ] }
 //! ```
 
-use crate::clustering::Cluster;
+use crate::types::Cluster;
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

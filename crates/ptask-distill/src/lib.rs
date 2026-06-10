@@ -11,12 +11,21 @@
 //! stays the cutover entry point until Phase 9 retires it at v0.9.0.
 
 pub mod classifier;
-pub mod clustering;
 pub mod collectors;
 pub mod consolidation;
-pub mod embeddings;
-pub mod semantic_dedup;
 pub mod temporal_dedup;
+pub mod types;
+
+// The candle-backed embedding stack and its consumers. Gated: the native
+// pipeline has never been the production entry point (the v0.6.5 Python
+// subprocess shim drives `pt distill`), so the default build skips the
+// heaviest dependency subtree in the workspace.
+#[cfg(feature = "native-ml")]
+pub mod clustering;
+#[cfg(feature = "native-ml")]
+pub mod embeddings;
+#[cfg(feature = "native-ml")]
+pub mod semantic_dedup;
 
 use anyhow::{Context, Result};
 use ptask_core::Db;
