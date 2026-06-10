@@ -409,12 +409,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_delta_sees_local_cli_mutations_and_deletions() {
+        // THE acceptance test for event-log unification: a task created via
+        // the core function (the CLI/TUI/bot path — no /sync involved) must
+        // show up in a remote client's delta, and a local deletion must
+        // arrive as a tombstone. Pre-unification both were invisible.
+        let _env = ENV_LOCK.lock().await;
+        let db = open_test_db();
+        let app = router(AppState { db: db.clone() });
+
+        // Seed one event so the baseline cursor is non-zero (a "0" token is
+        // the full-sync sentinel and would mask the delta behaviour).
+        ptask_core::tasks::create(&db, ptask_core::tasks::NewTask::minimal("seed")).unwrap();
+
+        // Client baseline: grab a cursor.
+        let req = serde_json::json!({ "sync_token": "*", "commands": [] });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = parsed["sync_token"].as_str().unwrap().to_string();
+
+        // Local mutations on the canonical host — CLI path, not /sync.
+        let kept = ptask_core::tasks::create(&db, ptask_core::tasks::NewTask::minimal("cli kept"))
+            .unwrap();
+        let doomed =
+            ptask_core::tasks::create(&db, ptask_core::tasks::NewTask::minimal("cli doomed"))
+                .unwrap();
+        ptask_core::tasks::delete_task(&db, &doomed.id).unwrap();
+
+        // Delta sync from the old cursor.
+        let req = serde_json::json!({ "sync_token": token, "commands": [] });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let delta_ids: Vec<&str> = parsed["resources"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap())
+            .collect();
+        assert!(
+            delta_ids.contains(&kept.id.as_str()),
+            "CLI-created task missing from delta: {:?}",
+            delta_ids
+        );
+        let deleted: Vec<&str> = parsed["deleted_task_uuids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(deleted, vec![doomed.id.as_str()]);
+    }
+
+    #[tokio::test]
     async fn sync_full_sync_returns_existing_tasks_without_events() {
         // Gated /sync route; hold ENV_LOCK against concurrent token-setting test.
         let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        let existing =
-            ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("preexisting")).unwrap();
+        // Raw SQL insert: a task that genuinely predates pt_event_log (every
+        // tasks::create now records an event, so simulate the legacy rows
+        // directly).
+        let existing_id = "legacy-uuid-1".to_string();
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO tasks (id, title, created_at, updated_at)
+                 VALUES (?1, 'preexisting', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                [&existing_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let existing = ptask_core::tasks::Task {
+            id: existing_id,
+            pt_id: None,
+            title: "preexisting".into(),
+            description: String::new(),
+            priority: 2,
+            status: "pending".into(),
+            created_at: "2026-01-01T00:00:00+00:00".into(),
+            updated_at: "2026-01-01T00:00:00+00:00".into(),
+            deadline: None,
+            source_type: "manual".into(),
+            ai_reasoning: String::new(),
+        };
         assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), 0);
 
         let app = router(AppState { db });

@@ -26,8 +26,22 @@ pub fn record(
     event_type: &str,
     payload: &serde_json::Value,
 ) -> Result<i64> {
-    let ts = dates::format_iso(&dates::now_in_operator_tz()?);
     let conn = db.get()?;
+    record_in_conn(&conn, uuid, task_uuid, event_type, payload)
+}
+
+/// Record an event on an existing connection — pass a `Transaction` (it
+/// derefs to `Connection`) to make the event row atomic with the mutation
+/// it describes. This is the primitive `tasks::*` mutations use so a task
+/// change and its sync-visible event commit or roll back together.
+pub fn record_in_conn(
+    conn: &rusqlite::Connection,
+    uuid: &str,
+    task_uuid: Option<&str>,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<i64> {
+    let ts = dates::format_iso(&dates::now_in_operator_tz()?);
     let payload_str = payload.to_string();
     conn.execute(
         "INSERT INTO pt_event_log (uuid, task_uuid, event_type, payload, ts)
@@ -83,6 +97,19 @@ pub fn changed_task_uuids_since(db: &Db, since: i64) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT task_uuid FROM pt_event_log
          WHERE id > ?1 AND task_uuid IS NOT NULL
+         ORDER BY task_uuid",
+    )?;
+    let rows = stmt.query_map([since], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Tombstones: `task_uuid` values with a `task.deleted` event after the
+/// cursor. Delta clients drop these from their local state.
+pub fn deleted_task_uuids_since(db: &Db, since: i64) -> Result<Vec<String>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT task_uuid FROM pt_event_log
+         WHERE id > ?1 AND task_uuid IS NOT NULL AND event_type = 'task.deleted'
          ORDER BY task_uuid",
     )?;
     let rows = stmt.query_map([since], |r| r.get::<_, String>(0))?;

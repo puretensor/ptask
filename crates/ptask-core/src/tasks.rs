@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::storage::Db;
 use crate::{priority, pt_id};
 use jiff::Zoned;
+use rusqlite::OptionalExtension;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -75,10 +76,53 @@ pub fn create(db: &Db, new: NewTask) -> Result<Task> {
     create_with_extensions(db, new, Extensions::default())
 }
 
+/// Generate an idempotency uuid for a locally-initiated mutation (CLI, TUI,
+/// bot). Remote-initiated mutations supply the client's command uuid instead
+/// so `/sync` replays stay idempotent.
+fn local_event_uuid() -> String {
+    format!("local:{}", Uuid::new_v4())
+}
+
+/// Write the event row inside the mutation's own transaction. Every event
+/// recorded here is what delta sync clients see — a mutation without an
+/// event row is invisible to the fleet, which is the bug this unification
+/// removes.
+fn record_event_tx(
+    tx: &rusqlite::Connection,
+    event_uuid: Option<&str>,
+    task_uuid: &str,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    let generated;
+    let uuid = match event_uuid {
+        Some(u) => u,
+        None => {
+            generated = local_event_uuid();
+            &generated
+        }
+    };
+    crate::event_log::record_in_conn(tx, uuid, Some(task_uuid), event_type, payload)?;
+    Ok(())
+}
+
 /// Variant that also writes pTask-native fields into `pt_extensions`
 /// (labels JSON, project, duration_min, planned_at, energy) in the same
 /// transaction. Used by the inline-token quick-add path.
 pub fn create_with_extensions(db: &Db, new: NewTask, ext: Extensions) -> Result<Task> {
+    create_with_extensions_with_event(db, new, ext, None)
+}
+
+/// Full-control variant: `event_uuid` is the idempotency key recorded with
+/// the `task.created` event (Some = caller-supplied, e.g. a sync command
+/// uuid; None = generated `local:` uuid). The event row commits in the same
+/// transaction as the task insert.
+pub fn create_with_extensions_with_event(
+    db: &Db,
+    new: NewTask,
+    ext: Extensions,
+    event_uuid: Option<&str>,
+) -> Result<Task> {
     let id = Uuid::new_v4().to_string();
     let now = iso_now();
 
@@ -163,12 +207,9 @@ pub fn create_with_extensions(db: &Db, new: NewTask, ext: Extensions) -> Result<
         params![id, now, format!("Claude Code manual insert: {}", new.title),],
     )?;
 
-    tx.commit()?;
-    debug!(target: "ptask::tasks", pt_id = %pt_id_str, "created");
-
-    Ok(Task {
+    let task = Task {
         id,
-        pt_id: Some(pt_id_str),
+        pt_id: Some(pt_id_str.clone()),
         title: new.title,
         description: new.description,
         priority: new.priority,
@@ -178,7 +219,15 @@ pub fn create_with_extensions(db: &Db, new: NewTask, ext: Extensions) -> Result<
         deadline: new.deadline,
         source_type: new.source_type,
         ai_reasoning: new.ai_reasoning,
-    })
+    };
+    let payload = serde_json::to_value(&task)
+        .map_err(|e| crate::Error::Other(format!("task.created payload: {}", e)))?;
+    record_event_tx(&tx, event_uuid, &task.id, "task.created", &payload)?;
+
+    tx.commit()?;
+    debug!(target: "ptask::tasks", pt_id = %pt_id_str, "created");
+
+    Ok(task)
 }
 
 /// List tasks against an optional DSL filter, optionally intersected with
@@ -420,6 +469,14 @@ pub enum DoneOutcome {
 /// Otherwise the task is set to `status='done'`. Either way an
 /// `interactions` row is logged.
 pub fn mark_done(db: &Db, task: &Task) -> Result<DoneOutcome> {
+    mark_done_with_event(db, task, None)
+}
+
+/// Full-control variant of [`mark_done`]: the `task.completed` /
+/// `task.recurrence_advanced` event commits in the same transaction as the
+/// status flip. `event_uuid` semantics match
+/// [`create_with_extensions_with_event`].
+pub fn mark_done_with_event(db: &Db, task: &Task, event_uuid: Option<&str>) -> Result<DoneOutcome> {
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
     let now = iso_now();
@@ -488,6 +545,17 @@ pub fn mark_done(db: &Db, task: &Task) -> Result<DoneOutcome> {
                 format!("Recurring task advanced to {}", next_iso),
             ],
         )?;
+        record_event_tx(
+            &tx,
+            event_uuid,
+            &task.id,
+            "task.recurrence_advanced",
+            &serde_json::json!({
+                "task_uuid": task.id,
+                "pt_id": task.pt_id,
+                "next_deadline": next_iso,
+            }),
+        )?;
         tx.commit()?;
         return Ok(DoneOutcome::Advanced {
             next_deadline: next_iso,
@@ -502,6 +570,13 @@ pub fn mark_done(db: &Db, task: &Task) -> Result<DoneOutcome> {
         "INSERT INTO interactions (task_id, action, ts, details)
          VALUES (?1, 'status_change', ?2, 'Completed via Claude Code')",
         params![task.id, now],
+    )?;
+    record_event_tx(
+        &tx,
+        event_uuid,
+        &task.id,
+        "task.completed",
+        &serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id }),
     )?;
     tx.commit()?;
     Ok(DoneOutcome::Completed)
@@ -615,6 +690,13 @@ pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
          VALUES (?1, 'priority_change', ?2, ?3)",
         params![task_uuid, now, format!("priority → {}", priority)],
     )?;
+    record_event_tx(
+        &tx,
+        None,
+        task_uuid,
+        "task.updated",
+        &serde_json::json!({ "task_uuid": task_uuid, "priority": priority }),
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -676,16 +758,41 @@ pub fn update_deadline(db: &Db, task_uuid: &str, deadline: Option<&str>) -> Resu
             }
         ],
     )?;
+    record_event_tx(
+        &tx,
+        None,
+        task_uuid,
+        "task.updated",
+        &serde_json::json!({ "task_uuid": task_uuid, "deadline": deadline }),
+    )?;
     tx.commit()?;
     Ok(())
 }
 
 /// Delete a task (and any side-table rows via ON DELETE CASCADE). The row
-/// vanishes; the audit trail in `interactions` is wiped with it. Use with
-/// care.
+/// vanishes; the audit trail in `interactions` is wiped with it, but a
+/// `task.deleted` tombstone lands in `pt_event_log` so delta sync clients
+/// learn about the removal. Use with care.
 pub fn delete_task(db: &Db, task_uuid: &str) -> Result<()> {
-    let conn = db.get()?;
-    conn.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    // Capture the PT-N before the CASCADE wipes pt_extensions.
+    let pt_id: Option<String> = tx
+        .query_row(
+            "SELECT pt_id FROM pt_extensions WHERE task_uuid=?1",
+            [task_uuid],
+            |r| r.get(0),
+        )
+        .optional()?;
+    tx.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
+    record_event_tx(
+        &tx,
+        None,
+        task_uuid,
+        "task.deleted",
+        &serde_json::json!({ "task_uuid": task_uuid, "pt_id": pt_id }),
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -859,6 +966,114 @@ mod tests {
             .unwrap();
         }
         (dir, Db::open(&path).unwrap())
+    }
+
+    fn event_count(db: &Db, event_type: &str) -> i64 {
+        db.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM pt_event_log WHERE event_type=?1",
+                [event_type],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn create_records_task_created_event_in_same_tx() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("local create logs event")).unwrap();
+        db.with_conn(|c| {
+            let (uuid, task_uuid): (String, String) = c.query_row(
+                "SELECT uuid, task_uuid FROM pt_event_log WHERE event_type='task.created'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert!(uuid.starts_with("local:"), "uuid was {}", uuid);
+            assert_eq!(task_uuid, t.id);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn mark_done_records_completed_event() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("done logs event")).unwrap();
+        mark_done(&db, &t).unwrap();
+        assert_eq!(event_count(&db, "task.completed"), 1);
+    }
+
+    #[test]
+    fn update_priority_records_updated_event() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("priority logs event")).unwrap();
+        update_priority(&db, &t.id, 4).unwrap();
+        assert_eq!(event_count(&db, "task.updated"), 1);
+    }
+
+    #[test]
+    fn update_deadline_records_updated_event() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("deadline logs event")).unwrap();
+        update_deadline(&db, &t.id, Some("2026-06-16")).unwrap();
+        update_deadline(&db, &t.id, None).unwrap();
+        assert_eq!(event_count(&db, "task.updated"), 2);
+    }
+
+    #[test]
+    fn delete_records_tombstone_with_pt_id() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("delete logs tombstone")).unwrap();
+        delete_task(&db, &t.id).unwrap();
+        db.with_conn(|c| {
+            let payload: String = c.query_row(
+                "SELECT payload FROM pt_event_log WHERE event_type='task.deleted'",
+                [],
+                |r| r.get(0),
+            )?;
+            let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(v["pt_id"], "PT-1");
+            assert_eq!(v["task_uuid"], t.id);
+            let rows: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+            assert_eq!(rows, 0);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn duplicate_event_uuid_rolls_back_the_whole_mutation() {
+        // The atomicity guarantee: if the event row can't be written (replayed
+        // idempotency uuid), the task mutation must not commit either.
+        let (_dir, db) = fresh_db();
+        let first = create_with_extensions_with_event(
+            &db,
+            NewTask::minimal("first"),
+            Extensions::default(),
+            Some("cmd-replayed"),
+        )
+        .unwrap();
+        let second = create_with_extensions_with_event(
+            &db,
+            NewTask::minimal("second"),
+            Extensions::default(),
+            Some("cmd-replayed"),
+        );
+        assert!(second.is_err(), "duplicate event uuid must fail");
+        db.with_conn(|c| {
+            let rows: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+            assert_eq!(rows, 1, "second task insert must have rolled back");
+            let counter: i64 = c.query_row(
+                "SELECT value FROM pt_counters WHERE name='pt_id'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(counter, 1, "PT-N counter must have rolled back");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(first.pt_id.as_deref(), Some("PT-1"));
     }
 
     #[test]

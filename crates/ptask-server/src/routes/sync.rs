@@ -70,6 +70,10 @@ pub struct SyncResp {
     pub resources: Resources,
     pub sync_status: BTreeMap<String, Value>,
     pub temp_id_mapping: BTreeMap<String, String>,
+    /// Tombstones: task uuids deleted since the client's cursor. Empty on
+    /// full sync (the full task set replaces client state wholesale).
+    #[serde(default)]
+    pub deleted_task_uuids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,30 +114,12 @@ async fn sync(
             status.insert(cmd.uuid.clone(), Value::String("ok".into()));
             continue;
         }
+        // The mutation itself records the event row in its own transaction
+        // (atomic, keyed on cmd.uuid) — no post-hoc event_log::record here.
         match apply_command(&state, cmd) {
             Ok((task_uuid, payload)) => {
                 if let (Some(temp), Some(tu)) = (cmd.temp_id.as_ref(), task_uuid.as_ref()) {
                     temp_map.insert(temp.clone(), tu.clone());
-                }
-                // The mutation has been applied; if the event row can't be
-                // written, the change would be invisible to every delta sync
-                // and replays of this uuid would re-execute. That's a real
-                // (if rare) failure — report it instead of claiming "ok".
-                if let Err(e) = event_log::record(
-                    &state.db,
-                    &cmd.uuid,
-                    task_uuid.as_deref(),
-                    &payload.event_type,
-                    &payload.payload,
-                ) {
-                    warn!(target: "ptask::sync", error = %e, uuid = %cmd.uuid, "event_log record failed");
-                    status.insert(
-                        cmd.uuid.clone(),
-                        serde_json::json!({
-                            "error": format!("applied but event-log record failed: {e}")
-                        }),
-                    );
-                    continue;
                 }
                 // Outbound webhook fan-out (env-driven; no-op if unconfigured).
                 crate::webhooks::dispatch(
@@ -169,17 +155,20 @@ async fn sync(
     // what the previous read-delta-then-cursor order did (the token advanced
     // past events this response never contained).
     let new_cursor = event_log::current_cursor(&state.db).unwrap_or(0);
-    let delta_tasks: Vec<tasks::Task> = if full_sync {
-        tasks::list_all(&state.db).unwrap_or_default()
+    let (delta_tasks, deleted_task_uuids): (Vec<tasks::Task>, Vec<String>) = if full_sync {
+        (tasks::list_all(&state.db).unwrap_or_default(), Vec::new())
     } else {
         let delta_uuids = event_log::changed_task_uuids_since(&state.db, since).unwrap_or_default();
+        let deleted = event_log::deleted_task_uuids_since(&state.db, since).unwrap_or_default();
         let mut rows = Vec::new();
         for u in &delta_uuids {
+            // Deleted tasks legitimately fail the row fetch — they're
+            // reported through the tombstone list instead.
             if let Ok(t) = task_by_uuid(&state.db, u) {
                 rows.push(t);
             }
         }
-        rows
+        (rows, deleted)
     };
 
     (
@@ -189,6 +178,7 @@ async fn sync(
             resources: Resources { tasks: delta_tasks },
             sync_status: status,
             temp_id_mapping: temp_map,
+            deleted_task_uuids,
         }),
     )
         .into_response()
@@ -247,7 +237,7 @@ fn apply_command(
                 energy: None,
                 recurrence: q.recurrence.clone(),
             };
-            let t = tasks::create_with_extensions(&state.db, new, ext)?;
+            let t = tasks::create_with_extensions_with_event(&state.db, new, ext, Some(&cmd.uuid))?;
             let payload = serde_json::to_value(&t)?;
             Ok((
                 Some(t.id.clone()),
@@ -259,7 +249,7 @@ fn apply_command(
         }
         "task_done" => {
             let task = resolve_task(state, &cmd.args)?;
-            let outcome = tasks::mark_done(&state.db, &task)?;
+            let outcome = tasks::mark_done_with_event(&state.db, &task, Some(&cmd.uuid))?;
             let (event_type, payload) = match outcome {
                 DoneOutcome::Completed => (
                     "task.completed".to_string(),
