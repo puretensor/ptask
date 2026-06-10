@@ -91,7 +91,21 @@ async fn sync(
     // Apply commands sequentially. Each command's `uuid` is its idempotency
     // key — replays return "ok" without re-executing.
     for cmd in &req.commands {
-        if let Some(event) = event_log::get_by_uuid(&state.db, &cmd.uuid).unwrap_or(None) {
+        // A failed idempotency lookup must NOT fall through to apply: if the
+        // command was already executed, re-applying double-creates. Surface
+        // the error and let the client retry the whole command instead.
+        let prior = match event_log::get_by_uuid(&state.db, &cmd.uuid) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(target: "ptask::sync", error = %e, uuid = %cmd.uuid, "idempotency lookup failed");
+                status.insert(
+                    cmd.uuid.clone(),
+                    serde_json::json!({ "error": format!("idempotency lookup failed: {e}") }),
+                );
+                continue;
+            }
+        };
+        if let Some(event) = prior {
             replay_temp_mapping(cmd, &event, &mut temp_map);
             status.insert(cmd.uuid.clone(), Value::String("ok".into()));
             continue;
@@ -101,6 +115,10 @@ async fn sync(
                 if let (Some(temp), Some(tu)) = (cmd.temp_id.as_ref(), task_uuid.as_ref()) {
                     temp_map.insert(temp.clone(), tu.clone());
                 }
+                // The mutation has been applied; if the event row can't be
+                // written, the change would be invisible to every delta sync
+                // and replays of this uuid would re-execute. That's a real
+                // (if rare) failure — report it instead of claiming "ok".
                 if let Err(e) = event_log::record(
                     &state.db,
                     &cmd.uuid,
@@ -108,7 +126,14 @@ async fn sync(
                     &payload.event_type,
                     &payload.payload,
                 ) {
-                    warn!(target: "ptask::sync", error = %e, "event_log record failed");
+                    warn!(target: "ptask::sync", error = %e, uuid = %cmd.uuid, "event_log record failed");
+                    status.insert(
+                        cmd.uuid.clone(),
+                        serde_json::json!({
+                            "error": format!("applied but event-log record failed: {e}")
+                        }),
+                    );
+                    continue;
                 }
                 // Outbound webhook fan-out (env-driven; no-op if unconfigured).
                 crate::webhooks::dispatch(
@@ -138,6 +163,12 @@ async fn sync(
             (parsed <= 0, parsed)
         }
     };
+    // Snapshot the cursor BEFORE reading the delta. Events committed by a
+    // concurrent writer between these two reads are then re-delivered on the
+    // next sync (at-least-once) instead of being skipped forever, which is
+    // what the previous read-delta-then-cursor order did (the token advanced
+    // past events this response never contained).
+    let new_cursor = event_log::current_cursor(&state.db).unwrap_or(0);
     let delta_tasks: Vec<tasks::Task> = if full_sync {
         tasks::list_all(&state.db).unwrap_or_default()
     } else {
@@ -150,8 +181,6 @@ async fn sync(
         }
         rows
     };
-
-    let new_cursor = event_log::current_cursor(&state.db).unwrap_or(0);
 
     (
         StatusCode::OK,
