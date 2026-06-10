@@ -91,17 +91,15 @@ async fn handle(
     signature_hex: &str,
 ) -> axum::response::Response {
     let signature_ok = verify_hmac(body, secret, signature_hex);
-    let envelope_json: serde_json::Value =
-        serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
-    let _ = log_webhook(
-        &state.db,
-        Direction::In,
-        source,
-        &envelope_json,
-        signature_ok,
-    );
-
     if !signature_ok {
+        // Audit the rejection, but never persist an unverified body: logging
+        // attacker-controlled payloads verbatim was an unauthenticated
+        // disk-write vector. A fixed-size stub keeps the failure visible.
+        let stub = serde_json::json!({
+            "error": "signature verification failed",
+            "body_bytes": body.len(),
+        });
+        let _ = log_webhook(&state.db, Direction::In, source, &stub, false);
         warn!(target: "ptask::webhook", source, "signature verification failed");
         return (
             StatusCode::UNAUTHORIZED,
@@ -109,6 +107,9 @@ async fn handle(
         )
             .into_response();
     }
+    let envelope_json: serde_json::Value =
+        serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+    let _ = log_webhook(&state.db, Direction::In, source, &envelope_json, true);
 
     let event: PushEvent = match serde_json::from_slice(body) {
         Ok(e) => e,

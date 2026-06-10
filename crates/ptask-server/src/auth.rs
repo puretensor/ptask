@@ -13,28 +13,52 @@ use std::sync::Once;
 use tracing::warn;
 
 const API_TOKEN_ENV: &str = "PTASK_API_TOKEN";
+const METRICS_TOKEN_ENV: &str = "PTASK_METRICS_TOKEN";
 const TOKEN_HEADER: &str = "x-ptask-token";
 
 pub fn require_write_token(headers: &HeaderMap) -> Option<Response> {
-    let expected = configured_token()?;
+    let expected = configured_token(API_TOKEN_ENV)?;
     match presented_token(headers) {
         Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => None,
-        _ => Some(
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "missing or invalid API token"})),
-            )
-                .into_response(),
-        ),
+        _ => Some(unauthorized()),
     }
 }
 
-/// Read-path gate. Same `PTASK_API_TOKEN` as the write routes — used by
-/// `/metrics`, which leaks task/store counts. Aliased to `require_write_token`
-/// rather than duplicated so the enforce-if-configured + constant-time logic
-/// lives in exactly one place.
+/// Read-path gate, used by `/metrics` (leaks task/store counts but mutates
+/// nothing). Accepts `PTASK_METRICS_TOKEN` *or* the write token, so a
+/// Prometheus scraper can hold a read-only credential instead of the
+/// fleet-wide write token. Enforce-if-configured: with neither env set the
+/// scrape stays open (back-compat); with only `PTASK_API_TOKEN` set the
+/// behaviour is unchanged from before.
 pub fn require_read_token(headers: &HeaderMap) -> Option<Response> {
-    require_write_token(headers)
+    let allowed: Vec<String> = [
+        configured_token(METRICS_TOKEN_ENV),
+        configured_token(API_TOKEN_ENV),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if allowed.is_empty() {
+        return None;
+    }
+    match presented_token(headers) {
+        Some(token)
+            if allowed
+                .iter()
+                .any(|t| constant_time_eq(token.as_bytes(), t.as_bytes())) =>
+        {
+            None
+        }
+        _ => Some(unauthorized()),
+    }
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({"error": "missing or invalid API token"})),
+    )
+        .into_response()
 }
 
 /// Emit a single loud warning at startup if `PTASK_API_TOKEN` is unset, so an
@@ -43,7 +67,7 @@ pub fn require_read_token(headers: &HeaderMap) -> Option<Response> {
 /// posture: auth enforces only once a token is configured.
 pub fn warn_if_unconfigured() {
     static WARNED: Once = Once::new();
-    if configured_token().is_none() {
+    if configured_token(API_TOKEN_ENV).is_none() {
         WARNED.call_once(|| {
             warn!(
                 target: "ptask::auth",
@@ -70,8 +94,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn configured_token() -> Option<String> {
-    std::env::var(API_TOKEN_ENV)
+fn configured_token(env: &str) -> Option<String> {
+    std::env::var(env)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
