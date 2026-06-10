@@ -16,9 +16,26 @@ use crate::AppState;
 use hmac::{Hmac, Mac};
 use ptask_core::webhook_log::{Direction, record};
 use sha2::Sha256;
+use std::sync::OnceLock;
+use std::time::Duration;
 use tracing::{info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Shared outbound client. Dispatch is awaited inline in the originating
+/// request, so a hung subscriber must not be able to stall `/sync` forever:
+/// reqwest's default client has NO timeout. Bound both connect and total
+/// request time, and reuse the client (connection pool) across dispatches.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("reqwest client construction cannot fail with static config")
+    })
+}
 
 #[derive(Default)]
 pub struct WebhookConfig {
@@ -80,7 +97,7 @@ pub async fn dispatch(
     });
     let body = serde_json::to_vec(&envelope).unwrap_or_default();
     let sig = sign(&body, &cfg.secret);
-    let client = reqwest::Client::new();
+    let client = http_client();
 
     for url in &cfg.urls {
         let mut req = client

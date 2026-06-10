@@ -348,6 +348,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_token_is_stable_when_idle() {
+        // Guards the cursor-before-delta snapshot order: the returned token
+        // must cover the request's own commands, so an idle re-sync with that
+        // token yields an empty delta (no perpetual self-redelivery) and the
+        // same token back.
+        let _env = ENV_LOCK.lock().await;
+        let db = open_test_db();
+        let app = router(AppState { db: db.clone() });
+
+        let req1 = serde_json::json!({
+            "sync_token": "*",
+            "commands": [{
+                "type": "task_create",
+                "uuid": "cmd-idle-1",
+                "temp_id": "tmp-idle",
+                "args": { "text": "water plants" }
+            }]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req1).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = parsed["sync_token"].as_str().unwrap().to_string();
+
+        let req2 = serde_json::json!({ "sync_token": token, "commands": [] });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req2).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            parsed["resources"]["tasks"].as_array().unwrap().len(),
+            0,
+            "idle re-sync must not re-deliver the client's own events"
+        );
+        assert_eq!(parsed["sync_token"].as_str().unwrap(), token);
+    }
+
+    #[tokio::test]
     async fn sync_full_sync_returns_existing_tasks_without_events() {
         // Gated /sync route; hold ENV_LOCK against concurrent token-setting test.
         let _env = ENV_LOCK.lock().await;
