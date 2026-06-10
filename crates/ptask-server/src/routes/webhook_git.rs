@@ -159,8 +159,13 @@ async fn handle(
                     continue;
                 }
             }
+            // mark_done_with_event records the sync event atomically with
+            // the status flip, keyed on the deterministic git event uuid —
+            // the pre-check above plus the UNIQUE constraint keep replayed
+            // deliveries idempotent. The richer source/commit context still
+            // travels in the outbound webhook envelope.
             match tasks::resolve(&state.db, &pt_id) {
-                Ok(t) => match tasks::mark_done(&state.db, &t) {
+                Ok(t) => match tasks::mark_done_with_event(&state.db, &t, Some(&event_uuid)) {
                     Ok(DoneOutcome::Completed) => {
                         let payload = serde_json::json!({
                             "task_uuid": t.id,
@@ -168,14 +173,6 @@ async fn handle(
                             "source": source,
                             "commit_id": commit.id,
                         });
-                        record_task_event(
-                            state,
-                            &event_uuid,
-                            &t.id,
-                            "task.completed",
-                            &payload,
-                            &mut errors,
-                        );
                         crate::webhooks::dispatch(state, "task.completed", Some(&t.id), &payload)
                             .await;
                         closed.push(format!("{}=done", pt_id));
@@ -188,14 +185,6 @@ async fn handle(
                             "commit_id": commit.id,
                             "next_deadline": next_deadline,
                         });
-                        record_task_event(
-                            state,
-                            &event_uuid,
-                            &t.id,
-                            "task.recurrence_advanced",
-                            &payload,
-                            &mut errors,
-                        );
                         crate::webhooks::dispatch(
                             state,
                             "task.recurrence_advanced",
@@ -227,25 +216,6 @@ async fn handle(
         })),
     )
         .into_response()
-}
-
-fn record_task_event(
-    state: &AppState,
-    event_uuid: &str,
-    task_uuid: &str,
-    event_type: &str,
-    payload: &serde_json::Value,
-    errors: &mut Vec<String>,
-) {
-    if let Err(e) = event_log::record(&state.db, event_uuid, Some(task_uuid), event_type, payload) {
-        warn!(
-            target: "ptask::webhook",
-            event_uuid,
-            error = %e,
-            "event_log record failed"
-        );
-        errors.push(format!("{}: event_log: {}", event_uuid, e));
-    }
 }
 
 fn close_event_uuid(source: &str, commit: &PushCommit, pt_id: &str) -> String {
