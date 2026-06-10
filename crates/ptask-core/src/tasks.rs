@@ -621,6 +621,9 @@ pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
 
 /// Set or clear a task deadline. Logs a `deadline_change` interaction.
 pub fn update_deadline(db: &Db, task_uuid: &str, deadline: Option<&str>) -> Result<()> {
+    if let Some(d) = deadline {
+        parse_iso_zoned(d)?;
+    }
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
@@ -970,6 +973,15 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn update_deadline_rejects_non_iso_deadline() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("validate me")).unwrap();
+
+        let err = update_deadline(&db, &t.id, Some("not-a-date")).unwrap_err();
+        assert!(format!("{}", err).contains("parse iso zoned"));
     }
 
     #[test]

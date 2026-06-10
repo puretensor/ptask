@@ -40,6 +40,18 @@ Create a task. The free-text title runs through the quick-add parser
 
 Mark done by `PT-N`, bare integer `42`, or title substring.
 
+### `pt priority <query> <level>` (alias `pt pri`)
+
+Promote/demote a task's priority: `critical | urgent | high | normal | low`
+or `1..=5`. Rescores immediately so `pt next` ordering reflects the change.
+
+### `pt edit <query> [--deadline ISO | --clear-deadline]` (alias `pt update`)
+
+Edit task fields. Currently supported: set the deadline to an ISO
+date/datetime, or clear it. Recurring tasks reject deadline clearing;
+setting a deadline updates their next occurrence. Deadline feeds
+`score_urgency`, so a rescore runs immediately after the change.
+
 ### `pt next [-n LIMIT]`
 
 DAG-ready tasks: every `depends_on` predecessor is `done` (or missing).
