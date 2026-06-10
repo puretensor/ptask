@@ -732,10 +732,14 @@ fn cmd_distill(db: &Db, a: DistillArgs) -> Result<()> {
             "distill FAILED (exit={:?}, {}ms)",
             report.exit_code, report.duration_ms
         );
+        if let Some(reason) = &report.soft_failure {
+            eprintln!("soft failure: {}", reason);
+        }
         if !report.stderr_tail.is_empty() {
             eprintln!("--- stderr tail ---\n{}", report.stderr_tail);
         }
-        std::process::exit(report.exit_code.unwrap_or(1));
+        // A soft failure carries exit_code Some(0); never exit 0 on failure.
+        std::process::exit(report.exit_code.filter(|&c| c != 0).unwrap_or(1));
     }
 }
 

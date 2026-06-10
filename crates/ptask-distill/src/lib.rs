@@ -41,6 +41,10 @@ pub struct RunReport {
     pub duration_ms: u128,
     pub new_tasks: usize,
     pub backfilled_pt_ids: usize,
+    /// Set when the subprocess exited 0 but its output carries an
+    /// all-stages-failed signature (see [`detect_soft_failure`]). A soft
+    /// failure forces `success = false`.
+    pub soft_failure: Option<String>,
 }
 
 /// Where the legacy Python lives. Override via env for fleet rollouts.
@@ -79,6 +83,12 @@ pub fn run(db: &Db, args: &[&str]) -> Result<RunReport> {
     };
     let stdout_lines = stdout.lines().count();
     let stderr_lines = stderr.lines().count();
+    let soft_failure = if success {
+        detect_soft_failure(&stdout, &stderr)
+    } else {
+        None
+    };
+    let success = success && soft_failure.is_none();
 
     let after_tasks = task_uuid_set(db).context("snapshotting tasks after distill")?;
     let mut new_task_uuids: Vec<String> = after_tasks.difference(&before_tasks).cloned().collect();
@@ -98,6 +108,7 @@ pub fn run(db: &Db, args: &[&str]) -> Result<RunReport> {
         duration_ms,
         new_tasks: new_task_uuids.len(),
         backfilled_pt_ids,
+        soft_failure,
     };
 
     let run_uuid = format!("distill:{}", uuid::Uuid::new_v4());
@@ -127,12 +138,44 @@ pub fn run(db: &Db, args: &[&str]) -> Result<RunReport> {
             target: "ptask::distill",
             exit = ?report.exit_code,
             duration_ms,
+            soft_failure = report.soft_failure.as_deref().unwrap_or(""),
             stderr_tail = %report.stderr_tail,
             "distill failed"
         );
     }
 
     Ok(report)
+}
+
+/// Failure signatures the Python exit code hides.
+///
+/// The shim's contract with `ingest.distill` is "exit 0 = pipeline healthy",
+/// but the Python pipeline logs stage errors and keeps going: a run where
+/// every cluster fails LLM consolidation (e.g. expired GOOGLE_API_KEY) still
+/// exits 0 while producing zero tasks. Scan captured output for the
+/// all-failed markers so such runs land as `distill.failed` and the systemd
+/// unit reports failure. Partial failures (some clusters consolidated) stay
+/// successful — output is degraded, not absent.
+fn detect_soft_failure(stdout: &str, stderr: &str) -> Option<String> {
+    for line in stderr.lines().chain(stdout.lines()) {
+        if let Some((failed, total)) = parse_failed_clusters(line)
+            && failed == total
+            && total > 0
+        {
+            return Some(format!(
+                "all {total} clusters failed consolidation — stage 5 produced nothing"
+            ));
+        }
+    }
+    None
+}
+
+/// Parse the Python `Stage 5: F/T clusters failed consolidation` warning.
+fn parse_failed_clusters(line: &str) -> Option<(u64, u64)> {
+    let idx = line.find(" clusters failed consolidation")?;
+    let frac = line[..idx].split_whitespace().last()?;
+    let (f, t) = frac.split_once('/')?;
+    Some((f.parse().ok()?, t.parse().ok()?))
 }
 
 fn task_uuid_set(db: &Db) -> Result<HashSet<String>> {
@@ -212,6 +255,82 @@ mod tests {
         let t = tail(&s, 5);
         // No panic == passing this test.
         assert!(t.starts_with('…'));
+    }
+
+    #[test]
+    fn soft_failure_detects_all_clusters_failed() {
+        let stderr = "2026-06-10 12:00:00 WARNING puretensor-tasks.consolidate: \
+                      Stage 5: 8/8 clusters failed consolidation";
+        let reason = detect_soft_failure("", stderr).expect("should detect");
+        assert!(reason.contains("all 8 clusters"));
+    }
+
+    #[test]
+    fn soft_failure_ignores_partial_cluster_failures() {
+        let stderr = "WARNING: Stage 5: 3/8 clusters failed consolidation";
+        assert_eq!(detect_soft_failure("", stderr), None);
+    }
+
+    #[test]
+    fn soft_failure_ignores_clean_output() {
+        let stderr = "INFO: === Distillation pipeline DONE: 4 canonical tasks created ===";
+        assert_eq!(detect_soft_failure("", stderr), None);
+        assert_eq!(detect_soft_failure("", ""), None);
+    }
+
+    #[test]
+    fn parse_failed_clusters_handles_malformed_lines() {
+        assert_eq!(parse_failed_clusters("clusters failed consolidation"), None);
+        assert_eq!(
+            parse_failed_clusters("x/y clusters failed consolidation"),
+            None
+        );
+        assert_eq!(
+            parse_failed_clusters("Stage 5: 0/0 clusters failed consolidation"),
+            Some((0, 0))
+        );
+        // 0/0 must not trip the all-failed gate (total > 0 required).
+        assert_eq!(
+            detect_soft_failure("", "Stage 5: 0/0 clusters failed consolidation"),
+            None
+        );
+    }
+
+    #[test]
+    fn run_flags_soft_failure_when_all_clusters_fail_but_exit_is_zero() {
+        let _env = env_lock();
+        let (root, _db_path, db) = fake_python_root_and_db(
+            r#"import sys
+print("collected 100 items")
+print("Stage 5: 8/8 clusters failed consolidation", file=sys.stderr)
+sys.exit(0)
+"#,
+        );
+        unsafe {
+            std::env::set_var("PTASK_DISTILL_PY_ROOT", &root);
+        }
+
+        let report = run(&db, &[]).unwrap();
+        assert_eq!(report.exit_code, Some(0));
+        assert!(!report.success, "all-clusters-failed must not count as ok");
+        assert!(report.soft_failure.is_some());
+        db.with_conn(|c| {
+            let failed: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM pt_event_log WHERE event_type='distill.failed'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(failed, 1);
+            Ok(())
+        })
+        .unwrap();
+
+        unsafe {
+            std::env::remove_var("PTASK_DISTILL_PY_ROOT");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
