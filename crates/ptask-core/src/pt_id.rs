@@ -131,25 +131,19 @@ mod tests {
     fn setup_db_with_tasks(tasks: &[(&str, &str, &str)]) -> (tempfile::TempDir, Db) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
-        {
-            let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE tasks (
-                    id         TEXT PRIMARY KEY,
-                    title      TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );",
-            )
-            .unwrap();
+        // V008 bootstraps the production-shape legacy schema — no stub.
+        let db = Db::open(&path).unwrap();
+        db.with_conn(|conn| {
             for (id, title, ts) in tasks {
                 conn.execute(
-                    "INSERT INTO tasks (id, title, created_at) VALUES (?1, ?2, ?3)",
+                    "INSERT INTO tasks (id, title, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?3)",
                     params![id, title, ts],
-                )
-                .unwrap();
+                )?;
             }
-        }
-        let db = Db::open(&path).unwrap();
+            Ok(())
+        })
+        .unwrap();
         (dir, db)
     }
 
@@ -196,7 +190,8 @@ mod tests {
         let mut conn = db.get().unwrap();
         // Add a fresh row to `tasks` then mint.
         conn.execute(
-            "INSERT INTO tasks (id, title, created_at) VALUES ('uuid-new', 'new', '2026-02-01T00:00:00Z')",
+            "INSERT INTO tasks (id, title, created_at, updated_at)
+             VALUES ('uuid-new', 'new', '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z')",
             [],
         )
         .unwrap();

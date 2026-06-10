@@ -349,8 +349,9 @@ sys.exit(0)
         let (root, db_path, db) = fake_python_root_and_db(
             r#"import os, sqlite3
 con = sqlite3.connect(os.environ["DB_PATH"])
-con.execute("INSERT INTO tasks (id, title, created_at) VALUES (?, ?, ?)",
-            ("py-task-1", "distilled from python", "2026-05-13T12:00:00+00:00"))
+con.execute("INSERT INTO tasks (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("py-task-1", "distilled from python", "2026-05-13T12:00:00+00:00",
+             "2026-05-13T12:00:00+00:00"))
 con.commit()
 print("created one task")
 "#,
@@ -446,24 +447,16 @@ print("created one task")
         std::fs::write(ingest.join("distill.py"), script).unwrap();
 
         let db_path = root.join("tasks.db");
-        {
-            let conn = rusqlite::Connection::open(&db_path).unwrap();
-            conn.execute(
-                "CREATE TABLE tasks (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                 )",
-                [],
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO tasks (id, title, created_at) VALUES (?1, ?2, ?3)",
-                params!["existing", "existing task", "2026-05-12T12:00:00+00:00"],
-            )
-            .unwrap();
-        }
+        // V008 bootstraps the production-shape legacy schema — no stub.
         let db = Db::open(&db_path).unwrap();
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO tasks (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+                params!["existing", "existing task", "2026-05-12T12:00:00+00:00"],
+            )?;
+            Ok(())
+        })
+        .unwrap();
         ptask_core::pt_id::backfill_all(&db).unwrap();
         (root, db_path, db)
     }
