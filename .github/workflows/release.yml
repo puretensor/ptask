@@ -1,13 +1,14 @@
 name: release
 
 # Fires when an operator pushes a `vX.Y.Z` tag. Builds the `pt` binary
-# for x86_64-unknown-linux-gnu, generates a SHA-256 manifest, and
-# attaches both to the GitHub Release.
+# for x86_64-unknown-linux-gnu AND aarch64-unknown-linux-gnu (mon3),
+# generates SHA-256 manifests, and attaches everything to the GitHub
+# Release. Built on ubuntu-22.04 so the glibc floor (2.35) covers mon2.
 #
 # Musl static-binary target deferred: candle + tokenizers + onig need
 # musl-clean build env validation that lives on the workstation, not in
 # CI. Once `cargo build --target x86_64-unknown-linux-musl --release`
-# succeeds locally, swap the target below and drop `RUSTFLAGS`.
+# succeeds locally, add the target to the matrix.
 
 on:
   push:
@@ -20,36 +21,56 @@ env:
 
 jobs:
   build:
-    name: build x86_64-unknown-linux-gnu
+    name: build ${{ matrix.target }}
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            rustflags: "-C target-cpu=x86-64-v3"
+            strip: strip
+          - target: aarch64-unknown-linux-gnu
+            # mon3 (arm64): no target-cpu narrowing.
+            rustflags: ""
+            strip: aarch64-linux-gnu-strip
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu
+          targets: ${{ matrix.target }}
+
+      - name: install aarch64 cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-x86_64-gnu
+          key: release-${{ matrix.target }}
 
       - name: cargo build --release
-        run: cargo build --release --bin pt
+        run: cargo build --release --bin pt --target ${{ matrix.target }} --locked
         env:
-          RUSTFLAGS: "-C target-cpu=x86-64-v3"
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
 
       - name: strip + checksum
         run: |
-          strip target/release/pt
+          ${{ matrix.strip }} target/${{ matrix.target }}/release/pt
           mkdir -p dist
-          mv target/release/pt dist/pt-x86_64-unknown-linux-gnu
+          mv target/${{ matrix.target }}/release/pt dist/pt-${{ matrix.target }}
           cd dist
-          sha256sum pt-x86_64-unknown-linux-gnu > pt-x86_64-unknown-linux-gnu.sha256
+          sha256sum pt-${{ matrix.target }} > pt-${{ matrix.target }}.sha256
 
       - name: upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pt-x86_64-unknown-linux-gnu
+          name: pt-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
@@ -84,16 +105,18 @@ jobs:
           body: |
             ## pTask ${{ github.ref_name }}
 
-            Single-binary release. Linux x86_64 (glibc, x86-64-v3 baseline).
+            Single-binary release.
+            - `pt-x86_64-unknown-linux-gnu` — Linux x86_64 (glibc ≥ 2.35, x86-64-v3 baseline)
+            - `pt-aarch64-unknown-linux-gnu` — Linux arm64 (mon3)
 
             ### Verifying
             ```
-            sha256sum -c pt-x86_64-unknown-linux-gnu.sha256
+            sha256sum -c pt-<target>.sha256
             ```
 
             ### Install
             ```
-            curl -L -o pt https://github.com/puretensor/ptask/releases/download/${{ github.ref_name }}/pt-x86_64-unknown-linux-gnu
+            curl -L -o pt https://github.com/puretensor/ptask/releases/download/${{ github.ref_name }}/pt-$(uname -m)-unknown-linux-gnu
             chmod +x pt && sudo mv pt /usr/local/bin/
             pt --version
             ```
