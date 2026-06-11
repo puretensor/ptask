@@ -35,3 +35,11 @@ This repo is built phase-by-phase by Claude on `main`. After each phase, Codex p
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Web dashboard (`dashboard/`)
+
+The official ptask web UI — the **PTASK Triage Cockpit**, a read-only Python sidecar
+(`dashboard/server.py` + `dashboard/www/`) over the `pt` task DB. Absorbed from the former
+standalone `ptask-dashboard` repo in v1.6.0 (88→30 consolidation). Runs via the
+`ptask-dashboard.service` user unit (`WorkingDirectory=~/ptask/dashboard`); secrets stay in
+`~/puretensor-tasks/.dashboard.env`.

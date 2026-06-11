@@ -1,0 +1,10 @@
+# Never commit task data or secrets
+*.db
+*.db-wal
+*.db-shm
+*.env
+.dashboard.env
+*secret*
+__pycache__/
+*.pyc
+.DS_Store

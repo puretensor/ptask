@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="mission">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PTASK · Triage Cockpit</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMTAwIDEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9InB0ZyIgeDE9IjAlIiB5MT0iMCUiIHgyPSIxMDAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzAwRDRBQSIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzAwODBGRiIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHg9IjIiIHk9IjIiIHdpZHRoPSI5NiIgaGVpZ2h0PSI5NiIgcng9IjIyIiBmaWxsPSIjMGQxNjIyIiBzdHJva2U9IiMxZDJjM2QiIHN0cm9rZS13aWR0aD0iMiIvPjxwYXRoIGQ9Ik0yMCAyNCBIODAgTDU3IDU0IFY3OCBMNDMgNzAgVjU0IFoiIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNwdGcpIiBzdHJva2Utd2lkdGg9IjUuNSIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjUwIiBjeT0iMjQiIHI9IjAiIGZpbGw9InVybCgjcHRnKSIvPjwvc3ZnPg==">
+<style>
+/* ===================================================================== THEME
+   Four runtime-switchable skins via [data-theme] on <html>. Every visual token
+   is a CSS custom property so the whole board re-skins instantly + animated.
+   ===================================================================== */
+:root{
+  --gap:14px; --radius:14px; --speed:.45s;
+  --teal:#00D4AA; --blue:#0080FF;
+  --p5:#ff3b5c; --p4:#ff9f43; --p3:#ffd93d; --p2:#4dabf7; --p1:#8a8aa8;
+}
+/* ---- Mission Control (dark telemetry) ---- */
+[data-theme="mission"]{
+  --bg:#0a0a0f; --bg2:#0f0f17; --panel:#13131f; --panel2:#181826;
+  --border:#242438; --text:#eef0f6; --muted:#8a8aa8; --dim:#5a5a72;
+  --accent:var(--teal); --accent2:var(--blue);
+  --font:'JetBrains Mono','SF Mono','Fira Code',ui-monospace,monospace;
+  --font-head:var(--font);
+  --shadow:0 8px 30px rgba(0,0,0,.5); --card-bg:var(--panel);
+  --glow:0 0 18px rgba(0,212,170,.35); --chip-radius:6px;
+  --header-bg:linear-gradient(180deg,#1a252f,#0f0f17);
+  --grad:linear-gradient(90deg,var(--teal),var(--blue));
+  --backdrop:none; --card-border:1px solid var(--border);
+  --uppercase:uppercase; --letter:.04em;
+}
+/* ---- Crystal / Glass (glassmorphism) ---- */
+[data-theme="crystal"]{
+  --bg:#0b1622; --bg2:#0e1b2b; --panel:rgba(255,255,255,.06); --panel2:rgba(255,255,255,.09);
+  --border:rgba(255,255,255,.14); --text:#eaf6ff; --muted:#9fc0d8; --dim:#6f93ac;
+  --accent:var(--teal); --accent2:var(--blue);
+  --font:'Inter','Segoe UI',system-ui,sans-serif; --font-head:var(--font);
+  --shadow:0 10px 40px rgba(0,40,80,.45);
+  --card-bg:rgba(255,255,255,.06);
+  --glow:0 0 30px rgba(0,212,170,.4); --chip-radius:20px;
+  --header-bg:linear-gradient(135deg,rgba(0,212,170,.18),rgba(0,128,255,.18));
+  --grad:linear-gradient(90deg,var(--teal),var(--blue));
+  --backdrop:blur(18px) saturate(140%); --card-border:1px solid rgba(255,255,255,.14);
+  --uppercase:none; --letter:0;
+}
+[data-theme="crystal"] body{
+  background:
+    radial-gradient(900px 500px at 12% -10%,rgba(0,212,170,.22),transparent 60%),
+    radial-gradient(900px 600px at 100% 0%,rgba(0,128,255,.22),transparent 55%),
+    linear-gradient(160deg,#0b1622,#0a1018);
+}
+/* ---- LCARS (Star Trek ops console) ---- */
+[data-theme="lcars"]{
+  --bg:#000; --bg2:#0a0a0a; --panel:#15151c; --panel2:#1d1d28;
+  --border:#000; --text:#ffd58c; --muted:#cc99cc; --dim:#9a7bb0;
+  --accent:#ff9f43; --accent2:#cc88ff;
+  --p5:#ff5544; --p4:#ff9f43; --p3:#ffcc66; --p2:#99ccff; --p1:#cc99cc;
+  --font:'Antonio','Arial Narrow',sans-serif; --font-head:'Antonio','Arial Narrow',sans-serif;
+  --shadow:none; --card-bg:#15151c;
+  --glow:none; --chip-radius:0 14px 14px 0;
+  --header-bg:#000; --grad:linear-gradient(90deg,#ff9f43,#cc88ff);
+  --backdrop:none; --card-border:none;
+  --uppercase:uppercase; --letter:.06em;
+}
+/* ---- Executive (light minimal) ---- */
+[data-theme="exec"]{
+  --bg:#f4f6f9; --bg2:#eef1f5; --panel:#ffffff; --panel2:#f8fafc;
+  --border:#e2e8f0; --text:#1a252f; --muted:#64748b; --dim:#94a3b8;
+  --accent:#0080FF; --accent2:#00b894;
+  --font:'Inter','Segoe UI',system-ui,sans-serif; --font-head:var(--font);
+  --shadow:0 1px 3px rgba(16,42,67,.08),0 4px 16px rgba(16,42,67,.06);
+  --card-bg:#fff; --glow:0 0 0 3px rgba(0,128,255,.12); --chip-radius:8px;
+  --header-bg:linear-gradient(180deg,#1a252f,#2C3E50);
+  --grad:linear-gradient(90deg,#00D4AA,#0080FF);
+  --backdrop:none; --card-border:1px solid var(--border);
+  --uppercase:none; --letter:0;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--text); font-family:var(--font);
+  font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased;
+  transition:background var(--speed),color var(--speed);
+  padding-bottom:40px;
+}
+a{color:var(--accent);text-decoration:none}
+.wrap{max-width:1500px;margin:0 auto;padding:0 18px}
+.skip{position:fixed;left:14px;top:14px;z-index:100;background:var(--accent);color:#001b16;font-weight:800;padding:8px 12px;border-radius:8px;transform:translateY(-160%);transition:transform .2s}
+.skip:focus{transform:translateY(0)}
+
+/* ----------------------------------------------------------------- header */
+header{
+  background:var(--header-bg); backdrop-filter:var(--backdrop);
+  border-bottom:1px solid var(--border);
+  position:sticky; top:0; z-index:50;
+  transition:background var(--speed);
+}
+[data-theme="lcars"] header{border-bottom:4px solid #ff9f43}
+.hdr{display:flex;align-items:center;gap:16px;padding:12px 18px;max-width:1500px;margin:0 auto;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:12px}
+.cube{width:34px;height:34px;flex:none;filter:drop-shadow(0 0 8px rgba(0,212,170,.5))}
+.brandtxt{display:flex;flex-direction:column;line-height:1.05}
+.brandtxt b{font-family:var(--font-head);font-size:18px;letter-spacing:.14em;color:#fff;font-weight:800}
+.brandtxt small{font-size:9px;letter-spacing:.34em;color:var(--teal);text-transform:uppercase}
+.accentline{height:3px;background:var(--grad);width:100%}
+
+.clock{margin-left:6px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.spacer{flex:1}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{
+  display:flex;align-items:center;gap:6px;padding:5px 11px;border-radius:var(--chip-radius);
+  background:var(--panel);border:var(--card-border);font-size:12px;font-weight:600;
+  text-transform:var(--uppercase);letter-spacing:var(--letter);white-space:nowrap;
+}
+.chip b{font-size:15px}
+.chip.crit{color:var(--p5);border-color:var(--p5)}
+.chip.urg{color:var(--p4)}
+.chip.over{color:var(--p5)}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}
+
+/* theme switcher */
+.themes{display:flex;gap:4px;background:var(--panel);border:var(--card-border);border-radius:var(--chip-radius);padding:3px}
+.themes button{
+  font-family:var(--font);font-size:11px;font-weight:600;cursor:pointer;
+  background:transparent;color:var(--muted);border:none;border-radius:calc(var(--chip-radius) - 2px);
+  padding:5px 9px;text-transform:var(--uppercase);letter-spacing:var(--letter);transition:all .2s;
+}
+.themes button:hover{color:var(--text)}
+.themes button.on{background:var(--grad);color:#fff;box-shadow:var(--glow)}
+
+/* ------------------------------------------------------------------ layout */
+section{margin-top:22px}
+.sec-h{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.sec-h h2{font-family:var(--font-head);font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.14em;color:var(--muted)}
+.sec-h .ln{flex:1;height:1px;background:var(--border)}
+.sec-h .ct{font-size:12px;color:var(--dim)}
+
+/* critical strip */
+.crit-strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:var(--gap)}
+.ccard{
+  background:var(--card-bg);backdrop-filter:var(--backdrop);
+  border:var(--card-border);border-left:4px solid var(--p5);
+  border-radius:var(--radius);padding:14px 16px;position:relative;overflow:hidden;
+  box-shadow:var(--shadow);transition:transform .2s,box-shadow .2s;
+}
+[data-theme="lcars"] .ccard{border-radius:4px 18px 18px 4px;border-left:10px solid var(--p5)}
+.ccard:hover{transform:translateY(-2px);box-shadow:var(--glow),var(--shadow)}
+.ccard .scorebar{position:absolute;top:0;right:0;height:100%;width:4px;background:var(--grad);opacity:.5}
+.ccard h3{font-size:14px;font-weight:600;margin-bottom:8px;padding-right:8px;line-height:1.3}
+.ccard .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--muted)}
+.score{font-family:var(--font);font-weight:700;color:var(--accent);font-size:12px}
+.scoremini{display:inline-block;height:5px;width:54px;border-radius:3px;background:var(--panel2);overflow:hidden;vertical-align:middle}
+.scoremini i{display:block;height:100%;background:var(--grad)}
+
+/* priority badge */
+.pbadge{font-family:var(--font);font-weight:800;font-size:10px;padding:2px 7px;border-radius:5px;color:#0a0a0f}
+.p5{background:var(--p5)} .p4{background:var(--p4)} .p3{background:var(--p3)} .p2{background:var(--p2);color:#fff} .p1{background:var(--p1);color:#fff}
+[data-theme="exec"] .p5,[data-theme="exec"] .p4{color:#fff}
+
+.due{padding:2px 7px;border-radius:5px;background:var(--panel2);font-size:10px;font-weight:600}
+.due.over{background:rgba(255,59,92,.18);color:var(--p5)}
+.due.soon{background:rgba(255,159,67,.18);color:var(--p4)}
+.age{color:var(--dim);font-size:10px}
+
+.btn-done{
+  margin-left:auto;cursor:pointer;background:transparent;border:1px solid var(--border);
+  color:var(--muted);border-radius:6px;width:24px;height:24px;font-size:13px;line-height:1;
+  transition:all .15s;flex:none;
+}
+.btn-done:hover{background:var(--teal);color:#04211b;border-color:var(--teal)}
+
+/* priority stepper (promote ▲ / demote ▼) */
+.pctl{display:inline-flex;align-items:center;gap:4px}
+.psteps{display:inline-flex;flex-direction:column;gap:2px;vertical-align:middle}
+.pstep{
+  cursor:pointer;background:transparent;border:1px solid var(--border);color:var(--muted);
+  border-radius:4px;width:20px;height:13px;font-size:9px;line-height:1;padding:0;
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.pstep:hover{background:var(--accent);color:#04211b;border-color:var(--accent)}
+.pstep.off{opacity:.22;cursor:default;pointer-events:none}
+[data-theme="lcars"] .pstep{border-radius:0 6px 6px 0}
+[data-theme="exec"] .pstep:hover{color:#fff}
+
+/* lanes */
+.lanes{display:grid;grid-template-columns:repeat(5,1fr);gap:var(--gap)}
+@media(max-width:1100px){.lanes{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:620px){.lanes{grid-template-columns:1fr}.crit-strip{grid-template-columns:1fr}}
+.lane{background:var(--bg2);border:var(--card-border);border-radius:var(--radius);padding:10px;min-height:120px}
+[data-theme="crystal"] .lane{background:rgba(255,255,255,.03)}
+.lane-h{display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:4px 6px}
+.lane-h .lbl{font-family:var(--font-head);font-weight:800;font-size:12px;letter-spacing:.1em;text-transform:uppercase}
+.lane-h .n{margin-left:auto;font-size:12px;color:var(--dim);font-weight:700}
+.lane.l5 .lbl{color:var(--p5)} .lane.l4 .lbl{color:var(--p4)} .lane.l3 .lbl{color:var(--p3)} .lane.l2 .lbl{color:var(--p2)} .lane.l1 .lbl{color:var(--p1)}
+.tcard{
+  background:var(--card-bg);backdrop-filter:var(--backdrop);border:var(--card-border);
+  border-radius:10px;padding:9px 11px;margin-bottom:8px;font-size:12px;cursor:default;
+  transition:transform .15s,box-shadow .15s;position:relative;
+}
+.tcard:hover{transform:translateX(3px);box-shadow:var(--glow)}
+.tcard .tt{line-height:1.3;margin-bottom:6px}
+.tcard .tm{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.lane .more{text-align:center;color:var(--dim);font-size:11px;padding:6px;cursor:pointer}
+.lane .more:hover{color:var(--accent)}
+
+/* timeline */
+.timeline{background:var(--card-bg);border:var(--card-border);border-radius:var(--radius);padding:18px 16px;backdrop-filter:var(--backdrop);box-shadow:var(--shadow);overflow-x:auto}
+.tl-track{position:relative;height:8px;background:var(--panel2);border-radius:4px;margin:30px 10px 44px}
+.tl-now{position:absolute;top:-6px;bottom:-6px;width:2px;background:var(--accent);box-shadow:var(--glow)}
+.tl-now::after{content:'NOW';position:absolute;top:-18px;left:-12px;font-size:9px;color:var(--accent);font-weight:700}
+.tl-pt{position:absolute;top:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;border:2px solid var(--bg);cursor:pointer;transition:transform .15s}
+.tl-pt:hover{transform:translate(-50%,-50%) scale(1.5);z-index:5}
+.tl-lab{position:absolute;font-size:9px;color:var(--muted);white-space:nowrap;transform:translateX(-50%)}
+.tl-lab.top{top:-26px} .tl-lab.bot{top:18px}
+
+/* heatmap */
+.heat{background:var(--card-bg);border:var(--card-border);border-radius:var(--radius);padding:16px;backdrop-filter:var(--backdrop);box-shadow:var(--shadow)}
+.heat table{border-collapse:separate;border-spacing:5px;width:100%}
+.heat th{font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:4px}
+.heat td{text-align:center;border-radius:7px;font-size:13px;font-weight:700;padding:12px 4px;color:#fff;font-variant-numeric:tabular-nums;transition:transform .15s}
+.heat td:hover{transform:scale(1.08)}
+.heat .rowlbl{font-family:var(--font);font-weight:800;font-size:12px;color:var(--text);background:transparent}
+
+/* ============================================================ LCARS DRESSING
+   Star-Trek ops console shape language, scoped entirely to [data-theme=lcars]
+   so the other three skins are untouched. Elbow frames, pill rails, blocky
+   asymmetric corners, the signature colour-block sidebar.
+   ============================================================ */
+[data-theme="lcars"] .wrap{padding-left:118px;position:relative}
+/* left vertical pill rail running down the page */
+[data-theme="lcars"] .wrap::before{
+  content:"";position:absolute;left:18px;top:6px;bottom:6px;width:74px;
+  background:
+    linear-gradient(#ff9f43 0 16%, #000 16% 18%,
+                    #cc88ff 18% 38%, #000 38% 40%,
+                    #ff5544 40% 58%, #000 58% 60%,
+                    #99ccff 60% 80%, #000 80% 82%,
+                    #ffcc66 82% 100%);
+  border-radius:38px 0 0 38px;
+}
+/* section header becomes an LCARS elbow: fat rounded shoulder + sweep bar */
+[data-theme="lcars"] .sec-h{
+  align-items:stretch;gap:0;margin:0 0 12px;
+}
+[data-theme="lcars"] .sec-h h2{
+  background:#ff9f43;color:#000;font-family:'Antonio','Arial Narrow',sans-serif;
+  font-weight:800;font-size:15px;letter-spacing:.12em;
+  padding:10px 22px 10px 18px;border-radius:0 0 0 26px;display:flex;align-items:center;
+  border-bottom:4px solid #000;
+}
+[data-theme="lcars"] .sec-h .ln{
+  background:#cc88ff;height:auto;flex:1;margin-left:6px;border-radius:0 14px 0 0;min-height:38px;
+}
+[data-theme="lcars"] .sec-h .ct{
+  background:#1d1d28;color:#ffcc66;padding:0 16px;display:flex;align-items:center;
+  margin-left:6px;border-radius:0 0 0 0;font-size:11px;letter-spacing:.04em;
+}
+[data-theme="lcars"] section{margin-top:18px}
+/* critical cards: hard left block + rounded right end (LCARS button look) */
+[data-theme="lcars"] .ccard{
+  border:none;border-left:none;border-radius:8px 26px 26px 8px;
+  background:#15151c;box-shadow:inset 14px 0 0 var(--p5);padding-left:26px;
+}
+[data-theme="lcars"] .ccard:hover{box-shadow:inset 14px 0 0 var(--p4)}
+[data-theme="lcars"] .ccard .scorebar{display:none}
+[data-theme="lcars"] .ccard h3{font-family:'Antonio','Arial Narrow',sans-serif;letter-spacing:.03em;text-transform:uppercase;font-size:15px}
+/* lanes: each lane gets a coloured cap header + rounded outer corner */
+[data-theme="lcars"] .lane{
+  background:#0d0d12;border:none;border-radius:24px 8px 8px 24px;padding:0 8px 10px;overflow:hidden;
+}
+[data-theme="lcars"] .lane-h{
+  margin:0 -8px 10px;padding:8px 14px;background:#1d1d28;border-radius:24px 8px 0 0;
+}
+[data-theme="lcars"] .lane.l5 .lane-h{background:#3a1418}
+[data-theme="lcars"] .lane.l4 .lane-h{background:#3a2510}
+[data-theme="lcars"] .lane.l3 .lane-h{background:#3a3214}
+[data-theme="lcars"] .lane.l2 .lane-h{background:#162a3a}
+[data-theme="lcars"] .lane.l1 .lane-h{background:#2a1f33}
+[data-theme="lcars"] .lane .lbl{font-family:'Antonio','Arial Narrow',sans-serif}
+[data-theme="lcars"] .tcard{
+  border:none;border-radius:6px 16px 16px 6px;background:#15151c;
+  box-shadow:inset 8px 0 0 #cc88ff;padding-left:16px;
+}
+[data-theme="lcars"] .lane.l5 .tcard{box-shadow:inset 8px 0 0 var(--p5)}
+[data-theme="lcars"] .lane.l4 .tcard{box-shadow:inset 8px 0 0 var(--p4)}
+[data-theme="lcars"] .lane.l3 .tcard{box-shadow:inset 8px 0 0 var(--p3)}
+[data-theme="lcars"] .lane.l2 .tcard{box-shadow:inset 8px 0 0 var(--p2)}
+[data-theme="lcars"] .lane.l1 .tcard{box-shadow:inset 8px 0 0 var(--p1)}
+/* timeline + heatmap panels: chunky asymmetric LCARS frame */
+[data-theme="lcars"] .timeline,[data-theme="lcars"] .heat{
+  border:none;border-radius:8px 30px 30px 8px;background:#0d0d12;
+  box-shadow:inset 16px 0 0 #ff9f43;padding-left:30px;
+}
+[data-theme="lcars"] .pbadge{border-radius:0 8px 8px 0}
+[data-theme="lcars"] .chip{border-radius:0 14px 14px 0;border:none;background:#1d1d28}
+[data-theme="lcars"] .statusbar{border:none;border-radius:8px 24px 24px 8px;background:#0d0d12;box-shadow:inset 14px 0 0 #cc88ff;padding-left:26px}
+[data-theme="lcars"] .brandtxt b{color:#ff9f43}
+
+/* footer / status */
+.statusbar{display:flex;align-items:center;gap:10px;margin-top:24px;padding:10px 14px;background:var(--bg2);border:var(--card-border);border-radius:10px;font-size:11px;color:var(--dim)}
+.live{display:flex;align-items:center;gap:6px;color:var(--teal)}
+.live .dot{animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes flash{0%{box-shadow:0 0 0 0 rgba(255,59,92,.7)}100%{box-shadow:0 0 0 16px rgba(255,59,92,0)}}
+.new{animation:flash 1.2s ease-out 2}
+@keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.fade{animation:fadein .5s ease both}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel2);border:var(--card-border);color:var(--text);padding:10px 18px;border-radius:10px;box-shadow:var(--shadow);font-size:13px;z-index:99;opacity:0;transition:opacity .3s}
+.toast.show{opacity:1}
+.quickadd{display:flex;gap:8px}
+.quickadd input{background:var(--panel);border:var(--card-border);color:var(--text);border-radius:var(--chip-radius);padding:6px 12px;font-family:var(--font);font-size:12px;width:180px}
+.quickadd input:focus{outline:none;border-color:var(--accent);box-shadow:var(--glow)}
+.quickadd button{background:var(--grad);color:#fff;border:none;border-radius:var(--chip-radius);padding:6px 14px;font-weight:700;cursor:pointer;font-size:12px}
+@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}}
+</style>
+</head>
+<body>
+<a href="#main" class="skip">Skip to dashboard</a>
+<header>
+  <div class="hdr">
+    <div class="brand">
+      <svg class="cube" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="ptg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00D4AA"/><stop offset="100%" stop-color="#0080FF"/></linearGradient></defs><path d="M20 24 H80 L57 54 V78 L43 70 V54 Z" fill="none" stroke="url(#ptg)" stroke-width="5.5" stroke-linejoin="round"/></svg>
+      <div class="brandtxt"><b>PTASK</b><small>Intelligence Distilled</small></div>
+    </div>
+    <span class="clock" id="clock">--:--:-- UTC</span>
+    <div class="spacer"></div>
+    <div class="chips" id="chips"></div>
+    <div class="quickadd">
+      <input id="qa" placeholder="quick add task…" maxlength="400">
+      <button id="qabtn">Add</button>
+    </div>
+    <div class="themes" id="themes">
+      <button data-t="mission">Mission</button>
+      <button data-t="crystal">Crystal</button>
+      <button data-t="lcars">LCARS</button>
+      <button data-t="exec">Exec</button>
+    </div>
+  </div>
+  <div class="accentline"></div>
+</header>
+
+<main class="wrap" id="main">
+  <section id="critical-sec">
+    <div class="sec-h"><h2>⚠ Critical Now</h2><div class="ln"></div><span class="ct" id="crit-ct"></span></div>
+    <div class="crit-strip" id="crit"></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Priority Lanes</h2><div class="ln"></div><span class="ct">ranked by composite score within each level</span></div>
+    <div class="lanes" id="lanes"></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Deadline Timeline</h2><div class="ln"></div><span class="ct" id="tl-ct"></span></div>
+    <div class="timeline"><div class="tl-track" id="tltrack"></div></div>
+  </section>
+
+  <section>
+    <div class="sec-h"><h2>Neglect Heatmap</h2><div class="ln"></div><span class="ct">pending tasks · priority × age</span></div>
+    <div class="heat" id="heat"></div>
+  </section>
+
+  <div class="statusbar">
+    <span class="live"><span class="dot"></span>LIVE</span>
+    <span id="status">connecting…</span>
+    <div class="spacer" style="flex:1"></div>
+    <span id="ver"></span>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const PCOL={5:'var(--p5)',4:'var(--p4)',3:'var(--p3)',2:'var(--p2)',1:'var(--p1)'};
+const PNAME={5:'CRITICAL',4:'URGENT',3:'HIGH',2:'NORMAL',1:'LOW'};
+let seenCrit=new Set(), first=true;
+
+/* ---- theme engine ---- */
+function setTheme(t){
+  document.documentElement.dataset.theme=t;
+  localStorage.setItem('ptask-theme',t);
+  $$('#themes button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
+}
+$$('#themes button').forEach(b=>b.onclick=()=>setTheme(b.dataset.t));
+setTheme(localStorage.getItem('ptask-theme')||'mission');
+
+/* ---- clock ---- */
+setInterval(()=>{$('#clock').textContent=new Date().toISOString().slice(11,19)+' UTC';},1000);
+
+/* ---- helpers ---- */
+const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function dueChip(t){
+  if(t.deadline_date==null) return '';
+  let cls='', d=t.days_until;
+  if(d<0) cls='over'; else if(d<=7) cls='soon';
+  let lbl=t.deadline_date.slice(5);
+  if(d<0) lbl='⚠ '+Math.abs(Math.round(d))+'d over';
+  else if(d<=14) lbl='in '+Math.round(d)+'d';
+  return `<span class="due ${cls}">${lbl}</span>`;
+}
+function pbadge(p){return `<span class="pbadge p${p}">P${p}</span>`;}
+/* priority stepper: ▲ promote / ▼ demote, disabled at the 5/1 bounds. */
+function psteps(t){
+  const p=t.priority, id=(t.pt_id||t.id);
+  const up = p<5
+    ? `<button class="pstep" title="promote → ${PNAME[p+1]}" aria-label="promote ${id}" onclick="setPriority('${id}',${p+1},event)">▲</button>`
+    : `<button class="pstep off" tabindex="-1" aria-hidden="true">▲</button>`;
+  const dn = p>1
+    ? `<button class="pstep" title="demote → ${PNAME[p-1]}" aria-label="demote ${id}" onclick="setPriority('${id}',${p-1},event)">▼</button>`
+    : `<button class="pstep off" tabindex="-1" aria-hidden="true">▼</button>`;
+  return `<span class="psteps">${up}${dn}</span>`;
+}
+/* priority badge + stepper as one control (used in the Critical strip). */
+function pctl(t){return `<span class="pctl">${pbadge(t.priority)}${psteps(t)}</span>`;}
+function scoreMini(s){const w=Math.min(100,Math.round(s*100));return `<span class="scoremini"><i style="width:${w}%"></i></span>`;}
+async function api(p){const r=await fetch(p,{headers:{'Accept':'application/json'}});if(!r.ok)throw new Error(p+' '+r.status);return r.json();}
+function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
+
+/* ---- done + quick-add (writes shell out to pt) ---- */
+async function markDone(id){
+  try{const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/done',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const j=await r.json(); toast(j.ok?('✓ '+id+' done'):('✗ '+(j.message||'failed'))); if(j.ok) load();
+  }catch(e){toast('✗ '+e.message);}
+}
+async function setPriority(id,level,ev){
+  if(ev) ev.stopPropagation();
+  if(level<1||level>5) return;
+  try{const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/priority',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({level})});
+    const j=await r.json(); toast(j.ok?('⇅ '+id+' → P'+level+' '+PNAME[level]):('✗ '+(j.message||'failed'))); if(j.ok) load();
+  }catch(e){toast('✗ '+e.message);}
+}
+$('#qabtn').onclick=async()=>{
+  const v=$('#qa').value.trim(); if(v.length<3){toast('too short');return;}
+  try{const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:v})});
+    const j=await r.json(); toast(j.ok?'✓ added':'✗ '+(j.message||'failed')); if(j.ok){$('#qa').value='';load();}
+  }catch(e){toast('✗ '+e.message);}
+};
+$('#qa').addEventListener('keydown',e=>{if(e.key==='Enter')$('#qabtn').click();});
+
+/* ---- renderers ---- */
+function renderChips(s){
+  const c5=s.by_priority[5]||0,c4=s.by_priority[4]||0;
+  $('#chips').innerHTML=`
+    <span class="chip crit"><span class="dot"></span><b>${c5}</b> crit</span>
+    <span class="chip urg"><b>${c4}</b> urgent</span>
+    <span class="chip over"><b>${s.overdue}</b> overdue</span>
+    <span class="chip"><b>${s.due_within_7d}</b> due ≤7d</span>
+    <span class="chip"><b>${s.pending_total}</b> open</span>`;
+  $('#ver').textContent='pt · v'+s.version;
+}
+function renderCritical(tasks){
+  $('#crit-ct').textContent=tasks.length+' highest composite score';
+  $('#crit').innerHTML=tasks.map(t=>{
+    const isNew=!first&&!seenCrit.has(t.id);
+    return `<div class="ccard ${isNew?'new':''} fade">
+      <div class="scorebar"></div>
+      <h3>${esc(t.title)}</h3>
+      <div class="meta">
+        ${pctl(t)}
+        <span class="score">${(t.priority_score).toFixed(3)}</span>${scoreMini(t.priority_score)}
+        ${dueChip(t)}
+        <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
+        <button class="btn-done" title="mark done" onclick="markDone('${t.pt_id||t.id}')">✓</button>
+      </div></div>`;
+  }).join('');
+  seenCrit=new Set(tasks.map(t=>t.id));
+}
+function renderLanes(tasks){
+  const by={5:[],4:[],3:[],2:[],1:[]};
+  tasks.forEach(t=>{if(by[t.priority])by[t.priority].push(t);});
+  $('#lanes').innerHTML=[5,4,3,2,1].map(p=>{
+    const list=by[p], show=list.slice(0,8);
+    return `<div class="lane l${p}">
+      <div class="lane-h"><span class="lbl">P${p} ${PNAME[p]}</span><span class="n">${list.length}</span></div>
+      ${show.map(t=>`<div class="tcard fade">
+        <div class="tt">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
+        <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
+        ${psteps(t)}
+        <button class="btn-done" title="done" onclick="markDone('${t.pt_id||t.id}')">✓</button></div>
+      </div>`).join('')}
+      ${list.length>8?`<div class="more">+${list.length-8} more</div>`:''}
+    </div>`;
+  }).join('');
+}
+function renderTimeline(items){
+  $('#tl-ct').textContent=items.length+' dated tasks';
+  if(!items.length){$('#tltrack').innerHTML='<div class="tl-lab" style="left:50%;top:-8px">no dated tasks</div>';return;}
+  const days=items.map(i=>i.days_until);
+  let lo=Math.min(...days,0), hi=Math.max(...days,1); if(hi-lo<1)hi=lo+1;
+  const pad=(hi-lo)*0.06; lo-=pad; hi+=pad;
+  const xpct=d=>((d-lo)/(hi-lo))*100;
+  let html=`<div class="tl-now" style="left:${xpct(0)}%"></div>`;
+  items.forEach((i,ix)=>{
+    const x=xpct(i.days_until), col=PCOL[i.priority];
+    const side=ix%2?'bot':'top';
+    html+=`<div class="tl-pt" style="left:${x}%;background:${col}" title="${esc(i.title)} · ${i.deadline_date}"></div>`;
+    html+=`<div class="tl-lab ${side}" style="left:${x}%;${side=='bot'?'top:18px':''}">${i.deadline_date.slice(5)}</div>`;
+  });
+  $('#tltrack').innerHTML=html;
+}
+function heatColor(v,max){
+  if(v===0) return 'var(--panel2)';
+  const t=Math.min(1,v/Math.max(1,max));
+  const r=Math.round(0+t*255), g=Math.round(212-t*160), b=Math.round(170-t*120);
+  return `rgba(${r},${g},${b},${.35+t*.55})`;
+}
+function renderHeat(h){
+  let max=0; h.rows.forEach(r=>Object.values(r.cells).forEach(v=>{if(v>max)max=v;}));
+  let html='<table><tr><th></th>'+h.buckets.map(b=>`<th>${b}</th>`).join('')+'</tr>';
+  h.rows.forEach(r=>{
+    html+=`<tr><td class="rowlbl" style="color:${PCOL[r.priority]}">P${r.priority}</td>`;
+    h.buckets.forEach(b=>{const v=r.cells[b];html+=`<td style="background:${heatColor(v,max)};color:${v===0?'var(--dim)':'#fff'}">${v||''}</td>`;});
+    html+='</tr>';
+  });
+  html+='</table>';
+  $('#heat').innerHTML=html;
+}
+
+/* ---- load loop ---- */
+async function load(){
+  try{
+    const [stats,crit,all,tl,heat]=await Promise.all([
+      api('/api/stats'),api('/api/critical?limit=12'),api('/api/tasks?status=pending&limit=600'),
+      api('/api/timeline'),api('/api/heatmap')]);
+    renderChips(stats); renderCritical(crit.tasks); renderLanes(all.tasks);
+    renderTimeline(tl.items); renderHeat(heat);
+    $('#status').textContent='updated '+new Date().toLocaleTimeString()+' · '+stats.pending_total+' pending';
+    first=false;
+  }catch(e){$('#status').textContent='⚠ '+e.message;}
+}
+load(); setInterval(load,15000);
+</script>
+</body>
+</html>
