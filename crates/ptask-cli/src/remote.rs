@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use ptask_core::Task;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -204,9 +204,6 @@ struct SyncResp {
 struct SyncResources {
     tasks: Vec<Task>,
 }
-
-#[derive(Serialize)] // tests can build mock responses.
-struct _Echo;
 
 fn ensure_ok(status: &BTreeMap<String, Value>, cmd_uuid: &str) -> Result<()> {
     match status.get(cmd_uuid) {
