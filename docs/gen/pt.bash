@@ -61,6 +61,9 @@ _pt() {
             pt,remote)
                 cmd="pt__subcmd__remote"
                 ;;
+            pt,reopen)
+                cmd="pt__subcmd__reopen"
+                ;;
             pt,scoring)
                 cmd="pt__subcmd__scoring"
                 ;;
@@ -130,6 +133,9 @@ _pt() {
             pt__subcmd__help,remote)
                 cmd="pt__subcmd__help__subcmd__remote"
                 ;;
+            pt__subcmd__help,reopen)
+                cmd="pt__subcmd__help__subcmd__reopen"
+                ;;
             pt__subcmd__help,scoring)
                 cmd="pt__subcmd__help__subcmd__scoring"
                 ;;
@@ -151,8 +157,20 @@ _pt() {
             pt__subcmd__help__subcmd__remote,done)
                 cmd="pt__subcmd__help__subcmd__remote__subcmd__done"
                 ;;
+            pt__subcmd__help__subcmd__remote,edit)
+                cmd="pt__subcmd__help__subcmd__remote__subcmd__edit"
+                ;;
             pt__subcmd__help__subcmd__remote,list)
                 cmd="pt__subcmd__help__subcmd__remote__subcmd__list"
+                ;;
+            pt__subcmd__help__subcmd__remote,priority)
+                cmd="pt__subcmd__help__subcmd__remote__subcmd__priority"
+                ;;
+            pt__subcmd__help__subcmd__remote,reopen)
+                cmd="pt__subcmd__help__subcmd__remote__subcmd__reopen"
+                ;;
+            pt__subcmd__help__subcmd__remote,show)
+                cmd="pt__subcmd__help__subcmd__remote__subcmd__show"
                 ;;
             pt__subcmd__help__subcmd__scoring,run)
                 cmd="pt__subcmd__help__subcmd__scoring__subcmd__run"
@@ -175,11 +193,23 @@ _pt() {
             pt__subcmd__remote,done)
                 cmd="pt__subcmd__remote__subcmd__done"
                 ;;
+            pt__subcmd__remote,edit)
+                cmd="pt__subcmd__remote__subcmd__edit"
+                ;;
             pt__subcmd__remote,help)
                 cmd="pt__subcmd__remote__subcmd__help"
                 ;;
             pt__subcmd__remote,list)
                 cmd="pt__subcmd__remote__subcmd__list"
+                ;;
+            pt__subcmd__remote,priority)
+                cmd="pt__subcmd__remote__subcmd__priority"
+                ;;
+            pt__subcmd__remote,reopen)
+                cmd="pt__subcmd__remote__subcmd__reopen"
+                ;;
+            pt__subcmd__remote,show)
+                cmd="pt__subcmd__remote__subcmd__show"
                 ;;
             pt__subcmd__remote__subcmd__help,add)
                 cmd="pt__subcmd__remote__subcmd__help__subcmd__add"
@@ -187,11 +217,23 @@ _pt() {
             pt__subcmd__remote__subcmd__help,done)
                 cmd="pt__subcmd__remote__subcmd__help__subcmd__done"
                 ;;
+            pt__subcmd__remote__subcmd__help,edit)
+                cmd="pt__subcmd__remote__subcmd__help__subcmd__edit"
+                ;;
             pt__subcmd__remote__subcmd__help,help)
                 cmd="pt__subcmd__remote__subcmd__help__subcmd__help"
                 ;;
             pt__subcmd__remote__subcmd__help,list)
                 cmd="pt__subcmd__remote__subcmd__help__subcmd__list"
+                ;;
+            pt__subcmd__remote__subcmd__help,priority)
+                cmd="pt__subcmd__remote__subcmd__help__subcmd__priority"
+                ;;
+            pt__subcmd__remote__subcmd__help,reopen)
+                cmd="pt__subcmd__remote__subcmd__help__subcmd__reopen"
+                ;;
+            pt__subcmd__remote__subcmd__help,show)
+                cmd="pt__subcmd__remote__subcmd__help__subcmd__show"
                 ;;
             pt__subcmd__scoring,help)
                 cmd="pt__subcmd__scoring__subcmd__help"
@@ -242,7 +284,7 @@ _pt() {
 
     case "${cmd}" in
         pt)
-            opts="-h -V --db --help --version add list done priority edit next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
+            opts="-h -V --db --help --version add list done priority edit reopen next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -532,7 +574,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help)
-            opts="add list done priority edit next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
+            opts="add list done priority edit reopen next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -756,7 +798,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help__subcmd__remote)
-            opts="add list done"
+            opts="add list done priority edit reopen show"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -797,9 +839,79 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__remote__subcmd__edit)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__help__subcmd__remote__subcmd__list)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__remote__subcmd__priority)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__remote__subcmd__reopen)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__remote__subcmd__show)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__reopen)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -1024,7 +1136,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote)
-            opts="-h --db --help add list done help"
+            opts="-h --db --help add list done priority edit reopen show help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1085,8 +1197,34 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__remote__subcmd__edit)
+            opts="-h --deadline --clear-deadline --url --db --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --deadline)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__remote__subcmd__help)
-            opts="add list done help"
+            opts="add list done priority edit reopen show help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1127,6 +1265,20 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__remote__subcmd__help__subcmd__edit)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__remote__subcmd__help__subcmd__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -1142,6 +1294,48 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__help__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__help__subcmd__priority)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__help__subcmd__reopen)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__help__subcmd__show)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1190,6 +1384,90 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__priority)
+            opts="-h --url --db --help <QUERY> <LEVEL>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__reopen)
+            opts="-h --url --db --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__show)
+            opts="-h --url --db --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__reopen)
+            opts="-h --db --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
                 --db)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

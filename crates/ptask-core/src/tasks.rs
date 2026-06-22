@@ -672,6 +672,19 @@ pub fn branch_name(pt_id: &str, title: &str) -> String {
 
 /// Set a task's priority (1..=5). Logs a `priority_change` interaction.
 pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
+    update_priority_with_event(db, task_uuid, priority, None)
+}
+
+/// Full-control variant of [`update_priority`]: the `task.updated` event commits
+/// in the same transaction as the priority change, keyed on `event_uuid` (the
+/// sync command UUID) so `/sync` replays are idempotent. `event_uuid` semantics
+/// match [`create_with_extensions_with_event`].
+pub fn update_priority_with_event(
+    db: &Db,
+    task_uuid: &str,
+    priority: i64,
+    event_uuid: Option<&str>,
+) -> Result<()> {
     if !(1..=5).contains(&priority) {
         return Err(crate::Error::Other(format!(
             "priority {} out of range 1..=5",
@@ -681,10 +694,13 @@ pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
-    tx.execute(
+    let changed = tx.execute(
         "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
         params![priority, now, task_uuid],
     )?;
+    if changed == 0 {
+        return Err(crate::Error::Other("task not found".into()));
+    }
     tx.execute(
         "INSERT INTO interactions (task_id, action, ts, details)
          VALUES (?1, 'priority_change', ?2, ?3)",
@@ -692,7 +708,7 @@ pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
     )?;
     record_event_tx(
         &tx,
-        None,
+        event_uuid,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "priority": priority }),
@@ -703,6 +719,18 @@ pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
 
 /// Set or clear a task deadline. Logs a `deadline_change` interaction.
 pub fn update_deadline(db: &Db, task_uuid: &str, deadline: Option<&str>) -> Result<()> {
+    update_deadline_with_event(db, task_uuid, deadline, None)
+}
+
+/// Full-control variant of [`update_deadline`]: the `task.updated` event commits
+/// in the same transaction as the deadline change, keyed on `event_uuid` for
+/// `/sync` idempotency.
+pub fn update_deadline_with_event(
+    db: &Db,
+    task_uuid: &str,
+    deadline: Option<&str>,
+    event_uuid: Option<&str>,
+) -> Result<()> {
     if let Some(d) = deadline {
         parse_iso_zoned(d)?;
     }
@@ -760,7 +788,7 @@ pub fn update_deadline(db: &Db, task_uuid: &str, deadline: Option<&str>) -> Resu
     )?;
     record_event_tx(
         &tx,
-        None,
+        event_uuid,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "deadline": deadline }),
@@ -791,6 +819,55 @@ pub fn delete_task(db: &Db, task_uuid: &str) -> Result<()> {
         task_uuid,
         "task.deleted",
         &serde_json::json!({ "task_uuid": task_uuid, "pt_id": pt_id }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Reopen a completed or dismissed task: flip `status` back to `'pending'`.
+/// Errors if the task is already pending (nothing to do) or missing.
+pub fn reopen(db: &Db, task_uuid: &str) -> Result<()> {
+    reopen_with_event(db, task_uuid, None)
+}
+
+/// Full-control variant of [`reopen`]: the `task.updated` event commits in the
+/// same transaction as the status flip, keyed on `event_uuid` for `/sync`
+/// idempotency. The `status_change` interaction's details contain `'pending'`,
+/// which the neglect score reads as a reopen signal.
+pub fn reopen_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) -> Result<()> {
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let status: Option<String> = tx
+        .query_row("SELECT status FROM tasks WHERE id=?1", [task_uuid], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let status = status.ok_or_else(|| crate::Error::Other("task not found".into()))?;
+    if status == "pending" {
+        return Err(crate::Error::Other(
+            "task is already pending — nothing to reopen".into(),
+        ));
+    }
+    tx.execute(
+        "UPDATE tasks SET status='pending', updated_at=?1 WHERE id=?2",
+        params![now, task_uuid],
+    )?;
+    tx.execute(
+        "INSERT INTO interactions (task_id, action, ts, details)
+         VALUES (?1, 'status_change', ?2, ?3)",
+        params![
+            task_uuid,
+            now,
+            format!("Reopened → pending (was {})", status)
+        ],
+    )?;
+    record_event_tx(
+        &tx,
+        event_uuid,
+        task_uuid,
+        "task.updated",
+        &serde_json::json!({ "task_uuid": task_uuid, "status": "pending" }),
     )?;
     tx.commit()?;
     Ok(())
@@ -1002,6 +1079,54 @@ mod tests {
         let t = create(&db, NewTask::minimal("done logs event")).unwrap();
         mark_done(&db, &t).unwrap();
         assert_eq!(event_count(&db, "task.completed"), 1);
+    }
+
+    #[test]
+    fn reopen_returns_task_to_pending_and_logs_reopen_signal() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("reopen me")).unwrap();
+        mark_done(&db, &t).unwrap();
+
+        let status_done: String = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(status_done, "done");
+
+        reopen(&db, &t.id).unwrap();
+        let status_reopened: String = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(status_reopened, "pending");
+
+        // The reopen must leave the neglect-score signal the scorer reads:
+        // a `status_change` interaction whose details contain 'pending'.
+        let signals: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM interactions
+                     WHERE task_id=?1 AND action='status_change' AND details LIKE '%pending%'",
+                    [&t.id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(signals, 1, "reopen must log a status_change→pending signal");
+        assert_eq!(event_count(&db, "task.updated"), 1);
+
+        // Reopening an already-pending task is an error (nothing to do).
+        assert!(reopen(&db, &t.id).is_err());
     }
 
     #[test]

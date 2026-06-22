@@ -99,7 +99,7 @@ impl RemoteClient {
     /// substring. Resolves the task locally via a full-sync `list` then
     /// dispatches `task_done` by uuid.
     pub fn done(&self, query: &str) -> Result<Task> {
-        let task = self.resolve(query)?;
+        let task = self.resolve(query, false)?;
         let cmd_uuid = uuid::Uuid::new_v4().to_string();
         let req = json!({
             "sync_token": "*",
@@ -113,6 +113,74 @@ impl RemoteClient {
         let resp = self.sync(&req)?;
         ensure_ok(&resp.sync_status, &cmd_uuid)?;
         Ok(task)
+    }
+
+    /// `pt remote priority <query> <level>` — set priority (1..=5) on the
+    /// canonical host. Resolves client-side, then dispatches `task_priority`.
+    pub fn priority(&self, query: &str, level: i64) -> Result<Task> {
+        let mut task = self.resolve(query, false)?;
+        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let req = json!({
+            "sync_token": "*",
+            "resource_types": ["tasks"],
+            "commands": [{
+                "type": "task_priority",
+                "uuid": cmd_uuid,
+                "args": { "task_uuid": task.id, "priority": level }
+            }]
+        });
+        let resp = self.sync(&req)?;
+        ensure_ok(&resp.sync_status, &cmd_uuid)?;
+        task.priority = level;
+        Ok(task)
+    }
+
+    /// `pt remote edit <query> --deadline <iso> | --clear-deadline` — set or
+    /// clear a deadline. `deadline = None` clears it (sends JSON null).
+    pub fn edit_deadline(&self, query: &str, deadline: Option<&str>) -> Result<Task> {
+        let mut task = self.resolve(query, false)?;
+        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let req = json!({
+            "sync_token": "*",
+            "resource_types": ["tasks"],
+            "commands": [{
+                "type": "task_edit",
+                "uuid": cmd_uuid,
+                "args": { "task_uuid": task.id, "deadline": deadline }
+            }]
+        });
+        let resp = self.sync(&req)?;
+        ensure_ok(&resp.sync_status, &cmd_uuid)?;
+        task.deadline = deadline.map(str::to_string);
+        Ok(task)
+    }
+
+    /// `pt remote reopen <query>` — flip a done/dismissed task back to pending.
+    /// Resolves including terminal-state tasks (the point is to find a completed
+    /// one); resolve-by-substring therefore matches done tasks here too.
+    pub fn reopen(&self, query: &str) -> Result<Task> {
+        let mut task = self.resolve(query, true)?;
+        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let req = json!({
+            "sync_token": "*",
+            "resource_types": ["tasks"],
+            "commands": [{
+                "type": "task_reopen",
+                "uuid": cmd_uuid,
+                "args": { "task_uuid": task.id }
+            }]
+        });
+        let resp = self.sync(&req)?;
+        ensure_ok(&resp.sync_status, &cmd_uuid)?;
+        task.status = "pending".to_string();
+        Ok(task)
+    }
+
+    /// `pt remote show <query>` — fetch one task's full row (read-only). No
+    /// mutation; resolves including terminal-state tasks so completed items are
+    /// viewable by PT-N.
+    pub fn show(&self, query: &str) -> Result<Task> {
+        self.resolve(query, true)
     }
 
     /// `pt remote list` — full sync, then client-side filters (status,
@@ -141,7 +209,12 @@ impl RemoteClient {
         Ok(out)
     }
 
-    fn resolve(&self, query: &str) -> Result<Task> {
+    /// Resolve a PT-N / bare-integer / title-substring query to a single task
+    /// via full sync. `include_terminal` keeps done/dismissed tasks in the
+    /// substring search (PT-N / integer always match any status); reopen/show
+    /// pass `true`, mutating verbs that only make sense on active tasks pass
+    /// `false`.
+    fn resolve(&self, query: &str, include_terminal: bool) -> Result<Task> {
         let req = json!({ "sync_token": "*", "resource_types": ["tasks"] });
         let resp = self.sync(&req)?;
         let tasks = resp.resources.tasks;
@@ -169,8 +242,7 @@ impl RemoteClient {
             let mut hits: Vec<Task> = tasks
                 .into_iter()
                 .filter(|t| {
-                    t.status != "done"
-                        && t.status != "dismissed"
+                    (include_terminal || (t.status != "done" && t.status != "dismissed"))
                         && t.title.to_ascii_lowercase().contains(&needle)
                 })
                 .collect();
@@ -370,6 +442,91 @@ mod tests {
                 .map(|cs| cs.iter().any(|cmd| cmd["type"] == "task_done"))
                 .unwrap_or(false)),
             "should have dispatched task_done"
+        );
+    }
+
+    /// Find the first dispatched command of a given type across all /sync calls.
+    fn dispatched<'a>(calls: &'a [Value], kind: &str) -> Option<&'a Value> {
+        calls
+            .iter()
+            .filter_map(|c| c["commands"].as_array())
+            .flatten()
+            .find(|cmd| cmd["type"] == kind)
+    }
+
+    /// Returns the runtime too: the caller must keep it alive, otherwise
+    /// dropping it tears down the spawned mock-`/sync` server mid-test.
+    fn mock_client() -> (
+        RemoteClient,
+        Arc<Mutex<Vec<Value>>>,
+        tokio::runtime::Runtime,
+    ) {
+        let server_rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (url, calls) = server_rt.block_on(spawn_mock_sync());
+        (RemoteClient::with_url(&url).unwrap(), calls, server_rt)
+    }
+
+    #[test]
+    fn remote_priority_dispatches_task_priority() {
+        let (c, calls, _rt) = mock_client();
+        let task = c.priority("PT-101", 5).unwrap();
+        assert_eq!(task.pt_id.as_deref(), Some("PT-101"));
+        assert_eq!(task.priority, 5, "returned task reflects the new priority");
+        let calls_v = calls.lock().unwrap();
+        let cmd = dispatched(&calls_v, "task_priority").expect("task_priority dispatched");
+        assert_eq!(cmd["args"]["priority"], 5);
+        assert_eq!(cmd["args"]["task_uuid"], "uuid-bbbbbbbb");
+    }
+
+    #[test]
+    fn remote_edit_dispatches_task_edit_with_deadline() {
+        let (c, calls, _rt) = mock_client();
+        let task = c.edit_deadline("PT-100", Some("2026-07-01")).unwrap();
+        assert_eq!(task.deadline.as_deref(), Some("2026-07-01"));
+        let calls_v = calls.lock().unwrap();
+        let cmd = dispatched(&calls_v, "task_edit").expect("task_edit dispatched");
+        assert_eq!(cmd["args"]["deadline"], "2026-07-01");
+    }
+
+    #[test]
+    fn remote_edit_clear_deadline_sends_json_null() {
+        let (c, calls, _rt) = mock_client();
+        let task = c.edit_deadline("PT-100", None).unwrap();
+        assert!(task.deadline.is_none());
+        let calls_v = calls.lock().unwrap();
+        let cmd = dispatched(&calls_v, "task_edit").expect("task_edit dispatched");
+        assert!(
+            cmd["args"]["deadline"].is_null(),
+            "clear must send JSON null, got {:?}",
+            cmd["args"]["deadline"]
+        );
+    }
+
+    #[test]
+    fn remote_reopen_dispatches_task_reopen() {
+        let (c, calls, _rt) = mock_client();
+        let task = c.reopen("PT-100").unwrap();
+        assert_eq!(task.status, "pending");
+        let calls_v = calls.lock().unwrap();
+        let cmd = dispatched(&calls_v, "task_reopen").expect("task_reopen dispatched");
+        assert_eq!(cmd["args"]["task_uuid"], "uuid-aaaaaaaa");
+    }
+
+    #[test]
+    fn remote_show_is_read_only() {
+        let (c, calls, _rt) = mock_client();
+        let task = c.show("PT-101").unwrap();
+        assert_eq!(task.pt_id.as_deref(), Some("PT-101"));
+        let calls_v = calls.lock().unwrap();
+        assert!(
+            calls_v
+                .iter()
+                .all(|c| c["commands"].as_array().is_none_or(|a| a.is_empty())),
+            "show must not dispatch any mutating command"
         );
     }
 }

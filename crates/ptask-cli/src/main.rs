@@ -45,6 +45,8 @@ enum Command {
     /// Edit task fields.
     #[command(alias = "update")]
     Edit(EditArgs),
+    /// Reopen a completed/dismissed task (status → pending).
+    Reopen(ReopenArgs),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
     /// Manage saved views.
@@ -108,6 +110,16 @@ enum RemoteCommand {
     List(RemoteListArgs),
     /// `pt remote done <query>` — mark a task done by PT-N or title substring.
     Done(RemoteDoneArgs),
+    /// `pt remote priority <query> <level>` — set priority on the canonical host.
+    #[command(alias = "pri")]
+    Priority(RemotePriorityArgs),
+    /// `pt remote edit <query> --deadline <iso> | --clear-deadline`.
+    #[command(alias = "update")]
+    Edit(RemoteEditArgs),
+    /// `pt remote reopen <query>` — flip a done/dismissed task back to pending.
+    Reopen(RemoteReopenArgs),
+    /// `pt remote show <query>` — print one task's full row (read-only).
+    Show(RemoteShowArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -133,6 +145,46 @@ struct RemoteListArgs {
 
 #[derive(clap::Args, Debug)]
 struct RemoteDoneArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemotePriorityArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    /// New level: low|normal|high|urgent|critical or 1..=5.
+    level: String,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteEditArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    /// Set deadline to an ISO date/datetime, e.g. 2026-06-30.
+    #[arg(long = "deadline")]
+    deadline: Option<String>,
+    /// Clear the deadline.
+    #[arg(long = "clear-deadline")]
+    clear_deadline: bool,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteReopenArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteShowArgs {
     /// PT-N (e.g. PT-42), bare integer (42), or title substring.
     query: String,
     #[arg(long = "url", env = "PTASK_SYNC_URL")]
@@ -266,6 +318,12 @@ struct EditArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct ReopenArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+}
+
+#[derive(clap::Args, Debug)]
 struct GenCompletionsArgs {
     /// Target shell.
     #[arg(value_enum)]
@@ -307,6 +365,7 @@ fn main() -> Result<()> {
                 Some(Command::Done(a)) => cmd_done(&db, a),
                 Some(Command::Priority(a)) => cmd_priority(&db, a),
                 Some(Command::Edit(a)) => cmd_edit(&db, a),
+                Some(Command::Reopen(a)) => cmd_reopen(&db, a),
                 Some(Command::Next(a)) => cmd_next(&db, a),
                 Some(Command::View(c)) => cmd_view(&db, c),
                 Some(Command::Tui) => ptask_tui::run(db),
@@ -547,6 +606,27 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     Ok(())
 }
 
+fn cmd_reopen(db: &Db, a: ReopenArgs) -> Result<()> {
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    tasks::reopen(db, &task.id)?;
+    // Reopening returns the task to the active set; rescore so it re-enters
+    // ordering immediately rather than at the next scoring run.
+    let note = match ptask_core::scoring::run_once(db, false) {
+        Ok(r) => format!(" · rescored {}", r.tasks_scored),
+        Err(e) => {
+            eprintln!("warning: reopened but rescore failed: {}", e);
+            String::new()
+        }
+    };
+    println!(
+        "{} {} · reopened → pending{}",
+        task.pt_id.as_deref().unwrap_or(""),
+        task.title,
+        note
+    );
+    Ok(())
+}
+
 fn cmd_next(db: &Db, a: NextArgs) -> Result<()> {
     let rows = dag::next_ready(db, a.limit)?;
     if rows.is_empty() {
@@ -752,6 +832,88 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 task.pt_id.as_deref().unwrap_or(&task.id[..8]),
                 task.title
             );
+            Ok(())
+        }
+        RemoteCommand::Priority(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let level = priority::parse(&a.level).map_err(anyhow::Error::msg)?;
+            let task = client.priority(&a.query, level)?;
+            println!(
+                "remote priority ok — {} {} · p{} ({})",
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title,
+                task.priority,
+                priority::label(task.priority)
+            );
+            Ok(())
+        }
+        RemoteCommand::Edit(a) => {
+            if a.deadline.is_some() && a.clear_deadline {
+                anyhow::bail!("use either --deadline or --clear-deadline, not both");
+            }
+            if a.deadline.is_none() && !a.clear_deadline {
+                anyhow::bail!("nothing to edit; use --deadline DATE or --clear-deadline");
+            }
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let new_deadline = if a.clear_deadline {
+                None
+            } else {
+                a.deadline.as_deref()
+            };
+            let task = client.edit_deadline(&a.query, new_deadline)?;
+            println!(
+                "remote edit ok — {} {} · deadline {}",
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title,
+                task.deadline.as_deref().unwrap_or("--")
+            );
+            Ok(())
+        }
+        RemoteCommand::Reopen(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let task = client.reopen(&a.query)?;
+            println!(
+                "remote reopen ok — {} {} · {}",
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title,
+                task.status
+            );
+            Ok(())
+        }
+        RemoteCommand::Show(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let t = client.show(&a.query)?;
+            let pt = t.pt_id.as_deref().unwrap_or(&t.id[..8]);
+            println!(
+                "{}  [{}]",
+                pt,
+                priority::label(t.priority).to_ascii_uppercase()
+            );
+            println!("  {}", t.title);
+            println!("  status:   {}", t.status);
+            println!(
+                "  priority: {} ({})",
+                t.priority,
+                priority::label(t.priority)
+            );
+            println!("  deadline: {}", t.deadline.as_deref().unwrap_or("--"));
+            if !t.description.is_empty() {
+                println!("  desc:     {}", t.description);
+            }
+            println!("  source:   {}", t.source_type);
+            println!("  uuid:     {}", t.id);
             Ok(())
         }
     }

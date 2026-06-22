@@ -12,6 +12,10 @@
 //!       { "type": "task_done",
 //!         "uuid": "<idempotency-key>",
 //!         "args": { "pt_id": "PT-42" } | { "task_uuid": "<uuid>" } },
+//!       // v1.8.0 — resolve by { task_uuid } or { pt_id }:
+//!       { "type": "task_priority", "uuid": "...", "args": { "task_uuid": "...", "priority": 4 } },
+//!       { "type": "task_edit",     "uuid": "...", "args": { "task_uuid": "...", "deadline": "2026-07-01" | null } },
+//!       { "type": "task_reopen",   "uuid": "...", "args": { "task_uuid": "..." } },
 //!     ]
 //!   }
 //!
@@ -269,6 +273,58 @@ fn apply_command(
                 EventPayload {
                     event_type,
                     payload,
+                },
+            ))
+        }
+        "task_priority" => {
+            let task = resolve_task(state, &cmd.args)?;
+            let priority = cmd
+                .args
+                .get("priority")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow::anyhow!("task_priority: args.priority required"))?;
+            tasks::update_priority_with_event(&state.db, &task.id, priority, Some(&cmd.uuid))?;
+            // Priority feeds the composite priority_score; rescore best-effort so
+            // ordering / the dashboard reflect the change without waiting for the
+            // scoring timer (parity with the local `pt priority`).
+            let _ = ptask_core::scoring::run_once(&state.db, false);
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.updated".into(),
+                    payload: serde_json::json!({ "task_uuid": task.id, "priority": priority }),
+                },
+            ))
+        }
+        "task_edit" => {
+            let task = resolve_task(state, &cmd.args)?;
+            // `deadline` present as a string sets it; present as null clears it;
+            // absent is an error (this command edits the deadline).
+            if cmd.args.get("deadline").is_none() {
+                return Err(anyhow::anyhow!(
+                    "task_edit: args.deadline required (ISO string to set, null to clear)"
+                ));
+            }
+            let new_deadline = cmd.args.get("deadline").and_then(Value::as_str);
+            tasks::update_deadline_with_event(&state.db, &task.id, new_deadline, Some(&cmd.uuid))?;
+            let _ = ptask_core::scoring::run_once(&state.db, false);
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.updated".into(),
+                    payload: serde_json::json!({ "task_uuid": task.id, "deadline": new_deadline }),
+                },
+            ))
+        }
+        "task_reopen" => {
+            let task = resolve_task(state, &cmd.args)?;
+            tasks::reopen_with_event(&state.db, &task.id, Some(&cmd.uuid))?;
+            let _ = ptask_core::scoring::run_once(&state.db, false);
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.updated".into(),
+                    payload: serde_json::json!({ "task_uuid": task.id, "status": "pending" }),
                 },
             ))
         }
