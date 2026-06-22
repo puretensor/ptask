@@ -87,6 +87,14 @@ _arguments "${_arguments_options[@]}" : \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
 && ret=0
 ;;
+(reopen)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
 (next)
 _arguments "${_arguments_options[@]}" : \
 '-n+[Max ready tasks to show]:LIMIT:_default' \
@@ -372,6 +380,45 @@ _arguments "${_arguments_options[@]}" : \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
 && ret=0
 ;;
+(priority)
+_arguments "${_arguments_options[@]}" : \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+':level -- New level\: low|normal|high|urgent|critical or 1..=5:_default' \
+&& ret=0
+;;
+(edit)
+_arguments "${_arguments_options[@]}" : \
+'--deadline=[Set deadline to an ISO date/datetime, e.g. 2026-06-30]:DEADLINE:_default' \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--clear-deadline[Clear the deadline]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
+(reopen)
+_arguments "${_arguments_options[@]}" : \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_pt__subcmd__remote__subcmd__help_commands" \
@@ -393,6 +440,22 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (done)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(priority)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(edit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reopen)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -459,6 +522,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (edit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reopen)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -582,6 +649,22 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(priority)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(edit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reopen)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -619,6 +702,7 @@ _pt_commands() {
 'done:Mark a task done (by PT-N or title substring)' \
 'priority:Promote/demote a task'\''s priority (critical|urgent|high|normal|low or 1..=5)' \
 'edit:Edit task fields' \
+'reopen:Reopen a completed/dismissed task (status → pending)' \
 'next:Show ready-to-start tasks (all dependencies done)' \
 'view:Manage saved views' \
 'tui:Launch the terminal UI (ratatui)' \
@@ -720,6 +804,7 @@ _pt__subcmd__help_commands() {
 'done:Mark a task done (by PT-N or title substring)' \
 'priority:Promote/demote a task'\''s priority (critical|urgent|high|normal|low or 1..=5)' \
 'edit:Edit task fields' \
+'reopen:Reopen a completed/dismissed task (status → pending)' \
 'next:Show ready-to-start tasks (all dependencies done)' \
 'view:Manage saved views' \
 'tui:Launch the terminal UI (ratatui)' \
@@ -820,6 +905,10 @@ _pt__subcmd__help__subcmd__remote_commands() {
 'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default https\://ptask.ts.puretensor.local)' \
 'list:\`pt remote list\` — fetch the live task set from the canonical host' \
 'done:\`pt remote done <query>\` — mark a task done by PT-N or title substring' \
+'priority:\`pt remote priority <query> <level>\` — set priority on the canonical host' \
+'edit:\`pt remote edit <query> --deadline <iso> | --clear-deadline\`' \
+'reopen:\`pt remote reopen <query>\` — flip a done/dismissed task back to pending' \
+'show:\`pt remote show <query>\` — print one task'\''s full row (read-only)' \
     )
     _describe -t commands 'pt help remote commands' commands "$@"
 }
@@ -833,10 +922,35 @@ _pt__subcmd__help__subcmd__remote__subcmd__done_commands() {
     local commands; commands=()
     _describe -t commands 'pt help remote done commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__edit_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__edit_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote edit commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__list_commands] )) ||
 _pt__subcmd__help__subcmd__remote__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'pt help remote list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__priority_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__priority_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote priority commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__reopen_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__reopen_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote reopen commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__show_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__reopen_commands] )) ||
+_pt__subcmd__help__subcmd__reopen_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help reopen commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__scoring_commands] )) ||
 _pt__subcmd__help__subcmd__scoring_commands() {
@@ -911,6 +1025,10 @@ _pt__subcmd__remote_commands() {
 'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default https\://ptask.ts.puretensor.local)' \
 'list:\`pt remote list\` — fetch the live task set from the canonical host' \
 'done:\`pt remote done <query>\` — mark a task done by PT-N or title substring' \
+'priority:\`pt remote priority <query> <level>\` — set priority on the canonical host' \
+'edit:\`pt remote edit <query> --deadline <iso> | --clear-deadline\`' \
+'reopen:\`pt remote reopen <query>\` — flip a done/dismissed task back to pending' \
+'show:\`pt remote show <query>\` — print one task'\''s full row (read-only)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'pt remote commands' commands "$@"
@@ -925,12 +1043,21 @@ _pt__subcmd__remote__subcmd__done_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote done commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__remote__subcmd__edit_commands] )) ||
+_pt__subcmd__remote__subcmd__edit_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote edit commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__remote__subcmd__help_commands] )) ||
 _pt__subcmd__remote__subcmd__help_commands() {
     local commands; commands=(
 'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default https\://ptask.ts.puretensor.local)' \
 'list:\`pt remote list\` — fetch the live task set from the canonical host' \
 'done:\`pt remote done <query>\` — mark a task done by PT-N or title substring' \
+'priority:\`pt remote priority <query> <level>\` — set priority on the canonical host' \
+'edit:\`pt remote edit <query> --deadline <iso> | --clear-deadline\`' \
+'reopen:\`pt remote reopen <query>\` — flip a done/dismissed task back to pending' \
+'show:\`pt remote show <query>\` — print one task'\''s full row (read-only)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'pt remote help commands' commands "$@"
@@ -945,6 +1072,11 @@ _pt__subcmd__remote__subcmd__help__subcmd__done_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote help done commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__edit_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__edit_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help edit commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__help_commands] )) ||
 _pt__subcmd__remote__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
@@ -955,10 +1087,45 @@ _pt__subcmd__remote__subcmd__help__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote help list commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__priority_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__priority_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help priority commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__reopen_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__reopen_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help reopen commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__show_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help show commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__remote__subcmd__list_commands] )) ||
 _pt__subcmd__remote__subcmd__list_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__priority_commands] )) ||
+_pt__subcmd__remote__subcmd__priority_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote priority commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__reopen_commands] )) ||
+_pt__subcmd__remote__subcmd__reopen_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote reopen commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__show_commands] )) ||
+_pt__subcmd__remote__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__reopen_commands] )) ||
+_pt__subcmd__reopen_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt reopen commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__scoring_commands] )) ||
 _pt__subcmd__scoring_commands() {

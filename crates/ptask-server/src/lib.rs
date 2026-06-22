@@ -347,6 +347,126 @@ mod tests {
         assert_eq!(tasks[0]["status"], "done");
     }
 
+    /// POST a /sync body and return the parsed JSON response (asserts HTTP 200).
+    async fn post_sync(app: &Router, body: &serde_json::Value) -> serde_json::Value {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn sync_round_trip_priority_edit_reopen() {
+        let _env = ENV_LOCK.lock().await;
+        let db = open_test_db();
+        let app = router(AppState { db: db.clone() });
+
+        // Create a task.
+        let created = post_sync(
+            &app,
+            &serde_json::json!({
+                "sync_token": "*",
+                "commands": [{ "type": "task_create", "uuid": "c-1", "temp_id": "t1",
+                               "args": { "text": "ship it" } }]
+            }),
+        )
+        .await;
+        assert_eq!(created["sync_status"]["c-1"], "ok");
+        let uuid = created["temp_id_mapping"]["t1"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // task_priority → critical (5).
+        let pri = post_sync(
+            &app,
+            &serde_json::json!({
+                "sync_token": "*",
+                "commands": [{ "type": "task_priority", "uuid": "c-2",
+                               "args": { "task_uuid": uuid, "priority": 5 } }]
+            }),
+        )
+        .await;
+        assert_eq!(pri["sync_status"]["c-2"], "ok");
+        let t = pri["resources"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == uuid)
+            .unwrap();
+        assert_eq!(t["priority"], 5);
+
+        // Idempotent replay of the same command uuid → still ok, no double-apply.
+        let replay = post_sync(
+            &app,
+            &serde_json::json!({
+                "sync_token": "*",
+                "commands": [{ "type": "task_priority", "uuid": "c-2",
+                               "args": { "task_uuid": uuid, "priority": 5 } }]
+            }),
+        )
+        .await;
+        assert_eq!(replay["sync_status"]["c-2"], "ok");
+
+        // task_edit → set a deadline.
+        let edited = post_sync(
+            &app,
+            &serde_json::json!({
+                "sync_token": "*",
+                "commands": [{ "type": "task_edit", "uuid": "c-3",
+                               "args": { "task_uuid": uuid, "deadline": "2026-09-01" } }]
+            }),
+        )
+        .await;
+        assert_eq!(edited["sync_status"]["c-3"], "ok");
+        let t = edited["resources"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == uuid)
+            .unwrap();
+        assert!(t["deadline"].as_str().unwrap().starts_with("2026-09-01"));
+
+        // task_done, then task_reopen → status back to pending.
+        post_sync(
+            &app,
+            &serde_json::json!({
+                "sync_token": "*",
+                "commands": [{ "type": "task_done", "uuid": "c-4", "args": { "task_uuid": uuid } }]
+            }),
+        )
+        .await;
+        let reopened = post_sync(
+            &app,
+            &serde_json::json!({
+                "sync_token": "*",
+                "commands": [{ "type": "task_reopen", "uuid": "c-5", "args": { "task_uuid": uuid } }]
+            }),
+        )
+        .await;
+        assert_eq!(reopened["sync_status"]["c-5"], "ok");
+        let t = reopened["resources"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == uuid)
+            .unwrap();
+        assert_eq!(t["status"], "pending");
+    }
+
     #[tokio::test]
     async fn sync_token_is_stable_when_idle() {
         // Guards the cursor-before-delta snapshot order: the returned token

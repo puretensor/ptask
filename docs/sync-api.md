@@ -86,9 +86,13 @@ the environment variable is set on the client node.
 |---|---|---|
 | `task_create` | `{ text, source_type? }` | runs quick-add parser, inserts to `tasks` + `pt_extensions`, optional `pt_recurrence`. |
 | `task_done` | `{ task_uuid }` or `{ pt_id }` | flips status to `done` or advances recurrence in-place, logs an `interaction` row. |
+| `task_priority` (v1.8.0) | `{ task_uuid \| pt_id, priority }` | sets priority (1..=5), logs a `priority_change` interaction, rescores. |
+| `task_edit` (v1.8.0) | `{ task_uuid \| pt_id, deadline }` | sets the deadline (ISO string) or clears it (JSON `null`); rescores. |
+| `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). |
 
-More commands (`task_edit`, `task_delete`, `view_save`, …) land in v1.0.x;
-the wire format is stable, additions are backward-compatible.
+Each command records exactly one event keyed on its `uuid`, so `/sync` replays
+are idempotent. More commands (`task_delete`, `view_save`, …) are backward-
+compatible additions; the wire format is stable.
 
 ## `POST /capture`
 

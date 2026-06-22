@@ -52,6 +52,13 @@ date/datetime, or clear it. Recurring tasks reject deadline clearing;
 setting a deadline updates their next occurrence. Deadline feeds
 `score_urgency`, so a rescore runs immediately after the change.
 
+### `pt reopen <query>`
+
+Flip a completed or dismissed task back to `pending` (resolve by PT-N for a
+done task — substring resolution only matches active tasks). Logs a
+`status_change` interaction the neglect score reads as a reopen, and rescores
+immediately so the task re-enters `pt next` ordering.
+
 ### `pt next [-n LIMIT]`
 
 DAG-ready tasks: every `depends_on` predecessor is `done` (or missing).
@@ -96,6 +103,10 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote add "..." [--url ...]` | quick-add on the remote canonical |
 | `pt remote list [-s STATUS -p P -n N]` | full-sync + client-side filter |
 | `pt remote done <query>` | resolve + `task_done` |
+| `pt remote priority <query> <level>` (alias `pri`) | resolve + `task_priority` (+ server rescore) |
+| `pt remote edit <query> [--deadline ISO \| --clear-deadline]` (alias `update`) | resolve + `task_edit` |
+| `pt remote reopen <query>` | resolve (incl. done) + `task_reopen` |
+| `pt remote show <query>` | resolve + print one task's row (read-only) |
 
 `--url` defaults to `$PTASK_SYNC_URL` then `https://ptask.ts.puretensor.local`.
 
