@@ -13,7 +13,7 @@ use tracing::info;
 )]
 pub enum PtCommand {
     #[command(
-        description = "Quick-add a new task. Inline tokens: @label #project p1..p4 ~Nm //desc, plus date phrases."
+        description = "Quick-add a new task. Inline tokens: @label #project p1..p5 ~Nm //desc, plus date phrases."
     )]
     Add(String),
     #[command(description = "List tasks. Optional Todoist-style filter DSL.")]

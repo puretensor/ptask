@@ -6,7 +6,8 @@
 //!
 //! - `@label`        — single label (multiple `@labels` accepted)
 //! - `#project`      — single project (last one wins if repeated)
-//! - `p1` `p2` `p3` `p4` — priority (defaults to "normal" / 2 if absent)
+//! - `p1`..`p5`     — priority, native scale (p1=low, p2=normal, p3=high,
+//!   p4=urgent, p5=critical; defaults to "normal" / 2 if absent)
 //! - `~30m` `~2h` `~1d` — duration estimate in minutes
 //! - `!HH:MM`        — reminder time-of-day
 //! - `//rest of line` — everything after the `//` is the description
@@ -157,14 +158,14 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             idx += 1;
             continue;
         }
-        // Priority pN (1..=4). Quick-add uses Todoist's p1..p4 convention.
-        // Map to pTask 5..1 scale (p1 → 4 urgent, p2 → 3 high,
-        // p3 → 2 normal, p4 → 1 low).
+        // Priority pN (1..=5), native pTask scale: p1=low, p2=normal,
+        // p3=high, p4=urgent, p5=critical. Matches the display, `--priority`,
+        // and `pt priority` — no Todoist inversion.
         if let Some(rest) = tok.strip_prefix('p')
             && let Ok(n) = rest.parse::<i64>()
-            && (1..=4).contains(&n)
+            && (1..=5).contains(&n)
         {
-            out.priority = Some(5 - n);
+            out.priority = Some(n);
             idx += 1;
             continue;
         }
@@ -471,7 +472,7 @@ fn is_explicit_marker(tok: &str) -> bool {
     }
     if let Some(rest) = tok.strip_prefix('p')
         && let Ok(n) = rest.parse::<i64>()
-        && (1..=4).contains(&n)
+        && (1..=5).contains(&n)
     {
         return true;
     }
@@ -511,8 +512,8 @@ mod tests {
 
     #[test]
     fn quoted_tokens_are_literal_title_text() {
-        // Verified live failure pre-fix: "p1" inside a sentence silently
-        // flipped the task to urgent. Quotes now protect literal text.
+        // Verified live failure pre-fix: a bare "p1" inside a sentence silently
+        // set the task's priority. Quotes now protect literal text.
         let q = parse_at("Review the \"p1 incident\" postmortem", anchor()).unwrap();
         assert_eq!(q.title, "Review the p1 incident postmortem");
         assert_eq!(q.priority, Some(2), "quoted p1 must not set priority");
@@ -541,8 +542,8 @@ mod tests {
     fn unmatched_quote_is_ordinary_text() {
         let q = parse_at("say \"hello p1", anchor()).unwrap();
         assert_eq!(q.title, "say \"hello");
-        // Outside any closed quote span, p1 still parses as priority.
-        assert_eq!(q.priority, Some(4));
+        // Outside any closed quote span, p1 still parses as priority (low).
+        assert_eq!(q.priority, Some(1));
     }
 
     #[test]
@@ -578,12 +579,12 @@ mod tests {
     #[test]
     fn explicit_tokens_only() {
         let q = parse_at(
-            "Fix Ceph OSD flapping @ops #fleet p1 ~45m //arx3 latency spike",
+            "Fix Ceph OSD flapping @ops #fleet p4 ~45m //arx3 latency spike",
             anchor(),
         )
         .unwrap();
         assert_eq!(q.title, "Fix Ceph OSD flapping");
-        assert_eq!(q.priority, Some(4)); // p1 → pTask urgent (4)
+        assert_eq!(q.priority, Some(4)); // p4 → pTask urgent (4), native scale
         assert_eq!(q.project.as_deref(), Some("fleet"));
         assert_eq!(q.labels, vec!["ops"]);
         assert_eq!(q.duration_min, Some(45));
@@ -779,8 +780,16 @@ mod tests {
     }
 
     #[test]
-    fn p1_through_p4_map_to_pt_scale() {
-        for (input, expected) in &[("foo p1", 4), ("foo p2", 3), ("foo p3", 2), ("foo p4", 1)] {
+    fn p1_through_p5_map_to_native_scale() {
+        // Native pTask scale, identical to the display / `pt priority`:
+        // p1=low(1) .. p5=critical(5). No Todoist inversion.
+        for (input, expected) in &[
+            ("foo p1", 1),
+            ("foo p2", 2),
+            ("foo p3", 3),
+            ("foo p4", 4),
+            ("foo p5", 5),
+        ] {
             let q = parse_at(input, anchor()).unwrap();
             assert_eq!(q.priority, Some(*expected), "input={input}");
         }
@@ -788,9 +797,9 @@ mod tests {
 
     #[test]
     fn unknown_p_token_stays_in_title() {
-        // p5 is out of Todoist range; stays as a title word.
-        let q = parse_at("foo p5 bar", anchor()).unwrap();
-        assert!(q.title.contains("p5"), "got title {:?}", q.title);
+        // p6 is out of the 1..=5 range; stays as a title word.
+        let q = parse_at("foo p6 bar", anchor()).unwrap();
+        assert!(q.title.contains("p6"), "got title {:?}", q.title);
     }
 
     #[test]
