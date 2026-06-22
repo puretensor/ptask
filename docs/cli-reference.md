@@ -45,12 +45,13 @@ Mark done by `PT-N`, bare integer `42`, or title substring.
 Promote/demote a task's priority: `critical | urgent | high | normal | low`
 or `1..=5`. Rescores immediately so `pt next` ordering reflects the change.
 
-### `pt edit <query> [--deadline ISO | --clear-deadline]` (alias `pt update`)
+### `pt edit <query> [--deadline ISO | --clear-deadline] [--title T] [--desc D]` (alias `pt update`)
 
-Edit task fields. Currently supported: set the deadline to an ISO
-date/datetime, or clear it. Recurring tasks reject deadline clearing;
-setting a deadline updates their next occurrence. Deadline feeds
-`score_urgency`, so a rescore runs immediately after the change.
+Edit task fields: set/clear the deadline and/or replace the title/description
+(any combination; at least one required). Recurring tasks reject deadline
+clearing; setting a deadline updates their next occurrence. A deadline change
+feeds `score_urgency` and triggers an immediate rescore; a text-only edit does
+not rescore.
 
 ### `pt reopen <query>`
 
@@ -104,9 +105,10 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote list [-s STATUS -p P -n N]` | full-sync + client-side filter |
 | `pt remote done <query>` | resolve + `task_done` |
 | `pt remote priority <query> <level>` (alias `pri`) | resolve + `task_priority` (+ server rescore) |
-| `pt remote edit <query> [--deadline ISO \| --clear-deadline]` (alias `update`) | resolve + `task_edit` |
+| `pt remote edit <query> [--deadline ISO \| --clear-deadline] [--title T] [--desc D]` (alias `update`) | resolve + `task_edit` (deadline) and/or `task_retext` (title/desc) |
 | `pt remote reopen <query>` | resolve (incl. done) + `task_reopen` |
-| `pt remote show <query>` | resolve + print one task's row (read-only) |
+| `pt remote show <query>` | base row + side-table detail via `GET /detail/{uuid}` (read-only) |
+| `pt remote next [-n N]` | DAG-ready tasks via `GET /next` (server resolves `depends_on`) |
 
 `--url` defaults to `$PTASK_SYNC_URL` then `https://ptask.ts.puretensor.local`.
 

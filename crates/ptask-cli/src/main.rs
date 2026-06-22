@@ -118,8 +118,10 @@ enum RemoteCommand {
     Edit(RemoteEditArgs),
     /// `pt remote reopen <query>` — flip a done/dismissed task back to pending.
     Reopen(RemoteReopenArgs),
-    /// `pt remote show <query>` — print one task's full row (read-only).
+    /// `pt remote show <query>` — print one task's full row + detail (read-only).
     Show(RemoteShowArgs),
+    /// `pt remote next [-n N]` — DAG-ready tasks from the canonical host.
+    Next(RemoteNextArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -171,6 +173,20 @@ struct RemoteEditArgs {
     /// Clear the deadline.
     #[arg(long = "clear-deadline")]
     clear_deadline: bool,
+    /// Replace the title.
+    #[arg(long = "title")]
+    title: Option<String>,
+    /// Replace the description.
+    #[arg(long = "desc")]
+    desc: Option<String>,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteNextArgs {
+    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    limit: usize,
     #[arg(long = "url", env = "PTASK_SYNC_URL")]
     url: Option<String>,
 }
@@ -315,6 +331,12 @@ struct EditArgs {
     /// Clear the deadline.
     #[arg(long = "clear-deadline")]
     clear_deadline: bool,
+    /// Replace the title.
+    #[arg(long = "title")]
+    title: Option<String>,
+    /// Replace the description.
+    #[arg(long = "desc")]
+    desc: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -576,31 +598,59 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     if a.deadline.is_some() && a.clear_deadline {
         anyhow::bail!("use either --deadline or --clear-deadline, not both");
     }
-    if a.deadline.is_none() && !a.clear_deadline {
-        anyhow::bail!("nothing to edit; currently supported: --deadline DATE or --clear-deadline");
+    let has_deadline = a.deadline.is_some() || a.clear_deadline;
+    let has_text = a.title.is_some() || a.desc.is_some();
+    if !has_deadline && !has_text {
+        anyhow::bail!(
+            "nothing to edit; use --deadline DATE | --clear-deadline | --title T | --desc D"
+        );
     }
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    let old = task.deadline.as_deref().unwrap_or("--").to_string();
-    let new_deadline = if a.clear_deadline {
-        None
-    } else {
-        a.deadline.as_deref()
-    };
-    tasks::update_deadline(db, &task.id, new_deadline)?;
-    // Deadline feeds urgency_score, so recompute immediately.
-    let note = match ptask_core::scoring::run_once(db, false) {
-        Ok(r) => format!(" · rescored {}", r.tasks_scored),
-        Err(e) => {
-            eprintln!("warning: deadline set but rescore failed: {}", e);
-            String::new()
+    if has_text {
+        tasks::update_text(db, &task.id, a.title.as_deref(), a.desc.as_deref())?;
+    }
+    if has_deadline {
+        let new_deadline = if a.clear_deadline {
+            None
+        } else {
+            a.deadline.as_deref()
+        };
+        tasks::update_deadline(db, &task.id, new_deadline)?;
+    }
+    // Only the deadline feeds a score (urgency); a text-only edit needs no rescore.
+    let note = if has_deadline {
+        match ptask_core::scoring::run_once(db, false) {
+            Ok(r) => format!(" · rescored {}", r.tasks_scored),
+            Err(e) => {
+                eprintln!("warning: edit applied but rescore failed: {}", e);
+                String::new()
+            }
         }
+    } else {
+        String::new()
     };
+    let mut parts: Vec<String> = Vec::new();
+    if has_deadline {
+        parts.push(format!(
+            "deadline {}",
+            if a.clear_deadline {
+                "cleared".to_string()
+            } else {
+                a.deadline.clone().unwrap_or_default()
+            }
+        ));
+    }
+    if a.title.is_some() {
+        parts.push("title".into());
+    }
+    if a.desc.is_some() {
+        parts.push("description".into());
+    }
     println!(
-        "{} {} · deadline {} -> {}{}",
+        "{} {} · edited {}{}",
         task.pt_id.as_deref().unwrap_or(""),
         task.title,
-        old,
-        new_deadline.unwrap_or("--"),
+        parts.join(" + "),
         note
     );
     Ok(())
@@ -854,25 +904,43 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             if a.deadline.is_some() && a.clear_deadline {
                 anyhow::bail!("use either --deadline or --clear-deadline, not both");
             }
-            if a.deadline.is_none() && !a.clear_deadline {
-                anyhow::bail!("nothing to edit; use --deadline DATE or --clear-deadline");
+            let has_deadline = a.deadline.is_some() || a.clear_deadline;
+            let has_text = a.title.is_some() || a.desc.is_some();
+            if !has_deadline && !has_text {
+                anyhow::bail!(
+                    "nothing to edit; use --deadline DATE | --clear-deadline | --title T | --desc D"
+                );
             }
             let client = match a.url {
                 Some(u) => remote::RemoteClient::with_url(&u)?,
                 None => remote::RemoteClient::from_env()?,
             };
-            let new_deadline = if a.clear_deadline {
-                None
-            } else {
-                a.deadline.as_deref()
-            };
-            let task = client.edit_deadline(&a.query, new_deadline)?;
-            println!(
-                "remote edit ok — {} {} · deadline {}",
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
-                task.title,
-                task.deadline.as_deref().unwrap_or("--")
-            );
+            // Title/description and deadline are separate commands (one event
+            // each); run text first so the deadline call re-resolves the new title.
+            let mut task = None;
+            if has_text {
+                task = Some(client.retext(&a.query, a.title.as_deref(), a.desc.as_deref())?);
+            }
+            if has_deadline {
+                let new_deadline = if a.clear_deadline {
+                    None
+                } else {
+                    a.deadline.as_deref()
+                };
+                task = Some(client.edit_deadline(&a.query, new_deadline)?);
+            }
+            let task = task.expect("validated that at least one edit runs");
+            let pt = task.pt_id.as_deref().unwrap_or(&task.id[..8]).to_string();
+            println!("remote edit ok — {} {}", pt, task.title);
+            if has_deadline {
+                println!("  deadline → {}", task.deadline.as_deref().unwrap_or("--"));
+            }
+            if a.title.is_some() {
+                println!("  title updated");
+            }
+            if a.desc.is_some() {
+                println!("  description updated");
+            }
             Ok(())
         }
         RemoteCommand::Reopen(a) => {
@@ -914,6 +982,46 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             }
             println!("  source:   {}", t.source_type);
             println!("  uuid:     {}", t.id);
+            // Rich side-table detail (best-effort: a pre-v1.9 server has no
+            // /detail route, so just skip it and keep the base row).
+            if let Ok(d) = client.detail(&t.id) {
+                if !d.labels.is_empty() {
+                    println!("  labels:   {}", d.labels.join(", "));
+                }
+                if let Some(p) = &d.project {
+                    println!("  project:  {}", p);
+                }
+                if let Some(m) = d.duration_min {
+                    println!("  est:      {}m", m);
+                }
+                if !d.depends_on.is_empty() {
+                    println!("  deps on:  {}", d.depends_on.join(", "));
+                }
+                if !d.blocks_tasks.is_empty() {
+                    println!("  blocks:   {}", d.blocks_tasks.join(", "));
+                }
+                if let Some(r) = &d.recurrence_input {
+                    println!("  recurs:   {}", r);
+                }
+            }
+            Ok(())
+        }
+        RemoteCommand::Next(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let rows = client.next(a.limit)?;
+            if rows.is_empty() {
+                println!("remote next — no ready tasks");
+                return Ok(());
+            }
+            for t in &rows {
+                let label = priority::label(t.priority).to_ascii_uppercase();
+                let pt = t.pt_id.as_deref().unwrap_or(&t.id[..8]);
+                let due = t.deadline.as_deref().unwrap_or("--");
+                println!("[{:8}] {:8}  {}  ({})", label, pt, t.title, due);
+            }
             Ok(())
         }
     }

@@ -67,6 +67,24 @@ impl RemoteClient {
         resp.json::<SyncResp>().context("parse /sync response")
     }
 
+    /// GET a read-only endpoint and return the parsed JSON. Forwards the API
+    /// token as a bearer credential, matching the `/sync` path.
+    fn get_json(&self, path: &str) -> Result<Value> {
+        let url = format!("{}{}", self.base, path);
+        let mut builder = self.client.get(&url);
+        if let Some(token) = self.api_token.as_ref() {
+            builder = builder.bearer_auth(token);
+        }
+        let resp = builder.send().with_context(|| format!("GET {url}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(anyhow!("remote GET {path} {status}: {body}"));
+        }
+        resp.json::<Value>()
+            .with_context(|| format!("parse GET {path}"))
+    }
+
     /// `pt remote add "..."` — POST `task_create` with the quick-add text.
     /// Returns the created `Task` row.
     pub fn add(&self, text: &str) -> Result<Task> {
@@ -181,6 +199,52 @@ impl RemoteClient {
     /// viewable by PT-N.
     pub fn show(&self, query: &str) -> Result<Task> {
         self.resolve(query, true)
+    }
+
+    /// `pt remote edit <query> --title/--desc` — change title and/or
+    /// description. At least one must be `Some` (the CLI enforces this).
+    pub fn retext(
+        &self,
+        query: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<Task> {
+        let mut task = self.resolve(query, false)?;
+        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let req = json!({
+            "sync_token": "*",
+            "resource_types": ["tasks"],
+            "commands": [{
+                "type": "task_retext",
+                "uuid": cmd_uuid,
+                "args": { "task_uuid": task.id, "title": title, "description": description }
+            }]
+        });
+        let resp = self.sync(&req)?;
+        ensure_ok(&resp.sync_status, &cmd_uuid)?;
+        if let Some(t) = title {
+            task.title = t.to_string();
+        }
+        if let Some(d) = description {
+            task.description = d.to_string();
+        }
+        Ok(task)
+    }
+
+    /// `pt remote next` — DAG-ready tasks computed on the canonical host. The
+    /// `/sync` Task shape can't carry `depends_on` edges, so readiness must be
+    /// resolved server-side.
+    pub fn next(&self, limit: usize) -> Result<Vec<Task>> {
+        let v = self.get_json(&format!("/next?limit={limit}"))?;
+        serde_json::from_value(v.get("tasks").cloned().unwrap_or(Value::Null))
+            .context("parse /next tasks")
+    }
+
+    /// Fetch a task's side-table detail (labels/project/deps/recurrence) by
+    /// UUID. Backs the rich `pt remote show` output.
+    pub fn detail(&self, task_uuid: &str) -> Result<ptask_core::tasks::TaskDetail> {
+        let v = self.get_json(&format!("/detail/{task_uuid}"))?;
+        serde_json::from_value(v).context("parse /detail")
     }
 
     /// `pt remote list` — full sync, then client-side filters (status,
@@ -365,7 +429,27 @@ mod tests {
                 }))
             }
         };
-        let app = axum::Router::new().route("/sync", axum::routing::post(handler));
+        // Read routes (v1.9.0): canned responses for next/detail.
+        let next_handler = || async {
+            axum::Json(json!({ "tasks": [{
+                "id": "uuid-bbbbbbbb", "pt_id": "PT-101", "title": "ready task",
+                "description": "", "priority": 4, "status": "pending",
+                "created_at": "2026-05-13T00:00:00+00:00",
+                "updated_at": "2026-05-13T00:00:00+00:00",
+                "deadline": null, "source_type": "manual", "ai_reasoning": ""
+            }]}))
+        };
+        let detail_handler = |axum::extract::Path(_uuid): axum::extract::Path<String>| async {
+            axum::Json(json!({
+                "labels": ["ops"], "project": "fleet", "duration_min": 30,
+                "planned_at": null, "energy": null, "depends_on": [], "blocks_tasks": [],
+                "recurrence_input": null, "recurrence_mode": null, "recurrence_next": null
+            }))
+        };
+        let app = axum::Router::new()
+            .route("/sync", axum::routing::post(handler))
+            .route("/next", axum::routing::get(next_handler))
+            .route("/detail/{uuid}", axum::routing::get(detail_handler));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -528,5 +612,36 @@ mod tests {
                 .all(|c| c["commands"].as_array().is_none_or(|a| a.is_empty())),
             "show must not dispatch any mutating command"
         );
+    }
+
+    #[test]
+    fn remote_retext_dispatches_task_retext() {
+        let (c, calls, _rt) = mock_client();
+        let task = c.retext("PT-100", Some("renamed"), None).unwrap();
+        assert_eq!(task.title, "renamed");
+        let calls_v = calls.lock().unwrap();
+        let cmd = dispatched(&calls_v, "task_retext").expect("task_retext dispatched");
+        assert_eq!(cmd["args"]["title"], "renamed");
+        assert!(
+            cmd["args"]["description"].is_null(),
+            "unset description must be JSON null"
+        );
+    }
+
+    #[test]
+    fn remote_next_fetches_ready_tasks() {
+        let (c, _calls, _rt) = mock_client();
+        let rows = c.next(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pt_id.as_deref(), Some("PT-101"));
+    }
+
+    #[test]
+    fn remote_detail_fetches_side_table() {
+        let (c, _calls, _rt) = mock_client();
+        let d = c.detail("uuid-bbbbbbbb").unwrap();
+        assert_eq!(d.labels, vec!["ops".to_string()]);
+        assert_eq!(d.project.as_deref(), Some("fleet"));
+        assert_eq!(d.duration_min, Some(30));
     }
 }

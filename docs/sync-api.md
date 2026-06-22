@@ -8,6 +8,8 @@
 | `/healthz` | GET | liveness |
 | `/version` | GET | `pt --version` string |
 | `/sync` | POST | command + delta sync |
+| `/next` | GET | DAG-ready tasks (`?limit=N`); read-token gated (v1.9.0) |
+| `/detail/{uuid}` | GET | one task's side-table detail; read-token gated (v1.9.0) |
 | `/capture` | POST | one-shot raw-text ingest |
 | `/webhook/gitea` | POST | HMAC-signed `Fixes PT-N` parser |
 | `/webhook/github` | POST | as above, GitHub HMAC |
@@ -89,6 +91,7 @@ the environment variable is set on the client node.
 | `task_priority` (v1.8.0) | `{ task_uuid \| pt_id, priority }` | sets priority (1..=5), logs a `priority_change` interaction, rescores. |
 | `task_edit` (v1.8.0) | `{ task_uuid \| pt_id, deadline }` | sets the deadline (ISO string) or clears it (JSON `null`); rescores. |
 | `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). |
+| `task_retext` (v1.9.0) | `{ task_uuid \| pt_id, title?, description? }` | replaces the title and/or description (at least one required). |
 
 Each command records exactly one event keyed on its `uuid`, so `/sync` replays
 are idempotent. More commands (`task_delete`, `view_save`, …) are backward-
