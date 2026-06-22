@@ -873,6 +873,48 @@ pub fn reopen_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) -> 
     Ok(())
 }
 
+/// Dismiss a task: set `status` to `'dismissed'` (a soft close — `reopen`
+/// brings it back). Errors if the task is missing or already dismissed.
+pub fn dismiss(db: &Db, task_uuid: &str) -> Result<()> {
+    dismiss_with_event(db, task_uuid, None)
+}
+
+/// Full-control variant of [`dismiss`]: the `task.updated` event commits in the
+/// same transaction as the status flip, keyed on `event_uuid` for `/sync`
+/// idempotency.
+pub fn dismiss_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) -> Result<()> {
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let status: Option<String> = tx
+        .query_row("SELECT status FROM tasks WHERE id=?1", [task_uuid], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let status = status.ok_or_else(|| crate::Error::Other("task not found".into()))?;
+    if status == "dismissed" {
+        return Err(crate::Error::Other("task is already dismissed".into()));
+    }
+    tx.execute(
+        "UPDATE tasks SET status='dismissed', updated_at=?1 WHERE id=?2",
+        params![now, task_uuid],
+    )?;
+    tx.execute(
+        "INSERT INTO interactions (task_id, action, ts, details)
+         VALUES (?1, 'status_change', ?2, ?3)",
+        params![task_uuid, now, format!("Dismissed (was {})", status)],
+    )?;
+    record_event_tx(
+        &tx,
+        event_uuid,
+        task_uuid,
+        "task.updated",
+        &serde_json::json!({ "task_uuid": task_uuid, "status": "dismissed" }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Update a task's title and/or description. At least one must be `Some`.
 pub fn update_text(
     db: &Db,
@@ -1234,6 +1276,41 @@ mod tests {
         // Nothing-to-change and missing-task are both errors.
         assert!(update_text(&db, &t.id, None, None).is_err());
         assert!(update_text(&db, "nonexistent-uuid", Some("x"), None).is_err());
+    }
+
+    #[test]
+    fn dismiss_sets_status_and_reopen_reverses_it() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("dismiss me")).unwrap();
+
+        dismiss(&db, &t.id).unwrap();
+        let s: String = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(s, "dismissed");
+        assert_eq!(event_count(&db, "task.updated"), 1);
+
+        // Dismissing an already-dismissed task is an error.
+        assert!(dismiss(&db, &t.id).is_err());
+
+        // reopen reverses it back to pending.
+        reopen(&db, &t.id).unwrap();
+        let s2: String = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(s2, "pending");
     }
 
     #[test]

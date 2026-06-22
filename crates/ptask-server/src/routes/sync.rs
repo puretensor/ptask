@@ -354,6 +354,17 @@ fn apply_command(
                 },
             ))
         }
+        "task_dismiss" => {
+            let task = resolve_task(state, &cmd.args)?;
+            tasks::dismiss_with_event(&state.db, &task.id, Some(&cmd.uuid))?;
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.updated".into(),
+                    payload: serde_json::json!({ "task_uuid": task.id, "status": "dismissed" }),
+                },
+            ))
+        }
         other => Err(anyhow::anyhow!("unsupported command type: {:?}", other)),
     }
 }

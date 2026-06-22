@@ -201,6 +201,26 @@ impl RemoteClient {
         self.resolve(query, true)
     }
 
+    /// `pt remote dismiss <query>` — soft-close a task (status → dismissed).
+    /// Reversible via `reopen`. Resolves active tasks only.
+    pub fn dismiss(&self, query: &str) -> Result<Task> {
+        let mut task = self.resolve(query, false)?;
+        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let req = json!({
+            "sync_token": "*",
+            "resource_types": ["tasks"],
+            "commands": [{
+                "type": "task_dismiss",
+                "uuid": cmd_uuid,
+                "args": { "task_uuid": task.id }
+            }]
+        });
+        let resp = self.sync(&req)?;
+        ensure_ok(&resp.sync_status, &cmd_uuid)?;
+        task.status = "dismissed".to_string();
+        Ok(task)
+    }
+
     /// `pt remote edit <query> --title/--desc` — change title and/or
     /// description. At least one must be `Some` (the CLI enforces this).
     pub fn retext(
@@ -643,5 +663,15 @@ mod tests {
         assert_eq!(d.labels, vec!["ops".to_string()]);
         assert_eq!(d.project.as_deref(), Some("fleet"));
         assert_eq!(d.duration_min, Some(30));
+    }
+
+    #[test]
+    fn remote_dismiss_dispatches_task_dismiss() {
+        let (c, calls, _rt) = mock_client();
+        let task = c.dismiss("PT-100").unwrap();
+        assert_eq!(task.status, "dismissed");
+        let calls_v = calls.lock().unwrap();
+        let cmd = dispatched(&calls_v, "task_dismiss").expect("task_dismiss dispatched");
+        assert_eq!(cmd["args"]["task_uuid"], "uuid-aaaaaaaa");
     }
 }
