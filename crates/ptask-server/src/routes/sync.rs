@@ -328,6 +328,32 @@ fn apply_command(
                 },
             ))
         }
+        "task_retext" => {
+            let task = resolve_task(state, &cmd.args)?;
+            let title = cmd.args.get("title").and_then(Value::as_str);
+            let description = cmd.args.get("description").and_then(Value::as_str);
+            if title.is_none() && description.is_none() {
+                return Err(anyhow::anyhow!(
+                    "task_retext: at least one of args.title / args.description required"
+                ));
+            }
+            tasks::update_text_with_event(
+                &state.db,
+                &task.id,
+                title,
+                description,
+                Some(&cmd.uuid),
+            )?;
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.updated".into(),
+                    payload: serde_json::json!({
+                        "task_uuid": task.id, "title": title, "description": description
+                    }),
+                },
+            ))
+        }
         other => Err(anyhow::anyhow!("unsupported command type: {:?}", other)),
     }
 }

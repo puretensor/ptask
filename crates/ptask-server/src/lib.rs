@@ -32,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::capture::router())
         .merge(routes::email::router())
         .merge(routes::sync::router())
+        .merge(routes::read::router())
         .merge(routes::metrics::router())
         .merge(routes::webhook_git::router())
         .with_state(state)
@@ -465,6 +466,89 @@ mod tests {
             .find(|t| t["id"] == uuid)
             .unwrap();
         assert_eq!(t["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn task_retext_and_read_routes() {
+        let _env = ENV_LOCK.lock().await;
+        let db = open_test_db();
+        let app = router(AppState { db: db.clone() });
+
+        // Create a ready task with a label so /detail has something to show.
+        let created = post_sync(
+            &app,
+            &serde_json::json!({
+                "sync_token": "*",
+                "commands": [{ "type": "task_create", "uuid": "k-1", "temp_id": "t1",
+                               "args": { "text": "ready task @ops" } }]
+            }),
+        )
+        .await;
+        let uuid = created["temp_id_mapping"]["t1"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // task_retext → change the title.
+        let retitled = post_sync(
+            &app,
+            &serde_json::json!({
+                "sync_token": "*",
+                "commands": [{ "type": "task_retext", "uuid": "k-2",
+                               "args": { "task_uuid": uuid, "title": "renamed task" } }]
+            }),
+        )
+        .await;
+        assert_eq!(retitled["sync_status"]["k-2"], "ok");
+        let t = retitled["resources"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == uuid)
+            .unwrap();
+        assert_eq!(t["title"], "renamed task");
+
+        // GET /next — the task has no deps, so it is ready.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/next?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            parsed["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["id"] == uuid),
+            "the ready task must appear in /next"
+        );
+
+        // GET /detail/{uuid} — the @ops label was captured by quick-add.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/detail/{uuid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let detail: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(detail["labels"][0], "ops");
     }
 
     #[tokio::test]

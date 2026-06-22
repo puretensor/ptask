@@ -873,10 +873,76 @@ pub fn reopen_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) -> 
     Ok(())
 }
 
+/// Update a task's title and/or description. At least one must be `Some`.
+pub fn update_text(
+    db: &Db,
+    task_uuid: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+) -> Result<()> {
+    update_text_with_event(db, task_uuid, title, description, None)
+}
+
+/// Full-control variant of [`update_text`]: the `task.updated` event commits in
+/// the same transaction as the edit, keyed on `event_uuid` for `/sync`
+/// idempotency.
+pub fn update_text_with_event(
+    db: &Db,
+    task_uuid: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    event_uuid: Option<&str>,
+) -> Result<()> {
+    if title.is_none() && description.is_none() {
+        return Err(crate::Error::Other("update_text: nothing to change".into()));
+    }
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let exists = tx
+        .query_row("SELECT 1 FROM tasks WHERE id=?1", [task_uuid], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(crate::Error::Other("task not found".into()));
+    }
+    if let Some(t) = title {
+        tx.execute(
+            "UPDATE tasks SET title=?1, updated_at=?2 WHERE id=?3",
+            params![t, now, task_uuid],
+        )?;
+    }
+    if let Some(d) = description {
+        tx.execute(
+            "UPDATE tasks SET description=?1, updated_at=?2 WHERE id=?3",
+            params![d, now, task_uuid],
+        )?;
+    }
+    let what = match (title.is_some(), description.is_some()) {
+        (true, true) => "title + description edited",
+        (true, false) => "title edited",
+        (false, true) => "description edited",
+        (false, false) => unreachable!("guarded above"),
+    };
+    tx.execute(
+        "INSERT INTO interactions (task_id, action, ts, details) VALUES (?1, 'edit', ?2, ?3)",
+        params![task_uuid, now, what],
+    )?;
+    record_event_tx(
+        &tx,
+        event_uuid,
+        task_uuid,
+        "task.updated",
+        &serde_json::json!({ "task_uuid": task_uuid, "title": title, "description": description }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Extension fields for a single task, loaded on demand. Used by the TUI
 /// detail pane and any other surface that wants the full row + side-table
 /// state without paying the cost for every list query.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDetail {
     pub labels: Vec<String>,
     pub project: Option<String>,
@@ -1127,6 +1193,47 @@ mod tests {
 
         // Reopening an already-pending task is an error (nothing to do).
         assert!(reopen(&db, &t.id).is_err());
+    }
+
+    #[test]
+    fn update_text_changes_title_and_description() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("old title")).unwrap();
+
+        update_text(&db, &t.id, Some("new title"), Some("a body")).unwrap();
+        let (title, desc): (String, String) = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT title, description FROM tasks WHERE id=?1",
+                    [&t.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(title, "new title");
+        assert_eq!(desc, "a body");
+        assert_eq!(event_count(&db, "task.updated"), 1);
+
+        // Title-only edit leaves the description untouched.
+        update_text(&db, &t.id, Some("title2"), None).unwrap();
+        let (title2, desc2): (String, String) = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT title, description FROM tasks WHERE id=?1",
+                    [&t.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(title2, "title2");
+        assert_eq!(
+            desc2, "a body",
+            "description must survive a title-only edit"
+        );
+
+        // Nothing-to-change and missing-task are both errors.
+        assert!(update_text(&db, &t.id, None, None).is_err());
+        assert!(update_text(&db, "nonexistent-uuid", Some("x"), None).is_err());
     }
 
     #[test]
