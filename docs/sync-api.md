@@ -92,6 +92,7 @@ the environment variable is set on the client node.
 | `task_edit` (v1.8.0) | `{ task_uuid \| pt_id, deadline }` | sets the deadline (ISO string) or clears it (JSON `null`); rescores. |
 | `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). |
 | `task_retext` (v1.9.0) | `{ task_uuid \| pt_id, title?, description? }` | replaces the title and/or description (at least one required). |
+| `task_dismiss` (v1.10.0) | `{ task_uuid \| pt_id }` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. |
 
 Each command records exactly one event keyed on its `uuid`, so `/sync` replays
 are idempotent. More commands (`task_delete`, `view_save`, …) are backward-

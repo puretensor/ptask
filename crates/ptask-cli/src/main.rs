@@ -5,7 +5,8 @@
 //!   pt list        [-s STATUS]   [-p PRIORITY]    [-n LIMIT]       [-v]
 //!   pt done <query>
 //!
-//! Future phases add `show`, `rm`, richer `edit`, `serve`, `bot`, `tui`.
+//! Later phases added `show`, `dismiss`, `rm`, `reopen`, richer `edit`,
+//! `serve`, `bot`, `tui`, and the `remote` mutation/read verbs.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -47,6 +48,12 @@ enum Command {
     Edit(EditArgs),
     /// Reopen a completed/dismissed task (status → pending).
     Reopen(ReopenArgs),
+    /// Show one task's full row + side-table detail.
+    Show(ShowArgs),
+    /// Dismiss a task (soft close, status → dismissed; reversible via reopen).
+    Dismiss(DismissArgs),
+    /// Delete a task permanently (hard delete + tombstone).
+    Rm(RmArgs),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
     /// Manage saved views.
@@ -122,6 +129,8 @@ enum RemoteCommand {
     Show(RemoteShowArgs),
     /// `pt remote next [-n N]` — DAG-ready tasks from the canonical host.
     Next(RemoteNextArgs),
+    /// `pt remote dismiss <query>` — soft-close a task (reversible via reopen).
+    Dismiss(RemoteDismissArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -193,6 +202,14 @@ struct RemoteNextArgs {
 
 #[derive(clap::Args, Debug)]
 struct RemoteReopenArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteDismissArgs {
     /// PT-N (e.g. PT-42), bare integer (42), or title substring.
     query: String,
     #[arg(long = "url", env = "PTASK_SYNC_URL")]
@@ -346,6 +363,27 @@ struct ReopenArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct ShowArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct DismissArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct RmArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long = "yes")]
+    yes: bool,
+}
+
+#[derive(clap::Args, Debug)]
 struct GenCompletionsArgs {
     /// Target shell.
     #[arg(value_enum)]
@@ -388,6 +426,9 @@ fn main() -> Result<()> {
                 Some(Command::Priority(a)) => cmd_priority(&db, a),
                 Some(Command::Edit(a)) => cmd_edit(&db, a),
                 Some(Command::Reopen(a)) => cmd_reopen(&db, a),
+                Some(Command::Show(a)) => cmd_show(&db, a),
+                Some(Command::Dismiss(a)) => cmd_dismiss(&db, a),
+                Some(Command::Rm(a)) => cmd_rm(&db, a),
                 Some(Command::Next(a)) => cmd_next(&db, a),
                 Some(Command::View(c)) => cmd_view(&db, c),
                 Some(Command::Tui) => ptask_tui::run(db),
@@ -677,6 +718,82 @@ fn cmd_reopen(db: &Db, a: ReopenArgs) -> Result<()> {
     Ok(())
 }
 
+fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
+    let t = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    let d = tasks::load_detail(db, &t.id)?;
+    let pt = t.pt_id.as_deref().unwrap_or(&t.id[..8]);
+    println!(
+        "{}  [{}]",
+        pt,
+        priority::label(t.priority).to_ascii_uppercase()
+    );
+    println!("  {}", t.title);
+    println!("  status:   {}", t.status);
+    println!(
+        "  priority: {} ({})",
+        t.priority,
+        priority::label(t.priority)
+    );
+    println!("  deadline: {}", t.deadline.as_deref().unwrap_or("--"));
+    if !t.description.is_empty() {
+        println!("  desc:     {}", t.description);
+    }
+    if !d.labels.is_empty() {
+        println!("  labels:   {}", d.labels.join(", "));
+    }
+    if let Some(p) = &d.project {
+        println!("  project:  {}", p);
+    }
+    if let Some(m) = d.duration_min {
+        println!("  est:      {}m", m);
+    }
+    if !d.depends_on.is_empty() {
+        println!("  deps on:  {}", d.depends_on.join(", "));
+    }
+    if !d.blocks_tasks.is_empty() {
+        println!("  blocks:   {}", d.blocks_tasks.join(", "));
+    }
+    if let Some(r) = &d.recurrence_input {
+        println!("  recurs:   {}", r);
+    }
+    println!("  source:   {}", t.source_type);
+    println!("  uuid:     {}", t.id);
+    Ok(())
+}
+
+fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    tasks::dismiss(db, &task.id)?;
+    println!(
+        "{} {} · dismissed",
+        task.pt_id.as_deref().unwrap_or(""),
+        task.title
+    );
+    Ok(())
+}
+
+fn cmd_rm(db: &Db, a: RmArgs) -> Result<()> {
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    let pt = task.pt_id.as_deref().unwrap_or("").to_string();
+    if !a.yes {
+        use std::io::Write;
+        print!(
+            "Permanently delete {} \"{}\"? This cannot be undone. [y/N] ",
+            pt, task.title
+        );
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok();
+        if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("aborted.");
+            return Ok(());
+        }
+    }
+    tasks::delete_task(db, &task.id)?;
+    println!("{} {} · deleted", pt, task.title);
+    Ok(())
+}
+
 fn cmd_next(db: &Db, a: NextArgs) -> Result<()> {
     let rows = dag::next_ready(db, a.limit)?;
     if rows.is_empty() {
@@ -837,11 +954,18 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 None => remote::RemoteClient::from_env()?,
             };
             let task = client.add(&a.text)?;
+            // Echo the parsed interpretation (priority + deadline) so a silent
+            // mis-parse — the PT-653 class — is visible at the moment of creation.
             println!(
-                "remote add ok — {} {}",
+                "remote add ok — {} {} · {} ({})",
                 task.pt_id.as_deref().unwrap_or(&task.id[..8]),
-                task.title
+                task.title,
+                task.priority,
+                priority::label(task.priority)
             );
+            if let Some(d) = &task.deadline {
+                println!("  deadline: {}", d);
+            }
             Ok(())
         }
         RemoteCommand::List(a) => {
@@ -1022,6 +1146,20 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 let due = t.deadline.as_deref().unwrap_or("--");
                 println!("[{:8}] {:8}  {}  ({})", label, pt, t.title, due);
             }
+            Ok(())
+        }
+        RemoteCommand::Dismiss(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let task = client.dismiss(&a.query)?;
+            println!(
+                "remote dismiss ok — {} {} · {}",
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title,
+                task.status
+            );
             Ok(())
         }
     }

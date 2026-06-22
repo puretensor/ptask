@@ -60,6 +60,22 @@ done task — substring resolution only matches active tasks). Logs a
 `status_change` interaction the neglect score reads as a reopen, and rescores
 immediately so the task re-enters `pt next` ordering.
 
+### `pt show <query>`
+
+Print one task's full row plus side-table detail: labels, project, duration,
+dependencies (`deps on` / `blocks`), and recurrence.
+
+### `pt dismiss <query>`
+
+Soft-close a task (`status → dismissed`). Reversible with `pt reopen`. Distinct
+from `pt rm`: the row and its history survive.
+
+### `pt rm <query> [-y | --yes]`
+
+Permanently delete a task (hard `DELETE` + a `task.deleted` tombstone for delta
+sync). Prompts for confirmation unless `--yes`. The `interactions` history is
+lost with the row — prefer `pt dismiss` unless you truly want it gone.
+
 ### `pt next [-n LIMIT]`
 
 DAG-ready tasks: every `depends_on` predecessor is `done` (or missing).
@@ -109,6 +125,7 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote reopen <query>` | resolve (incl. done) + `task_reopen` |
 | `pt remote show <query>` | base row + side-table detail via `GET /detail/{uuid}` (read-only) |
 | `pt remote next [-n N]` | DAG-ready tasks via `GET /next` (server resolves `depends_on`) |
+| `pt remote dismiss <query>` | resolve + `task_dismiss` (soft close; reversible via reopen) |
 
 `--url` defaults to `$PTASK_SYNC_URL` then `https://ptask.ts.puretensor.local`.
 
