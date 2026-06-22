@@ -37,6 +37,9 @@ _pt() {
             pt,done)
                 cmd="pt__subcmd__done"
                 ;;
+            pt,edit)
+                cmd="pt__subcmd__edit"
+                ;;
             pt,gen-completions)
                 cmd="pt__subcmd__gen__subcmd__completions"
                 ;;
@@ -51,6 +54,9 @@ _pt() {
                 ;;
             pt,next)
                 cmd="pt__subcmd__next"
+                ;;
+            pt,priority)
+                cmd="pt__subcmd__priority"
                 ;;
             pt,remote)
                 cmd="pt__subcmd__remote"
@@ -100,6 +106,9 @@ _pt() {
             pt__subcmd__help,done)
                 cmd="pt__subcmd__help__subcmd__done"
                 ;;
+            pt__subcmd__help,edit)
+                cmd="pt__subcmd__help__subcmd__edit"
+                ;;
             pt__subcmd__help,gen-completions)
                 cmd="pt__subcmd__help__subcmd__gen__subcmd__completions"
                 ;;
@@ -114,6 +123,9 @@ _pt() {
                 ;;
             pt__subcmd__help,next)
                 cmd="pt__subcmd__help__subcmd__next"
+                ;;
+            pt__subcmd__help,priority)
+                cmd="pt__subcmd__help__subcmd__priority"
                 ;;
             pt__subcmd__help,remote)
                 cmd="pt__subcmd__help__subcmd__remote"
@@ -230,7 +242,7 @@ _pt() {
 
     case "${cmd}" in
         pt)
-            opts="-h -V --db --help --version add list done next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
+            opts="-h -V --db --help --version add list done priority edit next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -461,6 +473,28 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__edit)
+            opts="-h --deadline --clear-deadline --db --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --deadline)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__gen__subcmd__completions)
             opts="-h --db --help bash zsh fish"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
@@ -498,7 +532,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help)
-            opts="add list done next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
+            opts="add list done priority edit next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -623,6 +657,20 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__edit)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__help__subcmd__gen__subcmd__completions)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -680,6 +728,20 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help__subcmd__next)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__priority)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -932,6 +994,24 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__priority)
+            opts="-h --db --help <QUERY> <LEVEL>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
                 --db)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

@@ -12,7 +12,7 @@ trailing `//description` becomes the description.
 
 | Token | Effect |
 |---|---|
-| `p1` `p2` `p3` `p4` | priority 1 (low) — 4 (urgent). Bare `p` matches 5 (critical) is unsupported by design; use `--priority`. |
+| `p1`..`p5` | priority, native scale: p1=low, p2=normal, p3=high, p4=urgent, p5=critical. Identical to `--priority` and `pt priority` — no Todoist inversion. |
 | `@label` | append to `pt_extensions.labels` JSON. Multiple allowed. |
 | `#project` | `pt_extensions.project` (last wins). |
 | `~30m`, `~2h`, `~1d` | `pt_extensions.duration_min`. |

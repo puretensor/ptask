@@ -14,7 +14,7 @@
 //!             | yesterday
 //!             | no date
 //!             | recurring
-//!             | p1 | p2 | p3 | p4
+//!             | p1 | p2 | p3 | p4 | p5
 //!             | @label
 //!             | #project
 //!             | due:        <phrase>
@@ -47,7 +47,7 @@ pub enum Expr {
     Overdue,
     NoDate,
     Recurring,
-    Priority(i64), // pTask 1..=4 (after Todoist→pTask mapping)
+    Priority(i64), // pTask 1..=5 (native scale: 1=low .. 5=critical)
     Label(String),
     Project(String),
     DueOn(String), // ISO yyyy-mm-dd
@@ -312,19 +312,17 @@ impl<'a> ParseCtx<'a> {
             let phrase = self.consume_phrase();
             return Ok(Expr::Search(phrase));
         }
-        // p1..p4
+        // p1..p5 — native pTask scale (p1=low .. p5=critical), no inversion.
         if self.lookahead("p") {
             let save = self.pos;
             self.pos += 1;
             let rest = &self.input[self.pos..];
             if let Some(first) = rest.chars().next()
                 && let Some(n) = first.to_digit(10)
-                && (1..=4).contains(&n)
+                && (1..=5).contains(&n)
             {
                 self.pos += first.len_utf8();
-                // Map Todoist p1 (urgent) → pTask 4; p4 (low) → 1.
-                let pt = 5 - n as i64;
-                return Ok(Expr::Priority(pt));
+                return Ok(Expr::Priority(n as i64));
             }
             self.pos = save;
         }
@@ -458,9 +456,9 @@ mod tests {
     }
 
     #[test]
-    fn priority_p1_through_p4() {
-        // Todoist scale → pTask: p1=4, p2=3, p3=2, p4=1
-        for (input, expected) in &[("p1", 4), ("p2", 3), ("p3", 2), ("p4", 1)] {
+    fn priority_p1_through_p5() {
+        // Native pTask scale: p1=low(1) .. p5=critical(5)
+        for (input, expected) in &[("p1", 1), ("p2", 2), ("p3", 3), ("p4", 4), ("p5", 5)] {
             match ast(input) {
                 Expr::Priority(n) => assert_eq!(n, *expected),
                 other => panic!("input {input} parsed as {:?}", other),
@@ -493,7 +491,7 @@ mod tests {
         match e {
             Expr::And(l, r) => {
                 assert!(matches!(*l, Expr::Or(_, _)));
-                assert!(matches!(*r, Expr::Priority(4)));
+                assert!(matches!(*r, Expr::Priority(1)));
             }
             other => panic!("got {:?}", other),
         }

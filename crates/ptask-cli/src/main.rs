@@ -196,7 +196,7 @@ struct NextArgs {
 #[derive(clap::Args, Debug)]
 struct AddArgs {
     /// Task title (parsed as quick-add unless --raw is set).
-    /// Inline tokens: @label, #project, p1..p4, ~30m/~2h/~1d, !HH:MM,
+    /// Inline tokens: @label, #project, p1..p5, ~30m/~2h/~1d, !HH:MM,
     /// //description (rest of string), date phrases (today/tomorrow/
     /// weekday with this|next|last/ N days/ISO dates).
     title: String,

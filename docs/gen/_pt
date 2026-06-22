@@ -41,7 +41,7 @@ _arguments "${_arguments_options[@]}" : \
 '--raw[Disable quick-add parsing — treat the title literally]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':title -- Task title (parsed as quick-add unless --raw is set). Inline tokens\: @label, #project, p1..p4, ~30m/~2h/~1d, !HH\:MM, //description (rest of string), date phrases (today/tomorrow/ weekday with this|next|last/ N days/ISO dates):_default' \
+':title -- Task title (parsed as quick-add unless --raw is set). Inline tokens\: @label, #project, p1..p5, ~30m/~2h/~1d, !HH\:MM, //description (rest of string), date phrases (today/tomorrow/ weekday with this|next|last/ N days/ISO dates):_default' \
 && ret=0
 ;;
 (list)
@@ -63,6 +63,25 @@ _arguments "${_arguments_options[@]}" : \
 (done)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
+(priority)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+':level -- New level\: low|normal|high|urgent|critical or 1..=5:_default' \
+&& ret=0
+;;
+(edit)
+_arguments "${_arguments_options[@]}" : \
+'--deadline=[Set deadline to an ISO date/datetime, e.g. 2026-06-16]:DEADLINE:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--clear-deadline[Clear the deadline]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -435,6 +454,14 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(priority)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(edit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (next)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -590,6 +617,8 @@ _pt_commands() {
 'add:Create a new task' \
 'list:List tasks' \
 'done:Mark a task done (by PT-N or title substring)' \
+'priority:Promote/demote a task'\''s priority (critical|urgent|high|normal|low or 1..=5)' \
+'edit:Edit task fields' \
 'next:Show ready-to-start tasks (all dependencies done)' \
 'view:Manage saved views' \
 'tui:Launch the terminal UI (ratatui)' \
@@ -668,6 +697,11 @@ _pt__subcmd__done_commands() {
     local commands; commands=()
     _describe -t commands 'pt done commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__edit_commands] )) ||
+_pt__subcmd__edit_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt edit commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__gen-completions_commands] )) ||
 _pt__subcmd__gen-completions_commands() {
     local commands; commands=()
@@ -684,6 +718,8 @@ _pt__subcmd__help_commands() {
 'add:Create a new task' \
 'list:List tasks' \
 'done:Mark a task done (by PT-N or title substring)' \
+'priority:Promote/demote a task'\''s priority (critical|urgent|high|normal|low or 1..=5)' \
+'edit:Edit task fields' \
 'next:Show ready-to-start tasks (all dependencies done)' \
 'view:Manage saved views' \
 'tui:Launch the terminal UI (ratatui)' \
@@ -743,6 +779,11 @@ _pt__subcmd__help__subcmd__done_commands() {
     local commands; commands=()
     _describe -t commands 'pt help done commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__edit_commands] )) ||
+_pt__subcmd__help__subcmd__edit_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help edit commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__gen-completions_commands] )) ||
 _pt__subcmd__help__subcmd__gen-completions_commands() {
     local commands; commands=()
@@ -767,6 +808,11 @@ _pt__subcmd__help__subcmd__list_commands() {
 _pt__subcmd__help__subcmd__next_commands() {
     local commands; commands=()
     _describe -t commands 'pt help next commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__priority_commands] )) ||
+_pt__subcmd__help__subcmd__priority_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help priority commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__remote_commands] )) ||
 _pt__subcmd__help__subcmd__remote_commands() {
@@ -853,6 +899,11 @@ _pt__subcmd__list_commands() {
 _pt__subcmd__next_commands() {
     local commands; commands=()
     _describe -t commands 'pt next commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__priority_commands] )) ||
+_pt__subcmd__priority_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt priority commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__remote_commands] )) ||
 _pt__subcmd__remote_commands() {
