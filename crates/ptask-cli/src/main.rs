@@ -1039,21 +1039,15 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 Some(u) => remote::RemoteClient::with_url(&u)?,
                 None => remote::RemoteClient::from_env()?,
             };
-            // Title/description and deadline are separate commands (one event
-            // each); run text first so the deadline call re-resolves the new title.
-            let mut task = None;
-            if has_text {
-                task = Some(client.retext(&a.query, a.title.as_deref(), a.desc.as_deref())?);
-            }
-            if has_deadline {
-                let new_deadline = if a.clear_deadline {
-                    None
-                } else {
-                    a.deadline.as_deref()
-                };
-                task = Some(client.edit_deadline(&a.query, new_deadline)?);
-            }
-            let task = task.expect("validated that at least one edit runs");
+            // Resolve ONCE: a single /sync request carries both the title/desc
+            // and deadline commands against the same resolved task_uuid, so a
+            // rename can't drift the deadline onto a different task.
+            let deadline_op = if a.clear_deadline {
+                Some(None)
+            } else {
+                a.deadline.as_deref().map(Some)
+            };
+            let task = client.edit(&a.query, a.title.as_deref(), a.desc.as_deref(), deadline_op)?;
             let pt = task.pt_id.as_deref().unwrap_or(&task.id[..8]).to_string();
             println!("remote edit ok — {} {}", pt, task.title);
             if has_deadline {
