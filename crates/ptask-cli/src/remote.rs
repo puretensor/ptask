@@ -153,23 +153,60 @@ impl RemoteClient {
         Ok(task)
     }
 
-    /// `pt remote edit <query> --deadline <iso> | --clear-deadline` — set or
-    /// clear a deadline. `deadline = None` clears it (sends JSON null).
-    pub fn edit_deadline(&self, query: &str, deadline: Option<&str>) -> Result<Task> {
+    /// `pt remote edit <query> [--title T] [--desc D] [--deadline ISO | --clear-deadline]`.
+    /// Resolves the query to a task ONCE, then dispatches the title/description
+    /// (`task_retext`) and/or deadline (`task_edit`) changes as separate commands
+    /// in a SINGLE `/sync` request — both keyed to the resolved `task_uuid`. This
+    /// is the fix for the wrong-task hazard of resolving the query twice: a title
+    /// rename can no longer make a second resolve drift onto a different task.
+    ///
+    /// `deadline`: `None` = leave it; `Some(None)` = clear (JSON null);
+    /// `Some(Some(s))` = set to `s`.
+    pub fn edit(
+        &self,
+        query: &str,
+        title: Option<&str>,
+        description: Option<&str>,
+        deadline: Option<Option<&str>>,
+    ) -> Result<Task> {
         let mut task = self.resolve(query, false)?;
-        let cmd_uuid = uuid::Uuid::new_v4().to_string();
-        let req = json!({
-            "sync_token": "*",
-            "resource_types": ["tasks"],
-            "commands": [{
+        let retext_uuid = uuid::Uuid::new_v4().to_string();
+        let edit_uuid = uuid::Uuid::new_v4().to_string();
+        let mut commands: Vec<Value> = Vec::new();
+        if title.is_some() || description.is_some() {
+            commands.push(json!({
+                "type": "task_retext",
+                "uuid": retext_uuid,
+                "args": { "task_uuid": task.id, "title": title, "description": description }
+            }));
+        }
+        if let Some(dl) = deadline {
+            commands.push(json!({
                 "type": "task_edit",
-                "uuid": cmd_uuid,
-                "args": { "task_uuid": task.id, "deadline": deadline }
-            }]
-        });
+                "uuid": edit_uuid,
+                "args": { "task_uuid": task.id, "deadline": dl }
+            }));
+        }
+        if commands.is_empty() {
+            return Err(anyhow!("remote edit: nothing to change"));
+        }
+        let req = json!({ "sync_token": "*", "resource_types": ["tasks"], "commands": commands });
         let resp = self.sync(&req)?;
-        ensure_ok(&resp.sync_status, &cmd_uuid)?;
-        task.deadline = deadline.map(str::to_string);
+        if title.is_some() || description.is_some() {
+            ensure_ok(&resp.sync_status, &retext_uuid)?;
+        }
+        if deadline.is_some() {
+            ensure_ok(&resp.sync_status, &edit_uuid)?;
+        }
+        if let Some(t) = title {
+            task.title = t.to_string();
+        }
+        if let Some(d) = description {
+            task.description = d.to_string();
+        }
+        if let Some(dl) = deadline {
+            task.deadline = dl.map(str::to_string);
+        }
         Ok(task)
     }
 
@@ -218,36 +255,6 @@ impl RemoteClient {
         let resp = self.sync(&req)?;
         ensure_ok(&resp.sync_status, &cmd_uuid)?;
         task.status = "dismissed".to_string();
-        Ok(task)
-    }
-
-    /// `pt remote edit <query> --title/--desc` — change title and/or
-    /// description. At least one must be `Some` (the CLI enforces this).
-    pub fn retext(
-        &self,
-        query: &str,
-        title: Option<&str>,
-        description: Option<&str>,
-    ) -> Result<Task> {
-        let mut task = self.resolve(query, false)?;
-        let cmd_uuid = uuid::Uuid::new_v4().to_string();
-        let req = json!({
-            "sync_token": "*",
-            "resource_types": ["tasks"],
-            "commands": [{
-                "type": "task_retext",
-                "uuid": cmd_uuid,
-                "args": { "task_uuid": task.id, "title": title, "description": description }
-            }]
-        });
-        let resp = self.sync(&req)?;
-        ensure_ok(&resp.sync_status, &cmd_uuid)?;
-        if let Some(t) = title {
-            task.title = t.to_string();
-        }
-        if let Some(d) = description {
-            task.description = d.to_string();
-        }
         Ok(task)
     }
 
@@ -589,7 +596,9 @@ mod tests {
     #[test]
     fn remote_edit_dispatches_task_edit_with_deadline() {
         let (c, calls, _rt) = mock_client();
-        let task = c.edit_deadline("PT-100", Some("2026-07-01")).unwrap();
+        let task = c
+            .edit("PT-100", None, None, Some(Some("2026-07-01")))
+            .unwrap();
         assert_eq!(task.deadline.as_deref(), Some("2026-07-01"));
         let calls_v = calls.lock().unwrap();
         let cmd = dispatched(&calls_v, "task_edit").expect("task_edit dispatched");
@@ -599,7 +608,7 @@ mod tests {
     #[test]
     fn remote_edit_clear_deadline_sends_json_null() {
         let (c, calls, _rt) = mock_client();
-        let task = c.edit_deadline("PT-100", None).unwrap();
+        let task = c.edit("PT-100", None, None, Some(None)).unwrap();
         assert!(task.deadline.is_none());
         let calls_v = calls.lock().unwrap();
         let cmd = dispatched(&calls_v, "task_edit").expect("task_edit dispatched");
@@ -607,6 +616,34 @@ mod tests {
             cmd["args"]["deadline"].is_null(),
             "clear must send JSON null, got {:?}",
             cmd["args"]["deadline"]
+        );
+    }
+
+    #[test]
+    fn remote_edit_title_and_deadline_share_one_resolve() {
+        // Regression for the wrong-task hazard: a combined title+deadline edit
+        // must resolve ONCE and send both commands against the SAME task_uuid in
+        // a single /sync request (not two independent resolves).
+        let (c, calls, _rt) = mock_client();
+        let task = c
+            .edit("PT-100", Some("renamed"), None, Some(Some("2026-08-01")))
+            .unwrap();
+        assert_eq!(task.title, "renamed");
+        assert_eq!(task.deadline.as_deref(), Some("2026-08-01"));
+        let calls_v = calls.lock().unwrap();
+        // Exactly one /sync request carrying BOTH commands.
+        let sync_calls: Vec<_> = calls_v
+            .iter()
+            .filter(|c| c["commands"].as_array().is_some_and(|a| !a.is_empty()))
+            .collect();
+        assert_eq!(sync_calls.len(), 1, "must be a single /sync request");
+        let cmds = sync_calls[0]["commands"].as_array().unwrap();
+        assert_eq!(cmds.len(), 2, "retext + edit in one request");
+        // Both reference the same resolved task_uuid.
+        assert!(
+            cmds.iter()
+                .all(|cmd| cmd["args"]["task_uuid"] == "uuid-aaaaaaaa"),
+            "both commands must target the one resolved uuid"
         );
     }
 
@@ -635,9 +672,9 @@ mod tests {
     }
 
     #[test]
-    fn remote_retext_dispatches_task_retext() {
+    fn remote_edit_text_only_dispatches_task_retext() {
         let (c, calls, _rt) = mock_client();
-        let task = c.retext("PT-100", Some("renamed"), None).unwrap();
+        let task = c.edit("PT-100", Some("renamed"), None, None).unwrap();
         assert_eq!(task.title, "renamed");
         let calls_v = calls.lock().unwrap();
         let cmd = dispatched(&calls_v, "task_retext").expect("task_retext dispatched");
@@ -645,6 +682,11 @@ mod tests {
         assert!(
             cmd["args"]["description"].is_null(),
             "unset description must be JSON null"
+        );
+        // text-only edit must NOT also dispatch a deadline command.
+        assert!(
+            dispatched(&calls_v, "task_edit").is_none(),
+            "text-only edit must not touch the deadline"
         );
     }
 

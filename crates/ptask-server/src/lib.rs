@@ -410,17 +410,31 @@ mod tests {
             .unwrap();
         assert_eq!(t["priority"], 5);
 
-        // Idempotent replay of the same command uuid → still ok, no double-apply.
+        // Idempotent replay of the same command uuid → ok, and NO double-apply.
+        // Replay carries a DIFFERENT priority (1) under the same uuid c-2: if the
+        // event-log guard ever broke, this would flip the task to 1. The assertion
+        // that it stays 5 is what proves the short-circuit (a replay of the same
+        // value could not distinguish "skipped" from "re-applied").
         let replay = post_sync(
             &app,
             &serde_json::json!({
                 "sync_token": "*",
                 "commands": [{ "type": "task_priority", "uuid": "c-2",
-                               "args": { "task_uuid": uuid, "priority": 5 } }]
+                               "args": { "task_uuid": uuid, "priority": 1 } }]
             }),
         )
         .await;
         assert_eq!(replay["sync_status"]["c-2"], "ok");
+        let t = replay["resources"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == uuid)
+            .unwrap();
+        assert_eq!(
+            t["priority"], 5,
+            "replayed command must NOT re-apply (priority stays 5, not 1)"
+        );
 
         // task_edit → set a deadline.
         let edited = post_sync(
