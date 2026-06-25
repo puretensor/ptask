@@ -20,8 +20,18 @@ class BindSafetyTests(unittest.TestCase):
 
 class AuthTests(unittest.TestCase):
     def test_compare_digest_auth_helper_importable(self):
-        self.assertEqual(server.VERSION, "0.1.3")
+        self.assertRegex(server.VERSION, r"^\d+\.\d+\.\d+$")
         self.assertGreater(server.MAX_POST_BYTES, 400)
+
+
+class QueryLimitTests(unittest.TestCase):
+    def test_parse_limit_clamps_negative_and_excessive_values(self):
+        self.assertEqual(server.parse_limit("-1", 500, 5000), 1)
+        self.assertEqual(server.parse_limit("999999", 500, 5000), 5000)
+
+    def test_parse_limit_rejects_non_integer_values(self):
+        with self.assertRaises(ValueError):
+            server.parse_limit("many", 500, 5000)
 
 
 if __name__ == "__main__":

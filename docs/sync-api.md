@@ -6,21 +6,26 @@
 | Endpoint | Method | Use |
 |---|---|---|
 | `/healthz` | GET | liveness |
-| `/version` | GET | `pt --version` string |
+| `/version` | GET | JSON with crate versions |
 | `/sync` | POST | command + delta sync |
 | `/next` | GET | DAG-ready tasks (`?limit=N`); read-token gated (v1.9.0) |
 | `/detail/{uuid}` | GET | one task's side-table detail; read-token gated (v1.9.0) |
 | `/capture` | POST | one-shot raw-text ingest |
+| `/email` | POST | raw RFC 822 email ingest |
 | `/webhook/gitea` | POST | HMAC-signed `Fixes PT-N` parser |
 | `/webhook/github` | POST | as above, GitHub HMAC |
 | `/metrics` | GET | Prometheus exposition |
 
 ## Auth
 
-By default, `pt serve` preserves the original localhost/Tailscale-only
-operating mode and accepts mutating requests without an application token.
-Set `PTASK_API_TOKEN` to require application-level auth for `POST /sync`,
-`POST /capture`, and `POST /email`.
+Loopback `pt serve` binds keep the original local-dev mode and accept requests
+without an application token. Non-loopback binds fail closed unless
+`PTASK_API_TOKEN` is set; `PTASK_ALLOW_UNAUTHENTICATED=1` is an explicit
+test-only override for isolated deployments.
+
+`PTASK_API_TOKEN` gates `POST /sync`, `POST /capture`, `POST /email`, and the
+read APIs (`GET /next`, `GET /detail/{uuid}`, `GET /metrics`). `/healthz`,
+`/version`, and HMAC-verified git webhooks do not use this bearer token.
 
 When configured, clients must send one of:
 
@@ -104,8 +109,20 @@ compatible additions; the wire format is stable.
 { "text": "...", "source": "telegram|email|cli|..." }
 ```
 
-Drops into `raw_items` for the distillation pipeline. Returns `{ "ok":
-true, "raw_item_id": N }`.
+Drops into `raw_items` for the distillation pipeline. Returns:
+
+```json
+{ "id": 123, "source_type": "telegram", "source_date": "2026-06-25" }
+```
+
+## `POST /email`
+
+Accepts a raw RFC 822 message body (`message/rfc822` or `text/plain`); parses
+subject/body into one `raw_items` row with `source_type="email"`. Returns:
+
+```json
+{ "id": 123, "subject": "Subject line", "source_file": "email:<message-id>" }
+```
 
 ## Webhooks
 

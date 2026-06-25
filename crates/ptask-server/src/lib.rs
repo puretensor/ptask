@@ -41,6 +41,9 @@ pub fn router(state: AppState) -> Router {
 
 /// Run the server on `addr` until SIGINT / SIGTERM. Blocks the current task.
 pub async fn serve(db: Db, addr: SocketAddr) -> Result<()> {
+    if let Err(e) = auth::validate_bind_auth(&addr) {
+        anyhow::bail!(e);
+    }
     let state = AppState { db };
     let app = router(state);
     auth::warn_if_unconfigured();

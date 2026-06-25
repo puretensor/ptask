@@ -138,7 +138,7 @@ complete -c pt -n "__fish_pt_using_subcommand scoring; and __fish_seen_subcomman
 complete -c pt -n "__fish_pt_using_subcommand scoring; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -s h -l help -d 'Print help'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "add" -d '`pt remote add "..."` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default https://ptask.ts.puretensor.local)'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "add" -d '`pt remote add "..."` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http://100.121.42.54:9501)'
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "list" -d '`pt remote list` — fetch the live task set from the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "done" -d '`pt remote done <query>` — mark a task done by PT-N or title substring'
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "priority" -d '`pt remote priority <query> <level>` — set priority on the canonical host'
@@ -183,7 +183,7 @@ complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from dismiss" -l url -r
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from dismiss" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from dismiss" -s h -l help -d 'Print help'
-complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "add" -d '`pt remote add "..."` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default https://ptask.ts.puretensor.local)'
+complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "add" -d '`pt remote add "..."` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http://100.121.42.54:9501)'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "list" -d '`pt remote list` — fetch the live task set from the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "done" -d '`pt remote done <query>` — mark a task done by PT-N or title substring'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "priority" -d '`pt remote priority <query> <level>` — set priority on the canonical host'
@@ -228,7 +228,7 @@ complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_f
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from view" -f -a "rm" -d 'Delete a saved view'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from accountability" -f -a "run" -d 'Run the state machine + dispatch once'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from scoring" -f -a "run" -d 'Recompute the four score_* columns + priority_score for every task with status NOT IN (\'done\', \'dismissed\')'
-complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "add" -d '`pt remote add "..."` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default https://ptask.ts.puretensor.local)'
+complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "add" -d '`pt remote add "..."` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http://100.121.42.54:9501)'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "list" -d '`pt remote list` — fetch the live task set from the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "done" -d '`pt remote done <query>` — mark a task done by PT-N or title substring'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "priority" -d '`pt remote priority <query> <level>` — set priority on the canonical host'

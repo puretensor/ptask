@@ -98,7 +98,7 @@ pt view rm <name>                     # delete
 ## Long-running daemons
 
 - `pt tui` — ratatui frontend with `j/k`, single-key edits, fuzzy search.
-- `pt serve [--bind 0.0.0.0:9501]` — HTTP API: `/sync`, `/capture`,
+- `pt serve [--bind 127.0.0.1:9501]` — HTTP API: `/sync`, `/capture`,
   `/webhook/{gitea,github}`, `/metrics`. See [sync-api.md](sync-api.md).
 - `pt bot` — Telegram long-poll handler.
 
@@ -127,7 +127,7 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote next [-n N]` | DAG-ready tasks via `GET /next` (server resolves `depends_on`) |
 | `pt remote dismiss <query>` | resolve + `task_dismiss` (soft close; reversible via reopen) |
 
-`--url` defaults to `$PTASK_SYNC_URL` then `https://ptask.ts.puretensor.local`.
+`--url` defaults to `$PTASK_SYNC_URL` then `http://100.121.42.54:9501`.
 
 ## Codegen
 

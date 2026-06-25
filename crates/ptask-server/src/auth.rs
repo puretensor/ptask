@@ -9,11 +9,13 @@
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use std::net::SocketAddr;
 use std::sync::Once;
 use tracing::warn;
 
 const API_TOKEN_ENV: &str = "PTASK_API_TOKEN";
 const METRICS_TOKEN_ENV: &str = "PTASK_METRICS_TOKEN";
+const ALLOW_UNAUTH_ENV: &str = "PTASK_ALLOW_UNAUTHENTICATED";
 const TOKEN_HEADER: &str = "x-ptask-token";
 
 pub fn require_write_token(headers: &HeaderMap) -> Option<Response> {
@@ -61,6 +63,34 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
+/// Refuse externally reachable unauthenticated API listeners by default.
+///
+/// Loopback keeps the old local-dev behaviour. Any non-loopback bind must have
+/// `PTASK_API_TOKEN` configured, unless an operator explicitly sets
+/// `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately isolated deployment.
+pub fn validate_bind_auth(addr: &SocketAddr) -> Result<(), String> {
+    validate_bind_auth_state(
+        addr,
+        configured_token(API_TOKEN_ENV).is_some(),
+        allow_unauthenticated_override(),
+    )
+}
+
+fn validate_bind_auth_state(
+    addr: &SocketAddr,
+    api_token_configured: bool,
+    allow_unauthenticated: bool,
+) -> Result<(), String> {
+    if addr.ip().is_loopback() || api_token_configured || allow_unauthenticated {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} is unset while binding {addr}; refusing to expose /sync, /capture, /email, and read APIs without application auth. Set {} or bind to 127.0.0.1. For an intentional isolated deployment only, set {}=1.",
+        API_TOKEN_ENV, API_TOKEN_ENV, ALLOW_UNAUTH_ENV
+    ))
+}
+
 /// Emit a single loud warning at startup if `PTASK_API_TOKEN` is unset, so an
 /// operator running unauthenticated sees it once in the log without flooding
 /// it on every `/metrics` scrape. Mirrors the fail-open-but-warn-when-unset
@@ -71,12 +101,19 @@ pub fn warn_if_unconfigured() {
         WARNED.call_once(|| {
             warn!(
                 target: "ptask::auth",
-                "{} is unset — /sync, /capture, /email, and /metrics are UNAUTHENTICATED. \
-                 Set {} (and send `Authorization: Bearer <token>` from callers) to enforce auth.",
-                API_TOKEN_ENV, API_TOKEN_ENV
+                "{} is unset — only loopback or {}=1 binds may run unauthenticated. \
+                 Set {} (and send `Authorization: Bearer <token>` from callers) before exposing pt serve.",
+                API_TOKEN_ENV, ALLOW_UNAUTH_ENV, API_TOKEN_ENV
             );
         });
     }
+}
+
+fn allow_unauthenticated_override() -> bool {
+    std::env::var(ALLOW_UNAUTH_ENV)
+        .ok()
+        .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 /// Compare two byte slices in time independent of where they first differ,
@@ -122,4 +159,35 @@ fn presented_token(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_bind_auth_allows_loopback_without_token() {
+        let addr: SocketAddr = "127.0.0.1:9501".parse().unwrap();
+        assert!(validate_bind_auth_state(&addr, false, false).is_ok());
+    }
+
+    #[test]
+    fn validate_bind_auth_rejects_non_loopback_without_token() {
+        let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
+        let err = validate_bind_auth_state(&addr, false, false).unwrap_err();
+        assert!(err.contains(API_TOKEN_ENV));
+        assert!(err.contains("refusing"));
+    }
+
+    #[test]
+    fn validate_bind_auth_allows_non_loopback_with_token() {
+        let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
+        assert!(validate_bind_auth_state(&addr, true, false).is_ok());
+    }
+
+    #[test]
+    fn validate_bind_auth_allows_explicit_override() {
+        let addr: SocketAddr = "0.0.0.0:9501".parse().unwrap();
+        assert!(validate_bind_auth_state(&addr, false, true).is_ok());
+    }
 }

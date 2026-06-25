@@ -108,6 +108,8 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.2.1** — clamp API `limit` query parameters so negative SQLite limits cannot
+  become unbounded reads; dashboard unit tests now run in CI.
 - **v0.2.0** — promote/demote priority controls (▲/▼ steppers) on Critical-strip
   and lane cards. New `POST /api/tasks/<id>/priority {level:1..5}` endpoint shells
   `pt priority <id> <level>` (requires `pt` ≥ 1.2.0), which re-runs scoring so the
