@@ -24,6 +24,8 @@ fn default_limit() -> usize {
     20
 }
 
+const MAX_NEXT_LIMIT: usize = 500;
+
 #[derive(Debug, Deserialize)]
 struct NextParams {
     #[serde(default = "default_limit")]
@@ -40,7 +42,8 @@ async fn next(
     if let Some(resp) = crate::auth::require_read_token(&headers) {
         return resp;
     }
-    match ptask_core::dag::next_ready(&state.db, params.limit) {
+    let limit = params.limit.clamp(1, MAX_NEXT_LIMIT);
+    match ptask_core::dag::next_ready(&state.db, limit) {
         Ok(tasks) => Json(serde_json::json!({ "tasks": tasks })).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

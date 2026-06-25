@@ -8,8 +8,8 @@ Wants=network-online.target
 # Fleet clients reach the canonical host at this exact address (it is the
 # value of PTASK_SYNC_URL fleet-wide). Listening only here keeps the
 # /sync,/capture,/email surface off the public/LAN NICs. Application-level
-# auth is still recommended: set PTASK_API_TOKEN in the EnvironmentFile to
-# require a bearer/X-PTask-Token on the mutating routes.
+# auth is required for this non-loopback bind: set PTASK_API_TOKEN in the
+# EnvironmentFile. Only set PTASK_ALLOW_UNAUTHENTICATED=1 for isolated tests.
 [Service]
 Type=simple
 EnvironmentFile=%h/puretensor-tasks/.env

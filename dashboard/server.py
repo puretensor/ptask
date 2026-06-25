@@ -51,7 +51,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 MAX_POST_BYTES = 16 * 1024
 
 # Columns we expose. Kept explicit so a schema change can't leak surprises.
@@ -78,6 +78,21 @@ def parse_bind(bind: str) -> tuple[str, int]:
 
 def is_loopback_host(host: str) -> bool:
     return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def parse_limit(raw: str | None, default: int, maximum: int) -> int:
+    """Parse an API limit and clamp it to 1..maximum.
+
+    SQLite treats LIMIT -1 as "no limit", so negative values must not pass
+    through from query strings.
+    """
+    if raw in (None, ""):
+        return default
+    try:
+        n = int(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError("limit must be an integer") from e
+    return max(1, min(n, maximum))
 
 
 # --------------------------------------------------------------------------- db
@@ -369,10 +384,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(q_stats())
             if path == "/api/tasks":
                 status = (qs.get("status", ["pending"])[0])
-                limit = min(int(qs.get("limit", ["500"])[0]), 5000)
+                limit = parse_limit(qs.get("limit", ["500"])[0], 500, 5000)
                 return self._json({"tasks": q_tasks(status=status, limit=limit)})
             if path == "/api/critical":
-                limit = min(int(qs.get("limit", ["12"])[0]), 100)
+                limit = parse_limit(qs.get("limit", ["12"])[0], 12, 100)
                 return self._json({"tasks": q_tasks(status="pending", limit=limit)})
             if path == "/api/timeline":
                 return self._json({"items": q_timeline()})
@@ -381,6 +396,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/version":
                 return self._json({"version": VERSION})
             return self._serve_static(path)
+        except ValueError as e:
+            return self._json({"error": str(e)}, 400)
         except Exception as e:  # noqa: BLE001
             return self._json({"error": str(e)}, 500)
 

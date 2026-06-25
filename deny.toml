@@ -1,0 +1,29 @@
+# cargo-deny policy for CI supply-chain checks.
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0173", reason = "Transitive via teloxide 0.17 -> aquamarine 0.6 -> proc-macro-error2. No fixed teloxide path is available in the current dependency line; track during the next Telegram bot dependency upgrade." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8

@@ -270,9 +270,12 @@ loginctl enable-linger "$USER"
 ### Rust API server (`ptask-serve.service`)
 
 The canonical host also runs the Rust HTTP server so fleet clients can
-hit `/sync`. v1.0.3 ships the unit file in the repo:
+hit `/sync`. The unit binds a non-loopback Tailscale address, so
+`PTASK_API_TOKEN` must be present in `~/puretensor-tasks/.env` before the
+service will start:
 
 ```bash
+grep '^PTASK_API_TOKEN=' ~/puretensor-tasks/.env
 ln -sf ~/ptask/scripts/systemd/ptask-serve.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ptask-serve.service
@@ -280,14 +283,15 @@ systemctl --user enable --now ptask-serve.service
 # The shipped unit binds tensor-core's Tailscale IP (not 0.0.0.0), so probe
 # it on that address rather than loopback.
 curl http://100.121.42.54:9501/healthz   # → ok
-curl http://100.121.42.54:9501/version   # → {"ptask_core":"1.0.3"}
+curl -H "Authorization: Bearer $PTASK_API_TOKEN" \
+  http://100.121.42.54:9501/version       # → {"ptask_core":"1.11.0"}
 ```
 
 Fleet clients reach this via Tailscale at `http://100.121.42.54:9501`;
 `/etc/profile.d/ptask.sh` sets `PTASK_SYNC_URL` everywhere. The unit binds
-that interface IP directly, keeping the API off the public/LAN NICs. To
-require application-level auth as well, set `PTASK_API_TOKEN` in
-`~/puretensor-tasks/.env`.
+that interface IP directly, keeping the API off the public/LAN NICs.
+Application-level auth is now fail-closed for non-loopback binds. Only use
+`PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately isolated test deployment.
 
 ### Inspect
 

@@ -1,9 +1,9 @@
 ---
 # pTask fleet deploy.
 #
-# Installs the `pt` binary into ~/.cargo/bin/, drops the four user-mode
-# systemd units (backup / distill / accountability / scoring), enables
-# the timers, and verifies the binary version.
+# Installs the `pt` binary into ~/.cargo/bin/, drops the user-mode
+# systemd units (serve / backup / distill / accountability / scoring), enables
+# the canonical API service + timers, and verifies the binary version.
 #
 # Usage from the workstation:
 #
@@ -27,7 +27,7 @@
   vars:
     ptask_binary: "{{ playbook_dir }}/../../target/release/pt"
     ptask_systemd_dir: "{{ ansible_env.HOME }}/.config/systemd/user"
-    ptask_units:
+    ptask_timer_units:
       - ptask-backup.service
       - ptask-backup.timer
       - ptask-distill.service
@@ -36,6 +36,9 @@
       - ptask-accountability.timer
       - ptask-scoring.service
       - ptask-scoring.timer
+    ptask_service_units:
+      - ptask-serve.service
+    ptask_units: "{{ ptask_timer_units + ptask_service_units }}"
     # The canonical-store host owns `tasks.db`. Other tier-0 nodes will
     # eventually proxy through `pt serve` over Tailscale (v0.9.5). Until
     # that lands, only the canonical host runs the timers.
@@ -71,7 +74,9 @@
         dest: "{{ ansible_env.HOME }}/.cargo/bin/pt"
         mode: '0755'
         backup: true
-      notify: restart pt timers
+      notify:
+        - restart pt timers
+        - restart ptask serve
 
     - name: query pt --version
       ansible.builtin.command: "{{ ansible_env.HOME }}/.cargo/bin/pt --version"
@@ -94,7 +99,9 @@
         dest: "{{ ptask_systemd_dir }}/{{ item }}"
         mode: '0644'
       loop: "{{ ptask_units }}"
-      notify: daemon-reload
+      notify:
+        - daemon-reload
+        - restart ptask serve
 
     - name: ensure linger enabled (timers must run when operator is logged out)
       ansible.builtin.command: "loginctl enable-linger {{ ansible_env.USER }}"
@@ -119,6 +126,15 @@
         - ptask-scoring.timer
       when: ptask_is_canonical
 
+    - name: enable + start API service on canonical host
+      ansible.builtin.systemd:
+        name: ptask-serve.service
+        scope: user
+        enabled: true
+        state: started
+        daemon_reload: false
+      when: ptask_is_canonical
+
     - name: keep timers disabled on non-canonical hosts
       ansible.builtin.systemd:
         name: "{{ item }}"
@@ -133,6 +149,15 @@
       when: not ptask_is_canonical
       failed_when: false
 
+    - name: keep API service disabled on non-canonical hosts
+      ansible.builtin.systemd:
+        name: ptask-serve.service
+        scope: user
+        enabled: false
+        state: stopped
+      when: not ptask_is_canonical
+      failed_when: false
+
   handlers:
     - name: daemon-reload
       ansible.builtin.systemd:
@@ -142,3 +167,11 @@
     - name: restart pt timers
       ansible.builtin.debug:
         msg: "binary updated; systemd handlers will re-pick on next fire (no service restart needed for oneshot timers)"
+
+    - name: restart ptask serve
+      ansible.builtin.systemd:
+        name: ptask-serve.service
+        scope: user
+        state: restarted
+      when: ptask_is_canonical
+      failed_when: false

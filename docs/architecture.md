@@ -57,7 +57,7 @@ completes the rest of the fleet's reconfiguration.
 
 | Role | Where | What's enabled |
 |---|---|---|
-| **canonical** | `tensor-core` | `tasks.db` + WAL on local NVMe; `ptask-serve` on `0.0.0.0:9501`; Litestream → CephFS; all four user-mode timers active |
+| **canonical** | `tensor-core` | `tasks.db` + WAL on local NVMe; `ptask-serve` on tensor-core Tailscale `100.121.42.54:9501`; Litestream → CephFS; all four user-mode timers active |
 | **client** | `mon1-3`, `arx1-4`, `fox-n0/1` | Same `pt` binary; timers **disabled**; reads/writes route through `pt remote` → `PTASK_SYNC_URL=http://100.121.42.54:9501` |
 | **excluded** | `coldiron`, `spore-azure-1`, `spore-gcp-1` | No `pt` install — these are GCP/Azure-ephemeral and shouldn't carry task state. The Ansible inventory deliberately omits them. |
 | **retired** | k3s `puretensor-tasks` namespace on mon1 | Was a long-running Python deployment behind `https://tasks.fox/` with its own k3s-PVC-backed DB. Discovered post-v1.0.3 activation; merged into tensor-core via UUID union (132 overlap, 306 mon1-only, 72 tc-only → 510 final). Namespace + IngressRoutes deleted at v1.0.4. |
@@ -82,6 +82,8 @@ invocation to override the default `target/release/pt`.
 |---|---|---|
 | `PTASK_DB` | `pt` (canonical) | Override the SQLite path. Defaults to `~/puretensor-tasks/tasks.db`. |
 | `PTASK_SYNC_URL` | `pt remote` (clients) | `http://100.121.42.54:9501`. Set fleet-wide by `/etc/profile.d/ptask.sh`. |
+| `PTASK_API_TOKEN` | `pt serve`, `pt remote` | Required for non-loopback `pt serve` binds; clients send it as `Authorization: Bearer`. |
+| `PTASK_ALLOW_UNAUTHENTICATED` | `pt serve` | Emergency/test override for unauthenticated non-loopback binds. Do not set in production. |
 | `PTASK_DISTILL_PY_ROOT` | `pt distill` | `/home/puretensorai/puretensor-tasks-legacy` — the archived Python tree the shim still calls. Set by `~/.config/systemd/user/ptask-distill.service.d/python-root.conf` on the canonical host. Retained until `pt distill` is fully native. |
 | `PTASK_HAL_CLASSIFY_URL` | `pt distill` (native) | HAL endpoint for the speech-act classifier (v0.8.3). |
 | `PTASK_HAL_CONSOLIDATE_URL` | `pt distill` (native) | HAL endpoint for cluster → task consolidation (v0.8.7). |
