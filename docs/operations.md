@@ -284,7 +284,7 @@ systemctl --user enable --now ptask-serve.service
 # it on that address rather than loopback.
 curl http://100.121.42.54:9501/healthz   # → ok
 curl -H "Authorization: Bearer $PTASK_API_TOKEN" \
-  http://100.121.42.54:9501/version       # → {"ptask_core":"1.11.0"}
+  http://100.121.42.54:9501/version       # → {"ptask_core":"1.12.0"}
 ```
 
 Fleet clients reach this via Tailscale at `http://100.121.42.54:9501`;

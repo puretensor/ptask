@@ -1,6 +1,6 @@
 //! pTask Telegram bot.
 //!
-//! `pt bot` launches a teloxide long-poll dispatcher. Access is gated by an
+//! `pt bot` launches a Telegram Bot API long-poll loop. Access is gated by an
 //! allowlist of Telegram `chat_id`s — messages from any other chat are
 //! ignored. Commands:
 //!
@@ -23,11 +23,11 @@ mod commands;
 mod config;
 mod digest;
 mod schedule;
+mod telegram;
 
+use crate::telegram::Bot;
 use anyhow::{Context, Result};
 use ptask_core::Db;
-use teloxide::prelude::*;
-use teloxide::utils::command::BotCommands;
 use tracing::{info, warn};
 
 pub use commands::PtCommand;
@@ -56,27 +56,41 @@ pub async fn run(db: Db) -> Result<()> {
         }
     });
 
-    let handler = dptree::entry().branch(
-        Update::filter_message().branch(
-            dptree::filter(move |msg: Message| in_allowlist(&cfg, &msg))
-                .filter_command::<PtCommand>()
-                .endpoint(commands::dispatch),
-        ),
-    );
-
-    Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![db])
-        .enable_ctrlc_handler()
-        .build()
-        .dispatch()
-        .await;
+    let mut offset = None;
+    loop {
+        tokio::select! {
+            _ = shutdown_signal() => break,
+            result = bot.get_updates(offset, 30) => {
+                match result {
+                    Ok(updates) => {
+                        for update in updates {
+                            offset = Some(update.update_id + 1);
+                            let Some(msg) = update.message else {
+                                continue;
+                            };
+                            if !in_allowlist(&cfg, &msg) {
+                                continue;
+                            }
+                            if let Err(e) = commands::dispatch_message(bot.clone(), msg, db.clone()).await {
+                                warn!(target: "ptask::bot", error = %e, "command dispatch failed");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(target: "ptask::bot", error = %e, "telegram polling failed; retrying");
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        }
+    }
 
     scheduler_handle.abort();
     let _ = scheduler_handle.await;
     Ok(())
 }
 
-fn in_allowlist(cfg: &BotConfig, msg: &Message) -> bool {
+fn in_allowlist(cfg: &BotConfig, msg: &telegram::Message) -> bool {
     let id = msg.chat.id.0;
     let allowed = cfg.allowed.contains(&id);
     if !allowed {
@@ -85,4 +99,26 @@ fn in_allowlist(cfg: &BotConfig, msg: &Message) -> bool {
         warn!(target: "ptask::bot", chat_id = id, "ignored message from non-allowlisted chat");
     }
     allowed
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        let mut sig = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        sig.recv().await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    info!(target: "ptask::bot", "shutdown signal received");
 }

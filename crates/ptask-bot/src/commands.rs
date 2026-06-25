@@ -1,39 +1,68 @@
 //! Command surface + dispatchers.
 
+use crate::telegram::{Bot, ChatId, Message};
+use anyhow::Result;
 use ptask_core::Db;
 use ptask_core::tasks::DoneOutcome;
-use teloxide::prelude::*;
-use teloxide::utils::command::BotCommands;
 use tracing::info;
 
-#[derive(BotCommands, Clone, Debug)]
-#[command(
-    rename_rule = "lowercase",
-    description = "pTask commands. PT-N IDs are sticky — share them in any chat."
-)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PtCommand {
-    #[command(
-        description = "Quick-add a new task. Inline tokens: @label #project p1..p5 ~Nm //desc, plus date phrases."
-    )]
     Add(String),
-    #[command(description = "List tasks. Optional Todoist-style filter DSL.")]
     List(String),
-    #[command(
-        description = "Mark done by PT-N or title substring. Recurring tasks advance in place."
-    )]
     Done(String),
-    #[command(description = "DAG-ready tasks (all dependencies satisfied).")]
     Next(String),
-    #[command(description = "Show this help.")]
     Help,
 }
 
-pub async fn dispatch(
-    bot: Bot,
-    msg: Message,
-    cmd: PtCommand,
-    db: Db,
-) -> Result<(), teloxide::RequestError> {
+impl PtCommand {
+    pub fn descriptions() -> &'static str {
+        "pTask commands. PT-N IDs are sticky — share them in any chat.\n\
+         /add <text> — Quick-add a new task. Inline tokens: @label #project p1..p5 ~Nm //desc, plus date phrases.\n\
+         /list [filter] — List tasks. Optional Todoist-style filter DSL.\n\
+         /done <query> — Mark done by PT-N or title substring. Recurring tasks advance in place.\n\
+         /next [N] — DAG-ready tasks (all dependencies satisfied).\n\
+         /help — Show this help."
+    }
+
+    pub fn parse_message(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let (head, rest) = split_command(text)?;
+        let name = head.split('@').next().unwrap_or(head).to_ascii_lowercase();
+        let rest = rest.trim().to_string();
+        match name.as_str() {
+            "add" => Some(Self::Add(rest)),
+            "list" => Some(Self::List(rest)),
+            "done" => Some(Self::Done(rest)),
+            "next" => Some(Self::Next(rest)),
+            "help" | "start" => Some(Self::Help),
+            _ => None,
+        }
+    }
+}
+
+fn split_command(text: &str) -> Option<(&str, &str)> {
+    let without_slash = text.strip_prefix('/')?;
+    let first_space = without_slash
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx));
+    match first_space {
+        Some(idx) => Some((&without_slash[..idx], &without_slash[idx..])),
+        None => Some((without_slash, "")),
+    }
+}
+
+pub async fn dispatch_message(bot: Bot, msg: Message, db: Db) -> Result<()> {
+    let Some(text) = msg.text() else {
+        return Ok(());
+    };
+    let Some(cmd) = PtCommand::parse_message(text) else {
+        return Ok(());
+    };
+    dispatch(bot, msg, cmd, db).await
+}
+
+pub async fn dispatch(bot: Bot, msg: Message, cmd: PtCommand, db: Db) -> Result<()> {
     let chat_id = msg.chat.id;
     info!(
         target: "ptask::bot",
@@ -57,12 +86,7 @@ pub async fn dispatch(
     Ok(())
 }
 
-async fn handle_add(
-    bot: &Bot,
-    chat_id: ChatId,
-    db: &Db,
-    text: &str,
-) -> Result<(), teloxide::RequestError> {
+async fn handle_add(bot: &Bot, chat_id: ChatId, db: &Db, text: &str) -> Result<()> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         send(bot, chat_id, "usage: /add <quick-add text>").await?;
@@ -111,12 +135,7 @@ async fn handle_add(
     Ok(())
 }
 
-async fn handle_list(
-    bot: &Bot,
-    chat_id: ChatId,
-    db: &Db,
-    filter: &str,
-) -> Result<(), teloxide::RequestError> {
+async fn handle_list(bot: &Bot, chat_id: ChatId, db: &Db, filter: &str) -> Result<()> {
     let expr = if filter.trim().is_empty() {
         None
     } else {
@@ -160,12 +179,7 @@ async fn handle_list(
     Ok(())
 }
 
-async fn handle_done(
-    bot: &Bot,
-    chat_id: ChatId,
-    db: &Db,
-    query: &str,
-) -> Result<(), teloxide::RequestError> {
+async fn handle_done(bot: &Bot, chat_id: ChatId, db: &Db, query: &str) -> Result<()> {
     let q = query.trim();
     if q.is_empty() {
         send(bot, chat_id, "usage: /done <PT-N | substring>").await?;
@@ -201,12 +215,7 @@ async fn handle_done(
     Ok(())
 }
 
-async fn handle_next(
-    bot: &Bot,
-    chat_id: ChatId,
-    db: &Db,
-    rest: &str,
-) -> Result<(), teloxide::RequestError> {
+async fn handle_next(bot: &Bot, chat_id: ChatId, db: &Db, rest: &str) -> Result<()> {
     let limit: usize = rest.trim().parse().unwrap_or(10);
     let rows = match ptask_core::dag::next_ready(db, limit) {
         Ok(r) => r,
@@ -230,12 +239,35 @@ async fn handle_next(
     Ok(())
 }
 
-async fn send(
-    bot: &Bot,
-    chat_id: ChatId,
-    text: impl Into<String>,
-) -> Result<(), teloxide::RequestError> {
+async fn send(bot: &Bot, chat_id: ChatId, text: impl Into<String>) -> Result<()> {
     // Plain text — none of pTask's output needs HTML or Markdown rendering.
     bot.send_message(chat_id, text.into()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PtCommand;
+
+    #[test]
+    fn parses_commands_with_bot_suffix_and_args() {
+        assert_eq!(
+            PtCommand::parse_message("/add@ptask_bot Buy bread @home"),
+            Some(PtCommand::Add("Buy bread @home".into()))
+        );
+        assert_eq!(
+            PtCommand::parse_message(" /done   PT-42 "),
+            Some(PtCommand::Done("PT-42".into()))
+        );
+        assert_eq!(
+            PtCommand::parse_message("/next 5"),
+            Some(PtCommand::Next("5".into()))
+        );
+    }
+
+    #[test]
+    fn ignores_non_commands_and_unknown_commands() {
+        assert_eq!(PtCommand::parse_message("add Buy bread"), None);
+        assert_eq!(PtCommand::parse_message("/unknown"), None);
+    }
 }

@@ -6,12 +6,12 @@
 
 use crate::config::BotConfig;
 use crate::digest;
+use crate::telegram::Bot;
 use anyhow::Result;
 use jiff::Zoned;
 use jiff::civil::Time;
 use ptask_core::Db;
 use ptask_core::dates;
-use teloxide::prelude::*;
 use tracing::{info, warn};
 
 /// Spawn the digest + recap loops. Returns immediately; loops live on tokio.

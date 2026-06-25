@@ -552,6 +552,7 @@ mod tests {
 
         // GET /detail/{uuid} — the @ops label was captured by quick-add.
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/detail/{uuid}"))
@@ -566,6 +567,24 @@ mod tests {
             .unwrap();
         let detail: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(detail["labels"][0], "ops");
+
+        // GET /resolve — remote clients can resolve one task server-side
+        // instead of full-syncing the whole task table.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/resolve?query=renamed%20task")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resolved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resolved["task"]["id"], uuid);
     }
 
     #[tokio::test]

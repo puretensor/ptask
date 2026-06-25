@@ -7,11 +7,11 @@
 //! slipped (overdue still open), blocked tasks. The post-mortem snapshot.
 
 use crate::config::BotConfig;
+use crate::telegram::{Bot, ChatId};
 use anyhow::Result;
 use ptask_core::dates;
 use ptask_core::tasks::Task;
 use ptask_core::{Db, priority};
-use teloxide::prelude::*;
 use tracing::warn;
 
 /// 07:00 London morning digest.

@@ -119,13 +119,13 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 |---|---|
 | `pt remote add "..." [--url ...]` | quick-add on the remote canonical |
 | `pt remote list [-s STATUS -p P -n N]` | full-sync + client-side filter |
-| `pt remote done <query>` | resolve + `task_done` |
-| `pt remote priority <query> <level>` (alias `pri`) | resolve + `task_priority` (+ server rescore) |
-| `pt remote edit <query> [--deadline ISO \| --clear-deadline] [--title T] [--desc D]` (alias `update`) | resolve + `task_edit` (deadline) and/or `task_retext` (title/desc) |
-| `pt remote reopen <query>` | resolve (incl. done) + `task_reopen` |
+| `pt remote done <query>` | server-side `/resolve` + `task_done` |
+| `pt remote priority <query> <level>` (alias `pri`) | server-side `/resolve` + `task_priority` (+ server rescore) |
+| `pt remote edit <query> [--deadline ISO \| --clear-deadline] [--title T] [--desc D]` (alias `update`) | server-side `/resolve` + `task_edit` (deadline) and/or `task_retext` (title/desc) |
+| `pt remote reopen <query>` | server-side `/resolve` (incl. done) + `task_reopen` |
 | `pt remote show <query>` | base row + side-table detail via `GET /detail/{uuid}` (read-only) |
 | `pt remote next [-n N]` | DAG-ready tasks via `GET /next` (server resolves `depends_on`) |
-| `pt remote dismiss <query>` | resolve + `task_dismiss` (soft close; reversible via reopen) |
+| `pt remote dismiss <query>` | server-side `/resolve` + `task_dismiss` (soft close; reversible via reopen) |
 
 `--url` defaults to `$PTASK_SYNC_URL` then `http://100.121.42.54:9501`.
 
