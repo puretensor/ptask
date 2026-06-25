@@ -39,7 +39,7 @@ Concrete one-liner success criteria at v1.0.0:
 │  ─────────                                                        │
 │  CLI (pt add/list/done/next/edit/show/rm/review)                 │
 │  TUI (pt with no args → ratatui)                                  │
-│  Telegram bot (teloxide, inline-token quick-add)                  │
+│  Telegram bot (Bot API long-poll, inline-token quick-add)                  │
 │  Email forward (axum /capture, mail-parser)                       │
 │  HAL via HTTP (sync API, HMAC webhooks)                           │
 │  Git webhooks (Fixes PT-N from Gitea + GitHub)                    │
@@ -76,7 +76,7 @@ ptask/
 │   ├── ptask-cli/                # bin: pt
 │   ├── ptask-server/             # axum HTTP + sync API
 │   ├── ptask-tui/                # ratatui frontend (lib used by pt)
-│   ├── ptask-bot/                # teloxide Telegram bot
+│   ├── ptask-bot/                # Telegram Bot API client
 │   └── ptask-distill/            # 6-stage pipeline (shim, then native)
 ├── migrations/                   # refinery V###__*.sql
 ├── docs/
@@ -279,7 +279,7 @@ Each phase below is a separable deliverable. End state: shippable binary, Python
 **Goal:** `pt bot` is the Telegram entry point. Inline-token quick-add via DM, morning digest, evening recap, snooze commands.
 
 **Sub-sections:**
-- ✅ **0.5.1 — teloxide skeleton** (v0.4.2). teloxide 0.17, `default-features = false`, features `macros + ctrlc_handler + rustls`. Long-poll dispatcher with Ctrl-C handler. Chat allowlist via `PTASK_TELEGRAM_ALLOWED_CHATS` (comma-list of int64 chat_ids). Non-allowlisted messages dropped with an info log naming the unknown chat_id so onboarding is trivial. SQLite dialogue storage wasn't needed — current commands are stateless.
+- ✅ **0.5.1 — Telegram bot skeleton** (v0.4.2, updated v1.12.0). Local Bot API long-poll client with Ctrl-C/SIGTERM shutdown; teloxide was removed to eliminate its mandatory aquamarine/proc-macro-error2 advisory path. Chat allowlist via `PTASK_TELEGRAM_ALLOWED_CHATS` (comma-list of int64 chat_ids). Non-allowlisted messages dropped with an info log naming the unknown chat_id so onboarding is trivial. SQLite dialogue storage wasn't needed — current commands are stateless.
 - ✅ **0.5.2 — `/add` handler** (v0.4.2). `/add <quick-add text>` → `ptask_core::quickadd::parse` → `create_with_extensions(source_type='telegram')`. Reply echoes PT-N, deadline, and the recurrence rule when present.
 - ✅ **0.5.3 — `/list` handler** (v0.4.2). `/list [filter DSL]`. Empty filter → pending tasks. Filter present → status='all' so DSL date predicates work. Top 20 returned.
 - 🟡 **0.5.4 — `/done` shipped; `/snooze` + `/defer` deferred** (v0.4.2). `/done <PT-N | substring>` routes through `tasks::resolve` + `mark_done`, surfacing `DoneOutcome::Advanced` for recurring tasks with the next deadline. Snooze and defer need a `snooze_until` column on `pt_extensions` — small follow-on patch.

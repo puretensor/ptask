@@ -85,6 +85,30 @@ impl RemoteClient {
             .with_context(|| format!("parse GET {path}"))
     }
 
+    /// GET a read-only endpoint with URL-encoded query parameters.
+    fn get_json_with_params(&self, path: &str, params: &[(&str, String)]) -> Result<Value> {
+        let mut url =
+            reqwest::Url::parse(&format!("{}{}", self.base, path)).context("build remote URL")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            for (k, v) in params {
+                pairs.append_pair(k, v);
+            }
+        }
+        let mut builder = self.client.get(url.clone());
+        if let Some(token) = self.api_token.as_ref() {
+            builder = builder.bearer_auth(token);
+        }
+        let resp = builder.send().with_context(|| format!("GET {url}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(anyhow!("remote GET {path} {status}: {body}"));
+        }
+        resp.json::<Value>()
+            .with_context(|| format!("parse GET {path}"))
+    }
+
     /// `pt remote add "..."` — POST `task_create` with the quick-add text.
     /// Returns the created `Task` row.
     pub fn add(&self, text: &str) -> Result<Task> {
@@ -114,8 +138,8 @@ impl RemoteClient {
     }
 
     /// `pt remote done <query>` — accepts PT-N, bare integer, or title
-    /// substring. Resolves the task locally via a full-sync `list` then
-    /// dispatches `task_done` by uuid.
+    /// substring. Resolves the task on the server, then dispatches
+    /// `task_done` by uuid.
     pub fn done(&self, query: &str) -> Result<Task> {
         let task = self.resolve(query, false)?;
         let cmd_uuid = uuid::Uuid::new_v4().to_string();
@@ -134,7 +158,7 @@ impl RemoteClient {
     }
 
     /// `pt remote priority <query> <level>` — set priority (1..=5) on the
-    /// canonical host. Resolves client-side, then dispatches `task_priority`.
+    /// canonical host. Resolves server-side, then dispatches `task_priority`.
     pub fn priority(&self, query: &str, level: i64) -> Result<Task> {
         let mut task = self.resolve(query, false)?;
         let cmd_uuid = uuid::Uuid::new_v4().to_string();
@@ -301,54 +325,20 @@ impl RemoteClient {
     }
 
     /// Resolve a PT-N / bare-integer / title-substring query to a single task
-    /// via full sync. `include_terminal` keeps done/dismissed tasks in the
-    /// substring search (PT-N / integer always match any status); reopen/show
-    /// pass `true`, mutating verbs that only make sense on active tasks pass
-    /// `false`.
+    /// via server-side `/resolve`. `include_terminal` keeps done/dismissed
+    /// tasks in the substring search (PT-N / integer always match any status);
+    /// reopen/show pass `true`, mutating verbs that only make sense on active
+    /// tasks pass `false`.
     fn resolve(&self, query: &str, include_terminal: bool) -> Result<Task> {
-        let req = json!({ "sync_token": "*", "resource_types": ["tasks"] });
-        let resp = self.sync(&req)?;
-        let tasks = resp.resources.tasks;
-        if let Some(stripped) = query
-            .strip_prefix("PT-")
-            .or_else(|| query.strip_prefix("pt-"))
-        {
-            let needle = format!("PT-{}", stripped);
-            if let Some(t) = tasks
-                .into_iter()
-                .find(|t| t.pt_id.as_deref() == Some(needle.as_str()))
-            {
-                return Ok(t);
-            }
-        } else if let Ok(n) = query.parse::<u64>() {
-            let needle = format!("PT-{n}");
-            if let Some(t) = tasks
-                .into_iter()
-                .find(|t| t.pt_id.as_deref() == Some(needle.as_str()))
-            {
-                return Ok(t);
-            }
-        } else {
-            let needle = query.to_ascii_lowercase();
-            let mut hits: Vec<Task> = tasks
-                .into_iter()
-                .filter(|t| {
-                    (include_terminal || (t.status != "done" && t.status != "dismissed"))
-                        && t.title.to_ascii_lowercase().contains(&needle)
-                })
-                .collect();
-            if hits.len() == 1 {
-                return Ok(hits.remove(0));
-            }
-            if hits.len() > 1 {
-                let titles: Vec<&str> = hits.iter().map(|t| t.title.as_str()).collect();
-                return Err(anyhow!(
-                    "remote: query {query:?} matched {} tasks — be more specific: {titles:?}",
-                    hits.len()
-                ));
-            }
-        }
-        Err(anyhow!("remote: no task matched {query:?}"))
+        let v = self.get_json_with_params(
+            "/resolve",
+            &[
+                ("query", query.to_string()),
+                ("include_terminal", include_terminal.to_string()),
+            ],
+        )?;
+        serde_json::from_value(v.get("task").cloned().unwrap_or(Value::Null))
+            .context("parse /resolve task")
     }
 }
 
@@ -381,6 +371,106 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
+
+    fn existing_tasks_json() -> Vec<Value> {
+        vec![
+            json!({
+                "id": "uuid-aaaaaaaa", "pt_id": "PT-100",
+                "title": "buy bread tomorrow morning",
+                "description": "", "priority": 2, "status": "pending",
+                "created_at": "2026-05-13T00:00:00+00:00",
+                "updated_at": "2026-05-13T00:00:00+00:00",
+                "deadline": null, "source_type": "manual", "ai_reasoning": ""
+            }),
+            json!({
+                "id": "uuid-bbbbbbbb", "pt_id": "PT-101",
+                "title": "investigate ceph mon quorum failure",
+                "description": "", "priority": 4, "status": "pending",
+                "created_at": "2026-05-13T01:00:00+00:00",
+                "updated_at": "2026-05-13T01:00:00+00:00",
+                "deadline": null, "source_type": "manual", "ai_reasoning": ""
+            }),
+            json!({
+                "id": "uuid-cccccccc", "pt_id": "PT-102",
+                "title": "archive completed receipt",
+                "description": "", "priority": 2, "status": "done",
+                "created_at": "2026-05-13T02:00:00+00:00",
+                "updated_at": "2026-05-13T02:00:00+00:00",
+                "deadline": null, "source_type": "manual", "ai_reasoning": ""
+            }),
+            json!({
+                "id": "uuid-newer-existing", "pt_id": "PT-999",
+                "title": "newer existing task should not be returned by add",
+                "description": "", "priority": 5, "status": "pending",
+                "created_at": "2026-05-15T00:00:00+00:00",
+                "updated_at": "2026-05-15T00:00:00+00:00",
+                "deadline": null, "source_type": "manual", "ai_reasoning": ""
+            }),
+        ]
+    }
+
+    fn resolve_mock_response(params: BTreeMap<String, String>) -> axum::response::Response {
+        use axum::response::IntoResponse;
+
+        let query = params.get("query").map_or("", String::as_str).trim();
+        if query.is_empty() {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": "empty task query"})),
+            )
+                .into_response();
+        }
+        let include_terminal = params.get("include_terminal").is_some_and(|v| v == "true");
+        let tasks = existing_tasks_json();
+        let upper = query.to_ascii_uppercase();
+        let pt_candidate = if upper.starts_with("PT-") {
+            Some(upper)
+        } else if let Ok(n) = query.parse::<u64>() {
+            Some(format!("PT-{n}"))
+        } else {
+            None
+        };
+        if let Some(pt_id) = pt_candidate {
+            if let Some(task) = tasks
+                .into_iter()
+                .find(|t| t["pt_id"].as_str() == Some(pt_id.as_str()))
+            {
+                return axum::Json(json!({ "task": task })).into_response();
+            }
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(json!({"error": format!("pt_id not found: {pt_id}")})),
+            )
+                .into_response();
+        }
+
+        let needle = query.to_ascii_lowercase();
+        let hits: Vec<Value> = tasks
+            .into_iter()
+            .filter(|t| {
+                let status = t["status"].as_str().unwrap_or("");
+                (include_terminal || (status != "done" && status != "dismissed"))
+                    && t["title"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .contains(&needle)
+            })
+            .collect();
+        match hits.len() {
+            0 => (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(json!({"error": format!("no task matching {query:?}")})),
+            )
+                .into_response(),
+            1 => axum::Json(json!({ "task": hits.into_iter().next().unwrap() })).into_response(),
+            n => (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(json!({"error": format!("{n} tasks match {query:?}")})),
+            )
+                .into_response(),
+        }
+    }
 
     async fn spawn_mock_sync() -> (String, Arc<Mutex<Vec<Value>>>) {
         let calls: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
@@ -421,33 +511,7 @@ mod tests {
                     }
                 }
                 // Always return the canonical "existing" tasks for full-sync verbs.
-                let existing = vec![
-                    json!({
-                        "id": "uuid-aaaaaaaa", "pt_id": "PT-100",
-                        "title": "buy bread tomorrow morning",
-                        "description": "", "priority": 2, "status": "pending",
-                        "created_at": "2026-05-13T00:00:00+00:00",
-                        "updated_at": "2026-05-13T00:00:00+00:00",
-                        "deadline": null, "source_type": "manual", "ai_reasoning": ""
-                    }),
-                    json!({
-                        "id": "uuid-bbbbbbbb", "pt_id": "PT-101",
-                        "title": "investigate ceph mon quorum failure",
-                        "description": "", "priority": 4, "status": "pending",
-                        "created_at": "2026-05-13T01:00:00+00:00",
-                        "updated_at": "2026-05-13T01:00:00+00:00",
-                        "deadline": null, "source_type": "manual", "ai_reasoning": ""
-                    }),
-                    json!({
-                        "id": "uuid-newer-existing", "pt_id": "PT-999",
-                        "title": "newer existing task should not be returned by add",
-                        "description": "", "priority": 5, "status": "pending",
-                        "created_at": "2026-05-15T00:00:00+00:00",
-                        "updated_at": "2026-05-15T00:00:00+00:00",
-                        "deadline": null, "source_type": "manual", "ai_reasoning": ""
-                    }),
-                ];
-                tasks.extend(existing);
+                tasks.extend(existing_tasks_json());
                 axum::Json(json!({
                     "sync_token": "42",
                     "resources": { "tasks": tasks },
@@ -473,10 +537,14 @@ mod tests {
                 "recurrence_input": null, "recurrence_mode": null, "recurrence_next": null
             }))
         };
+        let resolve_handler = |axum::extract::Query(params): axum::extract::Query<
+            BTreeMap<String, String>,
+        >| async { resolve_mock_response(params) };
         let app = axum::Router::new()
             .route("/sync", axum::routing::post(handler))
             .route("/next", axum::routing::get(next_handler))
-            .route("/detail/{uuid}", axum::routing::get(detail_handler));
+            .route("/detail/{uuid}", axum::routing::get(detail_handler))
+            .route("/resolve", axum::routing::get(resolve_handler));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -547,6 +615,11 @@ mod tests {
         let task = c.done("PT-100").unwrap();
         assert_eq!(task.pt_id.as_deref(), Some("PT-100"));
         let calls_v = calls.lock().unwrap();
+        assert_eq!(
+            calls_v.len(),
+            1,
+            "resolve must use /resolve, not an extra full-sync /sync"
+        );
         assert!(
             calls_v.iter().any(|c| c["commands"]
                 .as_array()
@@ -663,12 +736,16 @@ mod tests {
         let task = c.show("PT-101").unwrap();
         assert_eq!(task.pt_id.as_deref(), Some("PT-101"));
         let calls_v = calls.lock().unwrap();
-        assert!(
-            calls_v
-                .iter()
-                .all(|c| c["commands"].as_array().is_none_or(|a| a.is_empty())),
-            "show must not dispatch any mutating command"
-        );
+        assert!(calls_v.is_empty(), "show must use read-only /resolve only");
+    }
+
+    #[test]
+    fn remote_show_resolves_terminal_substring() {
+        let (c, calls, _rt) = mock_client();
+        let task = c.show("archive").unwrap();
+        assert_eq!(task.pt_id.as_deref(), Some("PT-102"));
+        assert_eq!(task.status, "done");
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[test]

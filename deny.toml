@@ -1,9 +1,7 @@
 # cargo-deny policy for CI supply-chain checks.
 
 [advisories]
-ignore = [
-    { id = "RUSTSEC-2026-0173", reason = "Transitive via teloxide 0.17 -> aquamarine 0.6 -> proc-macro-error2. No fixed teloxide path is available in the current dependency line; track during the next Telegram bot dependency upgrade." },
-]
+ignore = []
 
 [sources]
 unknown-registry = "deny"
