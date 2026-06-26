@@ -10,6 +10,7 @@
 | `/sync` | POST | command + delta sync |
 | `/next` | GET | DAG-ready tasks (`?limit=N`); read-token gated (v1.9.0) |
 | `/detail/{uuid}` | GET | one task's side-table detail; read-token gated (v1.9.0) |
+| `/resolve` | GET | server-side PT-N/title lookup (`?query=...&include_terminal=false`); read-token gated (v1.12.0) |
 | `/capture` | POST | one-shot raw-text ingest |
 | `/email` | POST | raw RFC 822 email ingest |
 | `/webhook/gitea` | POST | HMAC-signed `Fixes PT-N` parser |
@@ -24,8 +25,9 @@ without an application token. Non-loopback binds fail closed unless
 test-only override for isolated deployments.
 
 `PTASK_API_TOKEN` gates `POST /sync`, `POST /capture`, `POST /email`, and the
-read APIs (`GET /next`, `GET /detail/{uuid}`, `GET /metrics`). `/healthz`,
-`/version`, and HMAC-verified git webhooks do not use this bearer token.
+read APIs (`GET /next`, `GET /detail/{uuid}`, `GET /resolve`, `GET /metrics`).
+`/healthz`, `/version`, and HMAC-verified git webhooks do not use this bearer
+token.
 
 When configured, clients must send one of:
 
@@ -102,6 +104,33 @@ the environment variable is set on the client node.
 Each command records exactly one event keyed on its `uuid`, so `/sync` replays
 are idempotent. More commands (`task_delete`, `view_save`, …) are backward-
 compatible additions; the wire format is stable.
+
+## `GET /resolve`
+
+Server-side lookup for remote clients that need a single `task_uuid` before
+issuing a mutation. This avoids full-syncing the entire task table for
+`pt remote done|edit|priority|dismiss|reopen|show`.
+
+```text
+GET /resolve?query=PT-42&include_terminal=false
+GET /resolve?query=archive%20receipt&include_terminal=true
+```
+
+Semantics:
+
+- `PT-N` or bare integer `N` matches the exact PT id across any status.
+- Other queries perform a case-insensitive title substring search.
+- `include_terminal=false` excludes `done` and `dismissed` title matches.
+- `include_terminal=true` includes all statuses for read/reopen flows.
+
+Response:
+
+```json
+{ "task": <Task> }
+```
+
+Status codes: `200` one match, `400` empty query, `404` no match, `409`
+multiple substring matches.
 
 ## `POST /capture`
 

@@ -456,6 +456,101 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     }
 }
 
+/// Resolve a task for server-side remote lookup/search.
+///
+/// Semantics match the pre-v1.12 remote CLI resolver, but execute in SQLite on
+/// the canonical host instead of forcing the client to full-sync every task:
+///
+/// - PT-N (case-insensitive) -> exact pt_id match, any status
+/// - Bare integer N         -> treated as PT-N, any status
+/// - Otherwise              -> case-insensitive title substring
+///   - `include_terminal=false`: excludes `done` and `dismissed`
+///   - `include_terminal=true`: searches all statuses
+///
+/// Returns the matched task, or an error describing zero / multiple matches.
+pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Result<Task> {
+    let conn = db.get()?;
+    let q = query.trim();
+    if q.is_empty() {
+        return Err(crate::Error::Other("empty task query".into()));
+    }
+    let upper = q.to_ascii_uppercase();
+
+    let pt_candidate: Option<String> = if upper.starts_with("PT-") {
+        Some(upper)
+    } else if let Ok(n) = q.parse::<i64>() {
+        Some(format!("PT-{}", n))
+    } else {
+        None
+    };
+
+    if let Some(pt_id_str) = pt_candidate {
+        let row = conn.query_row(
+            "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+                    t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+             FROM tasks t JOIN pt_extensions x ON x.task_uuid = t.id
+             WHERE x.pt_id = ?1",
+            [&pt_id_str],
+            row_to_task,
+        );
+        return match row {
+            Ok(t) => Ok(t),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::PtIdNotFound(pt_id_str)),
+            Err(e) => Err(e.into()),
+        };
+    }
+
+    let mut sql = String::from(
+        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+         FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid = t.id
+         WHERE lower(t.title) LIKE ?1 ESCAPE '\\'",
+    );
+    if !include_terminal {
+        sql.push_str(" AND t.status NOT IN ('done', 'dismissed')");
+    }
+    sql.push_str(" ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let pat = format!("%{}%", escape_like_pattern(&q.to_ascii_lowercase()));
+    let rows: Vec<Task> = stmt
+        .query_map([&pat], row_to_task)?
+        .collect::<std::result::Result<_, _>>()?;
+
+    match rows.len() {
+        0 => {
+            let scope = if include_terminal {
+                "task"
+            } else {
+                "active task"
+            };
+            Err(crate::Error::Other(format!(
+                "no {} matching '{}'",
+                scope, query
+            )))
+        }
+        1 => Ok(rows.into_iter().next().unwrap()),
+        n => {
+            let titles: Vec<String> = rows
+                .into_iter()
+                .map(|t| {
+                    format!(
+                        "  - {} {}",
+                        t.pt_id.as_deref().unwrap_or("(no PT-id)"),
+                        t.title
+                    )
+                })
+                .collect();
+            Err(crate::Error::Other(format!(
+                "{} tasks match '{}':\n{}",
+                n,
+                query,
+                titles.join("\n")
+            )))
+        }
+    }
+}
+
 /// Outcome of `mark_done`: either the task was completed, or it was
 /// recurring and the deadline was advanced in-place.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1546,6 +1641,31 @@ mod tests {
             "msg was: {}",
             msg
         );
+    }
+
+    #[test]
+    fn resolve_for_lookup_matches_pt_id_across_terminal_statuses() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("completed task")).unwrap();
+        mark_done(&db, &t).unwrap();
+
+        let by_pt = resolve_for_lookup(&db, "PT-1", false).unwrap();
+        assert_eq!(by_pt.id, t.id);
+        assert_eq!(by_pt.status, "done");
+    }
+
+    #[test]
+    fn resolve_for_lookup_substring_scope_is_explicit() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("archive receipts")).unwrap();
+        mark_done(&db, &t).unwrap();
+
+        let err = resolve_for_lookup(&db, "archive", false).unwrap_err();
+        assert!(format!("{}", err).contains("no active task matching"));
+
+        let found = resolve_for_lookup(&db, "archive", true).unwrap();
+        assert_eq!(found.id, t.id);
+        assert_eq!(found.status, "done");
     }
 
     #[test]

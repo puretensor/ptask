@@ -63,7 +63,7 @@ enum Command {
     Tui,
     /// Run the HTTP server (sync API, capture, webhooks, metrics).
     Serve(ServeArgs),
-    /// Run the Telegram bot (teloxide long-poll).
+    /// Run the Telegram bot (Bot API long-poll).
     Bot,
     /// Print a Linear-style branch name for a task.
     Branch(BranchArgs),

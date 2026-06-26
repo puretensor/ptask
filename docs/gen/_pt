@@ -787,7 +787,7 @@ _pt_commands() {
 'view:Manage saved views' \
 'tui:Launch the terminal UI (ratatui)' \
 'serve:Run the HTTP server (sync API, capture, webhooks, metrics)' \
-'bot:Run the Telegram bot (teloxide long-poll)' \
+'bot:Run the Telegram bot (Bot API long-poll)' \
 'branch:Print a Linear-style branch name for a task' \
 'distill:Run the distillation pipeline (Python subprocess shim until v0.9)' \
 'accountability:Run one accountability cycle (escalation + Telegram/email)' \
@@ -897,7 +897,7 @@ _pt__subcmd__help_commands() {
 'view:Manage saved views' \
 'tui:Launch the terminal UI (ratatui)' \
 'serve:Run the HTTP server (sync API, capture, webhooks, metrics)' \
-'bot:Run the Telegram bot (teloxide long-poll)' \
+'bot:Run the Telegram bot (Bot API long-poll)' \
 'branch:Print a Linear-style branch name for a task' \
 'distill:Run the distillation pipeline (Python subprocess shim until v0.9)' \
 'accountability:Run one accountability cycle (escalation + Telegram/email)' \
