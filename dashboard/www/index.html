@@ -170,18 +170,18 @@ section{margin-top:22px}
 }
 .btn-done:hover{background:var(--teal);color:#04211b;border-color:var(--teal)}
 
-/* priority stepper (promote ▲ / demote ▼) */
-.pctl{display:inline-flex;align-items:center;gap:4px}
-.psteps{display:inline-flex;flex-direction:column;gap:2px;vertical-align:middle}
-.pstep{
-  cursor:pointer;background:transparent;border:1px solid var(--border);color:var(--muted);
-  border-radius:4px;width:20px;height:13px;font-size:9px;line-height:1;padding:0;
-  display:flex;align-items:center;justify-content:center;transition:all .15s;
+/* priority chip — click to open the direct severity picker */
+.pchip{
+  font-family:var(--font);font-weight:800;font-size:10px;line-height:1.4;
+  padding:2px 6px 2px 7px;border-radius:5px;color:#0a0a0f;border:none;cursor:pointer;
+  display:inline-flex;align-items:center;gap:3px;transition:filter .15s;
 }
-.pstep:hover{background:var(--accent);color:#04211b;border-color:var(--accent)}
-.pstep.off{opacity:.22;cursor:default;pointer-events:none}
-[data-theme="lcars"] .pstep{border-radius:0 6px 6px 0}
-[data-theme="exec"] .pstep:hover{color:#fff}
+.pchip.p2,.pchip.p1{color:#fff}
+[data-theme="exec"] .pchip.p5,[data-theme="exec"] .pchip.p4{color:#fff}
+[data-theme="lcars"] .pchip{border-radius:0 8px 8px 0}
+.pchip:hover{filter:brightness(1.12)}
+.pchip:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.pchip .car{font-size:8px;opacity:.85;margin-top:1px}
 
 /* lanes */
 .lanes{display:grid;grid-template-columns:repeat(5,1fr);gap:var(--gap);align-items:start}
@@ -329,6 +329,33 @@ section{margin-top:22px}
 .quickadd input{background:var(--panel);border:var(--card-border);color:var(--text);border-radius:var(--chip-radius);padding:6px 12px;font-family:var(--font);font-size:12px;width:180px}
 .quickadd input:focus{outline:none;border-color:var(--accent);box-shadow:var(--glow)}
 .quickadd button{background:var(--grad);color:#fff;border:none;border-radius:var(--chip-radius);padding:6px 14px;font-weight:700;cursor:pointer;font-size:12px}
+/* ---- body-level overlays: severity picker popover + done-confirm dialog ---- */
+[hidden]{display:none!important}
+.popover{position:fixed;z-index:96;min-width:154px;padding:5px;
+  background:var(--bg2);border:var(--card-border);border-radius:10px;box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.5))}
+.pmi{display:flex;align-items:center;gap:9px;width:100%;padding:7px 10px;border:none;border-radius:7px;
+  background:transparent;color:var(--text);font-family:var(--font);font-size:12px;font-weight:600;
+  cursor:pointer;text-align:left;transition:background .12s}
+.pmi:hover,.pmi:focus-visible{background:var(--panel2);outline:none}
+.pmi .pdot{width:10px;height:10px;border-radius:50%;flex:none}
+.pmi .pnm{flex:1;white-space:nowrap}
+.pmi .pk{color:var(--accent);font-weight:800}
+.pmi.cur{cursor:default}
+.modal{position:fixed;inset:0;z-index:97;display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.55);padding:20px}
+.modal-card{background:var(--bg2);border:var(--card-border);border-radius:14px;
+  box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.5));padding:20px 22px;max-width:440px;width:100%}
+.modal-card h3{font-family:var(--font-head);font-size:15px;font-weight:800;margin-bottom:10px;color:var(--text)}
+.modal-body{font-size:13px;color:var(--muted);line-height:1.45;margin-bottom:18px;word-break:break-word}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end}
+.mbtn{font-family:var(--font);font-size:12px;font-weight:700;cursor:pointer;border-radius:var(--chip-radius);
+  padding:8px 16px;border:1px solid var(--border);background:transparent;color:var(--text);transition:all .15s}
+.mbtn:hover{border-color:var(--accent)}
+.mbtn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.mbtn.primary{background:var(--grad);color:#fff;border:none}
+.mbtn.primary:hover{filter:brightness(1.08)}
+[data-theme="lcars"] .popover{border:2px solid #ff9f43;border-radius:8px 18px 18px 8px}
+[data-theme="lcars"] .modal-card{border:2px solid #ff9f43;border-radius:8px 26px 26px 8px}
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}}
 </style>
 </head>
@@ -386,12 +413,25 @@ section{margin-top:22px}
   </div>
 </main>
 <div class="toast" id="toast"></div>
+<!-- body-level overlays (survive the 15s #lanes/#crit re-render) -->
+<div id="pmenu" class="popover" role="menu" aria-label="Set task priority" hidden></div>
+<div id="confirm" class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-h" hidden>
+  <div class="modal-card">
+    <h3 id="confirm-h">Mark this task done?</h3>
+    <p class="modal-body" id="confirm-body"></p>
+    <div class="modal-actions">
+      <button type="button" class="mbtn" id="confirm-cancel">Cancel</button>
+      <button type="button" class="mbtn primary" id="confirm-ok">✓ Mark done</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const PCOL={5:'var(--p5)',4:'var(--p4)',3:'var(--p3)',2:'var(--p2)',1:'var(--p1)'};
 const PNAME={5:'CRITICAL',4:'URGENT',3:'HIGH',2:'NORMAL',1:'LOW'};
 let seenCrit=new Set(), first=true;
+let _popupOpen=false, _taskTitle={}, _pmId=null, _pmCur=null;
 
 /* ---- theme engine ---- */
 function setTheme(t){
@@ -416,20 +456,11 @@ function dueChip(t){
   else if(d<=14) lbl='in '+Math.round(d)+'d';
   return `<span class="due ${cls}">${lbl}</span>`;
 }
-function pbadge(p){return `<span class="pbadge p${p}">P${p}</span>`;}
-/* priority stepper: ▲ promote / ▼ demote, disabled at the 5/1 bounds. */
-function psteps(t){
+/* priority chip — click opens the direct severity picker (jump to any P5…P1). */
+function ptrigger(t){
   const p=t.priority, id=(t.pt_id||t.id);
-  const up = p<5
-    ? `<button class="pstep" title="promote → ${PNAME[p+1]}" aria-label="promote ${id}" onclick="setPriority('${id}',${p+1},event)">▲</button>`
-    : `<button class="pstep off" tabindex="-1" aria-hidden="true">▲</button>`;
-  const dn = p>1
-    ? `<button class="pstep" title="demote → ${PNAME[p-1]}" aria-label="demote ${id}" onclick="setPriority('${id}',${p-1},event)">▼</button>`
-    : `<button class="pstep off" tabindex="-1" aria-hidden="true">▼</button>`;
-  return `<span class="psteps">${up}${dn}</span>`;
+  return `<button class="pchip p${p}" aria-haspopup="menu" title="priority P${p} ${PNAME[p]} — click to change" onclick="openPriorityMenu(event,'${id}',${p})">P${p}<span class="car">▾</span></button>`;
 }
-/* priority badge + stepper as one control (used in the Critical strip). */
-function pctl(t){return `<span class="pctl">${pbadge(t.priority)}${psteps(t)}</span>`;}
 function scoreMini(s){const w=Math.min(100,Math.round(s*100));return `<span class="scoremini"><i style="width:${w}%"></i></span>`;}
 async function api(p){const r=await fetch(p,{headers:{'Accept':'application/json'}});if(!r.ok)throw new Error(p+' '+r.status);return r.json();}
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
@@ -447,6 +478,62 @@ async function setPriority(id,level,ev){
     const j=await r.json(); toast(j.ok?('⇅ '+id+' → P'+level+' '+PNAME[level]):('✗ '+(j.message||'failed'))); if(j.ok) load();
   }catch(e){toast('✗ '+e.message);}
 }
+
+/* ---- severity picker + done-confirm (body-level overlays; survive the 15s refresh) ---- */
+function closePopups(){
+  _popupOpen=false; _pmId=null; _pmCur=null;
+  const pm=$('#pmenu'); pm.hidden=true; pm.innerHTML='';
+  $('#confirm').hidden=true;
+}
+function openPriorityMenu(ev,id,cur){
+  ev.preventDefault(); ev.stopPropagation();
+  _popupOpen=true; _pmId=id; _pmCur=cur;
+  const pm=$('#pmenu');
+  pm.innerHTML=[5,4,3,2,1].map(n=>
+    `<button class="pmi${n===cur?' cur':''}" role="menuitem"${n===cur?' aria-current="true"':''} onclick="pickPriority(${n})">`+
+    `<span class="pdot" style="background:${PCOL[n]}"></span>`+
+    `<span class="pnm">P${n} ${PNAME[n]}</span>`+
+    `<span class="pk">${n===cur?'✓':''}</span></button>`).join('');
+  pm.hidden=false;
+  const r=ev.currentTarget.getBoundingClientRect(), m=6;
+  let left=r.left, top=r.bottom+4;
+  if(left+pm.offsetWidth>innerWidth-m) left=innerWidth-pm.offsetWidth-m;
+  if(left<m) left=m;
+  if(top+pm.offsetHeight>innerHeight-m) top=r.top-pm.offsetHeight-4;   // flip above
+  if(top<m) top=m;
+  pm.style.left=left+'px'; pm.style.top=top+'px';
+  const f=pm.querySelector('.pmi:not(.cur)')||pm.querySelector('.pmi'); if(f) f.focus({preventScroll:true});
+}
+function pickPriority(level){
+  const id=_pmId, cur=_pmCur;
+  closePopups();
+  if(level!==cur) setPriority(id,level);
+}
+function confirmDone(id){
+  _popupOpen=true;
+  $('#confirm-body').textContent='“'+(_taskTitle[id]||id)+'”';
+  $('#confirm').hidden=false;
+  $('#confirm-ok').onclick=()=>{ closePopups(); markDone(id); };
+  $('#confirm-cancel').onclick=closePopups;
+  $('#confirm-ok').focus({preventScroll:true});
+}
+/* global dismiss + popover keyboard nav */
+document.addEventListener('keydown',e=>{
+  if(!_popupOpen) return;
+  if(e.key==='Escape'){ closePopups(); return; }
+  const pm=$('#pmenu'); if(pm.hidden) return;
+  const items=[...pm.querySelectorAll('.pmi')]; if(!items.length) return;
+  const i=items.indexOf(document.activeElement);
+  if(e.key==='ArrowDown'){ e.preventDefault(); (items[i+1]||items[0]).focus(); }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); (items[i-1]||items[items.length-1]).focus(); }
+});
+document.addEventListener('mousedown',e=>{
+  if(!_popupOpen) return;
+  if(e.target.closest('#pmenu')||e.target.closest('.modal-card')||e.target.closest('.pchip')) return;
+  closePopups();
+},true);
+addEventListener('resize',()=>{ if(_popupOpen) closePopups(); });
+addEventListener('scroll',()=>{ if(!$('#pmenu').hidden) closePopups(); },true);
 $('#qabtn').onclick=async()=>{
   const v=$('#qa').value.trim(); if(v.length<3){toast('too short');return;}
   try{const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:v})});
@@ -474,11 +561,11 @@ function renderCritical(tasks){
       <div class="scorebar"></div>
       <h3>${esc(t.title)}</h3>
       <div class="meta">
-        ${pctl(t)}
+        ${ptrigger(t)}
         <span class="score">${(t.priority_score).toFixed(3)}</span>${scoreMini(t.priority_score)}
         ${dueChip(t)}
         <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
-        <button class="btn-done" title="mark done" onclick="markDone('${t.pt_id||t.id}')">✓</button>
+        <button class="btn-done" title="mark done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button>
       </div></div>`;
   }).join('');
   seenCrit=new Set(tasks.map(t=>t.id));
@@ -486,7 +573,8 @@ function renderCritical(tasks){
 let _laneScroll={};
 function renderLanes(tasks){
   const by={5:[],4:[],3:[],2:[],1:[]};
-  tasks.forEach(t=>{if(by[t.priority])by[t.priority].push(t);});
+  _taskTitle={};
+  tasks.forEach(t=>{if(by[t.priority])by[t.priority].push(t); _taskTitle[t.pt_id||t.id]=t.title;});
   /* snapshot each lane's scroll offset so the 15s auto-refresh doesn't yank a
      reading operator back to the top of the lane */
   $$('.lane-body').forEach(b=>{_laneScroll[b.dataset.p]=b.scrollTop;});
@@ -498,8 +586,8 @@ function renderLanes(tasks){
       ${list.map(t=>`<div class="tcard">
         <div class="tt">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
-        ${psteps(t)}
-        <button class="btn-done" title="done" onclick="markDone('${t.pt_id||t.id}')">✓</button></div>
+        ${ptrigger(t)}
+        <button class="btn-done" title="done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button></div>
       </div>`).join('')}
       </div>
     </div>`;
@@ -557,6 +645,7 @@ function renderHeat(h){
 
 /* ---- load loop ---- */
 async function load(){
+  if(_popupOpen) return;   // don't wipe the board while a picker/confirm popup is open
   try{
     const [stats,crit,all,tl,heat]=await Promise.all([
       api('/api/stats'),api('/api/critical?limit=12'),api('/api/tasks?status=pending&limit=600'),
