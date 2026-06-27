@@ -90,6 +90,62 @@ class BuildAddArgsTests(unittest.TestCase):
         self.assertIn("description", err)
 
 
+class VoiceJsonTests(unittest.TestCase):
+    def test_plain_json(self):
+        self.assertEqual(server._extract_json('{"a": 1}'), {"a": 1})
+
+    def test_json_in_markdown_fence(self):
+        self.assertEqual(server._extract_json('```json\n{"a": 1}\n```'), {"a": 1})
+        self.assertEqual(server._extract_json('```\n{"a": 2}\n```'), {"a": 2})
+
+    def test_json_with_surrounding_prose(self):
+        self.assertEqual(
+            server._extract_json('Sure! Here it is:\n{"title": "x"}\nHope that helps.'),
+            {"title": "x"})
+
+    def test_garbage_returns_empty(self):
+        for bad in ("", "no json here", "{not valid}", None):
+            self.assertEqual(server._extract_json(bad), {})
+
+
+class VoiceFieldsTests(unittest.TestCase):
+    def test_full_payload_passthrough(self):
+        out = server._normalize_voice_fields(
+            {"title": "Redesign dashboard.", "description": "do it",
+             "priority": 4, "deadline": "2026-07-03", "labels": ["pnoc", "UI!!"]},
+            "redesign the dashboard")
+        self.assertEqual(out["title"], "Redesign dashboard")   # trailing period stripped
+        self.assertEqual(out["description"], "do it")
+        self.assertEqual(out["priority"], 4)
+        self.assertEqual(out["deadline"], "2026-07-03")
+        self.assertEqual(out["labels"], ["pnoc", "ui"])        # sanitized lowercase
+
+    def test_missing_title_falls_back_to_transcript(self):
+        out = server._normalize_voice_fields({}, "  fix the broken thing  ")
+        self.assertEqual(out["title"], "fix the broken thing")
+        self.assertEqual(out["priority"], 2)                   # default NORMAL
+        self.assertIsNone(out["deadline"])
+        self.assertEqual(out["labels"], [])
+
+    def test_priority_clamped_and_defaulted(self):
+        self.assertEqual(server._normalize_voice_fields({"title": "abc", "priority": 9}, "t")["priority"], 5)
+        self.assertEqual(server._normalize_voice_fields({"title": "abc", "priority": 0}, "t")["priority"], 1)
+        self.assertEqual(server._normalize_voice_fields({"title": "abc", "priority": "x"}, "t")["priority"], 2)
+
+    def test_invalid_deadline_dropped(self):
+        for bad in ("2026-13-40", "next friday", "07/03/2026", ""):
+            out = server._normalize_voice_fields({"title": "abc", "deadline": bad}, "t")
+            self.assertIsNone(out["deadline"], f"deadline={bad!r} should be dropped")
+
+    def test_labels_capped_and_non_dict_safe(self):
+        out = server._normalize_voice_fields(
+            {"title": "abc", "labels": ["a", "b", "c", "d", "e", "f"]}, "t")
+        self.assertLessEqual(len(out["labels"]), 4)
+        safe = server._normalize_voice_fields("not a dict", "fallback title here")
+        self.assertEqual(safe["title"], "fallback title here")
+        self.assertEqual(safe["priority"], 2)
+
+
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.dirname(__file__)))
     unittest.main()

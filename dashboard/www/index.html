@@ -384,6 +384,22 @@ section{margin-top:22px}
 .sev button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 [data-theme="lcars"] .sev button{border-radius:0 12px 12px 0}
 @media(max-width:520px){.sev button{flex:1 1 40%}}
+/* voice capture — speak to auto-fill the whole task */
+.vbar{display:flex;flex-direction:column;gap:6px}
+.vbtn{display:flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;width:100%;
+  background:var(--panel);border:1px dashed var(--accent);color:var(--accent);border-radius:10px;
+  padding:11px 14px;font-family:var(--font);font-size:13px;font-weight:700;transition:all .15s}
+.vbtn:hover{background:var(--panel2);filter:brightness(1.06)}
+.vbtn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.vbtn.rec{border-style:solid;border-color:var(--p5);color:#fff;background:var(--p5);animation:vpulse 1.3s infinite}
+.vbtn.proc{border-style:solid;cursor:wait}
+.vbtn.off{border-style:solid;border-color:var(--border);color:var(--muted);cursor:not-allowed}
+.vbtn:disabled{cursor:not-allowed}
+@keyframes vpulse{0%,100%{box-shadow:0 0 0 0 rgba(255,59,92,.5)}50%{box-shadow:0 0 0 7px rgba(255,59,92,0)}}
+.vmsg{font-size:10px;color:var(--dim);min-height:13px;line-height:1.35;word-break:break-word}
+.vmsg.warn{color:var(--p4)}
+.vmsg.heard{color:var(--muted);font-style:italic}
+[data-theme="lcars"] .vbtn{border-radius:0 12px 12px 0}
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}}
 </style>
 </head>
@@ -457,6 +473,10 @@ section{margin-top:22px}
   <div class="modal-card compose">
     <h3 id="compose-h">New task</h3>
     <form class="cform" id="cform" autocomplete="off">
+      <div class="vbar">
+        <button type="button" class="vbtn" id="v-btn">🎤 Speak to fill</button>
+        <span class="vmsg" id="v-msg"></span>
+      </div>
       <div class="fld">
         <label for="c-title">Title</label>
         <input type="text" id="c-title" maxlength="400" placeholder="What needs doing?" required>
@@ -538,6 +558,7 @@ async function setPriority(id,level,ev){
 /* ---- severity picker + done-confirm (body-level overlays; survive the 15s refresh) ---- */
 function closePopups(){
   _popupOpen=false; _pmId=null; _pmCur=null;
+  if(typeof _vstate!=='undefined'&&_vstate==='rec') stopRec(false);   // discard + release mic on close
   const pm=$('#pmenu'); pm.hidden=true; pm.innerHTML='';
   $('#confirm').hidden=true;
   $('#compose').hidden=true;
@@ -609,6 +630,9 @@ function openCompose(seed){
   const s=(seed||'').slice(0,400);
   $('#c-title').value=s; $('#c-desc').value=''; $('#c-deadline').value='';
   buildSev(2);
+  // voice control: ready when the browser allows mic (secure context), else guide to HTTPS
+  if(voiceSupported()){ setVoiceState('idle'); voiceMsg('or speak it — title, description, severity & deadline auto-fill'); }
+  else { setVoiceState('off'); voiceMsg('open https://ptask.puretensor.ai to dictate — the mic needs a secure (HTTPS) connection','warn'); }
   $('#compose').hidden=false;
   // seeded enough for a title → land in description; else focus the title
   (s.trim().length>=3?$('#c-desc'):$('#c-title')).focus({preventScroll:true});
@@ -637,6 +661,61 @@ $('#cform').addEventListener('submit',submitCompose);
 $('#c-cancel').onclick=closePopups;
 /* ⌘/Ctrl+Enter submits from anywhere in the form (fast capture) */
 $('#cform').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')submitCompose(e);});
+
+/* ---- voice: speak → Whisper STT → Bedrock draft → auto-fill the composer ---- */
+let _rec=null,_chunks=[],_recTimer=null,_recStart=0,_vstate='idle',_vsend=true;
+function voiceMsg(t,cls){const m=$('#v-msg');m.textContent=t||'';m.className='vmsg'+(cls?' '+cls:'');}
+function setVoiceState(s){
+  _vstate=s; const b=$('#v-btn');
+  b.classList.remove('rec','proc','off'); b.disabled=false;
+  if(s==='idle')      b.textContent='🎤 Speak to fill';
+  else if(s==='rec'){ b.classList.add('rec'); b.textContent='⏹ Stop · 0s'; }
+  else if(s==='proc'){b.classList.add('proc'); b.disabled=true; b.textContent='✍️ transcribing & drafting…';}
+  else if(s==='off'){ b.classList.add('off'); b.disabled=true; b.textContent='🎤 voice needs HTTPS'; }
+}
+function voiceSupported(){return window.isSecureContext&&navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder;}
+async function startRec(){
+  if(!voiceSupported()){ setVoiceState('off'); voiceMsg('open https://ptask.puretensor.ai to dictate — the mic needs a secure (HTTPS) connection','warn'); return; }
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    _chunks=[]; _vsend=true;
+    const mime=MediaRecorder.isTypeSupported('audio/webm;codecs=opus')?'audio/webm;codecs=opus'
+              :MediaRecorder.isTypeSupported('audio/webm')?'audio/webm'
+              :MediaRecorder.isTypeSupported('audio/mp4')?'audio/mp4':'';
+    _rec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);
+    _rec.ondataavailable=e=>{if(e.data&&e.data.size)_chunks.push(e.data);};
+    _rec.onstop=()=>{
+      stream.getTracks().forEach(t=>t.stop());
+      const type=(_rec&&_rec.mimeType)||mime||'audio/webm'; _rec=null;
+      if(_vsend&&_chunks.length) sendVoice(new Blob(_chunks,{type})); else setVoiceState('idle');
+    };
+    _rec.start(); _recStart=Date.now(); setVoiceState('rec'); voiceMsg('listening… click to stop');
+    _recTimer=setInterval(()=>{const s=Math.floor((Date.now()-_recStart)/1000);
+      $('#v-btn').textContent='⏹ Stop · '+s+'s'; if(s>=60) stopRec(true);},250);
+  }catch(e){ setVoiceState('idle'); voiceMsg('mic blocked: '+(e&&e.message||e),'warn'); }
+}
+function stopRec(send){
+  _vsend=send!==false;
+  if(_recTimer){clearInterval(_recTimer);_recTimer=null;}
+  if(_rec&&_rec.state!=='inactive'){try{_rec.stop();}catch(_){}}
+}
+async function sendVoice(blob){
+  setVoiceState('proc'); voiceMsg('transcribing & drafting…');
+  try{
+    const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':blob.type||'audio/webm'},body:blob});
+    const j=await r.json();
+    setVoiceState('idle');
+    if(!j.ok){ voiceMsg('✗ '+(j.error||'voice failed'),'warn'); return; }
+    const f=j.fields||{};
+    if(f.title) $('#c-title').value=f.title;
+    if(f.description) $('#c-desc').value=f.description;
+    if(f.priority) pickSev(f.priority);
+    $('#c-deadline').value=f.deadline||'';
+    voiceMsg('heard: “'+(j.transcript||'')+'”','heard');
+    toast('✓ filled from voice'+(j.llm&&j.llm!=='bedrock'?' · '+j.llm:''));
+  }catch(e){ setVoiceState('idle'); voiceMsg('✗ '+e.message,'warn'); }
+}
+$('#v-btn').onclick=()=>{ if(_vstate==='idle') startRec(); else if(_vstate==='rec') stopRec(true); };
 
 /* ---- renderers ---- */
 function renderChips(s){

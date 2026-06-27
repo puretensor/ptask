@@ -19,6 +19,9 @@ Endpoints
   POST /api/tasks  {title, description?, priority?, deadline?}
                                 -> shells `pt add [--priority=] [--description=]
                                    [--deadline=] -- "<title>"`
+  POST /api/voice  (raw audio body) -> Whisper STT + Bedrock Claude draft
+                                -> {transcript, fields:{title,description,priority,
+                                   deadline,labels}} for the composer to pre-fill
 
 Config (env)
 ------------
@@ -39,7 +42,9 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 import threading
+import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,8 +58,21 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 MAX_POST_BYTES = 16 * 1024
+MAX_AUDIO_BYTES = 12 * 1024 * 1024  # voice clips (webm/opus) — separate, larger cap
+
+# Voice capture → task: speech-to-text + an LLM that drafts the task fields.
+# STT defaults to the fleet's local Whisper (instant, no upload); the field
+# extraction runs on cloud AWS Bedrock Claude (keyless via ~/.aws), with the
+# local vLLM as a fallback. Every endpoint/model is env-overridable so either
+# stage can be repointed at any provider without code changes.
+AWS_BIN = os.environ.get("PTASK_AWS_BIN", "/usr/local/bin/aws")
+STT_URL = os.environ.get("PTASK_STT_URL", "http://127.0.0.1:9000/transcribe")
+VOICE_MODEL = os.environ.get("PTASK_VOICE_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+VOICE_REGION = os.environ.get("PTASK_VOICE_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+VOICE_FALLBACK_URL = os.environ.get("PTASK_VOICE_FALLBACK_URL", "http://127.0.0.1:8772/v1/chat/completions")
+VOICE_FALLBACK_MODEL = os.environ.get("PTASK_VOICE_FALLBACK_MODEL", "mistral-medium-3.5")
 
 # Columns we expose. Kept explicit so a schema change can't leak surprises.
 TASK_COLS = [
@@ -319,6 +337,153 @@ def pt_exec(args: list[str]) -> tuple[bool, str]:
         return False, f"exec error: {e}"
 
 
+# ------------------------------------------------------------------------ voice
+VOICE_SYSTEM = (
+    "You turn a short spoken note into ONE task, returned as STRICT JSON only — no "
+    "prose, no markdown fences. Today is {today} (UTC). Output exactly these keys:\n"
+    '  "title": concise imperative summary of the task, <= 80 chars, no trailing period.\n'
+    '  "description": helpful prose expanding the note (context, specifics, acceptance '
+    'criteria). Empty string if the note adds nothing beyond the title.\n'
+    '  "priority": integer 1-5 (5=critical, 4=urgent, 3=high, 2=normal, 1=low). Infer from '
+    "urgency/impact words; default 2 if unstated.\n"
+    '  "deadline": absolute date "YYYY-MM-DD" resolved from phrases like "today", "tomorrow", '
+    '"next Friday", "in 3 days", "end of month" relative to today; null if no date is mentioned.\n'
+    '  "labels": array of 0-4 short lowercase tags inferred from the topic; [] if unclear.\n'
+    "Speech may contain filler words, false starts, or transcription noise — clean it up and "
+    "capture the intent. Return only the JSON object."
+)
+
+
+def _extract_json(text: str) -> dict:
+    """Pull the first JSON object out of an LLM reply (tolerates ``` fences / prose)."""
+    if not text:
+        return {}
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
+        t = re.sub(r"\n?```$", "", t).strip()
+    i, j = t.find("{"), t.rfind("}")
+    if i == -1 or j == -1 or j < i:
+        return {}
+    try:
+        return json.loads(t[i:j + 1])
+    except json.JSONDecodeError:
+        return {}
+
+
+def voice_transcribe(audio: bytes, suffix: str) -> str:
+    """Audio bytes -> transcript via the (local by default) Whisper STT service."""
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(audio)
+        path = f.name
+    try:
+        out = subprocess.run(
+            ["curl", "-s", "-m", "60", "-X", "POST", STT_URL, "-F", "audio=@" + path],
+            capture_output=True, text=True, timeout=70)
+        raw = (out.stdout or "").strip()
+        try:
+            return (json.loads(raw).get("text") or "").strip()
+        except json.JSONDecodeError:
+            return raw
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _bedrock_extract(transcript: str, today: str) -> dict:
+    """Cloud field extraction via AWS Bedrock Claude (keyless, IAM via ~/.aws)."""
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 600, "temperature": 0,
+        "system": VOICE_SYSTEM.format(today=today),
+        "messages": [{"role": "user", "content": transcript}],
+    })
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as bf:
+        bf.write(body)
+        bpath = bf.name
+    opath = bpath + ".out"
+    try:
+        r = subprocess.run(
+            [AWS_BIN, "bedrock-runtime", "invoke-model", "--region", VOICE_REGION,
+             "--model-id", VOICE_MODEL, "--body", "fileb://" + bpath,
+             "--cli-binary-format", "raw-in-base64-out", opath],
+            capture_output=True, text=True, timeout=40)
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout).strip()[:200] or "bedrock invoke failed")
+        with open(opath) as f:
+            payload = json.load(f)
+        return _extract_json(payload["content"][0]["text"])
+    finally:
+        for p in (bpath, opath):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
+def _vllm_extract(transcript: str, today: str) -> dict:
+    """Local fallback extraction via the on-fleet vLLM (OpenAI-compatible)."""
+    data = json.dumps({
+        "model": VOICE_FALLBACK_MODEL, "max_tokens": 600, "temperature": 0,
+        "messages": [{"role": "system", "content": VOICE_SYSTEM.format(today=today)},
+                     {"role": "user", "content": transcript}],
+    }).encode()
+    req = urllib.request.Request(VOICE_FALLBACK_URL, data=data,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=40) as resp:
+        out = json.load(resp)
+    return _extract_json(out["choices"][0]["message"]["content"])
+
+
+def voice_extract(transcript: str) -> tuple[dict, str]:
+    """Transcript -> normalized task fields. Cloud Bedrock first, local vLLM fallback."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    raw, provider = {}, "bedrock"
+    try:
+        raw = _bedrock_extract(transcript, today)
+    except Exception:  # noqa: BLE001 — fall through to local model
+        raw = {}
+    if not raw:
+        try:
+            raw, provider = _vllm_extract(transcript, today), "vllm"
+        except Exception:  # noqa: BLE001
+            raw, provider = {}, "none"
+    return _normalize_voice_fields(raw, transcript), provider
+
+
+def _normalize_voice_fields(d: dict, transcript: str) -> dict:
+    """Coerce model output into the exact shape the composer expects (never trust it raw)."""
+    d = d if isinstance(d, dict) else {}
+    title = str(d.get("title") or "").strip().rstrip(".")[:400]
+    if len(title) < 3:
+        title = (transcript.strip()[:80] or "Voice task").strip()
+    desc = str(d.get("description") or "").strip()[:4000]
+    try:
+        pri = int(d.get("priority"))
+    except (TypeError, ValueError):
+        pri = 2
+    pri = min(5, max(1, pri))
+    deadline = None
+    dl = d.get("deadline")
+    if isinstance(dl, str) and _DATE_RE.match(dl.strip()):
+        s = dl.strip()
+        try:
+            datetime.strptime(s, "%Y-%m-%d")
+            deadline = s
+        except ValueError:
+            deadline = None
+    labels = []
+    if isinstance(d.get("labels"), list):
+        for x in d["labels"][:4]:
+            s = re.sub(r"[^a-z0-9 _-]", "", str(x).strip().lower())[:24].strip()
+            if s:
+                labels.append(s)
+    return {"title": title, "description": desc, "priority": pri,
+            "deadline": deadline, "labels": labels}
+
+
 # ---------------------------------------------------------------------- server
 class Handler(BaseHTTPRequestHandler):
     server_version = "ptask-dash/" + VERSION
@@ -399,6 +564,31 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "bad json"}, 400)
             return None
 
+    def _handle_voice(self):
+        """POST /api/voice — raw audio body → Whisper STT → Bedrock draft → fields."""
+        try:
+            n = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            return self._json({"error": "bad content length"}, 400)
+        if n <= 0:
+            return self._json({"error": "empty audio"}, 400)
+        if n > MAX_AUDIO_BYTES:
+            return self._json({"error": "audio too large"}, 413)
+        audio = self.rfile.read(n)
+        ctype = (self.headers.get("Content-Type") or "").lower()
+        suffix = (".webm" if "webm" in ctype else ".ogg" if "ogg" in ctype
+                  else ".wav" if "wav" in ctype
+                  else ".m4a" if ("mp4" in ctype or "m4a" in ctype) else ".webm")
+        try:
+            transcript = voice_transcribe(audio, suffix)
+        except Exception as e:  # noqa: BLE001
+            return self._json({"ok": False, "error": f"transcription failed: {e}"}, 502)
+        if not transcript:
+            return self._json({"ok": False, "error": "no speech detected", "transcript": ""})
+        fields, llm = voice_extract(transcript)
+        return self._json({"ok": True, "transcript": transcript, "fields": fields,
+                           "stt": "whisper", "llm": llm})
+
     def _serve_static(self, path):
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
         target = (WWW_DIR / rel).resolve()
@@ -449,6 +639,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return self._need_auth()
         u = urlparse(self.path)
+        if u.path == "/api/voice":          # binary audio body, larger cap — own reader
+            return self._handle_voice()
         body = self._read_json_body()
         if body is None:
             return

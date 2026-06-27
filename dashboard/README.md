@@ -29,7 +29,7 @@ self-contained `index.html`, vanilla JS + CSS custom properties).
 
 - **Header** — crystal-cube mark, live UTC clock, count chips (crit / urgent /
   overdue / due≤7d / open), **task composer** (title + description + severity +
-  optional deadline), theme switcher
+  optional deadline, with **🎤 speak-to-fill** voice capture), theme switcher
 - **Critical Now** — top tasks by composite `priority_score` (raw P-level as a
   badge), pulse/glow animation on newly-arrived criticals
 - **Priority Lanes** — P5→P1 columns, score-ranked within each, inline done button
@@ -49,6 +49,7 @@ self-contained `index.html`, vanilla JS + CSS custom properties).
 | GET | `/api/heatmap` | priority × age-bucket matrix |
 | POST | `/api/tasks/<id>/done` | shells `pt done <id>` |
 | POST | `/api/tasks` `{title, description?, priority?, deadline?}` | shells `pt add [--priority=] [--description=] [--deadline=] -- "<title>"` |
+| POST | `/api/voice` (raw audio body) | Whisper STT → Bedrock Claude draft → `{transcript, fields:{title,description,priority,deadline,labels}}` to pre-fill the composer |
 
 ## Run locally
 
@@ -68,6 +69,12 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_DASH_USER` | `ops` | basic-auth user |
 | `PTASK_DASH_PASS` | _(unset)_ | basic-auth pass; **required for non-loopback binds** |
 | `PTASK_DASH_WWW` | `./www` | static dir |
+| `PTASK_STT_URL` | `http://127.0.0.1:9000/transcribe` | voice STT endpoint (local Whisper); accepts `-F audio=@` |
+| `PTASK_VOICE_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model for voice→task extraction |
+| `PTASK_VOICE_REGION` | `$AWS_DEFAULT_REGION` or `us-east-1` | Bedrock region (keyless, IAM via `~/.aws`) |
+| `PTASK_AWS_BIN` | `/usr/local/bin/aws` | aws CLI path for Bedrock invoke |
+| `PTASK_VOICE_FALLBACK_URL` | `http://127.0.0.1:8772/v1/chat/completions` | local vLLM fallback if Bedrock errors |
+| `PTASK_VOICE_FALLBACK_MODEL` | `mistral-medium-3.5` | fallback model id |
 
 ## Deploy (tensor-core)
 
@@ -109,6 +116,13 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.6.0** — **🎤 speak-to-fill voice capture** in the composer. A mic button
+  records (MediaRecorder) and POSTs the clip to `POST /api/voice`, which runs the
+  fleet's local Whisper (`large-v3-turbo`, STT) then **AWS Bedrock Claude Haiku 4.5**
+  to draft a clean title, description, severity (P1–P5) and deadline from the spoken
+  note — the operator just reviews and hits Create. Bedrock is keyless (IAM via
+  `~/.aws`); local vLLM is the fallback. Mic needs a secure context, so the UI
+  guides http-IP users to the HTTPS host. STT/LLM endpoints are env-overridable.
 - **v0.5.0** — full **task composer** replaces the one-line quick-add: the header
   control now opens a modal with title, description, a five-pill severity selector
   (P5…P1), and an optional deadline. `POST /api/tasks` accepts
