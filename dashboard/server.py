@@ -16,7 +16,9 @@ Endpoints
   GET  /api/heatmap             -> priority x age-bucket matrix
   POST /api/tasks/<id>/done     -> shells `pt done <id>`
   POST /api/tasks/<id>/priority {level:1..5} -> shells `pt priority <id> <level>`
-  POST /api/tasks  {title:..}   -> shells `pt add "<title>"`
+  POST /api/tasks  {title, description?, priority?, deadline?}
+                                -> shells `pt add [--priority=] [--description=]
+                                   [--deadline=] -- "<title>"`
 
 Config (env)
 ------------
@@ -51,7 +53,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 MAX_POST_BYTES = 16 * 1024
 
 # Columns we expose. Kept explicit so a schema change can't leak surprises.
@@ -63,6 +65,7 @@ TASK_COLS = [
 ]
 
 _ID_RE = re.compile(r"^(PT-\d+|[0-9a-fA-F-]{8,36})$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def parse_bind(bind: str) -> tuple[str, int]:
@@ -263,6 +266,47 @@ def q_heatmap():
 
 
 # --------------------------------------------------------------------- writes
+def build_add_args(body: dict) -> tuple[list[str] | None, str | None]:
+    """Translate a create-task request body into `pt add` argv (or an error).
+
+    Returns (args, None) on success or (None, "message") on validation failure.
+    Optional structured fields become explicit `--opt=value` flags and the title
+    is placed after a `--` separator, so any value may safely begin with '-'. The
+    title still runs through quick-add parsing (inline @label/#project/~2h keep
+    working); explicit flags win over inline priority/description.
+    """
+    title = (body.get("title") or "").strip()
+    if not (3 <= len(title) <= 400):
+        return None, "title 3-400 chars"
+    args = ["add"]
+    pri = body.get("priority")
+    if pri is not None:
+        if isinstance(pri, bool) or not isinstance(pri, int) or not (1 <= pri <= 5):
+            return None, "priority must be an integer 1..5"
+        args.append(f"--priority={pri}")
+    desc = body.get("description")
+    if desc is not None:
+        if not isinstance(desc, str):
+            return None, "description must be a string"
+        desc = desc.strip()
+        if len(desc) > 4000:
+            return None, "description too long (max 4000)"
+        if desc:
+            args.append(f"--description={desc}")
+    dl = body.get("deadline")
+    if dl is not None and str(dl).strip():
+        dl = str(dl).strip()
+        if not _DATE_RE.match(dl):
+            return None, "deadline must be ISO date YYYY-MM-DD"
+        try:
+            datetime.strptime(dl, "%Y-%m-%d")
+        except ValueError:
+            return None, "deadline is not a valid date"
+        args.append(f"--deadline={dl}")
+    args += ["--", title]
+    return args, None
+
+
 def pt_exec(args: list[str]) -> tuple[bool, str]:
     env = dict(os.environ)
     env["PATH"] = str(HOME / ".cargo" / "bin") + ":" + env.get("PATH", "")
@@ -429,10 +473,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         if u.path == "/api/tasks":
-            title = (body.get("title") or "").strip()
-            if not (3 <= len(title) <= 400):
-                return self._json({"error": "title 3-400 chars"}, 400)
-            ok, msg = pt_exec(["add", title])
+            args, err = build_add_args(body)
+            if err:
+                return self._json({"error": err}, 400)
+            ok, msg = pt_exec(args)
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         return self._json({"error": "not found"}, 404)

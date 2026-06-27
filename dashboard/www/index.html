@@ -356,6 +356,34 @@ section{margin-top:22px}
 .mbtn.primary:hover{filter:brightness(1.08)}
 [data-theme="lcars"] .popover{border:2px solid #ff9f43;border-radius:8px 18px 18px 8px}
 [data-theme="lcars"] .modal-card{border:2px solid #ff9f43;border-radius:8px 26px 26px 8px}
+/* ---- task composer (title + description + severity + deadline) ---- */
+.modal-card.compose{max-width:520px}
+.cform{display:flex;flex-direction:column;gap:15px}
+.fld{display:flex;flex-direction:column;gap:6px}
+.fld label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.fld label .opt{color:var(--dim);font-weight:600;text-transform:none;letter-spacing:0}
+.cform input[type=text],.cform textarea,.cform input[type=date]{
+  background:var(--panel);border:var(--card-border);color:var(--text);border-radius:10px;
+  padding:9px 12px;font-family:var(--font);font-size:13px;width:100%;
+  transition:border-color .15s,box-shadow .15s}
+.cform textarea{resize:vertical;min-height:76px;line-height:1.5}
+.cform input:focus,.cform textarea:focus{outline:none;border-color:var(--accent);box-shadow:var(--glow)}
+.cform .hint{font-size:10px;color:var(--dim)}
+.cform .hint b{color:var(--muted);font-weight:700}
+/* severity selector — five mutually-exclusive pills (radiogroup) */
+.sev{display:flex;gap:6px;flex-wrap:wrap}
+.sev button{flex:1 1 0;min-width:88px;display:flex;align-items:center;justify-content:center;gap:7px;
+  cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:9px;
+  padding:9px 6px;font-family:var(--font);font-size:11px;font-weight:700;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.03em;transition:all .15s;white-space:nowrap}
+.sev button .sd{width:11px;height:11px;border-radius:50%;flex:none;background:var(--sc)}
+.sev button:hover{color:var(--text);border-color:var(--sc)}
+.sev button.on{color:#0a0a0f;background:var(--sc);border-color:var(--sc)}
+.sev button.on.p2,.sev button.on.p1{color:#fff}
+[data-theme="exec"] .sev button.on.p5,[data-theme="exec"] .sev button.on.p4{color:#fff}
+.sev button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+[data-theme="lcars"] .sev button{border-radius:0 12px 12px 0}
+@media(max-width:520px){.sev button{flex:1 1 40%}}
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}}
 </style>
 </head>
@@ -371,8 +399,8 @@ section{margin-top:22px}
     <div class="spacer"></div>
     <div class="chips" id="chips"></div>
     <div class="quickadd">
-      <input id="qa" placeholder="quick add task…" maxlength="400">
-      <button id="qabtn">Add</button>
+      <input id="qa" placeholder="new task…" maxlength="400" aria-label="New task title — opens the composer">
+      <button id="qabtn">+ Add</button>
     </div>
     <div class="themes" id="themes">
       <button data-t="mission">Mission</button>
@@ -425,13 +453,41 @@ section{margin-top:22px}
     </div>
   </div>
 </div>
+<div id="compose" class="modal" role="dialog" aria-modal="true" aria-labelledby="compose-h" hidden>
+  <div class="modal-card compose">
+    <h3 id="compose-h">New task</h3>
+    <form class="cform" id="cform" autocomplete="off">
+      <div class="fld">
+        <label for="c-title">Title</label>
+        <input type="text" id="c-title" maxlength="400" placeholder="What needs doing?" required>
+        <span class="hint">tip: <b>@label</b> <b>#project</b> <b>~2h</b> still parse inline from the title</span>
+      </div>
+      <div class="fld">
+        <label for="c-desc">Description <span class="opt">— optional</span></label>
+        <textarea id="c-desc" maxlength="4000" placeholder="Context, links, acceptance criteria…"></textarea>
+      </div>
+      <div class="fld">
+        <label id="c-sev-lbl">Severity</label>
+        <div class="sev" id="c-sev" role="radiogroup" aria-labelledby="c-sev-lbl"></div>
+      </div>
+      <div class="fld">
+        <label for="c-deadline">Deadline <span class="opt">— optional</span></label>
+        <input type="date" id="c-deadline">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="mbtn" id="c-cancel">Cancel</button>
+        <button type="submit" class="mbtn primary" id="c-create">Create task</button>
+      </div>
+    </form>
+  </div>
+</div>
 
 <script>
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const PCOL={5:'var(--p5)',4:'var(--p4)',3:'var(--p3)',2:'var(--p2)',1:'var(--p1)'};
 const PNAME={5:'CRITICAL',4:'URGENT',3:'HIGH',2:'NORMAL',1:'LOW'};
 let seenCrit=new Set(), first=true;
-let _popupOpen=false, _taskTitle={}, _pmId=null, _pmCur=null;
+let _popupOpen=false, _taskTitle={}, _pmId=null, _pmCur=null, _sev=2;
 
 /* ---- theme engine ---- */
 function setTheme(t){
@@ -484,6 +540,7 @@ function closePopups(){
   _popupOpen=false; _pmId=null; _pmCur=null;
   const pm=$('#pmenu'); pm.hidden=true; pm.innerHTML='';
   $('#confirm').hidden=true;
+  $('#compose').hidden=true;
 }
 function openPriorityMenu(ev,id,cur){
   ev.preventDefault(); ev.stopPropagation();
@@ -532,15 +589,54 @@ document.addEventListener('mousedown',e=>{
   if(e.target.closest('#pmenu')||e.target.closest('.modal-card')||e.target.closest('.pchip')) return;
   closePopups();
 },true);
-addEventListener('resize',()=>{ if(_popupOpen) closePopups(); });
+addEventListener('resize',()=>{ if(!$('#pmenu').hidden) closePopups(); });  // only the anchored popover goes stale; centered modals survive
 addEventListener('scroll',()=>{ if(!$('#pmenu').hidden) closePopups(); },true);
-$('#qabtn').onclick=async()=>{
-  const v=$('#qa').value.trim(); if(v.length<3){toast('too short');return;}
-  try{const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:v})});
-    const j=await r.json(); toast(j.ok?'✓ added':'✗ '+(j.message||'failed')); if(j.ok){$('#qa').value='';load();}
-  }catch(e){toast('✗ '+e.message);}
-};
-$('#qa').addEventListener('keydown',e=>{if(e.key==='Enter')$('#qabtn').click();});
+/* ---- task composer (title + description + severity + deadline) ---- */
+function buildSev(sel){
+  _sev=sel;
+  $('#c-sev').innerHTML=[5,4,3,2,1].map(n=>
+    `<button type="button" class="sv p${n}${n===sel?' on':''}" role="radio" data-lvl="${n}"`+
+    ` aria-checked="${n===sel?'true':'false'}" style="--sc:${PCOL[n]}" onclick="pickSev(${n})">`+
+    `<span class="sd"></span>P${n} ${PNAME[n]}</button>`).join('');
+}
+function pickSev(n){
+  _sev=n;
+  $$('#c-sev .sv').forEach(b=>{const on=b.dataset.lvl===String(n);
+    b.classList.toggle('on',on); b.setAttribute('aria-checked',on?'true':'false');});
+}
+function openCompose(seed){
+  _popupOpen=true;
+  const s=(seed||'').slice(0,400);
+  $('#c-title').value=s; $('#c-desc').value=''; $('#c-deadline').value='';
+  buildSev(2);
+  $('#compose').hidden=false;
+  // seeded enough for a title → land in description; else focus the title
+  (s.trim().length>=3?$('#c-desc'):$('#c-title')).focus({preventScroll:true});
+}
+async function submitCompose(ev){
+  if(ev) ev.preventDefault();
+  const title=$('#c-title').value.trim();
+  if(title.length<3){toast('title too short');$('#c-title').focus();return;}
+  const description=$('#c-desc').value.trim();
+  const deadline=$('#c-deadline').value||'';          // '' or YYYY-MM-DD
+  const payload={title,priority:_sev};
+  if(description) payload.description=description;
+  if(deadline) payload.deadline=deadline;
+  const btn=$('#c-create'); btn.disabled=true;
+  try{
+    const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const j=await r.json();
+    if(j.ok){ closePopups(); $('#qa').value=''; toast('✓ created · P'+_sev+' '+PNAME[_sev]); load(); }
+    else { toast('✗ '+(j.message||'failed')); }
+  }catch(e){ toast('✗ '+e.message); }
+  finally{ btn.disabled=false; }
+}
+$('#qabtn').onclick=()=>openCompose($('#qa').value);
+$('#qa').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();openCompose($('#qa').value);}});
+$('#cform').addEventListener('submit',submitCompose);
+$('#c-cancel').onclick=closePopups;
+/* ⌘/Ctrl+Enter submits from anywhere in the form (fast capture) */
+$('#cform').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')submitCompose(e);});
 
 /* ---- renderers ---- */
 function renderChips(s){

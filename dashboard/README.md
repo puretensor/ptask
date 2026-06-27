@@ -28,7 +28,8 @@ self-contained `index.html`, vanilla JS + CSS custom properties).
 ## Layout
 
 - **Header** — crystal-cube mark, live UTC clock, count chips (crit / urgent /
-  overdue / due≤7d / open), quick-add, theme switcher
+  overdue / due≤7d / open), **task composer** (title + description + severity +
+  optional deadline), theme switcher
 - **Critical Now** — top tasks by composite `priority_score` (raw P-level as a
   badge), pulse/glow animation on newly-arrived criticals
 - **Priority Lanes** — P5→P1 columns, score-ranked within each, inline done button
@@ -47,7 +48,7 @@ self-contained `index.html`, vanilla JS + CSS custom properties).
 | GET | `/api/timeline` | pending tasks with a deadline |
 | GET | `/api/heatmap` | priority × age-bucket matrix |
 | POST | `/api/tasks/<id>/done` | shells `pt done <id>` |
-| POST | `/api/tasks` `{title}` | shells `pt add "<title>"` |
+| POST | `/api/tasks` `{title, description?, priority?, deadline?}` | shells `pt add [--priority=] [--description=] [--deadline=] -- "<title>"` |
 
 ## Run locally
 
@@ -108,6 +109,15 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.5.0** — full **task composer** replaces the one-line quick-add: the header
+  control now opens a modal with title, description, a five-pill severity selector
+  (P5…P1), and an optional deadline. `POST /api/tasks` accepts
+  `{title, description?, priority?, deadline?}` and shells them to `pt add` as
+  explicit `--priority=`/`--description=`/`--deadline=` flags with a `--` title
+  separator (hyphen-safe; inline `@label`/`#project`/`~2h` on the title still
+  parse). Fast capture preserved — type a title, Enter, ⌘/Ctrl+Enter to create.
+- **v0.4.0** — direct severity picker + done-confirmation dialog on the dashboard.
+- **v0.3.0** — scrollable priority lanes surface every pending task (no +N dead-end).
 - **v0.2.1** — clamp API `limit` query parameters so negative SQLite limits cannot
   become unbounded reads; dashboard unit tests now run in CI.
 - **v0.2.0** — promote/demote priority controls (▲/▼ steppers) on Critical-strip
