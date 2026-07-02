@@ -1,0 +1,12 @@
+[Unit]
+Description=pTask weekly backup restore drill
+
+[Timer]
+# Monday 05:30 UTC — after the nightly backup (so freshness checks see
+# yesterday's file) and before the 06:00 distill run.
+OnCalendar=Mon *-*-* 05:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
