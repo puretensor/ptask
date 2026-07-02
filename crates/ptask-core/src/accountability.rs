@@ -132,6 +132,8 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
                 COALESCE(dismissal_count, 0), COALESCE(escalation_level, 0)
          FROM tasks
          WHERE status IN ('pending', 'delayed')
+           AND NOT (COALESCE(status_v2,'') = 'snoozed'
+                    AND snoozed_until IS NOT NULL AND snoozed_until > ?1)
            AND (next_reminder IS NULL OR next_reminder <= ?1)
            AND COALESCE(escalation_level, 0) < 5
          ORDER BY priority_score DESC, priority DESC, created_at DESC",
@@ -245,9 +247,15 @@ fn set_status(db: &Db, task_uuid: &str, status: &str) -> Result<()> {
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
     let now = crate::dates::format_iso(&crate::dates::now_in_operator_tz()?);
+    let v2 = match status {
+        "blocked" => "blocked",
+        "pending" => "todo",
+        "delayed" => "snoozed",
+        other => other,
+    };
     tx.execute(
-        "UPDATE tasks SET status=?1, updated_at=?2 WHERE id=?3",
-        params![status, now, task_uuid],
+        "UPDATE tasks SET status=?1, status_v2=?4, updated_at=?2 WHERE id=?3",
+        params![status, now, task_uuid, v2],
     )?;
     tx.execute(
         "INSERT INTO interactions (task_id, action, ts, details)

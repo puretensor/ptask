@@ -12,38 +12,28 @@
 //! is the operator-facing "who's blocked by me" view, not the prerequisite
 //! relation.
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::storage::Db;
 use crate::tasks::Task;
-use std::collections::HashMap;
 
-/// Return pending tasks ready to start: all `depends_on` UUIDs resolve to
-/// rows with `status='done'`, or `depends_on` is empty. Order is the same
-/// as `tasks::list_with_filter` (priority_score DESC, priority DESC,
-/// created_at DESC).
+/// Return active tasks ready to start: every `depends_on` link resolves to
+/// a done task, or the task has no dependency links. Snoozed tasks don't
+/// compete. Order matches `tasks::list_with_filter` (priority_score DESC,
+/// priority DESC, created_at DESC).
 pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
     let conn = db.get()?;
 
-    // Build a map of id -> status for every task, in one shot. This lets us
-    // resolve dependencies without a per-task lookup.
-    let mut status_by_id: HashMap<String, String> = HashMap::new();
-    {
-        let mut stmt = conn.prepare("SELECT id, status FROM tasks")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        for row in rows {
-            let (id, status) = row?;
-            status_by_id.insert(id, status);
-        }
-    }
-
-    // Pull pending candidates with their depends_on payload.
+    // Active candidates (snoozed tasks deliberately don't compete) with an
+    // unmet-dependency count from task_links (schema v2 replaced the JSON
+    // depends_on blobs — which were empty for every task in prod anyway).
     let mut stmt = conn.prepare(
-        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
-                COALESCE(t.depends_on, '[]') AS deps
+                (SELECT COUNT(*) FROM task_links l JOIN tasks d ON d.id = l.to_uuid
+                 WHERE l.from_uuid = t.id AND l.kind = 'depends_on'
+                   AND d.status_v2 != 'done') AS unmet
          FROM tasks t
-         LEFT JOIN pt_extensions x ON x.task_uuid = t.id
-         WHERE t.status = 'pending'
+         WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
          ORDER BY t.priority_score DESC,
                   t.priority DESC,
                   t.created_at DESC",
@@ -51,7 +41,7 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
 
     let mut out: Vec<Task> = Vec::new();
     let rows = stmt.query_map([], |r| {
-        let deps_str: String = r.get(11)?;
+        let unmet: i64 = r.get(11)?;
         let task = Task {
             id: r.get(0)?,
             pt_id: r.get(1)?,
@@ -65,17 +55,12 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
             source_type: r.get(9)?,
             ai_reasoning: r.get(10).unwrap_or_default(),
         };
-        Ok((task, deps_str))
+        Ok((task, unmet))
     })?;
 
     for entry in rows {
-        let (task, deps_str) = entry?;
-        let deps: Vec<String> = serde_json::from_str(&deps_str)
-            .map_err(|e| Error::Other(format!("parse depends_on for {}: {}", task.id, e)))?;
-        let all_done = deps
-            .iter()
-            .all(|d| status_by_id.get(d).map(|s| s == "done").unwrap_or(true));
-        if all_done {
+        let (task, unmet) = entry?;
+        if unmet == 0 {
             out.push(task);
             if out.len() >= limit {
                 break;
@@ -91,53 +76,44 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
 #[allow(dead_code)]
 pub fn pending_with_missing_deps(db: &Db) -> Result<Vec<(Task, Vec<String>)>> {
     let conn = db.get()?;
-    let mut status_by_id: HashMap<String, String> = HashMap::new();
-    {
-        let mut stmt = conn.prepare("SELECT id, status FROM tasks")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        for row in rows {
-            let (id, status) = row?;
-            status_by_id.insert(id, status);
-        }
-    }
-
     let mut stmt = conn.prepare(
-        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
-                COALESCE(t.depends_on, '[]') AS deps
+        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
          FROM tasks t
-         LEFT JOIN pt_extensions x ON x.task_uuid = t.id
-         WHERE t.status = 'pending'",
+         WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
+           AND EXISTS (SELECT 1 FROM task_links l JOIN tasks d ON d.id = l.to_uuid
+                       WHERE l.from_uuid = t.id AND l.kind = 'depends_on'
+                         AND d.status_v2 != 'done')",
     )?;
-    let mut out: Vec<(Task, Vec<String>)> = Vec::new();
-    let rows = stmt.query_map([], |r| {
-        let deps_str: String = r.get(11)?;
-        let task = Task {
-            id: r.get(0)?,
-            pt_id: r.get(1)?,
-            title: r.get(2)?,
-            description: r.get(3).unwrap_or_default(),
-            priority: r.get(4)?,
-            status: r.get(5)?,
-            created_at: r.get(6)?,
-            updated_at: r.get(7)?,
-            deadline: r.get(8)?,
-            source_type: r.get(9)?,
-            ai_reasoning: r.get(10).unwrap_or_default(),
-        };
-        Ok((task, deps_str))
-    })?;
-    for entry in rows {
-        let (task, deps_str) = entry?;
-        let deps: Vec<String> = serde_json::from_str(&deps_str)
-            .map_err(|e| Error::Other(format!("parse depends_on for {}: {}", task.id, e)))?;
-        let missing: Vec<String> = deps
-            .into_iter()
-            .filter(|d| status_by_id.get(d).map(|s| s != "done").unwrap_or(false))
-            .collect();
-        if !missing.is_empty() {
-            out.push((task, missing));
-        }
+    let tasks: Vec<Task> = stmt
+        .query_map([], |r| {
+            Ok(Task {
+                id: r.get(0)?,
+                pt_id: r.get(1)?,
+                title: r.get(2)?,
+                description: r.get(3).unwrap_or_default(),
+                priority: r.get(4)?,
+                status: r.get(5)?,
+                created_at: r.get(6)?,
+                updated_at: r.get(7)?,
+                deadline: r.get(8)?,
+                source_type: r.get(9)?,
+                ai_reasoning: r.get(10).unwrap_or_default(),
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(stmt);
+
+    let mut out = Vec::new();
+    for task in tasks {
+        let mut miss = conn.prepare(
+            "SELECT l.to_uuid FROM task_links l JOIN tasks d ON d.id = l.to_uuid
+             WHERE l.from_uuid = ?1 AND l.kind = 'depends_on' AND d.status_v2 != 'done'",
+        )?;
+        let missing: Vec<String> = miss
+            .query_map([&task.id], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        out.push((task, missing));
     }
     Ok(out)
 }
@@ -147,7 +123,6 @@ mod tests {
     use super::*;
     use crate::event_log::EventCtx;
     use crate::tasks::NewTask;
-    use rusqlite::params;
 
     fn fresh_db() -> (tempfile::TempDir, Db) {
         let dir = tempfile::tempdir().unwrap();
@@ -195,16 +170,10 @@ mod tests {
         (dir, Db::open(&path).unwrap())
     }
 
-    fn set_deps(db: &Db, task_id: &str, deps: &[String]) {
-        let json = serde_json::to_string(deps).unwrap();
-        db.with_conn(|c| {
-            c.execute(
-                "UPDATE tasks SET depends_on=?1 WHERE id=?2",
-                params![json, task_id],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    fn set_deps(db: &Db, task_uuid: &str, deps: &[String]) {
+        for d in deps {
+            crate::tasks::add_dependency(db, task_uuid, d, &EventCtx::test()).unwrap();
+        }
     }
 
     #[test]
@@ -312,7 +281,17 @@ mod tests {
         let (_dir, db) = fresh_db();
         let t =
             crate::tasks::create(&db, NewTask::minimal("orphan dep"), &EventCtx::test()).unwrap();
-        set_deps(&db, &t.id, &["nonexistent-uuid".to_string()]);
+        // Raw insert: add_dependency validates both ends, but stale edges can
+        // exist from legacy JSON backfill or a later hard delete.
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO task_links (from_uuid, to_uuid, kind, created_at)
+                 VALUES (?1, 'nonexistent-uuid', 'depends_on', '2026-01-01T00:00:00+00:00')",
+                [&t.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
         let ready = next_ready(&db, 10).unwrap();
         assert_eq!(ready.len(), 1);
     }

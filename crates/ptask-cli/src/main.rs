@@ -27,6 +27,15 @@ struct Cli {
     #[arg(long, env = "PTASK_DB", global = true)]
     db: Option<String>,
 
+    /// Emit machine-readable JSON instead of human text (task-facing verbs).
+    #[arg(long, global = true)]
+    json: bool,
+
+    /// Idempotency key recorded with the mutation's event — a retried
+    /// command with the same key returns ok without re-applying.
+    #[arg(long = "idempotency-key", global = true)]
+    idempotency_key: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -78,6 +87,19 @@ enum Command {
     /// Talk to a remote canonical `pt serve` (no local DB).
     #[command(subcommand)]
     Remote(RemoteCommand),
+    /// Mark a task in progress (you're actively working it).
+    Start(StartArgs),
+    /// Snooze a task until a date — it leaves `pt next` and reminders,
+    /// then wakes to todo automatically.
+    Snooze(SnoozeArgs),
+    /// Manage dependency edges: PT-A depends on PT-B.
+    Depend(DependArgs),
+    /// Interactive review sweep: stale, snoozed-expired, and triage items.
+    Review(ReviewArgs),
+    /// Full-text search over titles + descriptions (FTS5).
+    Search(SearchArgs),
+    /// Apply one action to every task matching a filter DSL expression.
+    Bulk(BulkArgs),
     /// Show a task's attributed event history (who did what, via which surface).
     Log(LogArgs),
     /// Reverse the most recent undoable mutation (done/dismiss/create).
@@ -102,6 +124,65 @@ enum AccountabilityCommand {
 #[derive(clap::Args, Debug)]
 struct AccountabilityRunArgs {
     /// Don't actually send anything; log what would have been dispatched.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct StartArgs {
+    /// PT-N, bare integer, or title substring.
+    query: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct SnoozeArgs {
+    /// PT-N, bare integer, or title substring.
+    query: String,
+    /// Wake date/time: ISO or natural ("tomorrow 9am", "next monday").
+    until: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct DependArgs {
+    /// The dependent task (cannot start until --on is done).
+    query: String,
+    /// The prerequisite task.
+    #[arg(long = "on")]
+    on: Option<String>,
+    /// Remove the edge instead of adding it.
+    #[arg(long = "clear", requires = "on")]
+    clear: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReviewArgs {
+    /// Days of inactivity that makes a task "stale".
+    #[arg(long = "stale-days", default_value_t = 14)]
+    stale_days: i64,
+}
+
+#[derive(clap::Args, Debug)]
+struct SearchArgs {
+    /// FTS5 query (words, phrases, AND/OR/NOT).
+    query: Vec<String>,
+    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(clap::Args, Debug)]
+struct BulkArgs {
+    /// Filter DSL selecting the tasks (same grammar as `pt list`).
+    filter: String,
+    /// Set priority on every match.
+    #[arg(long = "set-priority")]
+    set_priority: Option<String>,
+    /// Mark every match done.
+    #[arg(long = "done", conflicts_with = "set_priority")]
+    done: bool,
+    /// Dismiss every match.
+    #[arg(long = "dismiss", conflicts_with_all = ["set_priority", "done"])]
+    dismiss: bool,
+    /// Preview without applying.
     #[arg(long = "dry-run")]
     dry_run: bool,
 }
@@ -172,9 +253,37 @@ enum RemoteCommand {
     Next(RemoteNextArgs),
     /// `pt remote dismiss <query>` — soft-close a task (reversible via reopen).
     Dismiss(RemoteDismissArgs),
+    /// `pt remote start <query>` — mark in progress on the canonical host.
+    Start(RemoteDoneArgs),
+    /// `pt remote snooze <query> <until>` — snooze on the canonical host.
+    Snooze(RemoteSnoozeArgs),
+    /// `pt remote depend <query> --on <target> [--clear]`.
+    Depend(RemoteDependArgs),
+    /// `pt remote rm <query>` — permanent delete (tombstoned).
+    Rm(RemoteDoneArgs),
     /// `pt remote version` — compare this client's version against the
     /// canonical server's `GET /version`. Exits non-zero on skew.
     Version(RemoteVersionArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteSnoozeArgs {
+    query: String,
+    /// Wake date/time (ISO or natural language, parsed locally).
+    until: Vec<String>,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteDependArgs {
+    query: String,
+    #[arg(long = "on")]
+    on: String,
+    #[arg(long = "clear")]
+    clear: bool,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -197,6 +306,9 @@ struct RemoteAddArgs {
 struct RemoteListArgs {
     #[arg(short = 's', long = "status", default_value = "pending")]
     status: String,
+    /// Filter DSL evaluated SERVER-side (GET /list).
+    #[arg(short = 'f', long = "filter")]
+    filter: Option<String>,
     #[arg(short = 'p', long = "priority")]
     priority: Option<String>,
     #[arg(short = 'n', long = "limit", default_value_t = 20)]
@@ -377,8 +489,9 @@ struct ListArgs {
 
 #[derive(clap::Args, Debug)]
 struct DoneArgs {
-    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
-    query: String,
+    /// One or more tasks: PT-N (e.g. PT-42), bare integer, or title substring.
+    #[arg(required = true)]
+    queries: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -448,15 +561,46 @@ enum ShellChoice {
     Fish,
 }
 
-/// Attribution for this CLI invocation. A `pt` process executes exactly one
-/// command, so this is entrypoint-time config: actor = $PTASK_ACTOR (the
-/// dashboard sidecar sets "dashboard"; HAL sessions "hal"), default "shell".
+/// Process-wide CLI output/attribution overrides, set once at the
+/// entrypoint from the parsed global flags. A `pt` process executes exactly
+/// one command, so this is entrypoint-time config, not ambient state.
+static CLI_JSON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static CLI_IDEMPOTENCY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+fn set_cli_globals(json: bool, idempotency_key: Option<String>) {
+    let _ = CLI_JSON.set(json);
+    let _ = CLI_IDEMPOTENCY.set(idempotency_key);
+}
+
+fn json_mode() -> bool {
+    *CLI_JSON.get().unwrap_or(&false)
+}
+
+/// Print a value as pretty JSON when --json is set; otherwise run the
+/// human-text closure.
+fn emit<T: serde::Serialize>(value: &T, text: impl FnOnce()) -> Result<()> {
+    if json_mode() {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    } else {
+        text();
+    }
+    Ok(())
+}
+
+/// Attribution for this CLI invocation: actor = $PTASK_ACTOR (the dashboard
+/// sidecar sets "dashboard"; HAL sessions "hal"), default "shell"; the
+/// --idempotency-key flag keys the event for safe retries.
 fn cli_ctx() -> ptask_core::event_log::EventCtx {
-    ptask_core::event_log::EventCtx::local(ptask_core::Config::from_env().actor)
+    let mut ctx = ptask_core::event_log::EventCtx::local(ptask_core::Config::from_env().actor);
+    if let Some(Some(key)) = CLI_IDEMPOTENCY.get().cloned() {
+        ctx.event_uuid = Some(key);
+    }
+    ctx
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    set_cli_globals(cli.json, cli.idempotency_key.clone());
 
     // Lightweight tracing: env-controlled, off by default.
     let filter = tracing_subscriber::EnvFilter::try_from_env("PTASK_LOG")
@@ -496,6 +640,12 @@ fn main() -> Result<()> {
                 Some(Command::Distill(a)) => cmd_distill(&db, a),
                 Some(Command::Accountability(c)) => cmd_accountability(db, c),
                 Some(Command::Scoring(c)) => cmd_scoring(&db, c),
+                Some(Command::Start(a)) => cmd_start(&db, a),
+                Some(Command::Snooze(a)) => cmd_snooze(&db, a),
+                Some(Command::Depend(a)) => cmd_depend(&db, a),
+                Some(Command::Review(a)) => cmd_review(&db, a),
+                Some(Command::Search(a)) => cmd_search(&db, a),
+                Some(Command::Bulk(a)) => cmd_bulk(&db, a),
                 Some(Command::Log(a)) => cmd_log(&db, a),
                 Some(Command::Undo) => cmd_undo(&db),
                 Some(Command::Token(c)) => cmd_token(&db, c),
@@ -557,6 +707,7 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         planned_at: None,
         energy: None,
         recurrence: q.recurrence.clone(),
+        due_at: q.due.clone(),
     };
 
     let task = tasks::create_with_extensions(db, new, ext, &cli_ctx())?;
@@ -641,19 +792,37 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
 }
 
 fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
-    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    let outcome = tasks::mark_done(db, &task, &cli_ctx())?;
-    let pt = task.pt_id.as_deref().unwrap_or("");
-    match outcome {
-        tasks::DoneOutcome::Completed => {
-            println!("Marked done: {} {}", pt, task.title);
+    let mut results = Vec::new();
+    for query in &a.queries {
+        let task = tasks::resolve(db, query).map_err(anyhow::Error::msg)?;
+        let outcome = tasks::mark_done(db, &task, &cli_ctx())?;
+        let pt = task.pt_id.clone().unwrap_or_default();
+        match &outcome {
+            tasks::DoneOutcome::Completed => {
+                if !json_mode() {
+                    println!("Marked done: {} {}", pt, task.title);
+                }
+                results.push(serde_json::json!({
+                    "pt_id": pt, "task_uuid": task.id, "title": task.title,
+                    "outcome": "completed"
+                }));
+            }
+            tasks::DoneOutcome::Advanced { next_deadline } => {
+                if !json_mode() {
+                    println!(
+                        "Recurring task advanced: {} {}\n  Next deadline: {}",
+                        pt, task.title, next_deadline
+                    );
+                }
+                results.push(serde_json::json!({
+                    "pt_id": pt, "task_uuid": task.id, "title": task.title,
+                    "outcome": "advanced", "next_deadline": next_deadline
+                }));
+            }
         }
-        tasks::DoneOutcome::Advanced { next_deadline } => {
-            println!(
-                "Recurring task advanced: {} {}\n  Next deadline: {}",
-                pt, task.title, next_deadline
-            );
-        }
+    }
+    if json_mode() {
+        println!("{}", serde_json::to_string_pretty(&results)?);
     }
     Ok(())
 }
@@ -1012,6 +1181,257 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
     }
 }
 
+fn cmd_start(db: &Db, a: StartArgs) -> Result<()> {
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    tasks::start(db, &task.id, &cli_ctx())?;
+    emit(
+        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress"}),
+        || {
+            println!(
+                "{} {} · in progress",
+                task.pt_id.as_deref().unwrap_or(""),
+                task.title
+            )
+        },
+    )
+}
+
+fn cmd_snooze(db: &Db, a: SnoozeArgs) -> Result<()> {
+    let phrase = a.until.join(" ");
+    if phrase.trim().is_empty() {
+        anyhow::bail!("snooze needs a wake time, e.g. `pt snooze PT-42 next monday`");
+    }
+    let until = ptask_core::dates::parse(&phrase).map_err(anyhow::Error::msg)?;
+    let until_iso = ptask_core::dates::format_iso(&until);
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    tasks::snooze(db, &task.id, &until_iso, &cli_ctx())?;
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id,
+            "status": "snoozed", "snoozed_until": until_iso
+        }),
+        || {
+            println!(
+                "{} {} · snoozed until {}",
+                task.pt_id.as_deref().unwrap_or(""),
+                task.title,
+                until_iso
+            )
+        },
+    )
+}
+
+fn cmd_depend(db: &Db, a: DependArgs) -> Result<()> {
+    let Some(on) = a.on.as_deref() else {
+        // No --on: show current edges.
+        let task = tasks::resolve_for_lookup(db, &a.query, true).map_err(anyhow::Error::msg)?;
+        let detail = tasks::load_detail(db, &task.id)?;
+        return emit(&detail, || {
+            println!(
+                "{} {}\n  depends on: {:?}\n  blocks: {:?}",
+                task.pt_id.as_deref().unwrap_or(""),
+                task.title,
+                detail.depends_on,
+                detail.blocks_tasks
+            )
+        });
+    };
+    let from = tasks::resolve_for_lookup(db, &a.query, true).map_err(anyhow::Error::msg)?;
+    let to = tasks::resolve_for_lookup(db, on, true).map_err(anyhow::Error::msg)?;
+    if a.clear {
+        tasks::remove_dependency(db, &from.id, &to.id, &cli_ctx())?;
+    } else {
+        tasks::add_dependency(db, &from.id, &to.id, &cli_ctx())?;
+    }
+    emit(
+        &serde_json::json!({
+            "from": from.pt_id, "on": to.pt_id,
+            "action": if a.clear { "removed" } else { "added" }
+        }),
+        || {
+            println!(
+                "{} {} depends-on {} ({})",
+                if a.clear { "cleared:" } else { "ok:" },
+                from.pt_id.as_deref().unwrap_or(&from.id[..8]),
+                to.pt_id.as_deref().unwrap_or(&to.id[..8]),
+                to.title
+            )
+        },
+    )
+}
+
+fn cmd_search(db: &Db, a: SearchArgs) -> Result<()> {
+    let q = a.query.join(" ");
+    if q.trim().is_empty() {
+        anyhow::bail!("search needs a query");
+    }
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.pt_id, t.title, t.status_v2, t.priority
+         FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
+         WHERE tasks_fts MATCH ?1
+         ORDER BY rank LIMIT ?2",
+    )?;
+    let rows: Vec<serde_json::Value> = stmt
+        .query_map((&q, a.limit as i64), |r| {
+            Ok(serde_json::json!({
+                "task_uuid": r.get::<_, String>(0)?,
+                "pt_id": r.get::<_, Option<String>>(1)?,
+                "title": r.get::<_, String>(2)?,
+                "status": r.get::<_, String>(3)?,
+                "priority": r.get::<_, i64>(4)?,
+            }))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    emit(&rows, || {
+        if rows.is_empty() {
+            println!("no matches");
+        }
+        for r in &rows {
+            println!(
+                "{:<8} {:<12} [{}] {}",
+                r["pt_id"].as_str().unwrap_or("-"),
+                r["status"].as_str().unwrap_or(""),
+                r["priority"],
+                r["title"].as_str().unwrap_or("")
+            );
+        }
+    })
+}
+
+fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
+    let expr = ptask_core::filter::parse(&a.filter).map_err(anyhow::Error::msg)?;
+    let matches = tasks::list_with_filter(db, Some(&expr), Some("pending"), None, 10_000)
+        .map_err(anyhow::Error::msg)?;
+    if matches.is_empty() {
+        println!("bulk: no tasks match {:?}", a.filter);
+        return Ok(());
+    }
+    let action = if let Some(prio) = a.set_priority.as_deref() {
+        format!("set priority {}", prio)
+    } else if a.done {
+        "mark done".into()
+    } else if a.dismiss {
+        "dismiss".into()
+    } else {
+        anyhow::bail!("bulk needs one of --set-priority / --done / --dismiss");
+    };
+    println!("bulk: {} task(s) match — action: {}", matches.len(), action);
+    for t in &matches {
+        println!("  {:<8} {}", t.pt_id.as_deref().unwrap_or("-"), t.title);
+    }
+    if a.dry_run {
+        println!("dry run — nothing applied");
+        return Ok(());
+    }
+    let ctx = cli_ctx();
+    for t in &matches {
+        if let Some(prio) = a.set_priority.as_deref() {
+            let level = priority::parse(prio).map_err(anyhow::Error::msg)?;
+            tasks::update_priority(db, &t.id, level, &ctx)?;
+        } else if a.done {
+            tasks::mark_done(db, t, &ctx)?;
+        } else if a.dismiss {
+            tasks::dismiss(db, &t.id, &ctx)?;
+        }
+    }
+    match ptask_core::scoring::run_once(db, false) {
+        Ok(r) => println!("bulk applied · rescored {}", r.tasks_scored),
+        Err(e) => println!("bulk applied · rescore failed: {}", e),
+    }
+    Ok(())
+}
+
+fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
+    use std::io::Write;
+    let stale_cutoff = ptask_core::dates::now_in_operator_tz()
+        .map_err(anyhow::Error::msg)?
+        .checked_sub(ptask_core::jiff::Span::new().days(a.stale_days))
+        .map_err(|e| anyhow::anyhow!("cutoff math: {e}"))?;
+    let cutoff_iso = ptask_core::dates::format_iso(&stale_cutoff);
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.pt_id, t.title, t.status_v2, t.updated_at
+         FROM tasks t
+         WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
+           AND t.updated_at < ?1
+         ORDER BY t.updated_at ASC",
+    )?;
+    let stale: Vec<(String, Option<String>, String, String, String)> = stmt
+        .query_map([&cutoff_iso], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(stmt);
+    drop(conn);
+
+    if stale.is_empty() {
+        println!(
+            "review: nothing stale (>{}d untouched). Clean board.",
+            a.stale_days
+        );
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        println!(
+            "review: {} stale task(s) (>{}d):",
+            stale.len(),
+            a.stale_days
+        );
+        for (_, pt, title, status, updated) in &stale {
+            println!(
+                "  {:<8} {:<12} {}  (last touch {})",
+                pt.as_deref().unwrap_or("-"),
+                status,
+                title,
+                updated.get(..10).unwrap_or(updated)
+            );
+        }
+        println!("(interactive triage needs a TTY: k=keep d=done x=dismiss s=snooze-1w q=quit)");
+        return Ok(());
+    }
+
+    let ctx = cli_ctx();
+    println!(
+        "review: {} stale task(s). [k]eep [d]one [x]dismiss [s]nooze-1w [q]uit",
+        stale.len()
+    );
+    for (uuid, pt, title, status, updated) in &stale {
+        print!(
+            "{:<8} {:<12} {}  (last {})  > ",
+            pt.as_deref().unwrap_or("-"),
+            status,
+            title,
+            updated.get(..10).unwrap_or(updated)
+        );
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        match line.trim() {
+            "d" => {
+                let t = tasks::resolve_for_lookup(db, uuid, true).map_err(anyhow::Error::msg)?;
+                tasks::mark_done(db, &t, &ctx)?;
+                println!("  done.");
+            }
+            "x" => {
+                tasks::dismiss(db, uuid, &ctx)?;
+                println!("  dismissed.");
+            }
+            "s" => {
+                let until = ptask_core::dates::now_in_operator_tz()
+                    .map_err(anyhow::Error::msg)?
+                    .checked_add(ptask_core::jiff::Span::new().days(7))
+                    .map_err(|e| anyhow::anyhow!("snooze math: {e}"))?;
+                tasks::snooze(db, uuid, &ptask_core::dates::format_iso(&until), &ctx)?;
+                println!("  snoozed 1 week.");
+            }
+            "q" => break,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn cmd_log(db: &Db, a: LogArgs) -> Result<()> {
     let task = tasks::resolve_for_lookup(db, &a.query, true).map_err(anyhow::Error::msg)?;
     let pt = task.pt_id.as_deref().unwrap_or(&task.id[..8]);
@@ -1183,7 +1603,15 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             } else {
                 Some(a.status.as_str())
             };
-            let tasks_out = client.list(status_filter, priority_filter, a.limit)?;
+            let tasks_out = if a.filter.is_some() {
+                client.list_filtered(a.filter.as_deref(), &a.status, a.limit)?
+            } else {
+                client.list(status_filter, priority_filter, a.limit)?
+            };
+            if json_mode() {
+                println!("{}", serde_json::to_string_pretty(&tasks_out)?);
+                return Ok(());
+            }
             if tasks_out.is_empty() {
                 println!("remote list — no tasks");
                 return Ok(());
@@ -1355,6 +1783,63 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             );
             Ok(())
         }
+        RemoteCommand::Start(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let task = client.start(&a.query)?;
+            println!(
+                "remote start ok — {} {} · in progress",
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title
+            );
+            Ok(())
+        }
+        RemoteCommand::Snooze(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let phrase = a.until.join(" ");
+            let until = ptask_core::dates::parse(&phrase).map_err(anyhow::Error::msg)?;
+            let until_iso = ptask_core::dates::format_iso(&until);
+            let task = client.snooze(&a.query, &until_iso)?;
+            println!(
+                "remote snooze ok — {} {} · until {}",
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title,
+                until_iso
+            );
+            Ok(())
+        }
+        RemoteCommand::Depend(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let task = client.depend(&a.query, &a.on, a.clear)?;
+            println!(
+                "remote depend {} — {} {}",
+                if a.clear { "cleared" } else { "ok" },
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title
+            );
+            Ok(())
+        }
+        RemoteCommand::Rm(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let task = client.rm(&a.query)?;
+            println!(
+                "remote rm ok — {} {} · deleted",
+                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.title
+            );
+            Ok(())
+        }
         RemoteCommand::Version(a) => {
             let client = match a.url {
                 Some(u) => remote::RemoteClient::with_url(&u)?,
@@ -1423,5 +1908,12 @@ fn cmd_distill(db: &Db, a: DistillArgs) -> Result<()> {
 fn cmd_backfill(db: &Db) -> Result<()> {
     let n = pt_id::backfill_all(db)?;
     println!("Backfilled PT-N for {} task(s).", n);
+    let promoted = ptask_core::convert::promote_subtasks_once(db)?;
+    if promoted > 0 {
+        println!(
+            "Promoted {} subtask(s) to child tasks (schema v2 one-shot).",
+            promoted
+        );
+    }
     Ok(())
 }

@@ -1,8 +1,9 @@
 //! PT-N identifier minting and lookup.
 //!
-//! Every task in `tasks` gets a side-table row in `pt_extensions` with a
-//! human-readable `pt_id` of the form `PT-<n>`. The counter persists in
-//! `pt_counters` and is monotonically increasing per database.
+//! Since schema v2 (V010) the human-readable `pt_id` (`PT-<n>`) lives
+//! directly on `tasks` — the pt_extensions side table is a compat VIEW.
+//! The counter persists in `pt_counters` and is monotonically increasing
+//! per database.
 
 use crate::error::{Error, Result};
 use crate::storage::Db;
@@ -24,8 +25,8 @@ pub fn current_counter(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(n)
 }
 
-/// Mint a fresh PT-N. Advances the counter and inserts an extension row.
-/// Caller supplies the parent `task_uuid`; row must already exist in `tasks`.
+/// Mint a fresh PT-N. Advances the counter and stamps the task row.
+/// Caller supplies the `task_uuid`; row must already exist in `tasks`.
 pub fn mint_for(conn: &mut rusqlite::Connection, task_uuid: &str) -> Result<String> {
     let tx = conn.transaction()?;
     let n: i64 = tx.query_row(
@@ -35,7 +36,7 @@ pub fn mint_for(conn: &mut rusqlite::Connection, task_uuid: &str) -> Result<Stri
     )?;
     let pt_id = format_pt_id(n);
     tx.execute(
-        "INSERT INTO pt_extensions (task_uuid, pt_id, created_by_pt) VALUES (?1, ?2, 1)",
+        "UPDATE tasks SET pt_id = ?2, created_by_pt = 1 WHERE id = ?1",
         params![task_uuid, pt_id],
     )?;
     tx.commit()?;
@@ -45,11 +46,9 @@ pub fn mint_for(conn: &mut rusqlite::Connection, task_uuid: &str) -> Result<Stri
 /// Resolve a PT-N string to the underlying `tasks.id` UUID.
 pub fn lookup_uuid(conn: &rusqlite::Connection, pt_id: &str) -> Result<String> {
     let uuid: Option<String> = conn
-        .query_row(
-            "SELECT task_uuid FROM pt_extensions WHERE pt_id = ?1",
-            [pt_id],
-            |r| r.get(0),
-        )
+        .query_row("SELECT id FROM tasks WHERE pt_id = ?1", [pt_id], |r| {
+            r.get(0)
+        })
         .map(Some)
         .or_else(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
@@ -61,11 +60,9 @@ pub fn lookup_uuid(conn: &rusqlite::Connection, pt_id: &str) -> Result<String> {
 /// Resolve a `tasks.id` UUID to its PT-N, if any.
 pub fn lookup_pt_id(conn: &rusqlite::Connection, task_uuid: &str) -> Result<Option<String>> {
     let pt_id: Option<String> = conn
-        .query_row(
-            "SELECT pt_id FROM pt_extensions WHERE task_uuid = ?1",
-            [task_uuid],
-            |r| r.get(0),
-        )
+        .query_row("SELECT pt_id FROM tasks WHERE id = ?1", [task_uuid], |r| {
+            r.get(0)
+        })
         .map(Some)
         .or_else(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
@@ -81,11 +78,10 @@ pub fn backfill_all(db: &Db) -> Result<usize> {
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
 
-    // Tasks lacking a pt_extensions row, in creation order.
+    // Tasks lacking a PT-N, in creation order.
     let mut stmt = tx.prepare(
         "SELECT t.id FROM tasks t
-         LEFT JOIN pt_extensions x ON x.task_uuid = t.id
-         WHERE x.task_uuid IS NULL
+         WHERE t.pt_id IS NULL
          ORDER BY t.created_at ASC, t.id ASC",
     )?;
     let pending: Vec<String> = stmt
@@ -104,7 +100,7 @@ pub fn backfill_all(db: &Db) -> Result<usize> {
         current += 1;
         let pt_id = format_pt_id(current);
         tx.execute(
-            "INSERT INTO pt_extensions (task_uuid, pt_id, created_by_pt) VALUES (?1, ?2, 0)",
+            "UPDATE tasks SET pt_id = ?2 WHERE id = ?1",
             params![uuid, pt_id],
         )?;
         debug!(target: "ptask::pt_id", pt_id = %pt_id, task = %uuid, "minted");

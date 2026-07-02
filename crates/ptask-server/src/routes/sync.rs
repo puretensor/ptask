@@ -278,6 +278,7 @@ fn apply_command(
                 planned_at: None,
                 energy: None,
                 recurrence: q.recurrence.clone(),
+                due_at: q.due.clone(),
             };
             let t =
                 tasks::create_with_extensions(&state.db, new, ext, &sync_ctx(actor, &cmd.uuid))?;
@@ -415,11 +416,100 @@ fn apply_command(
                 },
             ))
         }
+        "task_start" => {
+            let task = resolve_task(state, &cmd.args)?;
+            tasks::start(&state.db, &task.id, &sync_ctx(actor, &cmd.uuid))?;
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.updated".into(),
+                    payload: serde_json::json!({ "task_uuid": task.id, "status": "in_progress" }),
+                },
+            ))
+        }
+        "task_snooze" => {
+            let task = resolve_task(state, &cmd.args)?;
+            let until = cmd
+                .args
+                .get("until")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ptask_core::Error::Other("task_snooze needs args.until".into()))?;
+            tasks::snooze(&state.db, &task.id, until, &sync_ctx(actor, &cmd.uuid))?;
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.updated".into(),
+                    payload: serde_json::json!({
+                        "task_uuid": task.id, "status": "snoozed", "snoozed_until": until
+                    }),
+                },
+            ))
+        }
+        "task_depend" => {
+            let task = resolve_task(state, &cmd.args)?;
+            let on = cmd
+                .args
+                .get("on")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ptask_core::Error::Other("task_depend needs args.on".into()))?;
+            let on_task = resolve_query(state, on)?;
+            let clear = cmd
+                .args
+                .get("clear")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if clear {
+                tasks::remove_dependency(
+                    &state.db,
+                    &task.id,
+                    &on_task.id,
+                    &sync_ctx(actor, &cmd.uuid),
+                )?;
+            } else {
+                tasks::add_dependency(
+                    &state.db,
+                    &task.id,
+                    &on_task.id,
+                    &sync_ctx(actor, &cmd.uuid),
+                )?;
+            }
+            let key = if clear {
+                "depends_on_removed"
+            } else {
+                "depends_on_added"
+            };
+            let mut payload = serde_json::json!({ "task_uuid": task.id });
+            payload[key] = serde_json::json!(on_task.id);
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.updated".into(),
+                    payload,
+                },
+            ))
+        }
+        "task_delete" => {
+            let task = resolve_task(state, &cmd.args)?;
+            tasks::delete_task(&state.db, &task.id, &sync_ctx(actor, &cmd.uuid))?;
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.deleted".into(),
+                    payload: serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id }),
+                },
+            ))
+        }
         other => Err(anyhow::anyhow!("unsupported command type: {:?}", other)),
     }
 }
 
 /// Resolve a command's args to a Task. Accepts `{task_uuid}` or `{pt_id}`.
+/// Resolve a bare query string (PT-N / integer / title substring),
+/// including terminal tasks — dependency targets are often already done.
+fn resolve_query(state: &AppState, query: &str) -> Result<tasks::Task, anyhow::Error> {
+    tasks::resolve_for_lookup(&state.db, query, true).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 fn resolve_task(state: &AppState, args: &Value) -> Result<tasks::Task, anyhow::Error> {
     if let Some(s) = args.get("task_uuid").and_then(Value::as_str) {
         return task_by_uuid(&state.db, s);
@@ -435,9 +525,9 @@ fn resolve_task(state: &AppState, args: &Value) -> Result<tasks::Task, anyhow::E
 fn task_by_uuid(db: &ptask_core::Db, uuid: &str) -> Result<tasks::Task, anyhow::Error> {
     let conn = db.get()?;
     let row = conn.query_row(
-        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
-         FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid = t.id
+         FROM tasks t
          WHERE t.id = ?1",
         [uuid],
         |r| {

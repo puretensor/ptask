@@ -99,7 +99,7 @@ the environment variable is set on the client node.
 | `task_edit` (v1.8.0) | `{ task_uuid \| pt_id, deadline }` | sets the deadline (ISO string) or clears it (JSON `null`); rescores. |
 | `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). |
 | `task_retext` (v1.9.0) | `{ task_uuid \| pt_id, title?, description? }` | replaces the title and/or description (at least one required). |
-| `task_dismiss` (v1.10.0) | `{ task_uuid \| pt_id }` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. |
+| `task_dismiss`, `task_start`, `task_snooze` (args.until ISO), `task_depend` (args.on query, args.clear bool), `task_delete` (v1.10.0) | `{ task_uuid \| pt_id }` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. |
 
 Each command records exactly one event keyed on its `uuid`, so `/sync` replays
 are idempotent. More commands (`task_delete`, `view_save`, …) are backward-
@@ -182,3 +182,9 @@ Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
 | `pt_dsl_parse_duration_seconds` | histogram | `kind` (`quickadd` / `filter`) |
 | `pt_webhook_send_total` | counter | `result` (`ok` / `error`) |
 | `pt_sync_commands_total` | counter | `kind` (`task_create` / `task_done` / ...) |
+
+## GET /list (v2.0.0)
+
+`GET /list?filter=<DSL>&status=pending|all&limit=N` — server-side filtered
+task list (read scope). The DSL is the `pt list` grammar; parse errors
+return 400 with the reason.

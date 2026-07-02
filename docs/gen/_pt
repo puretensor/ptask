@@ -16,6 +16,8 @@ _pt() {
     local context curcontext="$curcontext" state line
     _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '-V[Print version]' \
@@ -38,7 +40,9 @@ _arguments "${_arguments_options[@]}" : \
 '--deadline=[Deadline override (ISO date, e.g. 2026-05-20)]:DEADLINE:_default' \
 '--reason=[Why this task was created — stored as ai_reasoning]:REASON:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--raw[Disable quick-add parsing — treat the title literally]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':title -- Task title (parsed as quick-add unless --raw is set). Inline tokens\: @label, #project, p1..p5, ~30m/~2h/~1d, !HH\:MM, //description (rest of string), date phrases (today/tomorrow/ weekday with this|next|last/ N days/ISO dates):_default' \
@@ -53,8 +57,10 @@ _arguments "${_arguments_options[@]}" : \
 '-n+[Max rows]:LIMIT:_default' \
 '--limit=[Max rows]:LIMIT:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '-v[Show description and UUID]' \
 '--verbose[Show description and UUID]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::filter -- Optional Todoist-style filter DSL. Examples\: "today & p1", "(today | overdue) & #fleet", "@waiting & no date", "due before\: next friday & !recurring", "search\: ceph & @ops":_default' \
@@ -63,14 +69,18 @@ _arguments "${_arguments_options[@]}" : \
 (done)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+'*::queries -- One or more tasks\: PT-N (e.g. PT-42), bare integer, or title substring:_default' \
 && ret=0
 ;;
 (priority)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -83,7 +93,9 @@ _arguments "${_arguments_options[@]}" : \
 '--title=[Replace the title]:TITLE:_default' \
 '--desc=[Replace the description]:DESC:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--clear-deadline[Clear the deadline]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -92,6 +104,8 @@ _arguments "${_arguments_options[@]}" : \
 (reopen)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -100,6 +114,8 @@ _arguments "${_arguments_options[@]}" : \
 (show)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -108,6 +124,8 @@ _arguments "${_arguments_options[@]}" : \
 (dismiss)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -116,8 +134,10 @@ _arguments "${_arguments_options[@]}" : \
 (rm)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '-y[Skip the confirmation prompt]' \
 '--yes[Skip the confirmation prompt]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -128,6 +148,8 @@ _arguments "${_arguments_options[@]}" : \
 '-n+[Max ready tasks to show]:LIMIT:_default' \
 '--limit=[Max ready tasks to show]:LIMIT:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -135,6 +157,8 @@ _arguments "${_arguments_options[@]}" : \
 (view)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ":: :_pt__subcmd__view_commands" \
@@ -150,6 +174,8 @@ _arguments "${_arguments_options[@]}" : \
             (save)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':name:_default' \
@@ -159,6 +185,8 @@ _arguments "${_arguments_options[@]}" : \
 (list)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -168,6 +196,8 @@ _arguments "${_arguments_options[@]}" : \
 '-n+[Override row limit]:LIMIT:_default' \
 '--limit=[Override row limit]:LIMIT:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':name:_default' \
@@ -176,6 +206,8 @@ _arguments "${_arguments_options[@]}" : \
 (rm)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':name:_default' \
@@ -224,6 +256,8 @@ esac
 (tui)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -232,6 +266,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--bind=[Bind address. Default 127.0.0.1\:9501 (leaves \:9500 for legacy Python FastAPI during the parallel-ops window)]:BIND:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -239,6 +275,8 @@ _arguments "${_arguments_options[@]}" : \
 (bot)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -246,6 +284,8 @@ _arguments "${_arguments_options[@]}" : \
 (branch)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (or bare integer, or title substring):_default' \
@@ -255,6 +295,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--days=[Days of history for the Python pipeline to ingest (defaults to 60, matching the legacy systemd unit)]:DAYS:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -262,6 +304,8 @@ _arguments "${_arguments_options[@]}" : \
 (accountability)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ":: :_pt__subcmd__accountability_commands" \
@@ -277,7 +321,9 @@ _arguments "${_arguments_options[@]}" : \
             (run)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--dry-run[Don'\''t actually send anything; log what would have been dispatched]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -313,6 +359,8 @@ esac
 (scoring)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ":: :_pt__subcmd__scoring_commands" \
@@ -328,7 +376,9 @@ _arguments "${_arguments_options[@]}" : \
             (run)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--dry-run[Compute and log scores but don'\''t write them back to the DB]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -364,6 +414,8 @@ esac
 (remote)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ":: :_pt__subcmd__remote_commands" \
@@ -380,6 +432,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--url=[Override the canonical endpoint]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':text -- Quick-add text. Same grammar as local `pt add`:_default' \
@@ -389,12 +443,16 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-s+[]:STATUS:_default' \
 '--status=[]:STATUS:_default' \
+'-f+[Filter DSL evaluated SERVER-side (GET /list)]:FILTER:_default' \
+'--filter=[Filter DSL evaluated SERVER-side (GET /list)]:FILTER:_default' \
 '-p+[]:PRIORITY:_default' \
 '--priority=[]:PRIORITY:_default' \
 '-n+[]:LIMIT:_default' \
 '--limit=[]:LIMIT:_default' \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -403,6 +461,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -412,6 +472,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -425,7 +487,9 @@ _arguments "${_arguments_options[@]}" : \
 '--desc=[Replace the description]:DESC:_default' \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--clear-deadline[Clear the deadline]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -435,6 +499,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -444,6 +510,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -455,6 +523,8 @@ _arguments "${_arguments_options[@]}" : \
 '--limit=[]:LIMIT:_default' \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -463,6 +533,55 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
+(start)
+_arguments "${_arguments_options[@]}" : \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
+(snooze)
+_arguments "${_arguments_options[@]}" : \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query:_default' \
+'*::until -- Wake date/time (ISO or natural language, parsed locally):_default' \
+&& ret=0
+;;
+(depend)
+_arguments "${_arguments_options[@]}" : \
+'--on=[]:ON:_default' \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--clear[]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query:_default' \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -472,6 +591,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--url=[Override the canonical endpoint]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -524,6 +645,22 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(start)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(snooze)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(depend)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (version)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -540,11 +677,82 @@ esac
     ;;
 esac
 ;;
+(start)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N, bare integer, or title substring:_default' \
+&& ret=0
+;;
+(snooze)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N, bare integer, or title substring:_default' \
+'*::until -- Wake date/time\: ISO or natural ("tomorrow 9am", "next monday"):_default' \
+&& ret=0
+;;
+(depend)
+_arguments "${_arguments_options[@]}" : \
+'--on=[The prerequisite task]:ON:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--clear[Remove the edge instead of adding it]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- The dependent task (cannot start until --on is done):_default' \
+&& ret=0
+;;
+(review)
+_arguments "${_arguments_options[@]}" : \
+'--stale-days=[Days of inactivity that makes a task "stale"]:STALE_DAYS:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+'-n+[]:LIMIT:_default' \
+'--limit=[]:LIMIT:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'*::query -- FTS5 query (words, phrases, AND/OR/NOT):_default' \
+&& ret=0
+;;
+(bulk)
+_arguments "${_arguments_options[@]}" : \
+'--set-priority=[Set priority on every match]:SET_PRIORITY:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'(--set-priority)--done[Mark every match done]' \
+'(--set-priority --done)--dismiss[Dismiss every match]' \
+'--dry-run[Preview without applying]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':filter -- Filter DSL selecting the tasks (same grammar as `pt list`):_default' \
+&& ret=0
+;;
 (log)
 _arguments "${_arguments_options[@]}" : \
 '-n+[Max events to show (newest first)]:LIMIT:_default' \
 '--limit=[Max events to show (newest first)]:LIMIT:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
@@ -553,6 +761,8 @@ _arguments "${_arguments_options[@]}" : \
 (undo)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -560,6 +770,8 @@ _arguments "${_arguments_options[@]}" : \
 (token)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ":: :_pt__subcmd__token_commands" \
@@ -576,6 +788,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--scope=[Scope\: read | capture | write | admin (each implies the previous)]:SCOPE:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':client_id -- Stable client identity\: hal, puresentinel, nexus, dashboard, shell-<host>…:_default' \
@@ -584,6 +798,8 @@ _arguments "${_arguments_options[@]}" : \
 (list)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -591,6 +807,8 @@ _arguments "${_arguments_options[@]}" : \
 (revoke)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':client_id:_default' \
@@ -635,6 +853,8 @@ esac
 (backfill)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -642,6 +862,8 @@ _arguments "${_arguments_options[@]}" : \
 (gen-manpage)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -649,6 +871,8 @@ _arguments "${_arguments_options[@]}" : \
 (gen-completions)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':shell -- Target shell:(bash zsh fish)' \
@@ -846,6 +1070,22 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(start)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(snooze)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(depend)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (version)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -853,6 +1093,30 @@ _arguments "${_arguments_options[@]}" : \
         esac
     ;;
 esac
+;;
+(start)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(snooze)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(depend)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(review)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(bulk)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
 ;;
 (log)
 _arguments "${_arguments_options[@]}" : \
@@ -937,6 +1201,12 @@ _pt_commands() {
 'accountability:Run one accountability cycle (escalation + Telegram/email)' \
 'scoring:Recompute composite priority scores for all active tasks' \
 'remote:Talk to a remote canonical \`pt serve\` (no local DB)' \
+'start:Mark a task in progress (you'\''re actively working it)' \
+'snooze:Snooze a task until a date — it leaves \`pt next\` and reminders, then wakes to todo automatically' \
+'depend:Manage dependency edges\: PT-A depends on PT-B' \
+'review:Interactive review sweep\: stale, snoozed-expired, and triage items' \
+'search:Full-text search over titles + descriptions (FTS5)' \
+'bulk:Apply one action to every task matching a filter DSL expression' \
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
 'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
@@ -998,6 +1268,16 @@ _pt__subcmd__branch_commands() {
     local commands; commands=()
     _describe -t commands 'pt branch commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__bulk_commands] )) ||
+_pt__subcmd__bulk_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt bulk commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__depend_commands] )) ||
+_pt__subcmd__depend_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt depend commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__dismiss_commands] )) ||
 _pt__subcmd__dismiss_commands() {
     local commands; commands=()
@@ -1050,6 +1330,12 @@ _pt__subcmd__help_commands() {
 'accountability:Run one accountability cycle (escalation + Telegram/email)' \
 'scoring:Recompute composite priority scores for all active tasks' \
 'remote:Talk to a remote canonical \`pt serve\` (no local DB)' \
+'start:Mark a task in progress (you'\''re actively working it)' \
+'snooze:Snooze a task until a date — it leaves \`pt next\` and reminders, then wakes to todo automatically' \
+'depend:Manage dependency edges\: PT-A depends on PT-B' \
+'review:Interactive review sweep\: stale, snoozed-expired, and triage items' \
+'search:Full-text search over titles + descriptions (FTS5)' \
+'bulk:Apply one action to every task matching a filter DSL expression' \
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
 'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
@@ -1091,6 +1377,16 @@ _pt__subcmd__help__subcmd__bot_commands() {
 _pt__subcmd__help__subcmd__branch_commands() {
     local commands; commands=()
     _describe -t commands 'pt help branch commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__bulk_commands] )) ||
+_pt__subcmd__help__subcmd__bulk_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help bulk commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__depend_commands] )) ||
+_pt__subcmd__help__subcmd__depend_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help depend commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__dismiss_commands] )) ||
 _pt__subcmd__help__subcmd__dismiss_commands() {
@@ -1159,6 +1455,10 @@ _pt__subcmd__help__subcmd__remote_commands() {
 'show:\`pt remote show <query>\` — print one task'\''s full row + detail (read-only)' \
 'next:\`pt remote next \[-n N\]\` — DAG-ready tasks from the canonical host' \
 'dismiss:\`pt remote dismiss <query>\` — soft-close a task (reversible via reopen)' \
+'start:\`pt remote start <query>\` — mark in progress on the canonical host' \
+'snooze:\`pt remote snooze <query> <until>\` — snooze on the canonical host' \
+'depend:\`pt remote depend <query> --on <target> \[--clear\]\`' \
+'rm:\`pt remote rm <query>\` — permanent delete (tombstoned)' \
 'version:\`pt remote version\` — compare this client'\''s version against the canonical server'\''s \`GET /version\`. Exits non-zero on skew' \
     )
     _describe -t commands 'pt help remote commands' commands "$@"
@@ -1167,6 +1467,11 @@ _pt__subcmd__help__subcmd__remote_commands() {
 _pt__subcmd__help__subcmd__remote__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'pt help remote add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__depend_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__depend_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote depend commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__dismiss_commands] )) ||
 _pt__subcmd__help__subcmd__remote__subcmd__dismiss_commands() {
@@ -1203,10 +1508,25 @@ _pt__subcmd__help__subcmd__remote__subcmd__reopen_commands() {
     local commands; commands=()
     _describe -t commands 'pt help remote reopen commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__rm_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote rm commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__show_commands] )) ||
 _pt__subcmd__help__subcmd__remote__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt help remote show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__snooze_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__snooze_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote snooze commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__start_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__start_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote start commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__version_commands] )) ||
 _pt__subcmd__help__subcmd__remote__subcmd__version_commands() {
@@ -1217,6 +1537,11 @@ _pt__subcmd__help__subcmd__remote__subcmd__version_commands() {
 _pt__subcmd__help__subcmd__reopen_commands() {
     local commands; commands=()
     _describe -t commands 'pt help reopen commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__review_commands] )) ||
+_pt__subcmd__help__subcmd__review_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help review commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__rm_commands] )) ||
 _pt__subcmd__help__subcmd__rm_commands() {
@@ -1235,6 +1560,11 @@ _pt__subcmd__help__subcmd__scoring__subcmd__run_commands() {
     local commands; commands=()
     _describe -t commands 'pt help scoring run commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__search_commands] )) ||
+_pt__subcmd__help__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help search commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__serve_commands] )) ||
 _pt__subcmd__help__subcmd__serve_commands() {
     local commands; commands=()
@@ -1244,6 +1574,16 @@ _pt__subcmd__help__subcmd__serve_commands() {
 _pt__subcmd__help__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt help show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__snooze_commands] )) ||
+_pt__subcmd__help__subcmd__snooze_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help snooze commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__start_commands] )) ||
+_pt__subcmd__help__subcmd__start_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help start commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__token_commands] )) ||
 _pt__subcmd__help__subcmd__token_commands() {
@@ -1341,6 +1681,10 @@ _pt__subcmd__remote_commands() {
 'show:\`pt remote show <query>\` — print one task'\''s full row + detail (read-only)' \
 'next:\`pt remote next \[-n N\]\` — DAG-ready tasks from the canonical host' \
 'dismiss:\`pt remote dismiss <query>\` — soft-close a task (reversible via reopen)' \
+'start:\`pt remote start <query>\` — mark in progress on the canonical host' \
+'snooze:\`pt remote snooze <query> <until>\` — snooze on the canonical host' \
+'depend:\`pt remote depend <query> --on <target> \[--clear\]\`' \
+'rm:\`pt remote rm <query>\` — permanent delete (tombstoned)' \
 'version:\`pt remote version\` — compare this client'\''s version against the canonical server'\''s \`GET /version\`. Exits non-zero on skew' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -1350,6 +1694,11 @@ _pt__subcmd__remote_commands() {
 _pt__subcmd__remote__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__depend_commands] )) ||
+_pt__subcmd__remote__subcmd__depend_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote depend commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__remote__subcmd__dismiss_commands] )) ||
 _pt__subcmd__remote__subcmd__dismiss_commands() {
@@ -1378,6 +1727,10 @@ _pt__subcmd__remote__subcmd__help_commands() {
 'show:\`pt remote show <query>\` — print one task'\''s full row + detail (read-only)' \
 'next:\`pt remote next \[-n N\]\` — DAG-ready tasks from the canonical host' \
 'dismiss:\`pt remote dismiss <query>\` — soft-close a task (reversible via reopen)' \
+'start:\`pt remote start <query>\` — mark in progress on the canonical host' \
+'snooze:\`pt remote snooze <query> <until>\` — snooze on the canonical host' \
+'depend:\`pt remote depend <query> --on <target> \[--clear\]\`' \
+'rm:\`pt remote rm <query>\` — permanent delete (tombstoned)' \
 'version:\`pt remote version\` — compare this client'\''s version against the canonical server'\''s \`GET /version\`. Exits non-zero on skew' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -1387,6 +1740,11 @@ _pt__subcmd__remote__subcmd__help_commands() {
 _pt__subcmd__remote__subcmd__help__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote help add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__depend_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__depend_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help depend commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__dismiss_commands] )) ||
 _pt__subcmd__remote__subcmd__help__subcmd__dismiss_commands() {
@@ -1428,10 +1786,25 @@ _pt__subcmd__remote__subcmd__help__subcmd__reopen_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote help reopen commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__rm_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help rm commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__show_commands] )) ||
 _pt__subcmd__remote__subcmd__help__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote help show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__snooze_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__snooze_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help snooze commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__start_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__start_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help start commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__version_commands] )) ||
 _pt__subcmd__remote__subcmd__help__subcmd__version_commands() {
@@ -1458,10 +1831,25 @@ _pt__subcmd__remote__subcmd__reopen_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote reopen commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__remote__subcmd__rm_commands] )) ||
+_pt__subcmd__remote__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote rm commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__remote__subcmd__show_commands] )) ||
 _pt__subcmd__remote__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__snooze_commands] )) ||
+_pt__subcmd__remote__subcmd__snooze_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote snooze commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__start_commands] )) ||
+_pt__subcmd__remote__subcmd__start_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote start commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__remote__subcmd__version_commands] )) ||
 _pt__subcmd__remote__subcmd__version_commands() {
@@ -1472,6 +1860,11 @@ _pt__subcmd__remote__subcmd__version_commands() {
 _pt__subcmd__reopen_commands() {
     local commands; commands=()
     _describe -t commands 'pt reopen commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__review_commands] )) ||
+_pt__subcmd__review_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt review commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__rm_commands] )) ||
 _pt__subcmd__rm_commands() {
@@ -1509,6 +1902,11 @@ _pt__subcmd__scoring__subcmd__run_commands() {
     local commands; commands=()
     _describe -t commands 'pt scoring run commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__search_commands] )) ||
+_pt__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt search commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__serve_commands] )) ||
 _pt__subcmd__serve_commands() {
     local commands; commands=()
@@ -1518,6 +1916,16 @@ _pt__subcmd__serve_commands() {
 _pt__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__snooze_commands] )) ||
+_pt__subcmd__snooze_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt snooze commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__start_commands] )) ||
+_pt__subcmd__start_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt start commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__token_commands] )) ||
 _pt__subcmd__token_commands() {

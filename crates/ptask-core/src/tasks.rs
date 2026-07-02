@@ -65,6 +65,9 @@ pub struct Extensions {
     pub duration_min: Option<i64>,
     pub planned_at: Option<String>,
     pub energy: Option<String>,
+    /// Scheduled date (`due:` token) — when the operator PLANS to do it,
+    /// distinct from the hard `deadline`.
+    pub due_at: Option<String>,
     /// Optional recurrence rule. When set, a row is written to
     /// `pt_recurrence` in the same transaction as the task insert.
     /// `next_occurrence` is initialised from the task's deadline.
@@ -124,19 +127,31 @@ pub fn create_with_extensions(
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
 
+    // Mint PT-N first so the row insert is a single statement.
+    let n: i64 = tx.query_row(
+        "UPDATE pt_counters SET value = value + 1 WHERE name='pt_id' RETURNING value",
+        [],
+        |r| r.get(0),
+    )?;
+    let pt_id_str = pt_id::format_pt_id(n);
+
     tx.execute(
         "INSERT INTO tasks (
-            id, title, description, priority, status, created_at, updated_at,
-            deadline, source_type, source_files, ai_confidence, ai_reasoning,
-            depends_on, blocks_tasks, escalation_level, dismissal_count,
-            priority_score, score_urgency, score_dependency, score_neglect,
-            subtasks, task_type, cluster_keywords
+            id, title, description, priority, status, status_v2,
+            created_at, updated_at, deadline, source_type, source_files,
+            ai_confidence, ai_reasoning, depends_on, blocks_tasks,
+            escalation_level, dismissal_count, priority_score, score_urgency,
+            score_dependency, score_neglect, subtasks, task_type,
+            cluster_keywords, pt_id, project, duration_min, planned_at,
+            energy, created_by_pt, due_at
          ) VALUES (
-            ?1, ?2, ?3, ?4, 'pending', ?5, ?5,
-            ?6, ?7, '[]', ?8, ?9,
-            '[]', '[]', 0, 0,
-            0.0, 0.0, 0.0, 0.0,
-            '[]', 'operational', '[]'
+            ?1, ?2, ?3, ?4, 'pending', 'todo',
+            ?5, ?5, ?6, ?7, '[]',
+            ?8, ?9, '[]', '[]',
+            0, 0, 0.0, 0.0,
+            0.0, 0.0, '[]', 'operational',
+            '[]', ?10, ?11, ?12, ?13,
+            ?14, 1, ?15
          )",
         params![
             id,
@@ -148,33 +163,21 @@ pub fn create_with_extensions(
             new.source_type,
             new.ai_confidence,
             new.ai_reasoning,
-        ],
-    )?;
-
-    // Mint PT-N + write extension columns. Reuse the same tx for atomicity.
-    let n: i64 = tx.query_row(
-        "UPDATE pt_counters SET value = value + 1 WHERE name='pt_id' RETURNING value",
-        [],
-        |r| r.get(0),
-    )?;
-    let pt_id_str = pt_id::format_pt_id(n);
-    let labels_json = serde_json::to_string(&ext.labels)
-        .map_err(|e| crate::Error::Other(format!("labels serialise: {}", e)))?;
-    tx.execute(
-        "INSERT INTO pt_extensions (
-            task_uuid, pt_id, status_category, labels, project,
-            duration_min, planned_at, energy, created_by_pt
-         ) VALUES (?1, ?2, 'todo', ?3, ?4, ?5, ?6, ?7, 1)",
-        params![
-            id,
             pt_id_str,
-            labels_json,
             ext.project,
             ext.duration_min,
             ext.planned_at,
             ext.energy,
+            ext.due_at,
         ],
     )?;
+
+    for label in &ext.labels {
+        tx.execute(
+            "INSERT OR IGNORE INTO task_labels (task_uuid, label) VALUES (?1, ?2)",
+            params![id, label],
+        )?;
+    }
 
     // Recurrence: persist a pt_recurrence row when the caller supplies one.
     // next_occurrence is seeded from the task's deadline (must be Some for
@@ -199,7 +202,7 @@ pub fn create_with_extensions(
     // Audit-log the creation. Reuses Python `interactions` table verbatim.
     tx.execute(
         "INSERT INTO interactions (task_id, action, ts, details) VALUES (?1, 'create', ?2, ?3)",
-        params![id, now, format!("Claude Code manual insert: {}", new.title),],
+        params![id, now, format!("created by {}: {}", ctx.actor, new.title),],
     )?;
 
     let task = Task {
@@ -237,10 +240,9 @@ pub fn list_with_filter(
 ) -> Result<Vec<Task>> {
     let conn = db.get()?;
     let mut sql = String::from(
-        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
-         FROM tasks t
-         LEFT JOIN pt_extensions x ON x.task_uuid = t.id",
+         FROM tasks t",
     );
     let mut conds: Vec<String> = Vec::new();
     let mut bound: Vec<rusqlite::types::Value> = Vec::new();
@@ -317,10 +319,9 @@ pub fn list(
 ) -> Result<Vec<Task>> {
     let conn = db.get()?;
     let mut sql = String::from(
-        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
-         FROM tasks t
-         LEFT JOIN pt_extensions x ON x.task_uuid = t.id",
+         FROM tasks t",
     );
     let mut conds: Vec<String> = Vec::new();
     let mut bound: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -364,10 +365,9 @@ pub fn list(
 pub fn list_all(db: &Db) -> Result<Vec<Task>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
-        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
          FROM tasks t
-         LEFT JOIN pt_extensions x ON x.task_uuid = t.id
          ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC",
     )?;
     let rows = stmt.query_map([], row_to_task)?;
@@ -397,10 +397,10 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
 
     if let Some(pt_id_str) = pt_candidate {
         let row = conn.query_row(
-            "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+            "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                     t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
-             FROM tasks t JOIN pt_extensions x ON x.task_uuid = t.id
-             WHERE x.pt_id = ?1",
+             FROM tasks t
+             WHERE t.pt_id = ?1",
             [&pt_id_str],
             row_to_task,
         );
@@ -413,10 +413,10 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
 
     // Title substring search on pending tasks.
     let mut stmt = conn.prepare(
-        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
-         FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid = t.id
-         WHERE t.status = 'pending' AND lower(t.title) LIKE ?1 ESCAPE '\\'
+         FROM tasks t
+         WHERE t.status_v2 NOT IN ('done','dismissed') AND lower(t.title) LIKE ?1 ESCAPE '\\'
          ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC",
     )?;
     let pat = format!("%{}%", escape_like_pattern(&q.to_ascii_lowercase()));
@@ -481,10 +481,10 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
 
     if let Some(pt_id_str) = pt_candidate {
         let row = conn.query_row(
-            "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+            "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                     t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
-             FROM tasks t JOIN pt_extensions x ON x.task_uuid = t.id
-             WHERE x.pt_id = ?1",
+             FROM tasks t
+             WHERE t.pt_id = ?1",
             [&pt_id_str],
             row_to_task,
         );
@@ -496,9 +496,9 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
     }
 
     let mut sql = String::from(
-        "SELECT t.id, x.pt_id, t.title, t.description, t.priority, t.status,
+        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
-         FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid = t.id
+         FROM tasks t
          WHERE lower(t.title) LIKE ?1 ESCAPE '\\'",
     );
     if !include_terminal {
@@ -647,7 +647,7 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     }
 
     tx.execute(
-        "UPDATE tasks SET status='done', updated_at=?1 WHERE id=?2",
+        "UPDATE tasks SET status='done', status_v2='done', updated_at=?1 WHERE id=?2",
         params![now, task.id],
     )?;
     tx.execute(
@@ -874,11 +874,9 @@ pub fn delete_task(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let tx = conn.transaction()?;
     // Capture the PT-N before the CASCADE wipes pt_extensions.
     let pt_id: Option<String> = tx
-        .query_row(
-            "SELECT pt_id FROM pt_extensions WHERE task_uuid=?1",
-            [task_uuid],
-            |r| r.get(0),
-        )
+        .query_row("SELECT pt_id FROM tasks WHERE id=?1", [task_uuid], |r| {
+            r.get(0)
+        })
         .optional()?;
     tx.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
     record_event_tx(
@@ -908,13 +906,13 @@ pub fn reopen(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
         })
         .optional()?;
     let status = status.ok_or_else(|| crate::Error::Other("task not found".into()))?;
-    if status == "pending" {
+    if !matches!(status.as_str(), "done" | "dismissed") {
         return Err(crate::Error::Other(
-            "task is already pending — nothing to reopen".into(),
+            "task is not done/dismissed — nothing to reopen".into(),
         ));
     }
     tx.execute(
-        "UPDATE tasks SET status='pending', updated_at=?1 WHERE id=?2",
+        "UPDATE tasks SET status='pending', status_v2='todo', snoozed_until=NULL, updated_at=?1 WHERE id=?2",
         params![now, task_uuid],
     )?;
     tx.execute(
@@ -955,7 +953,7 @@ pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
         return Err(crate::Error::Other("task is already dismissed".into()));
     }
     tx.execute(
-        "UPDATE tasks SET status='dismissed', updated_at=?1 WHERE id=?2",
+        "UPDATE tasks SET status='dismissed', status_v2='dismissed', updated_at=?1 WHERE id=?2",
         params![now, task_uuid],
     )?;
     tx.execute(
@@ -1046,6 +1044,188 @@ pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
     ))
 }
 
+/// Mark a task in progress (status_v2 `in_progress`; legacy stays
+/// `pending`). Attributed `task.updated` event in the same transaction.
+pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE tasks SET status_v2='in_progress', status='pending',
+                          snoozed_until=NULL, updated_at=?1
+         WHERE id=?2 AND status_v2 NOT IN ('done','dismissed')",
+        params![now, task_uuid],
+    )?;
+    if changed == 0 {
+        return Err(crate::Error::Other(
+            "task not found or terminal — cannot start".into(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO interactions (task_id, action, ts, details)
+         VALUES (?1, 'status_change', ?2, 'Started → in_progress')",
+        params![task_uuid, now],
+    )?;
+    record_event_tx(
+        &tx,
+        ctx,
+        task_uuid,
+        "task.updated",
+        &serde_json::json!({ "task_uuid": task_uuid, "status": "in_progress" }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Snooze until `until_iso` (status_v2 `snoozed`; legacy `delayed`). The
+/// task leaves `pt next` and accountability until the wake time passes,
+/// when [`wake_expired_snoozes`] flips it back to todo.
+pub fn snooze(db: &Db, task_uuid: &str, until_iso: &str, ctx: &EventCtx) -> Result<()> {
+    parse_iso_zoned(until_iso)?;
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE tasks SET status_v2='snoozed', status='delayed',
+                          snoozed_until=?1, updated_at=?2
+         WHERE id=?3 AND status_v2 NOT IN ('done','dismissed')",
+        params![until_iso, now, task_uuid],
+    )?;
+    if changed == 0 {
+        return Err(crate::Error::Other(
+            "task not found or terminal — cannot snooze".into(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO interactions (task_id, action, ts, details)
+         VALUES (?1, 'status_change', ?2, ?3)",
+        params![task_uuid, now, format!("Snoozed until {}", until_iso)],
+    )?;
+    record_event_tx(
+        &tx,
+        ctx,
+        task_uuid,
+        "task.updated",
+        &serde_json::json!({
+            "task_uuid": task_uuid, "status": "snoozed", "snoozed_until": until_iso
+        }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Wake every snoozed task whose `snoozed_until` has passed (→ todo).
+/// Invoked by the hourly scoring run so snoozes expire without their own
+/// timer. Returns the number woken; each wake is an attributed event.
+pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<usize> {
+    let expired: Vec<String> = {
+        let conn = db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM tasks
+             WHERE status_v2='snoozed' AND snoozed_until IS NOT NULL
+               AND snoozed_until <= ?1",
+        )?;
+        let rows = stmt.query_map([now_iso], |r| r.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+    for uuid in &expired {
+        let mut conn = db.get()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE tasks SET status_v2='todo', status='pending',
+                              snoozed_until=NULL, updated_at=?1 WHERE id=?2",
+            params![now_iso, uuid],
+        )?;
+        record_event_tx(
+            &tx,
+            ctx,
+            uuid,
+            "task.updated",
+            &serde_json::json!({ "task_uuid": uuid, "status": "todo", "woke_from_snooze": true }),
+        )?;
+        tx.commit()?;
+    }
+    Ok(expired.len())
+}
+
+/// Add a `depends_on` edge: `from` cannot start until `to` is done.
+/// Rejects self-dependency and cycles (bounded walk — the graph is small).
+pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -> Result<()> {
+    if from_uuid == to_uuid {
+        return Err(crate::Error::Other("a task cannot depend on itself".into()));
+    }
+    // Cycle check: is `from` reachable FROM `to` via depends_on edges?
+    {
+        let conn = db.get()?;
+        let mut frontier = vec![to_uuid.to_string()];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cur) = frontier.pop() {
+            if cur == from_uuid {
+                return Err(crate::Error::Other(
+                    "dependency would create a cycle".into(),
+                ));
+            }
+            if !seen.insert(cur.clone()) || seen.len() > 10_000 {
+                continue;
+            }
+            let mut stmt = conn.prepare(
+                "SELECT to_uuid FROM task_links WHERE from_uuid=?1 AND kind='depends_on'",
+            )?;
+            let next: Vec<String> = stmt
+                .query_map([&cur], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            frontier.extend(next);
+        }
+    }
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let exists: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE id IN (?1, ?2)",
+        params![from_uuid, to_uuid],
+        |r| r.get(0),
+    )?;
+    if exists != 2 {
+        return Err(crate::Error::Other("both tasks must exist".into()));
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
+         VALUES (?1, ?2, 'depends_on', ?3)",
+        params![from_uuid, to_uuid, now],
+    )?;
+    record_event_tx(
+        &tx,
+        ctx,
+        from_uuid,
+        "task.updated",
+        &serde_json::json!({ "task_uuid": from_uuid, "depends_on_added": to_uuid }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Remove a `depends_on` edge. Errors if the edge doesn't exist.
+pub fn remove_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -> Result<()> {
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let n = tx.execute(
+        "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='depends_on'",
+        params![from_uuid, to_uuid],
+    )?;
+    if n == 0 {
+        return Err(crate::Error::Other("no such dependency edge".into()));
+    }
+    record_event_tx(
+        &tx,
+        ctx,
+        from_uuid,
+        "task.updated",
+        &serde_json::json!({ "task_uuid": from_uuid, "depends_on_removed": to_uuid }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Update title and/or description (at least one `Some`). The
 /// `task.updated` event commits in the same transaction, attributed to `ctx`.
 pub fn update_text(
@@ -1121,42 +1301,36 @@ pub struct TaskDetail {
 /// Load the side-table state for one task. Returns defaults for missing rows.
 pub fn load_detail(db: &Db, task_uuid: &str) -> Result<TaskDetail> {
     let conn = db.get()?;
-    // pt_extensions row (always present for PT-N-minted tasks).
-    let ext: (
-        String,
-        Option<String>,
-        Option<i64>,
-        Option<String>,
-        Option<String>,
-    ) = conn
+    // Merged v2 columns (schema v2: pt_extensions folded into tasks).
+    let ext: (Option<String>, Option<i64>, Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT labels, project, duration_min, planned_at, energy
-             FROM pt_extensions WHERE task_uuid = ?1",
-            [task_uuid],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0).unwrap_or_else(|_| "[]".into()),
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                ))
-            },
-        )
-        .unwrap_or(("[]".into(), None, None, None, None));
-    let labels: Vec<String> = serde_json::from_str(&ext.0).unwrap_or_default();
-
-    // depends_on / blocks_tasks from the Python tasks table.
-    let dep_row: (String, String) = conn
-        .query_row(
-            "SELECT COALESCE(depends_on,'[]'), COALESCE(blocks_tasks,'[]')
+            "SELECT project, duration_min, planned_at, energy
              FROM tasks WHERE id = ?1",
             [task_uuid],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
-        .unwrap_or(("[]".into(), "[]".into()));
-    let depends_on: Vec<String> = serde_json::from_str(&dep_row.0).unwrap_or_default();
-    let blocks_tasks: Vec<String> = serde_json::from_str(&dep_row.1).unwrap_or_default();
+        .unwrap_or((None, None, None, None));
+
+    let mut lstmt =
+        conn.prepare("SELECT label FROM task_labels WHERE task_uuid = ?1 ORDER BY label")?;
+    let labels: Vec<String> = lstmt
+        .query_map([task_uuid], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(lstmt);
+
+    // Relations from task_links (schema v2 replaced the JSON blobs).
+    let mut dstmt = conn
+        .prepare("SELECT to_uuid FROM task_links WHERE from_uuid = ?1 AND kind = 'depends_on'")?;
+    let depends_on: Vec<String> = dstmt
+        .query_map([task_uuid], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(dstmt);
+    let mut bstmt = conn
+        .prepare("SELECT from_uuid FROM task_links WHERE to_uuid = ?1 AND kind = 'depends_on'")?;
+    let blocks_tasks: Vec<String> = bstmt
+        .query_map([task_uuid], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(bstmt);
 
     // pt_recurrence (optional).
     let rec: Option<(String, String, String)> = conn
@@ -1170,10 +1344,10 @@ pub fn load_detail(db: &Db, task_uuid: &str) -> Result<TaskDetail> {
 
     Ok(TaskDetail {
         labels,
-        project: ext.1,
-        duration_min: ext.2,
-        planned_at: ext.3,
-        energy: ext.4,
+        project: ext.0,
+        duration_min: ext.1,
+        planned_at: ext.2,
+        energy: ext.3,
         depends_on,
         blocks_tasks,
         recurrence_input: rec.as_ref().map(|r| r.0.clone()),
@@ -1532,6 +1706,19 @@ mod tests {
         assert_eq!(t.pt_id.as_deref(), Some("PT-1"));
         assert_eq!(t.priority, 2);
         assert_eq!(t.status, "pending");
+        db.with_conn(|c| {
+            let (pt, v2): (String, String) = c
+                .query_row(
+                    "SELECT pt_id, status_v2 FROM tasks WHERE id=?1",
+                    [&t.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(pt, "PT-1");
+            assert_eq!(v2, "todo");
+            Ok(())
+        })
+        .unwrap();
 
         // Interaction logged.
         db.with_conn(|c| {
@@ -1550,7 +1737,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(details, "Claude Code manual insert: Buy bread");
+            assert_eq!(details, "created by test: Buy bread");
             Ok(())
         })
         .unwrap();

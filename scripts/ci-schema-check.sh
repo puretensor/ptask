@@ -21,12 +21,12 @@ db = sys.argv[1]
 c = sqlite3.connect(db)
 expected = {
     "pt_counters",
-    "pt_extensions",
     "pt_views",
     "pt_recurrence",
     "pt_event_log",
     "pt_webhook_log",
     "pt_api_tokens",
+    "pt_extensions_legacy",
 }
 present = {
     row[0]
@@ -34,6 +34,18 @@ present = {
         "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'pt_%'"
     )
 }
+views = {
+    row[0]
+    for row in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='view' AND name LIKE 'pt_%'"
+    )
+}
+assert "pt_extensions" in views, f"pt_extensions compat view missing: {views}"
+for t in ("task_links", "task_labels", "tasks_fts"):
+    n = c.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name=?", (t,)
+    ).fetchone()[0]
+    assert n == 1, f"missing v2 object {t}"
 missing = expected - present
 extra = present - expected
 if missing or extra:

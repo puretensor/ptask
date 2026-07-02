@@ -77,6 +77,18 @@ Use `-e ptask_binary=/path/to/per-host/build` on the per-host Ansible
 invocation to override the default per-arch `dist/pt-<target-triple>`
 artifact.
 
+## Schema v2 (v2.0.0)
+
+V010 merged `pt_extensions` into `tasks` (the side table survives as a
+compat VIEW for the dashboard sidecar until Phase 7), introduced the
+8-state `status_v2` model (legacy `tasks.status` is maintained in sync by
+every Rust write because the legacy Python distill still writes rows),
+`task_links` (depends_on/blocks/discovered_from/subtask_of),
+`task_labels`, `due_at`/`snoozed_until`/`parent_uuid`, one-way folded
+`interactions` into `pt_event_log`, UTC-normalized timestamps, and FTS5
+(`tasks_fts`). Subtask JSON of non-terminal parents was promoted to real
+child rows by the one-shot Rust converter in `pt backfill`.
+
 ## Environment
 
 Since v1.16.0 the environment is read exactly once per process, at the

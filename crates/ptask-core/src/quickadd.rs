@@ -36,6 +36,9 @@ pub struct QuickAdd {
     pub priority: Option<i64>,
     pub deadline: Option<String>, // ISO-formatted Zoned
     pub deadline_phrase: Option<String>,
+    /// Scheduled date from an explicit `due:<date>` token — when the
+    /// operator PLANS to do it, distinct from the hard deadline.
+    pub due: Option<String>,
     pub description: String,
     pub labels: Vec<String>,
     pub project: Option<String>,
@@ -142,6 +145,16 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             .map(|off| idx + off)
             .unwrap_or(raw.len());
 
+        // Explicit due:<date> — scheduled date (distinct from deadline).
+        if let Some(rest) = tok.strip_prefix("due:")
+            && !rest.is_empty()
+        {
+            let parsed = dates::parse_at(rest, now.clone())
+                .map_err(|e| crate::Error::Other(format!("due: date {:?}: {}", rest, e)))?;
+            out.due = Some(dates::format_iso(&parsed));
+            idx += 1;
+            continue;
+        }
         // Explicit @label
         if let Some(rest) = tok.strip_prefix('@')
             && !rest.is_empty()

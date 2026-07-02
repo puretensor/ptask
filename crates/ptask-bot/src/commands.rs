@@ -124,6 +124,7 @@ async fn handle_add(bot: &Bot, chat_id: ChatId, db: &Db, text: &str) -> Result<(
         planned_at: None,
         energy: None,
         recurrence: q.recurrence.clone(),
+        due_at: q.due.clone(),
     };
     match ptask_core::tasks::create_with_extensions(db, new, ext, &bot_ctx()) {
         Ok(t) => {

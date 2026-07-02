@@ -322,6 +322,83 @@ impl RemoteClient {
         Ok(task)
     }
 
+    /// `pt remote start <query>` — mark in progress on the canonical host.
+    pub fn start(&self, query: &str) -> Result<Task> {
+        self.simple_task_command("task_start", query, serde_json::Map::new(), false)
+    }
+
+    /// `pt remote snooze <query> <until-iso>`.
+    pub fn snooze(&self, query: &str, until_iso: &str) -> Result<Task> {
+        let mut extra = serde_json::Map::new();
+        extra.insert("until".into(), json!(until_iso));
+        self.simple_task_command("task_snooze", query, extra, false)
+    }
+
+    /// `pt remote depend <query> --on <target> [--clear]`. The target is
+    /// resolved server-side by the command handler.
+    pub fn depend(&self, query: &str, on: &str, clear: bool) -> Result<Task> {
+        let mut extra = serde_json::Map::new();
+        extra.insert("on".into(), json!(on));
+        if clear {
+            extra.insert("clear".into(), json!(true));
+        }
+        self.simple_task_command("task_depend", query, extra, false)
+    }
+
+    /// `pt remote rm <query>` — permanent delete (tombstoned for delta
+    /// sync). Resolves terminal tasks too.
+    pub fn rm(&self, query: &str) -> Result<Task> {
+        self.simple_task_command("task_delete", query, serde_json::Map::new(), true)
+    }
+
+    /// `GET /list?filter=` — server-side filtered list (replaces the old
+    /// fetch-everything-and-filter-locally pattern when a DSL is given).
+    pub fn list_filtered(
+        &self,
+        filter: Option<&str>,
+        status: &str,
+        limit: usize,
+    ) -> Result<Vec<Task>> {
+        let mut params: Vec<(&str, String)> =
+            vec![("status", status.to_string()), ("limit", limit.to_string())];
+        if let Some(f) = filter {
+            params.push(("filter", f.to_string()));
+        }
+        let v = self.get_json_with_params("/list", &params)?;
+        let tasks = v
+            .get("tasks")
+            .cloned()
+            .ok_or_else(|| anyhow!("GET /list: missing tasks field"))?;
+        serde_json::from_value(tasks).context("parse /list tasks")
+    }
+
+    /// Shared shape for resolve-then-single-command verbs.
+    fn simple_task_command(
+        &self,
+        command: &str,
+        query: &str,
+        extra: serde_json::Map<String, Value>,
+        include_terminal: bool,
+    ) -> Result<Task> {
+        let task = self.resolve(query, include_terminal)?;
+        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let mut args = serde_json::Map::new();
+        args.insert("task_uuid".into(), json!(task.id));
+        args.extend(extra);
+        let req = json!({
+            "sync_token": "*",
+            "resource_types": ["tasks"],
+            "commands": [{
+                "type": command,
+                "uuid": cmd_uuid,
+                "args": Value::Object(args),
+            }]
+        });
+        let resp = self.sync(&req)?;
+        ensure_ok(&resp.sync_status, &cmd_uuid)?;
+        Ok(task)
+    }
+
     /// `pt remote next` — DAG-ready tasks computed on the canonical host. The
     /// `/sync` Task shape can't carry `depends_on` edges, so readiness must be
     /// resolved server-side.

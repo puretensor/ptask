@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
         .route("/next", get(next))
         .route("/detail/{uuid}", get(detail))
         .route("/resolve", get(resolve))
+        .route("/list", get(list))
 }
 
 fn default_limit() -> usize {
@@ -35,10 +36,62 @@ struct NextParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ListParams {
+    /// Filter DSL expression (same grammar as `pt list`). Optional.
+    filter: Option<String>,
+    /// Legacy-vocab status filter (pending/done/…) or "all".
+    #[serde(default = "default_list_status")]
+    status: String,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+fn default_list_status() -> String {
+    "pending".into()
+}
+
+#[derive(Debug, Deserialize)]
 struct ResolveParams {
     query: String,
     #[serde(default)]
     include_terminal: bool,
+}
+
+/// `GET /list?filter=<DSL>&status=&limit=` — server-side filtered task list.
+/// Replaces the remote client's fetch-everything-and-filter-locally pattern.
+async fn list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<ListParams>,
+) -> impl IntoResponse {
+    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
+        return resp;
+    }
+    let limit = params.limit.clamp(1, MAX_NEXT_LIMIT);
+    let expr = match params.filter.as_deref().map(ptask_core::filter::parse) {
+        Some(Ok(e)) => Some(e),
+        Some(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("filter: {e}")})),
+            )
+                .into_response();
+        }
+        None => None,
+    };
+    let status = if params.status == "all" {
+        None
+    } else {
+        Some(params.status.as_str())
+    };
+    match ptask_core::tasks::list_with_filter(&state.db, expr.as_ref(), status, None, limit) {
+        Ok(tasks) => Json(serde_json::json!({ "tasks": tasks })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /next?limit=N` — DAG-ready tasks (every `depends_on` predecessor done),

@@ -111,6 +111,25 @@ pt view rm <name>                     # delete
 | `pt scoring run [--dry-run]` | `hourly` | Composite priority recompute. |
 | `pt backfill` | one-shot | Mint PT-N for any task lacking one. |
 
+## Workflow (v2.0.0)
+
+| Verb | Use |
+|---|---|
+| `pt start <query>` | mark in progress (status_v2 `in_progress`) |
+| `pt snooze <query> <until…>` | park until a date (natural language ok); auto-wakes to todo via the hourly scoring run |
+| `pt depend <query> --on <target> [--clear]` | dependency edges in `task_links`; `pt next` hides tasks with unmet deps; no `--on` shows current edges |
+| `pt review [--stale-days N]` | interactive sweep of stale tasks (TTY: k/d/x/s/q; non-TTY prints the list) |
+| `pt search <query…> [-n N]` | FTS5 full-text over titles + descriptions |
+| `pt bulk '<filter>' --set-priority P \| --done \| --dismiss [--dry-run]` | one action across every DSL match |
+| `pt done <q1> <q2> …` | done now accepts multiple tasks |
+
+Globals (v2.0.0): `--json` on task-facing verbs emits machine-readable
+output; `--idempotency-key <k>` keys the mutation's event so retries are
+safe. Quick-add gains `due:<date>` (scheduled) alongside hard deadlines.
+Statuses are the 8-state v2 model: triage/backlog/todo/in_progress/
+snoozed/done/dismissed/blocked (legacy column maintained for
+not-yet-retired consumers).
+
 ## Journal & tokens (v1.17.0)
 
 | Verb | Use |
@@ -140,6 +159,11 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote show <query>` | base row + side-table detail via `GET /detail/{uuid}` (read-only) |
 | `pt remote next [-n N]` | DAG-ready tasks via `GET /next` (server resolves `depends_on`) |
 | `pt remote dismiss <query>` | server-side `/resolve` + `task_dismiss` (soft close; reversible via reopen) |
+| `pt remote start <query>` | server-side `task_start` |
+| `pt remote snooze <query> <until…>` | server-side `task_snooze` (date parsed locally) |
+| `pt remote depend <query> --on <t> [--clear]` | server-side `task_depend` |
+| `pt remote rm <query>` | server-side `task_delete` (tombstoned) |
+| `pt remote list --filter '<DSL>'` | SERVER-side filtered list via `GET /list` |
 | `pt remote version` | compare client vs server `GET /version`; exits non-zero on skew |
 
 `--url` defaults to `$PTASK_SYNC_URL` then `http://100.121.42.54:9501`.

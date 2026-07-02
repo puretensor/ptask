@@ -1,16 +1,22 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH pt 1  "pt 1.17.0" 
+.TH pt 1  "pt 2.0.0" 
 .SH NAME
 pt \- Sovereign task manager for PureTensor
 .SH SYNOPSIS
-\fBpt\fR [\fB\-\-db\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBpt\fR [\fB\-\-db\fR] [\fB\-\-json\fR] [\fB\-\-idempotency\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 Sovereign task manager for PureTensor
 .SH OPTIONS
 .TP
 \fB\-\-db\fR \fI<DB>\fR
 Override the SQLite path (default: $PTASK_DB or ~/puretensor\-tasks/tasks.db)
+.TP
+\fB\-\-json\fR
+Emit machine\-readable JSON instead of human text (task\-facing verbs)
+.TP
+\fB\-\-idempotency\-key\fR \fI<IDEMPOTENCY_KEY>\fR
+Idempotency key recorded with the mutation\*(Aqs event — a retried command with the same key returns ok without re\-applying
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
@@ -76,6 +82,24 @@ Recompute composite priority scores for all active tasks
 pt\-remote(1)
 Talk to a remote canonical `pt serve` (no local DB)
 .TP
+pt\-start(1)
+Mark a task in progress (you\*(Aqre actively working it)
+.TP
+pt\-snooze(1)
+Snooze a task until a date — it leaves `pt next` and reminders, then wakes to todo automatically
+.TP
+pt\-depend(1)
+Manage dependency edges: PT\-A depends on PT\-B
+.TP
+pt\-review(1)
+Interactive review sweep: stale, snoozed\-expired, and triage items
+.TP
+pt\-search(1)
+Full\-text search over titles + descriptions (FTS5)
+.TP
+pt\-bulk(1)
+Apply one action to every task matching a filter DSL expression
+.TP
 pt\-log(1)
 Show a task\*(Aqs attributed event history (who did what, via which surface)
 .TP
@@ -97,4 +121,4 @@ Generate shell completions (bash/zsh/fish) to stdout
 pt\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH VERSION
-v1.17.0
+v2.0.0

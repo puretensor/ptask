@@ -117,23 +117,27 @@ mod tests {
         let path = dir.path().join("test.db");
         let db = Db::open(&path).expect("open ok");
         db.with_conn(|c| {
-            // Each pt_* table should exist after migrations.
-            for table in [
-                "pt_counters",
-                "pt_extensions",
-                "pt_views",
-                "pt_recurrence",
-                "pt_event_log",
-                "pt_webhook_log",
+            // Each pt_* object should exist after migrations. pt_extensions
+            // is a compat VIEW since schema v2 (V010); the rest are tables.
+            for (name, kind) in [
+                ("pt_counters", "table"),
+                ("pt_extensions", "view"),
+                ("pt_views", "table"),
+                ("pt_recurrence", "table"),
+                ("pt_event_log", "table"),
+                ("pt_webhook_log", "table"),
+                ("pt_api_tokens", "table"),
+                ("task_links", "table"),
+                ("task_labels", "table"),
             ] {
                 let exists: i64 = c
                     .query_row(
-                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                        [table],
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type=?1 AND name=?2",
+                        [kind, name],
                         |r| r.get(0),
                     )
                     .unwrap();
-                assert_eq!(exists, 1, "expected table {} to exist", table);
+                assert_eq!(exists, 1, "expected {} {} to exist", kind, name);
             }
             // The counter seed should be present.
             let counter: i64 = c
@@ -213,8 +217,11 @@ mod tests {
             conn.execute_batch(
                 "CREATE TABLE tasks (
                     id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                    description TEXT DEFAULT '',
                     priority INTEGER DEFAULT 2, status TEXT DEFAULT 'pending',
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    deadline TEXT, last_reminded TEXT, next_reminder TEXT,
+                    depends_on TEXT DEFAULT '[]', blocks_tasks TEXT DEFAULT '[]',
                     priority_score REAL DEFAULT 0.0
                  );
                  CREATE INDEX idx_tasks_status ON tasks(status);",

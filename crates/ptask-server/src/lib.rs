@@ -500,7 +500,8 @@ mod tests {
             .iter()
             .find(|t| t["id"] == uuid)
             .unwrap();
-        assert_eq!(t["status"], "pending");
+        // Schema v2: the wire status carries the v2 vocabulary (reopen → todo).
+        assert_eq!(t["status"], "todo");
     }
 
     #[tokio::test]

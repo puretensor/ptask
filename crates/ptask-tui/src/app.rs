@@ -565,6 +565,7 @@ impl App {
             planned_at: None,
             energy: None,
             recurrence: q.recurrence.clone(),
+            due_at: q.due.clone(),
         };
         match tasks::create_with_extensions(&self.db, new, ext, &tui_ctx()) {
             Ok(t) => {

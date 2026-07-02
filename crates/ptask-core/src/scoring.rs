@@ -279,6 +279,19 @@ struct ScoreWrite {
 /// but no DB writes happen — mirrors the dry-run semantics fixed in v0.7.1
 /// for accountability.
 pub fn run_once_at(db: &Db, dry_run: bool, now: &Zoned) -> Result<ScoringReport> {
+    // Expired snoozes wake here so they re-enter ordering without a
+    // dedicated timer (the scoring run is hourly).
+    if !dry_run {
+        let now_iso = crate::dates::format_iso(now);
+        let woken = crate::tasks::wake_expired_snoozes(
+            db,
+            &now_iso,
+            &crate::event_log::EventCtx::system("scoring"),
+        )?;
+        if woken > 0 {
+            tracing::info!(target: "ptask::scoring", woken, "woke expired snoozes");
+        }
+    }
     let rows = load_scoring_rows(db)?;
     if rows.is_empty() {
         return Ok(ScoringReport {
