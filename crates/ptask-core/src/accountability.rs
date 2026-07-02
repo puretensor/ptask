@@ -428,9 +428,8 @@ pub async fn run_check_at<D: Dispatch>(
                 "telegram" => {
                     if sent_telegrams >= telegram_remaining
                         || telegram_consecutive_failures >= TELEGRAM_CIRCUIT_BREAK
+                        || !cfg.telegram_configured()
                     {
-                        false
-                    } else if !cfg.telegram_configured() {
                         false
                     } else {
                         let prefixed = format!("<b>Task #{}:</b> {}", level, message);

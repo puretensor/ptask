@@ -69,7 +69,7 @@ pub fn run(db: &Db, args: &[&str], py_root: &Path) -> Result<RunReport> {
     cmd.arg("-m")
         .arg("ingest.distill")
         .args(args)
-        .current_dir(&root);
+        .current_dir(root);
     let output = cmd.output();
     let duration_ms = start.elapsed().as_millis();
 

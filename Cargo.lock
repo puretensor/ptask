@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-bot"
-version = "1.16.0"
+version = "1.16.1"
 dependencies = [
  "anyhow",
  "jiff",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-cli"
-version = "1.16.0"
+version = "1.16.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-core"
-version = "1.16.0"
+version = "1.16.1"
 dependencies = [
  "interim",
  "jiff",
@@ -2811,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-distill"
-version = "1.16.0"
+version = "1.16.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-notify"
-version = "1.16.0"
+version = "1.16.1"
 dependencies = [
  "lettre",
  "ptask-core",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-server"
-version = "1.16.0"
+version = "1.16.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2871,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-tui"
-version = "1.16.0"
+version = "1.16.1"
 dependencies = [
  "anyhow",
  "crossterm",
