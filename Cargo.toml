@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "2.3.0"
+version = "2.3.1"
 edition = "2024"
 license = "MIT"
 authors = ["PureTensor, Inc. <hal@puretensor.ai>"]
@@ -47,12 +47,12 @@ base64 = "0.22"
 futures-util = { version = "0.3", default-features = false }
 
 # Internal crates
-ptask-core    = { path = "crates/ptask-core",    version = "2.3.0" }
-ptask-tui     = { path = "crates/ptask-tui",     version = "2.3.0" }
-ptask-server  = { path = "crates/ptask-server",  version = "2.3.0" }
-ptask-bot     = { path = "crates/ptask-bot",     version = "2.3.0" }
-ptask-distill = { path = "crates/ptask-distill", version = "2.3.0" }
-ptask-notify  = { path = "crates/ptask-notify",  version = "2.3.0" }
+ptask-core    = { path = "crates/ptask-core",    version = "2.3.1" }
+ptask-tui     = { path = "crates/ptask-tui",     version = "2.3.1" }
+ptask-server  = { path = "crates/ptask-server",  version = "2.3.1" }
+ptask-bot     = { path = "crates/ptask-bot",     version = "2.3.1" }
+ptask-distill = { path = "crates/ptask-distill", version = "2.3.1" }
+ptask-notify  = { path = "crates/ptask-notify",  version = "2.3.1" }
 
 # HMAC for outbound webhook signing (v0.3.5).
 sha2 = "0.10"

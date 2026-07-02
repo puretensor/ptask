@@ -1498,4 +1498,61 @@ Don't forget the sourdough.\r\n";
         assert!(created["ok"].as_bool().unwrap());
         assert!(created["pt_id"].as_str().unwrap().starts_with("PT-"));
     }
+
+    /// Cross-origin writes must be rejected even with valid Basic creds —
+    /// browsers attach cached credentials cross-origin (CSRF).
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_rejects_cross_origin_writes() {
+        use ptask_core::config::DashConfig;
+        let db = open_test_db();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("csrf target"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let dash = DashConfig {
+            user: "ops".into(),
+            pass: Some("pw".into()),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db, Default::default(), Default::default()).with_dash(dash));
+        let basic = format!(
+            "Basic {}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"ops:pw")
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{}/done", t.id))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("authorization", &basic)
+                    .header("host", "ptask.puretensor.ai")
+                    .header("origin", "https://evil.example")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Matching origin passes.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{}/done", t.id))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("authorization", &basic)
+                    .header("host", "ptask.puretensor.ai")
+                    .header("origin", "https://ptask.puretensor.ai")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

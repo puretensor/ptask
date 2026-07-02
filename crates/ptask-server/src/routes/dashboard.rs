@@ -120,6 +120,23 @@ pub fn authed(state: &AppState, headers: &HeaderMap) -> bool {
     ct_eq(user.as_bytes(), state.dash.user.as_bytes()) & ct_eq(pw.as_bytes(), pass.as_bytes())
 }
 
+/// CSRF guard for the state-changing dashboard routes: browsers attach
+/// cached Basic credentials cross-origin, so a present Origin header must
+/// match the Host we were addressed as. Header-free callers (curl, same-
+/// origin fetches in some browsers) pass.
+fn origin_ok(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|o| o.trim_end_matches('/') == host)
+}
+
 fn need_auth() -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -491,6 +508,9 @@ async fn act_done(
     if !authed(&state, &headers) {
         return need_auth();
     }
+    if !origin_ok(&headers) {
+        return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
+    }
     let task = match resolve_active(&state, &id) {
         Ok(t) => t,
         Err(r) => return r,
@@ -512,6 +532,9 @@ async fn act_dismiss(
     if !authed(&state, &headers) {
         return need_auth();
     }
+    if !origin_ok(&headers) {
+        return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
+    }
     let task = match resolve_active(&state, &id) {
         Ok(t) => t,
         Err(r) => return r,
@@ -532,6 +555,9 @@ async fn act_reopen(
 ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
+    }
+    if !origin_ok(&headers) {
+        return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
     let task = match resolve_active(&state, &id) {
         Ok(t) => t,
@@ -559,6 +585,9 @@ async fn act_priority(
 ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
+    }
+    if !origin_ok(&headers) {
+        return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
     if !(1..=5).contains(&body.level) {
         return jerr(StatusCode::BAD_REQUEST, "level must be an integer 1..5");
@@ -590,6 +619,9 @@ async fn act_snooze(
 ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
+    }
+    if !origin_ok(&headers) {
+        return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
     let days = body.days.unwrap_or(3).clamp(1, 90);
     let task = match resolve_active(&state, &id) {
@@ -641,6 +673,9 @@ async fn act_edit(
 ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
+    }
+    if !origin_ok(&headers) {
+        return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
     let task = match resolve_active(&state, &id) {
         Ok(t) => t,
@@ -697,6 +732,9 @@ async fn api_create(
 ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
+    }
+    if !origin_ok(&headers) {
+        return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
     let title = body.title.trim().to_string();
     if !(3..=400).contains(&title.len()) {
@@ -867,6 +905,9 @@ async fn api_voice(
 ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
+    }
+    if !origin_ok(&headers) {
+        return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
     let url = format!(
         "{}/api/voice",
