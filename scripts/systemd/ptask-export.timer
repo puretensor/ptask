@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly pTask export at 04:45 UTC
+
+[Timer]
+OnCalendar=*-*-* 04:45:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

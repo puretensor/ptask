@@ -195,7 +195,7 @@ pub fn env_db_path() -> PathBuf {
     home_dir().join("puretensor-tasks").join("tasks.db")
 }
 
-fn home_dir() -> PathBuf {
+pub fn home_dir() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
 }
 

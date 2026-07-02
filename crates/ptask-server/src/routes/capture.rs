@@ -39,6 +39,11 @@ pub struct CaptureReq {
     /// Incident severity. `>= 3` takes the fast lane (immediate task).
     #[serde(default)]
     pub severity: Option<i64>,
+    /// Stable client key for idempotent federation: a re-send with the same
+    /// key + text returns the original row instead of a new one (kills the
+    /// heartbeat/fleet-sentry re-nag loop).
+    #[serde(default)]
+    pub client_key: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +51,10 @@ pub struct CaptureResp {
     pub id: i64,
     pub source_type: String,
     pub source_date: String,
+    /// True when client_key matched an existing capture (idempotent replay).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
+    pub duplicate: bool,
     /// Set when the fast lane created a task synchronously.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_uuid: Option<String>,
@@ -95,7 +104,38 @@ async fn capture(
     let source_file = req
         .source_file
         .clone()
+        .or_else(|| req.client_key.clone())
         .unwrap_or_else(|| "http://capture".into());
+
+    if req.client_key.is_some() {
+        let dup: Option<(i64, String, String)> = state
+            .db
+            .with_conn(|c| {
+                use rusqlite::OptionalExtension;
+                Ok(c.query_row(
+                    "SELECT id, source_type, source_date FROM raw_items
+                     WHERE source_file = ?1 AND text = ?2 ORDER BY id DESC LIMIT 1",
+                    rusqlite::params![source_file, text],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?)
+            })
+            .unwrap_or(None);
+        if let Some((id, source_type, source_date)) = dup {
+            return (
+                StatusCode::OK,
+                Json(CaptureResp {
+                    id,
+                    source_type,
+                    source_date,
+                    duplicate: true,
+                    task_uuid: None,
+                    pt_id: None,
+                }),
+            )
+                .into_response();
+        }
+    }
 
     let row = match ptask_core::raw_items::insert(&state.db, &text, &source, &source_file) {
         Ok(r) => r,
@@ -173,6 +213,7 @@ async fn capture(
             id: row.id,
             source_type: row.source_type,
             source_date: row.source_date,
+            duplicate: false,
             task_uuid,
             pt_id,
         }),

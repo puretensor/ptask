@@ -1,0 +1,9 @@
+[Unit]
+Description=pTask nightly JSONL export (git-committed projection of the spine)
+OnFailure=ptask-failure-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.cargo/bin/pt export --git
+Nice=15
+IOSchedulingClass=best-effort

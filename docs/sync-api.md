@@ -224,6 +224,11 @@ return 400 with the reason.
 
 ## POST /capture fast lane (v2.1.0)
 
+**v2.4.0:** optional `client_key` makes capture idempotent — a re-send with
+the same key + text returns HTTP 200 `{"duplicate": true, "id": <original>}`
+instead of a new row. Federation adapters MUST pass one (docs/agent-surface.md).
+
+
 `severity >= 3` (explicit field, or a puresentinel incident source with
 `[puresentinel sevN]` in the text) creates the task SYNCHRONOUSLY —
 attributed to the capturing token identity, `source_type=incident`,

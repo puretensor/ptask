@@ -108,6 +108,17 @@ pt view show <name>                   # run
 pt view rm <name>                     # delete
 ```
 
+## Agent surface (v2.4.0)
+
+```
+pt mcp                    # MCP server over stdio (tools: task_next/list/add/…)
+pt digest [--days 7]      # session-priming JSON: recent done/dismissed + ready queue
+pt export [--git] [--out DIR]   # JSONL projection of the spine (nightly timer)
+pt delegate PT-42         # prints the operator-gated claude -p command (never spawns)
+```
+
+HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md.
+
 ## Long-running daemons
 
 - `pt tui` — ratatui frontend with `j/k`, single-key edits, fuzzy search.

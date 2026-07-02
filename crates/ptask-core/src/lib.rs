@@ -11,6 +11,7 @@ pub mod config;
 pub mod convert;
 pub mod dag;
 pub mod dates;
+pub mod digest;
 pub mod error;
 pub mod event_log;
 pub mod filter;
@@ -30,6 +31,7 @@ pub mod views;
 pub mod webhook_log;
 
 pub use jiff;
+pub use rusqlite;
 
 pub use config::Config;
 pub use error::{Error, Result};

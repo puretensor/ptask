@@ -9,6 +9,7 @@
 //! and `/metrics`.
 
 mod auth;
+pub mod mcp;
 mod routes;
 pub mod webhooks;
 
@@ -46,8 +47,56 @@ impl AppState {
     }
 }
 
+/// Gate `/mcp` to the **hal** named token (write scope). The MCP mount is
+/// HAL's surface by design — per-request identity can't reach rmcp tool
+/// handlers, so attribution is pinned to hal and the gate enforces that
+/// only hal's credential gets in. Other agents use the scoped REST API.
+async fn require_hal_bearer(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let bearer = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let ok = bearer.is_some_and(|tok| {
+        ptask_core::tokens::resolve(&state.db, &tok)
+            .ok()
+            .flatten()
+            .is_some_and(|id| id.client_id == "hal" && id.scope >= ptask_core::tokens::Scope::Write)
+    });
+    if !ok {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error": "mcp requires the hal token"})),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
 /// Build the axum Router. Exposed so tests can hit it without binding a port.
 pub fn router(state: AppState) -> Router {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+    let mcp_db = state.db.clone();
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(mcp::PtaskMcp::new(mcp_db.clone(), "hal".into())),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
+    let mcp_router: Router =
+        Router::new()
+            .fallback_service(mcp_service)
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                require_hal_bearer,
+            ));
     Router::new()
         .merge(routes::base::router())
         .merge(routes::capture::router())
@@ -59,6 +108,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::metrics::router())
         .merge(routes::webhook_git::router())
         .with_state(state)
+        .nest_service("/mcp", mcp_router)
         .layer(TraceLayer::new_for_http())
 }
 

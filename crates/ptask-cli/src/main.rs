@@ -74,6 +74,14 @@ enum Command {
     Serve(ServeArgs),
     /// Run the Telegram bot (Bot API long-poll).
     Bot,
+    /// Serve the MCP server over stdio (agent-native tool surface).
+    Mcp,
+    /// Session-priming digest: recent done/dismissed/created + ready queue.
+    Digest(DigestArgs),
+    /// Export tasks/links/labels as JSONL (optionally git-commit the export).
+    Export(ExportArgs),
+    /// Print the operator-gated delegation command for a task (skeleton).
+    Delegate(DelegateArgs),
     /// Print a Linear-style branch name for a task.
     Branch(BranchArgs),
     /// Run the distillation pipeline (Python subprocess shim until v0.9).
@@ -121,6 +129,29 @@ enum Command {
 enum AccountabilityCommand {
     /// Run the state machine + dispatch once.
     Run(AccountabilityRunArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct DigestArgs {
+    /// Lookback window in days.
+    #[arg(long, default_value_t = 7)]
+    days: i64,
+}
+
+#[derive(clap::Args, Debug)]
+struct ExportArgs {
+    /// Output directory (default ~/puretensor-tasks/export).
+    #[arg(long)]
+    out: Option<std::path::PathBuf>,
+    /// Commit the export in-place (init a repo on first run).
+    #[arg(long)]
+    git: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct DelegateArgs {
+    /// Task handle (PT-N / uuid / title substring).
+    id: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -656,6 +687,10 @@ fn main() -> Result<()> {
                 Some(Command::Tui) => ptask_tui::run(db),
                 Some(Command::Serve(a)) => cmd_serve(db, a),
                 Some(Command::Bot) => cmd_bot(db),
+                Some(Command::Mcp) => cmd_mcp(db),
+                Some(Command::Digest(a)) => cmd_digest(&db, a),
+                Some(Command::Export(a)) => cmd_export(&db, a),
+                Some(Command::Delegate(a)) => cmd_delegate(&db, a),
                 Some(Command::Branch(a)) => cmd_branch(&db, a),
                 Some(Command::Distill(a)) => cmd_distill(&db, a),
                 Some(Command::Accountability(c)) => cmd_accountability(db, c),
@@ -1113,6 +1148,142 @@ fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `pt mcp` — the agent-native tool surface over stdio. Actor comes from
+/// `$PTASK_ACTOR` (config), source=mcp.
+fn cmd_mcp(db: Db) -> Result<()> {
+    let config = ptask_core::Config::from_env();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    rt.block_on(ptask_server::mcp::serve_stdio(db, config.actor))
+}
+
+fn cmd_digest(db: &Db, a: DigestArgs) -> Result<()> {
+    let v = ptask_core::digest::build(db, a.days)?;
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
+/// JSONL export: tasks + task_links + task_labels, one file each. With
+/// --git the export dir becomes/updates a repo — a greppable, diffable,
+/// mirrorable projection of the spine (the DB stays canonical).
+fn cmd_export(db: &Db, a: ExportArgs) -> Result<()> {
+    let out = a.out.unwrap_or_else(|| {
+        ptask_core::config::home_dir()
+            .join("puretensor-tasks")
+            .join("export")
+    });
+    std::fs::create_dir_all(&out).with_context(|| format!("mkdir {:?}", out))?;
+    let conn = db.get()?;
+    let dump = |sql: &str, cols: &[&str], file: &str| -> Result<usize> {
+        let mut stmt = conn.prepare(sql)?;
+        let n_cols = cols.len();
+        let mut rows = stmt.query([])?;
+        let mut lines = Vec::new();
+        while let Some(r) = rows.next()? {
+            let mut m = serde_json::Map::new();
+            for (i, c) in cols.iter().enumerate().take(n_cols) {
+                let v: ptask_core::rusqlite::types::Value = r.get(i)?;
+                m.insert(
+                    (*c).to_string(),
+                    match v {
+                        ptask_core::rusqlite::types::Value::Null => serde_json::Value::Null,
+                        ptask_core::rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+                        ptask_core::rusqlite::types::Value::Real(f) => serde_json::json!(f),
+                        ptask_core::rusqlite::types::Value::Text(t) => serde_json::json!(t),
+                        ptask_core::rusqlite::types::Value::Blob(_) => serde_json::Value::Null,
+                    },
+                );
+            }
+            lines.push(serde_json::to_string(&m)?);
+        }
+        std::fs::write(out.join(file), lines.join("\n") + "\n")?;
+        Ok(lines.len())
+    };
+    let nt = dump(
+        "SELECT id, pt_id, title, description, priority, status_v2, created_at,
+                updated_at, deadline, due_at, snoozed_until, source_type, task_type,
+                project, parent_uuid, priority_score, escalation_level
+         FROM tasks ORDER BY rowid",
+        &[
+            "id",
+            "pt_id",
+            "title",
+            "description",
+            "priority",
+            "status",
+            "created_at",
+            "updated_at",
+            "deadline",
+            "due_at",
+            "snoozed_until",
+            "source_type",
+            "task_type",
+            "project",
+            "parent_uuid",
+            "priority_score",
+            "escalation_level",
+        ],
+        "tasks.jsonl",
+    )?;
+    let nl = dump(
+        "SELECT from_uuid, to_uuid, kind, created_at FROM task_links ORDER BY rowid",
+        &["from_uuid", "to_uuid", "kind", "created_at"],
+        "task_links.jsonl",
+    )?;
+    let nb = dump(
+        "SELECT task_uuid, label FROM task_labels ORDER BY rowid",
+        &["task_uuid", "label"],
+        "task_labels.jsonl",
+    )?;
+    println!(
+        "exported {} tasks, {} links, {} labels -> {:?}",
+        nt, nl, nb, out
+    );
+    if a.git {
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&out)
+                .output()
+        };
+        if !out.join(".git").exists() {
+            run(&["init", "-q"]).context("git init")?;
+        }
+        run(&["add", "-A"]).context("git add")?;
+        let msg = format!("pt export: {} tasks, {} links, {} labels", nt, nl, nb);
+        let c = run(&["commit", "-q", "-m", &msg]).context("git commit")?;
+        if c.status.success() {
+            println!("committed: {}", msg);
+        } else {
+            println!("nothing to commit (no changes since last export)");
+        }
+    }
+    Ok(())
+}
+
+/// `pt delegate` — OPERATOR-GATED skeleton. Prints the headless command;
+/// never spawns it. Autonomy is revisited once the loop is proven.
+fn cmd_delegate(db: &Db, a: DelegateArgs) -> Result<()> {
+    let t = tasks::resolve_for_lookup(db, &a.id, false).map_err(anyhow::Error::msg)?;
+    let handle = t.pt_id.clone().unwrap_or_else(|| t.id.clone());
+    println!(
+        "delegation command for {} — review, then run it yourself:",
+        handle
+    );
+    println!();
+    println!(
+        "  claude -p \"Work the pTask task {}: {}. When done: pt done {}; if blocked, pt capture a note explaining why.\"",
+        handle,
+        t.title.replace('"', "'"),
+        handle
+    );
+    println!();
+    println!("(operator-gated by design — pt will not spawn agents autonomously)");
+    Ok(())
 }
 
 fn cmd_serve(db: Db, a: ServeArgs) -> Result<()> {

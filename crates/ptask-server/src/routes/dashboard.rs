@@ -865,13 +865,19 @@ async fn serve_index(State(state): State<AppState>, headers: HeaderMap) -> Respo
     serve_www_file(&state, &headers, "index.html", "text/html; charset=utf-8")
 }
 
-async fn serve_manifest(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    serve_www_file(
-        &state,
-        &headers,
-        "manifest.webmanifest",
-        "application/manifest+json",
-    )
+/// Auth-exempt: browsers fetch manifests without credentials, and the file
+/// holds nothing sensitive.
+async fn serve_manifest(State(state): State<AppState>) -> Response {
+    let path = state.dash.www_dir.join("manifest.webmanifest");
+    match std::fs::read(&path) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/manifest+json")],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => jerr(StatusCode::NOT_FOUND, "not found"),
+    }
 }
 
 /// Allow-listed static files from the configured www dir. No arbitrary
