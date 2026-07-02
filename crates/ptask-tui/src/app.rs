@@ -15,6 +15,15 @@ use ratatui::widgets::ListState;
 
 const TUI_TASK_LIMIT: usize = 1000;
 
+/// Attribution for TUI-initiated mutations (the operator at the keyboard).
+fn tui_ctx() -> ptask_core::event_log::EventCtx {
+    ptask_core::event_log::EventCtx {
+        actor: "shell".into(),
+        source: "tui".into(),
+        event_uuid: None,
+    }
+}
+
 pub struct App {
     pub db: Db,
     pub tasks: Vec<Task>,
@@ -324,7 +333,7 @@ impl App {
             match (c, key.code) {
                 (Confirm::Delete { task_uuid, title }, KeyCode::Char('y'))
                 | (Confirm::Delete { task_uuid, title }, KeyCode::Char('Y')) => {
-                    match ptask_core::tasks::delete_task(&self.db, &task_uuid) {
+                    match ptask_core::tasks::delete_task(&self.db, &task_uuid, &tui_ctx()) {
                         Ok(_) => {
                             self.status_msg = format!("deleted: {}", title);
                             if let Err(e) = self.reload() {
@@ -471,7 +480,7 @@ impl App {
             return;
         };
         let pt = task.pt_id.clone().unwrap_or_default();
-        match tasks::mark_done(&self.db, &task) {
+        match tasks::mark_done(&self.db, &task, &tui_ctx()) {
             Ok(tasks::DoneOutcome::Completed) => {
                 self.status_msg = format!("done: {} {}", pt, task.title);
             }
@@ -499,7 +508,7 @@ impl App {
         } else {
             task.priority + 1
         };
-        match tasks::update_priority(&self.db, &task.id, next) {
+        match tasks::update_priority(&self.db, &task.id, next, &tui_ctx()) {
             Ok(_) => {
                 self.status_msg = format!(
                     "{} → priority {} ({})",
@@ -557,7 +566,7 @@ impl App {
             energy: None,
             recurrence: q.recurrence.clone(),
         };
-        match tasks::create_with_extensions(&self.db, new, ext) {
+        match tasks::create_with_extensions(&self.db, new, ext, &tui_ctx()) {
             Ok(t) => {
                 self.status_msg =
                     format!("created {}: {}", t.pt_id.as_deref().unwrap_or("?"), t.title);
@@ -600,6 +609,7 @@ impl App {
 mod tests {
     use super::*;
     use ptask_core::NewTask;
+    use ptask_core::event_log::EventCtx;
 
     fn fresh_db() -> (tempfile::TempDir, Db) {
         let dir = tempfile::tempdir().unwrap();
@@ -650,7 +660,7 @@ mod tests {
     #[test]
     fn reload_keeps_no_selection_when_filter_matches_nothing() {
         let (_dir, db) = fresh_db();
-        ptask_core::tasks::create(&db, NewTask::minimal("alpha task")).unwrap();
+        ptask_core::tasks::create(&db, NewTask::minimal("alpha task"), &EventCtx::test()).unwrap();
 
         let mut app = App::new(db).unwrap();
         app.filter_query = "zzzz-no-match".into();
@@ -668,7 +678,12 @@ mod tests {
     fn initial_load_covers_phase_three_task_volume() {
         let (_dir, db) = fresh_db();
         for i in 0..205 {
-            ptask_core::tasks::create(&db, NewTask::minimal(format!("task {i:03}"))).unwrap();
+            ptask_core::tasks::create(
+                &db,
+                NewTask::minimal(format!("task {i:03}")),
+                &EventCtx::test(),
+            )
+            .unwrap();
         }
 
         let app = App::new(db).unwrap();

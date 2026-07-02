@@ -7,6 +7,7 @@
 //! to 10k once the perf gate lands in CI.
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use ptask_core::event_log::EventCtx;
 use ptask_core::{Db, NewTask, dag, quickadd, tasks};
 use std::hint::black_box;
 
@@ -21,6 +22,7 @@ fn seed(db: &Db, n: usize) {
         tasks::create(
             db,
             NewTask::minimal(format!("bench task {i} — investigate ceph mon quorum")),
+            &EventCtx::test(),
         )
         .unwrap();
     }
@@ -39,7 +41,12 @@ fn bench_add(c: &mut Criterion) {
         let (_d, db) = fresh_db();
         seed(&db, 100);
         b.iter(|| {
-            tasks::create(&db, NewTask::minimal("ephemeral bench task")).unwrap();
+            tasks::create(
+                &db,
+                NewTask::minimal("ephemeral bench task"),
+                &EventCtx::test(),
+            )
+            .unwrap();
             let rows = tasks::list_with_filter(&db, None, Some("pending"), None, 100).unwrap();
             black_box(rows);
         });

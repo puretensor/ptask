@@ -22,7 +22,7 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> impl Into
     // Same enforce-if-configured gate as the write routes: /metrics leaks
     // task/store counts. When PTASK_API_TOKEN is unset this returns None and
     // the scrape is served (back-compat); when set, a missing/wrong token 401s.
-    if let Some(resp) = crate::auth::require_read_token(&state.auth, &headers) {
+    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
     let body = render(&state.db).unwrap_or_else(|e| {

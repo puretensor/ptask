@@ -213,34 +213,56 @@ fn fallback_message(task: &EligibleTask, level: i64, age_days: i64) -> String {
     }
 }
 
-/// Update tasks(escalation_level=N) and log to interactions.
+/// Update tasks(escalation_level=N), log to interactions, and record an
+/// attributed `task.escalated` event — escalations used to be invisible to
+/// the journal (and thus to delta sync and the audit trail).
 fn set_escalation_level(db: &Db, task_uuid: &str, level: i64) -> Result<()> {
-    let conn = db.get()?;
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
     let now = crate::dates::format_iso(&crate::dates::now_in_operator_tz()?);
-    conn.execute(
+    tx.execute(
         "UPDATE tasks SET escalation_level=?1, updated_at=?2 WHERE id=?3",
         params![level, now, task_uuid],
     )?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO interactions (task_id, action, ts, details)
          VALUES (?1, 'escalation', ?2, ?3)",
         params![task_uuid, now, format!("escalation_level → {}", level)],
     )?;
+    crate::event_log::record_in_conn(
+        &tx,
+        &format!("local:{}", uuid::Uuid::new_v4()),
+        Some(task_uuid),
+        "task.escalated",
+        &serde_json::json!({ "task_uuid": task_uuid, "level": level }),
+        &crate::event_log::EventCtx::system("accountability"),
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
 fn set_status(db: &Db, task_uuid: &str, status: &str) -> Result<()> {
-    let conn = db.get()?;
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
     let now = crate::dates::format_iso(&crate::dates::now_in_operator_tz()?);
-    conn.execute(
+    tx.execute(
         "UPDATE tasks SET status=?1, updated_at=?2 WHERE id=?3",
         params![status, now, task_uuid],
     )?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO interactions (task_id, action, ts, details)
          VALUES (?1, 'status_change', ?2, ?3)",
         params![task_uuid, now, format!("status → {}", status)],
     )?;
+    crate::event_log::record_in_conn(
+        &tx,
+        &format!("local:{}", uuid::Uuid::new_v4()),
+        Some(task_uuid),
+        "task.updated",
+        &serde_json::json!({ "task_uuid": task_uuid, "status": status }),
+        &crate::event_log::EventCtx::system("accountability"),
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -513,6 +535,7 @@ pub async fn run_check_at<D: Dispatch>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event_log::EventCtx;
     use crate::tasks::{Extensions, NewTask, create_with_extensions};
     use rusqlite::params;
 
@@ -579,7 +602,13 @@ mod tests {
     /// Build a task and back-date created_at relative to a `before` anchor
     /// so age_days computes deterministically regardless of wall clock.
     fn aged_task_before(db: &Db, title: &str, age_days: i64, before: &Zoned) -> String {
-        let t = create_with_extensions(db, NewTask::minimal(title), Extensions::default()).unwrap();
+        let t = create_with_extensions(
+            db,
+            NewTask::minimal(title),
+            Extensions::default(),
+            &EventCtx::test(),
+        )
+        .unwrap();
         // Pad by an extra hour so integer-truncated age_days lands at or
         // above the requested value even when the anchor moves slightly.
         let created = before

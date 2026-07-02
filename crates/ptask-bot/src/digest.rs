@@ -162,6 +162,7 @@ async fn fanout(bot: &Bot, cfg: &BotConfig, text: &str) {
 mod tests {
     use super::*;
     use ptask_core::NewTask;
+    use ptask_core::event_log::EventCtx;
 
     fn fresh_db() -> (tempfile::TempDir, Db) {
         let dir = tempfile::tempdir().unwrap();
@@ -222,8 +223,8 @@ mod tests {
         let today = dates::now_in_operator_tz().unwrap().date().to_string();
         let mut new = NewTask::minimal("already done today");
         new.deadline = Some(today);
-        let task = ptask_core::tasks::create(&db, new).unwrap();
-        ptask_core::tasks::mark_done(&db, &task).unwrap();
+        let task = ptask_core::tasks::create(&db, new, &EventCtx::test()).unwrap();
+        ptask_core::tasks::mark_done(&db, &task, &EventCtx::test()).unwrap();
 
         let txt = render_morning(&db).unwrap();
         assert!(txt.contains("Clear runway"), "got:\n{txt}");
@@ -242,8 +243,8 @@ mod tests {
     #[test]
     fn evening_recap_counts_done_today() {
         let (_dir, db) = fresh_db();
-        let t = ptask_core::tasks::create(&db, NewTask::minimal("x")).unwrap();
-        ptask_core::tasks::mark_done(&db, &t).unwrap();
+        let t = ptask_core::tasks::create(&db, NewTask::minimal("x"), &EventCtx::test()).unwrap();
+        ptask_core::tasks::mark_done(&db, &t, &EventCtx::test()).unwrap();
         let txt = render_evening(&db).unwrap();
         assert!(txt.contains("Completed today: 1"));
     }
@@ -263,7 +264,8 @@ mod tests {
     #[test]
     fn evening_recap_counts_london_day_across_bst_offset() {
         let (_dir, db) = fresh_db();
-        let task = ptask_core::tasks::create(&db, NewTask::minimal("late done")).unwrap();
+        let task = ptask_core::tasks::create(&db, NewTask::minimal("late done"), &EventCtx::test())
+            .unwrap();
         db.with_conn(|c| {
             c.execute(
                 "INSERT INTO interactions (task_id, action, ts, details)

@@ -20,6 +20,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use hmac::{Hmac, Mac};
+use ptask_core::event_log::EventCtx;
 use ptask_core::tasks::{self, DoneOutcome};
 use ptask_core::webhook_log::{Direction, record as log_webhook};
 use ptask_core::{event_log, magic_words};
@@ -164,7 +165,11 @@ async fn handle(
             // deliveries idempotent. The richer source/commit context still
             // travels in the outbound webhook envelope.
             match tasks::resolve(&state.db, &pt_id) {
-                Ok(t) => match tasks::mark_done_with_event(&state.db, &t, Some(&event_uuid)) {
+                Ok(t) => match tasks::mark_done(
+                    &state.db,
+                    &t,
+                    &EventCtx::webhook(source, event_uuid.clone()),
+                ) {
                     Ok(DoneOutcome::Completed) => {
                         let payload = serde_json::json!({
                             "task_uuid": t.id,

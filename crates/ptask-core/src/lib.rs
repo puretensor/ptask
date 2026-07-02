@@ -23,6 +23,7 @@ pub mod recurrence;
 pub mod scoring;
 pub mod storage;
 pub mod tasks;
+pub mod tokens;
 pub mod views;
 pub mod webhook_log;
 

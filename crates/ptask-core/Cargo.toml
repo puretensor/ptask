@@ -19,6 +19,8 @@ r2d2_sqlite = { workspace = true }
 refinery = { workspace = true }
 uuid = { workspace = true }
 jiff = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 interim = { workspace = true }
 # Deliberately NO reqwest/lettre/tokio: the domain crate is pure. Network
 # dispatch implementations live in ptask-notify behind the Dispatch trait.

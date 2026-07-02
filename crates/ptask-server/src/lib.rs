@@ -110,6 +110,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use ptask_core::event_log::EventCtx;
     use tower::ServiceExt;
 
     fn open_test_db() -> Db {
@@ -686,7 +687,12 @@ mod tests {
 
         // Seed one event so the baseline cursor is non-zero (a "0" token is
         // the full-sync sentinel and would mask the delta behaviour).
-        ptask_core::tasks::create(&db, ptask_core::tasks::NewTask::minimal("seed")).unwrap();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::tasks::NewTask::minimal("seed"),
+            &EventCtx::test(),
+        )
+        .unwrap();
 
         // Client baseline: grab a cursor.
         let req = serde_json::json!({ "sync_token": "*", "commands": [] });
@@ -709,12 +715,19 @@ mod tests {
         let token = parsed["sync_token"].as_str().unwrap().to_string();
 
         // Local mutations on the canonical host — CLI path, not /sync.
-        let kept = ptask_core::tasks::create(&db, ptask_core::tasks::NewTask::minimal("cli kept"))
-            .unwrap();
-        let doomed =
-            ptask_core::tasks::create(&db, ptask_core::tasks::NewTask::minimal("cli doomed"))
-                .unwrap();
-        ptask_core::tasks::delete_task(&db, &doomed.id).unwrap();
+        let kept = ptask_core::tasks::create(
+            &db,
+            ptask_core::tasks::NewTask::minimal("cli kept"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let doomed = ptask_core::tasks::create(
+            &db,
+            ptask_core::tasks::NewTask::minimal("cli doomed"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        ptask_core::tasks::delete_task(&db, &doomed.id, &EventCtx::test()).unwrap();
 
         // Delta sync from the old cursor.
         let req = serde_json::json!({ "sync_token": token, "commands": [] });
@@ -1050,7 +1063,12 @@ mod tests {
         use sha2::Sha256;
         let db = open_test_db();
         // Create a task we can close via the magic word.
-        let t = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("close me")).unwrap();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("close me"),
+            &EventCtx::test(),
+        )
+        .unwrap();
         let pt = t.pt_id.clone().unwrap();
         let body = serde_json::json!({
             "ref": "refs/heads/main",
@@ -1217,5 +1235,77 @@ Don't forget the sourdough.\r\n";
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
         assert!(s.starts_with("pt "));
+    }
+    /// PHASE-3 GATE (server side): a named scoped token authenticates, its
+    /// client_id becomes the journal actor, and a read-scoped token cannot
+    /// write.
+    #[tokio::test(flavor = "current_thread")]
+    async fn named_token_identity_lands_in_journal() {
+        let db = open_test_db();
+        let plain =
+            ptask_core::tokens::create(&db, "hal", ptask_core::tokens::Scope::Write).unwrap();
+        let reader =
+            ptask_core::tokens::create(&db, "watcher", ptask_core::tokens::Scope::Read).unwrap();
+        let auth = AuthConfig {
+            api_token: Some("env-token".into()),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), auth, Default::default()));
+
+        let body = serde_json::json!({
+            "sync_token": "*",
+            "commands": [{
+                "type": "task_create",
+                "uuid": "cmd-hal-1",
+                "temp_id": "tmp-hal",
+                "args": {"text": "attributed task"}
+            }]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {plain}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (actor, payload): (String, String) = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT actor, payload FROM pt_event_log WHERE uuid='cmd-hal-1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(actor, "hal", "journal actor is the token's client_id");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["actor"], "hal");
+        assert_eq!(v["source"], "sync");
+
+        // Read scope must not authorize /sync.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {reader}"))
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({"sync_token":"*","commands":[]}))
+                            .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

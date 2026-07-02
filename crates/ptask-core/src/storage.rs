@@ -108,6 +108,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event_log::EventCtx;
 
     /// Open a temp DB and verify migrations created the side tables.
     #[test]
@@ -184,6 +185,7 @@ mod tests {
             &db,
             crate::tasks::NewTask::minimal("first task on a fresh install"),
             crate::tasks::Extensions::default(),
+            &EventCtx::test(),
         )
         .expect("create works on greenfield DB");
         assert_eq!(task.pt_id.as_deref(), Some("PT-1"));

@@ -111,6 +111,20 @@ pt view rm <name>                     # delete
 | `pt scoring run [--dry-run]` | `hourly` | Composite priority recompute. |
 | `pt backfill` | one-shot | Mint PT-N for any task lacking one. |
 
+## Journal & tokens (v1.17.0)
+
+| Verb | Use |
+|---|---|
+| `pt log <query> [-n N]` | attributed event history for a task: when, who (actor), via which surface, what |
+| `pt undo` | reverse the most recent undoable mutation (done/dismiss → reopen, create → delete); the reversal is itself an attributed event |
+| `pt token create <client_id> [--scope read\|capture\|write\|admin]` | mint a named scoped API token (plain value shown ONCE; only the sha256 is stored) |
+| `pt token list` | client, scope, active/revoked, created/last-used |
+| `pt token revoke <client_id>` | revoke all active tokens for a client |
+
+Server auth resolves, in order: legacy env `PTASK_API_TOKEN` → env metrics
+token → `pt_api_tokens` lookup. Named-token requests are journaled under
+their client_id; local mutations under `$PTASK_ACTOR` (default `shell`).
+
 ## Remote (`pt remote`)
 
 Talks to a canonical `pt serve` over Tailscale; no local DB.

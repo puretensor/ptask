@@ -6,6 +6,15 @@ use ptask_core::Db;
 use ptask_core::tasks::DoneOutcome;
 use tracing::info;
 
+/// Attribution for Telegram-bot-initiated mutations.
+fn bot_ctx() -> ptask_core::event_log::EventCtx {
+    ptask_core::event_log::EventCtx {
+        actor: "telegram".into(),
+        source: "bot".into(),
+        event_uuid: None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PtCommand {
     Add(String),
@@ -116,7 +125,7 @@ async fn handle_add(bot: &Bot, chat_id: ChatId, db: &Db, text: &str) -> Result<(
         energy: None,
         recurrence: q.recurrence.clone(),
     };
-    match ptask_core::tasks::create_with_extensions(db, new, ext) {
+    match ptask_core::tasks::create_with_extensions(db, new, ext, &bot_ctx()) {
         Ok(t) => {
             let pt = t.pt_id.as_deref().unwrap_or("?");
             let mut msg = format!("✓ {} {}", pt, t.title);
@@ -193,7 +202,7 @@ async fn handle_done(bot: &Bot, chat_id: ChatId, db: &Db, query: &str) -> Result
         }
     };
     let pt = task.pt_id.as_deref().unwrap_or("?");
-    match ptask_core::tasks::mark_done(db, &task) {
+    match ptask_core::tasks::mark_done(db, &task, &bot_ctx()) {
         Ok(DoneOutcome::Completed) => {
             send(bot, chat_id, format!("✓ done: {} {}", pt, task.title)).await?;
         }

@@ -30,6 +30,7 @@ pub mod semantic_dedup;
 use anyhow::{Context, Result};
 use ptask_core::Db;
 use ptask_core::event_log;
+use ptask_core::event_log::EventCtx;
 use ptask_core::pt_id;
 use std::collections::HashSet;
 use std::path::Path;
@@ -120,7 +121,14 @@ pub fn run(db: &Db, args: &[&str], py_root: &Path) -> Result<RunReport> {
     } else {
         "distill.failed"
     };
-    if let Err(e) = event_log::record(db, &run_uuid, None, event_type, &payload) {
+    if let Err(e) = event_log::record(
+        db,
+        &run_uuid,
+        None,
+        event_type,
+        &payload,
+        &EventCtx::system("distill"),
+    ) {
         warn!(target: "ptask::distill", error = %e, "pt_event_log record failed");
     }
 
@@ -200,9 +208,14 @@ fn record_new_task_events(db: &Db, run_uuid: &str, task_uuids: &[String]) -> Res
             "run_uuid": run_uuid,
         });
         let event_uuid = format!("{run_uuid}:task:{task_uuid}");
-        if let Err(e) =
-            event_log::record(db, &event_uuid, Some(task_uuid), "task.created", &payload)
-        {
+        if let Err(e) = event_log::record(
+            db,
+            &event_uuid,
+            Some(task_uuid),
+            "task.created",
+            &payload,
+            &EventCtx::system("distill"),
+        ) {
             warn!(
                 target: "ptask::distill",
                 task_uuid,

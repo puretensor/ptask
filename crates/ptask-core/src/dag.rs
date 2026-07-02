@@ -145,6 +145,7 @@ pub fn pending_with_missing_deps(db: &Db) -> Result<Vec<(Task, Vec<String>)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event_log::EventCtx;
     use crate::tasks::NewTask;
     use rusqlite::params;
 
@@ -209,7 +210,7 @@ mod tests {
     #[test]
     fn task_with_no_deps_is_ready() {
         let (_dir, db) = fresh_db();
-        crate::tasks::create(&db, NewTask::minimal("solo")).unwrap();
+        crate::tasks::create(&db, NewTask::minimal("solo"), &EventCtx::test()).unwrap();
         let ready = next_ready(&db, 10).unwrap();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].title, "solo");
@@ -218,8 +219,9 @@ mod tests {
     #[test]
     fn task_with_open_dep_is_not_ready() {
         let (_dir, db) = fresh_db();
-        let a = crate::tasks::create(&db, NewTask::minimal("blocker")).unwrap();
-        let b = crate::tasks::create(&db, NewTask::minimal("downstream")).unwrap();
+        let a = crate::tasks::create(&db, NewTask::minimal("blocker"), &EventCtx::test()).unwrap();
+        let b =
+            crate::tasks::create(&db, NewTask::minimal("downstream"), &EventCtx::test()).unwrap();
         set_deps(&db, &b.id, std::slice::from_ref(&a.id));
         let ready = next_ready(&db, 10).unwrap();
         let titles: Vec<&str> = ready.iter().map(|t| t.title.as_str()).collect();
@@ -229,10 +231,11 @@ mod tests {
     #[test]
     fn task_with_done_dep_becomes_ready() {
         let (_dir, db) = fresh_db();
-        let a = crate::tasks::create(&db, NewTask::minimal("blocker")).unwrap();
-        let b = crate::tasks::create(&db, NewTask::minimal("downstream")).unwrap();
+        let a = crate::tasks::create(&db, NewTask::minimal("blocker"), &EventCtx::test()).unwrap();
+        let b =
+            crate::tasks::create(&db, NewTask::minimal("downstream"), &EventCtx::test()).unwrap();
         set_deps(&db, &b.id, std::slice::from_ref(&a.id));
-        crate::tasks::mark_done(&db, &a).unwrap();
+        crate::tasks::mark_done(&db, &a, &EventCtx::test()).unwrap();
         let ready = next_ready(&db, 10).unwrap();
         let titles: Vec<&str> = ready.iter().map(|t| t.title.as_str()).collect();
         // Now only "downstream" remains pending and is ready.
@@ -242,8 +245,10 @@ mod tests {
     #[test]
     fn ordering_priority_score_first() {
         let (_dir, db) = fresh_db();
-        let lo = crate::tasks::create(&db, NewTask::minimal("low score")).unwrap();
-        let hi = crate::tasks::create(&db, NewTask::minimal("high score")).unwrap();
+        let lo =
+            crate::tasks::create(&db, NewTask::minimal("low score"), &EventCtx::test()).unwrap();
+        let hi =
+            crate::tasks::create(&db, NewTask::minimal("high score"), &EventCtx::test()).unwrap();
         db.with_conn(|c| {
             c.execute("UPDATE tasks SET priority_score=9.0 WHERE id=?1", [&hi.id])?;
             c.execute("UPDATE tasks SET priority_score=1.0 WHERE id=?1", [&lo.id])?;
@@ -257,8 +262,10 @@ mod tests {
     #[test]
     fn ordering_matches_task_list_without_deadline_sort() {
         let (_dir, db) = fresh_db();
-        let older_due = crate::tasks::create(&db, NewTask::minimal("older due")).unwrap();
-        let newer_no_due = crate::tasks::create(&db, NewTask::minimal("newer no due")).unwrap();
+        let older_due =
+            crate::tasks::create(&db, NewTask::minimal("older due"), &EventCtx::test()).unwrap();
+        let newer_no_due =
+            crate::tasks::create(&db, NewTask::minimal("newer no due"), &EventCtx::test()).unwrap();
         db.with_conn(|c| {
             c.execute(
                 "UPDATE tasks
@@ -291,7 +298,8 @@ mod tests {
     fn limit_truncates_result() {
         let (_dir, db) = fresh_db();
         for i in 0..5 {
-            crate::tasks::create(&db, NewTask::minimal(format!("t{}", i))).unwrap();
+            crate::tasks::create(&db, NewTask::minimal(format!("t{}", i)), &EventCtx::test())
+                .unwrap();
         }
         let ready = next_ready(&db, 3).unwrap();
         assert_eq!(ready.len(), 3);
@@ -302,7 +310,8 @@ mod tests {
         // depends_on referencing a UUID that no longer exists is treated as
         // satisfied (the row was likely deleted or the reference is stale).
         let (_dir, db) = fresh_db();
-        let t = crate::tasks::create(&db, NewTask::minimal("orphan dep")).unwrap();
+        let t =
+            crate::tasks::create(&db, NewTask::minimal("orphan dep"), &EventCtx::test()).unwrap();
         set_deps(&db, &t.id, &["nonexistent-uuid".to_string()]);
         let ready = next_ready(&db, 10).unwrap();
         assert_eq!(ready.len(), 1);
@@ -311,8 +320,10 @@ mod tests {
     #[test]
     fn pending_with_missing_deps_surfaces_blockers() {
         let (_dir, db) = fresh_db();
-        let blocker = crate::tasks::create(&db, NewTask::minimal("blocker")).unwrap();
-        let downstream = crate::tasks::create(&db, NewTask::minimal("downstream")).unwrap();
+        let blocker =
+            crate::tasks::create(&db, NewTask::minimal("blocker"), &EventCtx::test()).unwrap();
+        let downstream =
+            crate::tasks::create(&db, NewTask::minimal("downstream"), &EventCtx::test()).unwrap();
         set_deps(&db, &downstream.id, std::slice::from_ref(&blocker.id));
         let pending = pending_with_missing_deps(&db).unwrap();
         assert_eq!(pending.len(), 1);

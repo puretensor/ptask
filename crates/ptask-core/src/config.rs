@@ -16,6 +16,10 @@ use std::path::PathBuf;
 pub struct Config {
     /// SQLite store. `$PTASK_DB`, else `~/puretensor-tasks/tasks.db`.
     pub db_path: PathBuf,
+    /// Identity stamped on locally-initiated mutations (`$PTASK_ACTOR`,
+    /// default "shell"). The dashboard sidecar sets PTASK_ACTOR=dashboard
+    /// on its pt subprocesses; HAL sessions can set PTASK_ACTOR=hal.
+    pub actor: String,
     pub auth: AuthConfig,
     pub notify: DispatchCfg,
     pub webhooks: WebhookConfig,
@@ -99,6 +103,7 @@ impl Config {
     pub fn from_env() -> Self {
         Config {
             db_path: env_db_path(),
+            actor: env_nonempty("PTASK_ACTOR").unwrap_or_else(|| "shell".into()),
             auth: AuthConfig {
                 api_token: env_nonempty("PTASK_API_TOKEN"),
                 metrics_token: env_nonempty("PTASK_METRICS_TOKEN"),
@@ -209,6 +214,7 @@ mod tests {
     #[test]
     fn default_config_is_inert() {
         let cfg = Config::default();
+        assert!(cfg.actor.is_empty());
         assert!(cfg.auth.api_token.is_none());
         assert!(!cfg.notify.telegram_configured());
         assert!(cfg.webhooks.outbound_urls.is_empty());

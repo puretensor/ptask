@@ -5,6 +5,7 @@
 //! are indistinguishable.
 
 use crate::error::Result;
+use crate::event_log::EventCtx;
 use crate::storage::Db;
 use crate::{priority, pt_id};
 use jiff::Zoned;
@@ -72,8 +73,8 @@ pub struct Extensions {
 
 /// Insert a task with byte-for-byte Python defaults, mint a PT-N, log a
 /// `create` interaction. Returns the created Task.
-pub fn create(db: &Db, new: NewTask) -> Result<Task> {
-    create_with_extensions(db, new, Extensions::default())
+pub fn create(db: &Db, new: NewTask, ctx: &EventCtx) -> Result<Task> {
+    create_with_extensions(db, new, Extensions::default(), ctx)
 }
 
 /// Generate an idempotency uuid for a locally-initiated mutation (CLI, TUI,
@@ -83,45 +84,39 @@ fn local_event_uuid() -> String {
     format!("local:{}", Uuid::new_v4())
 }
 
-/// Write the event row inside the mutation's own transaction. Every event
-/// recorded here is what delta sync clients see — a mutation without an
-/// event row is invisible to the fleet, which is the bug this unification
-/// removes.
+/// Write the attributed event row inside the mutation's own transaction.
+/// Every event recorded here is what delta sync clients see — a mutation
+/// without an event row is invisible to the fleet, and a mutation without
+/// an actor is invisible to the audit trail; `ctx` is how the compiler
+/// forces every writer to identify itself.
 fn record_event_tx(
     tx: &rusqlite::Connection,
-    event_uuid: Option<&str>,
+    ctx: &EventCtx,
     task_uuid: &str,
     event_type: &str,
     payload: &serde_json::Value,
 ) -> Result<()> {
     let generated;
-    let uuid = match event_uuid {
+    let uuid = match ctx.event_uuid.as_deref() {
         Some(u) => u,
         None => {
             generated = local_event_uuid();
             &generated
         }
     };
-    crate::event_log::record_in_conn(tx, uuid, Some(task_uuid), event_type, payload)?;
+    crate::event_log::record_in_conn(tx, uuid, Some(task_uuid), event_type, payload, ctx)?;
     Ok(())
 }
 
 /// Variant that also writes pTask-native fields into `pt_extensions`
 /// (labels JSON, project, duration_min, planned_at, energy) in the same
-/// transaction. Used by the inline-token quick-add path.
-pub fn create_with_extensions(db: &Db, new: NewTask, ext: Extensions) -> Result<Task> {
-    create_with_extensions_with_event(db, new, ext, None)
-}
-
-/// Full-control variant: `event_uuid` is the idempotency key recorded with
-/// the `task.created` event (Some = caller-supplied, e.g. a sync command
-/// uuid; None = generated `local:` uuid). The event row commits in the same
-/// transaction as the task insert.
-pub fn create_with_extensions_with_event(
+/// transaction. The attributed `task.created` event commits with the
+/// insert; `ctx.event_uuid` carries the /sync idempotency key when remote.
+pub fn create_with_extensions(
     db: &Db,
     new: NewTask,
     ext: Extensions,
-    event_uuid: Option<&str>,
+    ctx: &EventCtx,
 ) -> Result<Task> {
     let id = Uuid::new_v4().to_string();
     let now = iso_now();
@@ -222,7 +217,7 @@ pub fn create_with_extensions_with_event(
     };
     let payload = serde_json::to_value(&task)
         .map_err(|e| crate::Error::Other(format!("task.created payload: {}", e)))?;
-    record_event_tx(&tx, event_uuid, &task.id, "task.created", &payload)?;
+    record_event_tx(&tx, ctx, &task.id, "task.created", &payload)?;
 
     tx.commit()?;
     debug!(target: "ptask::tasks", pt_id = %pt_id_str, "created");
@@ -563,15 +558,9 @@ pub enum DoneOutcome {
 /// is advanced in-place and `status` stays `pending` (Todoist-style).
 /// Otherwise the task is set to `status='done'`. Either way an
 /// `interactions` row is logged.
-pub fn mark_done(db: &Db, task: &Task) -> Result<DoneOutcome> {
-    mark_done_with_event(db, task, None)
-}
-
-/// Full-control variant of [`mark_done`]: the `task.completed` /
-/// `task.recurrence_advanced` event commits in the same transaction as the
-/// status flip. `event_uuid` semantics match
-/// [`create_with_extensions_with_event`].
-pub fn mark_done_with_event(db: &Db, task: &Task, event_uuid: Option<&str>) -> Result<DoneOutcome> {
+/// Mark done. The `task.completed` / `task.recurrence_advanced` event
+/// commits in the same transaction as the status flip, attributed to `ctx`.
+pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
     let now = iso_now();
@@ -642,7 +631,7 @@ pub fn mark_done_with_event(db: &Db, task: &Task, event_uuid: Option<&str>) -> R
         )?;
         record_event_tx(
             &tx,
-            event_uuid,
+            ctx,
             &task.id,
             "task.recurrence_advanced",
             &serde_json::json!({
@@ -668,7 +657,7 @@ pub fn mark_done_with_event(db: &Db, task: &Task, event_uuid: Option<&str>) -> R
     )?;
     record_event_tx(
         &tx,
-        event_uuid,
+        ctx,
         &task.id,
         "task.completed",
         &serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id }),
@@ -766,20 +755,9 @@ pub fn branch_name(pt_id: &str, title: &str) -> String {
 }
 
 /// Set a task's priority (1..=5). Logs a `priority_change` interaction.
-pub fn update_priority(db: &Db, task_uuid: &str, priority: i64) -> Result<()> {
-    update_priority_with_event(db, task_uuid, priority, None)
-}
-
-/// Full-control variant of [`update_priority`]: the `task.updated` event commits
-/// in the same transaction as the priority change, keyed on `event_uuid` (the
-/// sync command UUID) so `/sync` replays are idempotent. `event_uuid` semantics
-/// match [`create_with_extensions_with_event`].
-pub fn update_priority_with_event(
-    db: &Db,
-    task_uuid: &str,
-    priority: i64,
-    event_uuid: Option<&str>,
-) -> Result<()> {
+/// Set priority. The `task.updated` event commits in the same transaction,
+/// attributed to `ctx` and keyed on `ctx.event_uuid` for /sync idempotency.
+pub fn update_priority(db: &Db, task_uuid: &str, priority: i64, ctx: &EventCtx) -> Result<()> {
     if !(1..=5).contains(&priority) {
         return Err(crate::Error::Other(format!(
             "priority {} out of range 1..=5",
@@ -803,7 +781,7 @@ pub fn update_priority_with_event(
     )?;
     record_event_tx(
         &tx,
-        event_uuid,
+        ctx,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "priority": priority }),
@@ -813,18 +791,13 @@ pub fn update_priority_with_event(
 }
 
 /// Set or clear a task deadline. Logs a `deadline_change` interaction.
-pub fn update_deadline(db: &Db, task_uuid: &str, deadline: Option<&str>) -> Result<()> {
-    update_deadline_with_event(db, task_uuid, deadline, None)
-}
-
-/// Full-control variant of [`update_deadline`]: the `task.updated` event commits
-/// in the same transaction as the deadline change, keyed on `event_uuid` for
-/// `/sync` idempotency.
-pub fn update_deadline_with_event(
+/// Set or clear a deadline. The `task.updated` event commits in the same
+/// transaction, attributed to `ctx`.
+pub fn update_deadline(
     db: &Db,
     task_uuid: &str,
     deadline: Option<&str>,
-    event_uuid: Option<&str>,
+    ctx: &EventCtx,
 ) -> Result<()> {
     if let Some(d) = deadline {
         parse_iso_zoned(d)?;
@@ -883,7 +856,7 @@ pub fn update_deadline_with_event(
     )?;
     record_event_tx(
         &tx,
-        event_uuid,
+        ctx,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "deadline": deadline }),
@@ -896,7 +869,7 @@ pub fn update_deadline_with_event(
 /// vanishes; the audit trail in `interactions` is wiped with it, but a
 /// `task.deleted` tombstone lands in `pt_event_log` so delta sync clients
 /// learn about the removal. Use with care.
-pub fn delete_task(db: &Db, task_uuid: &str) -> Result<()> {
+pub fn delete_task(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
     // Capture the PT-N before the CASCADE wipes pt_extensions.
@@ -910,7 +883,7 @@ pub fn delete_task(db: &Db, task_uuid: &str) -> Result<()> {
     tx.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
     record_event_tx(
         &tx,
-        None,
+        ctx,
         task_uuid,
         "task.deleted",
         &serde_json::json!({ "task_uuid": task_uuid, "pt_id": pt_id }),
@@ -921,15 +894,11 @@ pub fn delete_task(db: &Db, task_uuid: &str) -> Result<()> {
 
 /// Reopen a completed or dismissed task: flip `status` back to `'pending'`.
 /// Errors if the task is already pending (nothing to do) or missing.
-pub fn reopen(db: &Db, task_uuid: &str) -> Result<()> {
-    reopen_with_event(db, task_uuid, None)
-}
-
-/// Full-control variant of [`reopen`]: the `task.updated` event commits in the
-/// same transaction as the status flip, keyed on `event_uuid` for `/sync`
-/// idempotency. The `status_change` interaction's details contain `'pending'`,
-/// which the neglect score reads as a reopen signal.
-pub fn reopen_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) -> Result<()> {
+/// Reopen a completed/dismissed task (status → pending). The `task.updated`
+/// event commits in the same transaction, attributed to `ctx`. The
+/// `status_change` interaction's details contain `'pending'`, which the
+/// neglect score reads as a reopen signal.
+pub fn reopen(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
@@ -959,7 +928,7 @@ pub fn reopen_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) -> 
     )?;
     record_event_tx(
         &tx,
-        event_uuid,
+        ctx,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "status": "pending" }),
@@ -970,14 +939,9 @@ pub fn reopen_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) -> 
 
 /// Dismiss a task: set `status` to `'dismissed'` (a soft close — `reopen`
 /// brings it back). Errors if the task is missing or already dismissed.
-pub fn dismiss(db: &Db, task_uuid: &str) -> Result<()> {
-    dismiss_with_event(db, task_uuid, None)
-}
-
-/// Full-control variant of [`dismiss`]: the `task.updated` event commits in the
-/// same transaction as the status flip, keyed on `event_uuid` for `/sync`
-/// idempotency.
-pub fn dismiss_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) -> Result<()> {
+/// Dismiss (soft close; reversible via reopen). The `task.updated` event
+/// commits in the same transaction, attributed to `ctx`.
+pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
@@ -1001,7 +965,7 @@ pub fn dismiss_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) ->
     )?;
     record_event_tx(
         &tx,
-        event_uuid,
+        ctx,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "status": "dismissed" }),
@@ -1010,25 +974,86 @@ pub fn dismiss_with_event(db: &Db, task_uuid: &str, event_uuid: Option<&str>) ->
     Ok(())
 }
 
-/// Update a task's title and/or description. At least one must be `Some`.
+/// What `undo_last` reversed, for operator feedback.
+#[derive(Debug, Clone)]
+pub struct UndoOutcome {
+    pub reversed_event_id: i64,
+    pub description: String,
+}
+
+/// Reverse the most recent undoable mutation in the journal.
+///
+/// Undoable (honest v1 — reversals that need no "before" snapshot):
+///   task.completed                 → reopen
+///   task.updated{status=dismissed} → reopen
+///   task.created                   → delete (with tombstone)
+/// Everything else (priority/deadline/text edits, escalations) is skipped —
+/// their events don't carry the prior state yet. The reversal itself is a
+/// normal attributed mutation, so `pt log` shows both sides.
+pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
+    let candidates: Vec<(i64, String, String, String)> = {
+        let conn = db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, task_uuid, event_type, payload FROM pt_event_log
+             WHERE task_uuid IS NOT NULL
+               AND event_type IN ('task.completed', 'task.created', 'task.updated')
+             ORDER BY id DESC LIMIT 50",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+
+    for (id, task_uuid, event_type, payload) in candidates {
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        let exists: bool = {
+            let conn = db.get()?;
+            conn.query_row("SELECT 1 FROM tasks WHERE id=?1", [&task_uuid], |_| Ok(()))
+                .optional()?
+                .is_some()
+        };
+        if !exists {
+            continue;
+        }
+        match event_type.as_str() {
+            "task.completed" => {
+                reopen(db, &task_uuid, ctx)?;
+                return Ok(UndoOutcome {
+                    reversed_event_id: id,
+                    description: format!("reopened {} (was completed)", task_uuid),
+                });
+            }
+            "task.updated"
+                if payload.get("status").and_then(|s| s.as_str()) == Some("dismissed") =>
+            {
+                reopen(db, &task_uuid, ctx)?;
+                return Ok(UndoOutcome {
+                    reversed_event_id: id,
+                    description: format!("reopened {} (was dismissed)", task_uuid),
+                });
+            }
+            "task.created" => {
+                delete_task(db, &task_uuid, ctx)?;
+                return Ok(UndoOutcome {
+                    reversed_event_id: id,
+                    description: format!("deleted {} (undid create)", task_uuid),
+                });
+            }
+            _ => continue,
+        }
+    }
+    Err(crate::Error::Other(
+        "nothing undoable in the recent journal (undo covers done/dismiss/create)".into(),
+    ))
+}
+
+/// Update title and/or description (at least one `Some`). The
+/// `task.updated` event commits in the same transaction, attributed to `ctx`.
 pub fn update_text(
     db: &Db,
     task_uuid: &str,
     title: Option<&str>,
     description: Option<&str>,
-) -> Result<()> {
-    update_text_with_event(db, task_uuid, title, description, None)
-}
-
-/// Full-control variant of [`update_text`]: the `task.updated` event commits in
-/// the same transaction as the edit, keyed on `event_uuid` for `/sync`
-/// idempotency.
-pub fn update_text_with_event(
-    db: &Db,
-    task_uuid: &str,
-    title: Option<&str>,
-    description: Option<&str>,
-    event_uuid: Option<&str>,
+    ctx: &EventCtx,
 ) -> Result<()> {
     if title.is_none() && description.is_none() {
         return Err(crate::Error::Other("update_text: nothing to change".into()));
@@ -1067,7 +1092,7 @@ pub fn update_text_with_event(
     )?;
     record_event_tx(
         &tx,
-        event_uuid,
+        ctx,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "title": title, "description": description }),
@@ -1262,7 +1287,12 @@ mod tests {
     #[test]
     fn create_records_task_created_event_in_same_tx() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("local create logs event")).unwrap();
+        let t = create(
+            &db,
+            NewTask::minimal("local create logs event"),
+            &EventCtx::test(),
+        )
+        .unwrap();
         db.with_conn(|c| {
             let (uuid, task_uuid): (String, String) = c.query_row(
                 "SELECT uuid, task_uuid FROM pt_event_log WHERE event_type='task.created'",
@@ -1279,16 +1309,16 @@ mod tests {
     #[test]
     fn mark_done_records_completed_event() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("done logs event")).unwrap();
-        mark_done(&db, &t).unwrap();
+        let t = create(&db, NewTask::minimal("done logs event"), &EventCtx::test()).unwrap();
+        mark_done(&db, &t, &EventCtx::test()).unwrap();
         assert_eq!(event_count(&db, "task.completed"), 1);
     }
 
     #[test]
     fn reopen_returns_task_to_pending_and_logs_reopen_signal() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("reopen me")).unwrap();
-        mark_done(&db, &t).unwrap();
+        let t = create(&db, NewTask::minimal("reopen me"), &EventCtx::test()).unwrap();
+        mark_done(&db, &t, &EventCtx::test()).unwrap();
 
         let status_done: String = db
             .with_conn(|c| {
@@ -1301,7 +1331,7 @@ mod tests {
             .unwrap();
         assert_eq!(status_done, "done");
 
-        reopen(&db, &t.id).unwrap();
+        reopen(&db, &t.id, &EventCtx::test()).unwrap();
         let status_reopened: String = db
             .with_conn(|c| {
                 Ok(
@@ -1329,15 +1359,22 @@ mod tests {
         assert_eq!(event_count(&db, "task.updated"), 1);
 
         // Reopening an already-pending task is an error (nothing to do).
-        assert!(reopen(&db, &t.id).is_err());
+        assert!(reopen(&db, &t.id, &EventCtx::test()).is_err());
     }
 
     #[test]
     fn update_text_changes_title_and_description() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("old title")).unwrap();
+        let t = create(&db, NewTask::minimal("old title"), &EventCtx::test()).unwrap();
 
-        update_text(&db, &t.id, Some("new title"), Some("a body")).unwrap();
+        update_text(
+            &db,
+            &t.id,
+            Some("new title"),
+            Some("a body"),
+            &EventCtx::test(),
+        )
+        .unwrap();
         let (title, desc): (String, String) = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -1352,7 +1389,7 @@ mod tests {
         assert_eq!(event_count(&db, "task.updated"), 1);
 
         // Title-only edit leaves the description untouched.
-        update_text(&db, &t.id, Some("title2"), None).unwrap();
+        update_text(&db, &t.id, Some("title2"), None, &EventCtx::test()).unwrap();
         let (title2, desc2): (String, String) = db
             .with_conn(|c| {
                 Ok(c.query_row(
@@ -1369,16 +1406,16 @@ mod tests {
         );
 
         // Nothing-to-change and missing-task are both errors.
-        assert!(update_text(&db, &t.id, None, None).is_err());
-        assert!(update_text(&db, "nonexistent-uuid", Some("x"), None).is_err());
+        assert!(update_text(&db, &t.id, None, None, &EventCtx::test()).is_err());
+        assert!(update_text(&db, "nonexistent-uuid", Some("x"), None, &EventCtx::test()).is_err());
     }
 
     #[test]
     fn dismiss_sets_status_and_reopen_reverses_it() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("dismiss me")).unwrap();
+        let t = create(&db, NewTask::minimal("dismiss me"), &EventCtx::test()).unwrap();
 
-        dismiss(&db, &t.id).unwrap();
+        dismiss(&db, &t.id, &EventCtx::test()).unwrap();
         let s: String = db
             .with_conn(|c| {
                 Ok(
@@ -1392,10 +1429,10 @@ mod tests {
         assert_eq!(event_count(&db, "task.updated"), 1);
 
         // Dismissing an already-dismissed task is an error.
-        assert!(dismiss(&db, &t.id).is_err());
+        assert!(dismiss(&db, &t.id, &EventCtx::test()).is_err());
 
         // reopen reverses it back to pending.
-        reopen(&db, &t.id).unwrap();
+        reopen(&db, &t.id, &EventCtx::test()).unwrap();
         let s2: String = db
             .with_conn(|c| {
                 Ok(
@@ -1411,25 +1448,40 @@ mod tests {
     #[test]
     fn update_priority_records_updated_event() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("priority logs event")).unwrap();
-        update_priority(&db, &t.id, 4).unwrap();
+        let t = create(
+            &db,
+            NewTask::minimal("priority logs event"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        update_priority(&db, &t.id, 4, &EventCtx::test()).unwrap();
         assert_eq!(event_count(&db, "task.updated"), 1);
     }
 
     #[test]
     fn update_deadline_records_updated_event() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("deadline logs event")).unwrap();
-        update_deadline(&db, &t.id, Some("2026-06-16")).unwrap();
-        update_deadline(&db, &t.id, None).unwrap();
+        let t = create(
+            &db,
+            NewTask::minimal("deadline logs event"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        update_deadline(&db, &t.id, Some("2026-06-16"), &EventCtx::test()).unwrap();
+        update_deadline(&db, &t.id, None, &EventCtx::test()).unwrap();
         assert_eq!(event_count(&db, "task.updated"), 2);
     }
 
     #[test]
     fn delete_records_tombstone_with_pt_id() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("delete logs tombstone")).unwrap();
-        delete_task(&db, &t.id).unwrap();
+        let t = create(
+            &db,
+            NewTask::minimal("delete logs tombstone"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        delete_task(&db, &t.id, &EventCtx::test()).unwrap();
         db.with_conn(|c| {
             let payload: String = c.query_row(
                 "SELECT payload FROM pt_event_log WHERE event_type='task.deleted'",
@@ -1451,19 +1503,12 @@ mod tests {
         // The atomicity guarantee: if the event row can't be written (replayed
         // idempotency uuid), the task mutation must not commit either.
         let (_dir, db) = fresh_db();
-        let first = create_with_extensions_with_event(
-            &db,
-            NewTask::minimal("first"),
-            Extensions::default(),
-            Some("cmd-replayed"),
-        )
-        .unwrap();
-        let second = create_with_extensions_with_event(
-            &db,
-            NewTask::minimal("second"),
-            Extensions::default(),
-            Some("cmd-replayed"),
-        );
+        let ctx = EventCtx::test().with_uuid("cmd-replayed");
+        let first =
+            create_with_extensions(&db, NewTask::minimal("first"), Extensions::default(), &ctx)
+                .unwrap();
+        let second =
+            create_with_extensions(&db, NewTask::minimal("second"), Extensions::default(), &ctx);
         assert!(second.is_err(), "duplicate event uuid must fail");
         db.with_conn(|c| {
             let rows: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
@@ -1483,7 +1528,7 @@ mod tests {
     #[test]
     fn create_inserts_and_mints_pt_id() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("Buy bread")).unwrap();
+        let t = create(&db, NewTask::minimal("Buy bread"), &EventCtx::test()).unwrap();
         assert_eq!(t.pt_id.as_deref(), Some("PT-1"));
         assert_eq!(t.priority, 2);
         assert_eq!(t.status, "pending");
@@ -1514,10 +1559,10 @@ mod tests {
     #[test]
     fn list_filters_by_status_and_priority() {
         let (_dir, db) = fresh_db();
-        create(&db, NewTask::minimal("low task")).unwrap();
+        create(&db, NewTask::minimal("low task"), &EventCtx::test()).unwrap();
         let mut high = NewTask::minimal("high task");
         high.priority = 4;
-        create(&db, high).unwrap();
+        create(&db, high, &EventCtx::test()).unwrap();
 
         let all = list(&db, Some("pending"), None, 100).unwrap();
         assert_eq!(all.len(), 2);
@@ -1531,8 +1576,13 @@ mod tests {
         let (_dir, db) = fresh_db();
         let mut critical = NewTask::minimal("critical but unscored");
         critical.priority = 5;
-        create(&db, critical).unwrap();
-        let scored = create(&db, NewTask::minimal("normal but scored")).unwrap();
+        create(&db, critical, &EventCtx::test()).unwrap();
+        let scored = create(
+            &db,
+            NewTask::minimal("normal but scored"),
+            &EventCtx::test(),
+        )
+        .unwrap();
 
         db.with_conn(|c| {
             c.execute(
@@ -1551,9 +1601,9 @@ mod tests {
     #[test]
     fn update_deadline_sets_and_logs_interaction() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("date me")).unwrap();
+        let t = create(&db, NewTask::minimal("date me"), &EventCtx::test()).unwrap();
 
-        update_deadline(&db, &t.id, Some("2026-06-16")).unwrap();
+        update_deadline(&db, &t.id, Some("2026-06-16"), &EventCtx::test()).unwrap();
 
         db.with_conn(|c| {
             let deadline: Option<String> = c
@@ -1578,9 +1628,9 @@ mod tests {
         let (_dir, db) = fresh_db();
         let mut new = NewTask::minimal("clear me");
         new.deadline = Some("2026-06-16".into());
-        let t = create(&db, new).unwrap();
+        let t = create(&db, new, &EventCtx::test()).unwrap();
 
-        update_deadline(&db, &t.id, None).unwrap();
+        update_deadline(&db, &t.id, None, &EventCtx::test()).unwrap();
 
         db.with_conn(|c| {
             let deadline: Option<String> = c
@@ -1597,16 +1647,21 @@ mod tests {
     #[test]
     fn update_deadline_rejects_non_iso_deadline() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("validate me")).unwrap();
+        let t = create(&db, NewTask::minimal("validate me"), &EventCtx::test()).unwrap();
 
-        let err = update_deadline(&db, &t.id, Some("not-a-date")).unwrap_err();
+        let err = update_deadline(&db, &t.id, Some("not-a-date"), &EventCtx::test()).unwrap_err();
         assert!(format!("{}", err).contains("parse iso zoned"));
     }
 
     #[test]
     fn resolve_by_pt_n_and_substring() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("Buy artisanal bread")).unwrap();
+        let t = create(
+            &db,
+            NewTask::minimal("Buy artisanal bread"),
+            &EventCtx::test(),
+        )
+        .unwrap();
         let by_pt = resolve(&db, "PT-1").unwrap();
         assert_eq!(by_pt.id, t.id);
         let by_short = resolve(&db, "1").unwrap();
@@ -1618,8 +1673,8 @@ mod tests {
     #[test]
     fn resolve_substring_with_multiple_matches_errors() {
         let (_dir, db) = fresh_db();
-        create(&db, NewTask::minimal("Buy bread")).unwrap();
-        create(&db, NewTask::minimal("Buy milk")).unwrap();
+        create(&db, NewTask::minimal("Buy bread"), &EventCtx::test()).unwrap();
+        create(&db, NewTask::minimal("Buy milk"), &EventCtx::test()).unwrap();
         let err = resolve(&db, "Buy").unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("2 pending tasks match"), "msg was: {}", msg);
@@ -1628,8 +1683,13 @@ mod tests {
     #[test]
     fn resolve_substring_treats_like_wildcards_literally() {
         let (_dir, db) = fresh_db();
-        create(&db, NewTask::minimal("literal percent % task")).unwrap();
-        create(&db, NewTask::minimal("plain task")).unwrap();
+        create(
+            &db,
+            NewTask::minimal("literal percent % task"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        create(&db, NewTask::minimal("plain task"), &EventCtx::test()).unwrap();
 
         let by_percent = resolve(&db, "%").unwrap();
         assert_eq!(by_percent.title, "literal percent % task");
@@ -1646,8 +1706,8 @@ mod tests {
     #[test]
     fn resolve_for_lookup_matches_pt_id_across_terminal_statuses() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("completed task")).unwrap();
-        mark_done(&db, &t).unwrap();
+        let t = create(&db, NewTask::minimal("completed task"), &EventCtx::test()).unwrap();
+        mark_done(&db, &t, &EventCtx::test()).unwrap();
 
         let by_pt = resolve_for_lookup(&db, "PT-1", false).unwrap();
         assert_eq!(by_pt.id, t.id);
@@ -1657,8 +1717,8 @@ mod tests {
     #[test]
     fn resolve_for_lookup_substring_scope_is_explicit() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("archive receipts")).unwrap();
-        mark_done(&db, &t).unwrap();
+        let t = create(&db, NewTask::minimal("archive receipts"), &EventCtx::test()).unwrap();
+        mark_done(&db, &t, &EventCtx::test()).unwrap();
 
         let err = resolve_for_lookup(&db, "archive", false).unwrap_err();
         assert!(format!("{}", err).contains("no active task matching"));
@@ -1703,8 +1763,8 @@ mod tests {
     #[test]
     fn mark_done_returns_completed_for_non_recurring() {
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("solo task")).unwrap();
-        let outcome = mark_done(&db, &t).unwrap();
+        let t = create(&db, NewTask::minimal("solo task"), &EventCtx::test()).unwrap();
+        let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
         assert_eq!(outcome, DoneOutcome::Completed);
     }
 
@@ -1718,7 +1778,7 @@ mod tests {
             recurrence: Some(rec.clone()),
             ..Default::default()
         };
-        let t = create_with_extensions(&db, new, ext).unwrap();
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
         db.with_conn(|c| {
             let (rrule, mode, next): (String, String, String) = c
                 .query_row(
@@ -1764,8 +1824,8 @@ mod tests {
             recurrence: Some(rec),
             ..Default::default()
         };
-        let t = create_with_extensions(&db, new, ext).unwrap();
-        let outcome = mark_done(&db, &t).unwrap();
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
         match outcome {
             DoneOutcome::Advanced { next_deadline } => {
                 // Fixed mode anchors on the original deadline → next Monday.
@@ -1802,8 +1862,8 @@ mod tests {
             recurrence: Some(rec),
             ..Default::default()
         };
-        let t = create_with_extensions(&db, new, ext).unwrap();
-        let outcome = mark_done(&db, &t).unwrap();
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
         match outcome {
             DoneOutcome::Advanced { next_deadline } => {
                 assert!(
@@ -1827,8 +1887,8 @@ mod tests {
             recurrence: Some(rec),
             ..Default::default()
         };
-        let t = create_with_extensions(&db, new, ext).unwrap();
-        let outcome = mark_done(&db, &t).unwrap();
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
         match outcome {
             DoneOutcome::Advanced { next_deadline } => {
                 // Completion mode → 5 days from now, so the new deadline must
@@ -1852,8 +1912,8 @@ mod tests {
             recurrence: Some(rec),
             ..Default::default()
         };
-        let t = create_with_extensions(&db, new, ext).unwrap();
-        let outcome = mark_done(&db, &t).unwrap();
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
         match outcome {
             DoneOutcome::Advanced { next_deadline } => {
                 assert!(next_deadline.contains("T09:00:00"), "got {next_deadline}");
@@ -1867,8 +1927,8 @@ mod tests {
         // Preserves prior behaviour test of non-recurring completion path,
         // including the interaction details string.
         let (_dir, db) = fresh_db();
-        let t = create(&db, NewTask::minimal("write tests")).unwrap();
-        mark_done(&db, &t).unwrap();
+        let t = create(&db, NewTask::minimal("write tests"), &EventCtx::test()).unwrap();
+        mark_done(&db, &t, &EventCtx::test()).unwrap();
         db.with_conn(|c| {
             let status: String = c
                 .query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
@@ -1912,5 +1972,102 @@ mod tests {
             assert_eq!(frac.len(), 6);
             assert!(frac.chars().all(|ch| ch.is_ascii_digit()));
         }
+    }
+    /// PHASE-3 GATE: every mutation path emits exactly one attributed event,
+    /// the delta cursor sees every touched task, and tombstones appear on
+    /// delete. If a new mutation forgets its event or its actor, this fails.
+    #[test]
+    fn every_mutation_emits_exactly_one_attributed_event() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx {
+            actor: "gate".into(),
+            source: "test".into(),
+            event_uuid: None,
+        };
+        let count = |db: &Db| -> i64 {
+            db.with_conn(
+                |c| Ok(c.query_row("SELECT COUNT(*) FROM pt_event_log", [], |r| r.get(0))?),
+            )
+            .unwrap()
+        };
+        let last_actor = |db: &Db| -> (String, String) {
+            db.with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT actor, payload FROM pt_event_log ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap()
+        };
+
+        let mut expected = 0i64;
+        let t = create(&db, NewTask::minimal("gate task"), &ctx).unwrap();
+        expected += 1;
+        assert_eq!(count(&db), expected, "create emits one event");
+
+        update_priority(&db, &t.id, 4, &ctx).unwrap();
+        expected += 1;
+        assert_eq!(count(&db), expected, "priority emits one event");
+
+        update_deadline(&db, &t.id, Some("2026-08-01"), &ctx).unwrap();
+        expected += 1;
+        update_text(&db, &t.id, Some("gate task 2"), None, &ctx).unwrap();
+        expected += 1;
+        mark_done(&db, &t, &ctx).unwrap();
+        expected += 1;
+        reopen(&db, &t.id, &ctx).unwrap();
+        expected += 1;
+        dismiss(&db, &t.id, &ctx).unwrap();
+        expected += 1;
+        assert_eq!(
+            count(&db),
+            expected,
+            "each mutation emits exactly one event"
+        );
+
+        // Attribution: column AND payload envelope carry the actor.
+        let (actor, payload) = last_actor(&db);
+        assert_eq!(actor, "gate");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["actor"], "gate");
+        assert_eq!(v["source"], "test");
+
+        // Cursor replay: the task is visible from cursor 0.
+        let changed = crate::event_log::changed_task_uuids_since(&db, 0).unwrap();
+        assert!(changed.contains(&t.id));
+
+        // Delete emits a tombstone the delta protocol reports.
+        delete_task(&db, &t.id, &ctx).unwrap();
+        expected += 1;
+        assert_eq!(count(&db), expected);
+        let deleted = crate::event_log::deleted_task_uuids_since(&db, 0).unwrap();
+        assert!(deleted.contains(&t.id));
+
+        // pt log sees the attributed history.
+        let history = crate::event_log::history_for_task(&db, &t.id, 50).unwrap();
+        assert_eq!(history.len(), expected as usize);
+        assert!(history.iter().all(|e| e.actor.as_deref() == Some("gate")));
+    }
+
+    /// Undo reverses done → pending as an attributed mutation of its own.
+    #[test]
+    fn undo_reverses_last_done() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let t = create(&db, NewTask::minimal("undo me"), &ctx).unwrap();
+        mark_done(&db, &t, &ctx).unwrap();
+        let out = undo_last(&db, &ctx).unwrap();
+        assert!(out.description.contains("reopened"));
+        let status: String = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "pending");
     }
 }

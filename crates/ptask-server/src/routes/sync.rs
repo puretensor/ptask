@@ -34,6 +34,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use ptask_core::event_log;
+use ptask_core::event_log::EventCtx;
 use ptask_core::tasks::{self, DoneOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -85,14 +86,35 @@ pub struct Resources {
     pub tasks: Vec<tasks::Task>,
 }
 
+fn sync_read_error(stage: &str, e: ptask_core::Error) -> axum::response::Response {
+    warn!(target: "ptask::sync", error = %e, stage, "sync read failed");
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(serde_json::json!({"error": format!("{stage} failed")})),
+    )
+        .into_response()
+}
+
+/// Attribution for one /sync command: the authenticated client identity +
+/// the command uuid as the idempotency key.
+fn sync_ctx(actor: &str, cmd_uuid: &str) -> EventCtx {
+    EventCtx::sync(actor, cmd_uuid)
+}
+
 async fn sync(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<SyncReq>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_write_token(&state.auth, &headers) {
-        return resp;
-    }
+    let identity = match crate::auth::authenticate(
+        &state.db,
+        &state.auth,
+        &headers,
+        ptask_core::tokens::Scope::Write,
+    ) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
     let mut status: BTreeMap<String, Value> = BTreeMap::new();
     let mut temp_map: BTreeMap<String, String> = BTreeMap::new();
 
@@ -120,7 +142,7 @@ async fn sync(
         }
         // The mutation itself records the event row in its own transaction
         // (atomic, keyed on cmd.uuid) — no post-hoc event_log::record here.
-        match apply_command(&state, cmd) {
+        match apply_command(&state, cmd, &identity.client_id) {
             Ok((task_uuid, payload)) => {
                 if let (Some(temp), Some(tu)) = (cmd.temp_id.as_ref(), task_uuid.as_ref()) {
                     temp_map.insert(temp.clone(), tu.clone());
@@ -158,12 +180,27 @@ async fn sync(
     // next sync (at-least-once) instead of being skipped forever, which is
     // what the previous read-delta-then-cursor order did (the token advanced
     // past events this response never contained).
-    let new_cursor = event_log::current_cursor(&state.db).unwrap_or(0);
+    // A DB error here must be a loud 500, not an empty task universe: a
+    // client full-syncing against a briefly-erroring store would otherwise
+    // read "no tasks" as truth and clear its local state.
+    let new_cursor = match event_log::current_cursor(&state.db) {
+        Ok(c) => c,
+        Err(e) => return sync_read_error("cursor read", e),
+    };
     let (delta_tasks, deleted_task_uuids): (Vec<tasks::Task>, Vec<String>) = if full_sync {
-        (tasks::list_all(&state.db).unwrap_or_default(), Vec::new())
+        match tasks::list_all(&state.db) {
+            Ok(all) => (all, Vec::new()),
+            Err(e) => return sync_read_error("full-sync list", e),
+        }
     } else {
-        let delta_uuids = event_log::changed_task_uuids_since(&state.db, since).unwrap_or_default();
-        let deleted = event_log::deleted_task_uuids_since(&state.db, since).unwrap_or_default();
+        let delta_uuids = match event_log::changed_task_uuids_since(&state.db, since) {
+            Ok(v) => v,
+            Err(e) => return sync_read_error("delta read", e),
+        };
+        let deleted = match event_log::deleted_task_uuids_since(&state.db, since) {
+            Ok(v) => v,
+            Err(e) => return sync_read_error("tombstone read", e),
+        };
         let mut rows = Vec::new();
         for u in &delta_uuids {
             // Deleted tasks legitimately fail the row fetch — they're
@@ -210,6 +247,7 @@ fn replay_temp_mapping(
 fn apply_command(
     state: &AppState,
     cmd: &Command,
+    actor: &str,
 ) -> Result<(Option<String>, EventPayload), anyhow::Error> {
     match cmd.kind.as_str() {
         "task_create" => {
@@ -241,7 +279,8 @@ fn apply_command(
                 energy: None,
                 recurrence: q.recurrence.clone(),
             };
-            let t = tasks::create_with_extensions_with_event(&state.db, new, ext, Some(&cmd.uuid))?;
+            let t =
+                tasks::create_with_extensions(&state.db, new, ext, &sync_ctx(actor, &cmd.uuid))?;
             let payload = serde_json::to_value(&t)?;
             Ok((
                 Some(t.id.clone()),
@@ -253,7 +292,7 @@ fn apply_command(
         }
         "task_done" => {
             let task = resolve_task(state, &cmd.args)?;
-            let outcome = tasks::mark_done_with_event(&state.db, &task, Some(&cmd.uuid))?;
+            let outcome = tasks::mark_done(&state.db, &task, &sync_ctx(actor, &cmd.uuid))?;
             let (event_type, payload) = match outcome {
                 DoneOutcome::Completed => (
                     "task.completed".to_string(),
@@ -283,11 +322,13 @@ fn apply_command(
                 .get("priority")
                 .and_then(Value::as_i64)
                 .ok_or_else(|| anyhow::anyhow!("task_priority: args.priority required"))?;
-            tasks::update_priority_with_event(&state.db, &task.id, priority, Some(&cmd.uuid))?;
+            tasks::update_priority(&state.db, &task.id, priority, &sync_ctx(actor, &cmd.uuid))?;
             // Priority feeds the composite priority_score; rescore best-effort so
             // ordering / the dashboard reflect the change without waiting for the
             // scoring timer (parity with the local `pt priority`).
-            let _ = ptask_core::scoring::run_once(&state.db, false);
+            if let Err(e) = ptask_core::scoring::run_once(&state.db, false) {
+                warn!(target: "ptask::sync", error = %e, "post-mutation rescore failed");
+            }
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -306,8 +347,15 @@ fn apply_command(
                 ));
             }
             let new_deadline = cmd.args.get("deadline").and_then(Value::as_str);
-            tasks::update_deadline_with_event(&state.db, &task.id, new_deadline, Some(&cmd.uuid))?;
-            let _ = ptask_core::scoring::run_once(&state.db, false);
+            tasks::update_deadline(
+                &state.db,
+                &task.id,
+                new_deadline,
+                &sync_ctx(actor, &cmd.uuid),
+            )?;
+            if let Err(e) = ptask_core::scoring::run_once(&state.db, false) {
+                warn!(target: "ptask::sync", error = %e, "post-mutation rescore failed");
+            }
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -318,8 +366,10 @@ fn apply_command(
         }
         "task_reopen" => {
             let task = resolve_task(state, &cmd.args)?;
-            tasks::reopen_with_event(&state.db, &task.id, Some(&cmd.uuid))?;
-            let _ = ptask_core::scoring::run_once(&state.db, false);
+            tasks::reopen(&state.db, &task.id, &sync_ctx(actor, &cmd.uuid))?;
+            if let Err(e) = ptask_core::scoring::run_once(&state.db, false) {
+                warn!(target: "ptask::sync", error = %e, "post-mutation rescore failed");
+            }
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -337,12 +387,12 @@ fn apply_command(
                     "task_retext: at least one of args.title / args.description required"
                 ));
             }
-            tasks::update_text_with_event(
+            tasks::update_text(
                 &state.db,
                 &task.id,
                 title,
                 description,
-                Some(&cmd.uuid),
+                &sync_ctx(actor, &cmd.uuid),
             )?;
             Ok((
                 Some(task.id.clone()),
@@ -356,7 +406,7 @@ fn apply_command(
         }
         "task_dismiss" => {
             let task = resolve_task(state, &cmd.args)?;
-            tasks::dismiss_with_event(&state.db, &task.id, Some(&cmd.uuid))?;
+            tasks::dismiss(&state.db, &task.id, &sync_ctx(actor, &cmd.uuid))?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {

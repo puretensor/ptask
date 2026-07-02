@@ -78,6 +78,13 @@ enum Command {
     /// Talk to a remote canonical `pt serve` (no local DB).
     #[command(subcommand)]
     Remote(RemoteCommand),
+    /// Show a task's attributed event history (who did what, via which surface).
+    Log(LogArgs),
+    /// Reverse the most recent undoable mutation (done/dismiss/create).
+    Undo,
+    /// Manage named scoped API tokens (create/list/revoke).
+    #[command(subcommand)]
+    Token(TokenCommand),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
     /// Generate the `pt(1)` manpage to stdout.
@@ -97,6 +104,40 @@ struct AccountabilityRunArgs {
     /// Don't actually send anything; log what would have been dispatched.
     #[arg(long = "dry-run")]
     dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct LogArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    /// Max events to show (newest first).
+    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(Subcommand, Debug)]
+enum TokenCommand {
+    /// Mint a token for a client. Prints the plain token ONCE — store it
+    /// with the consumer; only its hash is kept.
+    Create(TokenCreateArgs),
+    /// List all tokens (client, scope, created/last-used/revoked).
+    List,
+    /// Revoke every active token for a client id.
+    Revoke(TokenRevokeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct TokenCreateArgs {
+    /// Stable client identity: hal, puresentinel, nexus, dashboard, shell-<host>…
+    client_id: String,
+    /// Scope: read | capture | write | admin (each implies the previous).
+    #[arg(long = "scope", default_value = "write")]
+    scope: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct TokenRevokeArgs {
+    client_id: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -407,6 +448,13 @@ enum ShellChoice {
     Fish,
 }
 
+/// Attribution for this CLI invocation. A `pt` process executes exactly one
+/// command, so this is entrypoint-time config: actor = $PTASK_ACTOR (the
+/// dashboard sidecar sets "dashboard"; HAL sessions "hal"), default "shell".
+fn cli_ctx() -> ptask_core::event_log::EventCtx {
+    ptask_core::event_log::EventCtx::local(ptask_core::Config::from_env().actor)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -448,6 +496,9 @@ fn main() -> Result<()> {
                 Some(Command::Distill(a)) => cmd_distill(&db, a),
                 Some(Command::Accountability(c)) => cmd_accountability(db, c),
                 Some(Command::Scoring(c)) => cmd_scoring(&db, c),
+                Some(Command::Log(a)) => cmd_log(&db, a),
+                Some(Command::Undo) => cmd_undo(&db),
+                Some(Command::Token(c)) => cmd_token(&db, c),
                 Some(Command::Backfill) => cmd_backfill(&db),
                 None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
                     ptask_tui::run(db)
@@ -508,7 +559,7 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         recurrence: q.recurrence.clone(),
     };
 
-    let task = tasks::create_with_extensions(db, new, ext)?;
+    let task = tasks::create_with_extensions(db, new, ext, &cli_ctx())?;
 
     let label = priority::label(task.priority).to_ascii_uppercase();
     println!("Task created [{}]: {}", label, task.title);
@@ -591,7 +642,7 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
 
 fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    let outcome = tasks::mark_done(db, &task)?;
+    let outcome = tasks::mark_done(db, &task, &cli_ctx())?;
     let pt = task.pt_id.as_deref().unwrap_or("");
     match outcome {
         tasks::DoneOutcome::Completed => {
@@ -621,7 +672,7 @@ fn cmd_priority(db: &Db, a: PriorityArgs) -> Result<()> {
         );
         return Ok(());
     }
-    tasks::update_priority(db, &task.id, level)?;
+    tasks::update_priority(db, &task.id, level, &cli_ctx())?;
     // priority feeds manual_score -> the composite priority_score, so recompute
     // immediately; otherwise ordering (and the dashboard's "Critical Now") lags
     // until the next scheduled `pt scoring run`.
@@ -658,7 +709,13 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     }
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
     if has_text {
-        tasks::update_text(db, &task.id, a.title.as_deref(), a.desc.as_deref())?;
+        tasks::update_text(
+            db,
+            &task.id,
+            a.title.as_deref(),
+            a.desc.as_deref(),
+            &cli_ctx(),
+        )?;
     }
     if has_deadline {
         let new_deadline = if a.clear_deadline {
@@ -666,7 +723,7 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
         } else {
             a.deadline.as_deref()
         };
-        tasks::update_deadline(db, &task.id, new_deadline)?;
+        tasks::update_deadline(db, &task.id, new_deadline, &cli_ctx())?;
     }
     // Only the deadline feeds a score (urgency); a text-only edit needs no rescore.
     let note = if has_deadline {
@@ -709,7 +766,7 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
 
 fn cmd_reopen(db: &Db, a: ReopenArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    tasks::reopen(db, &task.id)?;
+    tasks::reopen(db, &task.id, &cli_ctx())?;
     // Reopening returns the task to the active set; rescore so it re-enters
     // ordering immediately rather than at the next scoring run.
     let note = match ptask_core::scoring::run_once(db, false) {
@@ -773,7 +830,7 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
 
 fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    tasks::dismiss(db, &task.id)?;
+    tasks::dismiss(db, &task.id, &cli_ctx())?;
     println!(
         "{} {} · dismissed",
         task.pt_id.as_deref().unwrap_or(""),
@@ -799,7 +856,7 @@ fn cmd_rm(db: &Db, a: RmArgs) -> Result<()> {
             return Ok(());
         }
     }
-    tasks::delete_task(db, &task.id)?;
+    tasks::delete_task(db, &task.id, &cli_ctx())?;
     println!("{} {} · deleted", pt, task.title);
     Ok(())
 }
@@ -950,6 +1007,118 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     report.send_failures
                 );
             }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_log(db: &Db, a: LogArgs) -> Result<()> {
+    let task = tasks::resolve_for_lookup(db, &a.query, true).map_err(anyhow::Error::msg)?;
+    let pt = task.pt_id.as_deref().unwrap_or(&task.id[..8]);
+    let events = ptask_core::event_log::history_for_task(db, &task.id, a.limit)?;
+    if events.is_empty() {
+        println!("{} {} — no journal events", pt, task.title);
+        return Ok(());
+    }
+    println!(
+        "{} {} — {} event(s), newest first",
+        pt,
+        task.title,
+        events.len()
+    );
+    for e in events {
+        let actor = e.actor.as_deref().unwrap_or("-");
+        // ts to the minute is enough for a human trail
+        let ts = e.ts.get(..16).unwrap_or(&e.ts);
+        println!(
+            "  {}  {:<22} {:<14} {}",
+            ts,
+            e.event_type,
+            actor,
+            summarize_payload(&e.payload)
+        );
+    }
+    Ok(())
+}
+
+/// One-line human summary of an event payload (drop envelope keys).
+fn summarize_payload(payload: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    if let Some(obj) = v.as_object() {
+        for (k, val) in obj {
+            if matches!(k.as_str(), "actor" | "source" | "task_uuid" | "pt_id") {
+                continue;
+            }
+            parts.push(format!("{}={}", k, val));
+            if parts.len() >= 3 {
+                break;
+            }
+        }
+    }
+    parts.join(" ")
+}
+
+fn cmd_undo(db: &Db) -> Result<()> {
+    let out = tasks::undo_last(db, &cli_ctx()).map_err(anyhow::Error::msg)?;
+    println!(
+        "undo ok — {} (reversed event #{})",
+        out.description, out.reversed_event_id
+    );
+    Ok(())
+}
+
+fn cmd_token(db: &Db, c: TokenCommand) -> Result<()> {
+    use ptask_core::tokens;
+    match c {
+        TokenCommand::Create(a) => {
+            let scope = tokens::Scope::parse(&a.scope).ok_or_else(|| {
+                anyhow::anyhow!("invalid scope {:?} (read|capture|write|admin)", a.scope)
+            })?;
+            let plain = tokens::create(db, &a.client_id, scope)?;
+            println!(
+                "token created for {} (scope {})",
+                a.client_id,
+                scope.as_str()
+            );
+            println!("{}", plain);
+            println!("^ shown ONCE — store it with the consumer now.");
+            Ok(())
+        }
+        TokenCommand::List => {
+            let infos = tokens::list(db)?;
+            if infos.is_empty() {
+                println!("no tokens minted");
+                return Ok(());
+            }
+            for t in infos {
+                let state = if t.revoked_at.is_some() {
+                    "REVOKED"
+                } else {
+                    "active"
+                };
+                println!(
+                    "{:<16} {:<8} {:<8} created {}  last-used {}",
+                    t.client_id,
+                    t.scopes,
+                    state,
+                    t.created_at.get(..16).unwrap_or(&t.created_at),
+                    t.last_used_at
+                        .as_deref()
+                        .map(|s| s.get(..16).unwrap_or(s))
+                        .unwrap_or("never"),
+                );
+            }
+            Ok(())
+        }
+        TokenCommand::Revoke(a) => {
+            let n = tokens::revoke(db, &a.client_id)?;
+            if n == 0 {
+                anyhow::bail!("no active tokens for {:?}", a.client_id);
+            }
+            println!("revoked {} token(s) for {}", n, a.client_id);
             Ok(())
         }
     }

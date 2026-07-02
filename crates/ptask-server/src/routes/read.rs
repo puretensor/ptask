@@ -48,7 +48,7 @@ async fn next(
     headers: HeaderMap,
     Query(params): Query<NextParams>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_read_token(&state.auth, &headers) {
+    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
     let limit = params.limit.clamp(1, MAX_NEXT_LIMIT);
@@ -70,7 +70,7 @@ async fn detail(
     headers: HeaderMap,
     Path(uuid): Path<String>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_read_token(&state.auth, &headers) {
+    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
     match ptask_core::tasks::load_detail(&state.db, &uuid) {
@@ -91,7 +91,7 @@ async fn resolve(
     headers: HeaderMap,
     Query(params): Query<ResolveParams>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_read_token(&state.auth, &headers) {
+    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
     match ptask_core::tasks::resolve_for_lookup(&state.db, &params.query, params.include_terminal) {

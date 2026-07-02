@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH pt 1  "pt 1.16.1" 
+.TH pt 1  "pt 1.17.0" 
 .SH NAME
 pt \- Sovereign task manager for PureTensor
 .SH SYNOPSIS
@@ -76,6 +76,15 @@ Recompute composite priority scores for all active tasks
 pt\-remote(1)
 Talk to a remote canonical `pt serve` (no local DB)
 .TP
+pt\-log(1)
+Show a task\*(Aqs attributed event history (who did what, via which surface)
+.TP
+pt\-undo(1)
+Reverse the most recent undoable mutation (done/dismiss/create)
+.TP
+pt\-token(1)
+Manage named scoped API tokens (create/list/revoke)
+.TP
 pt\-backfill(1)
 One\-shot backfill PT\-N for any tasks lacking one
 .TP
@@ -88,4 +97,4 @@ Generate shell completions (bash/zsh/fish) to stdout
 pt\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH VERSION
-v1.16.1
+v1.17.0

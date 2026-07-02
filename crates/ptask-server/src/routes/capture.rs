@@ -36,7 +36,7 @@ async fn capture(
     headers: HeaderMap,
     Json(req): Json<CaptureReq>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_write_token(&state.auth, &headers) {
+    if let Some(resp) = crate::auth::require_write_token(&state.db, &state.auth, &headers) {
         return resp;
     }
     let text = req.text.trim();
