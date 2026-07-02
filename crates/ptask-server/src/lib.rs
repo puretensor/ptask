@@ -88,7 +88,14 @@ pub fn router(state: AppState) -> Router {
     let mcp_service = StreamableHttpService::new(
         move || Ok(mcp::PtaskMcp::new(mcp_db.clone(), "hal".into())),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
+        StreamableHttpServerConfig {
+            // rmcp's DNS-rebinding host allowlist defaults to localhost-only,
+            // but this mount binds the tailnet IP and sits behind the hal
+            // bearer gate — a rebinding page can't present that token, so
+            // allow-all (empty) is sound here.
+            allowed_hosts: Vec::new(),
+            ..Default::default()
+        },
     );
     let mcp_router: Router =
         Router::new()
