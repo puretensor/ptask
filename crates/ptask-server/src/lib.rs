@@ -46,6 +46,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::capture::router())
         .merge(routes::email::router())
         .merge(routes::sync::router())
+        .merge(routes::tg::router())
         .merge(routes::read::router())
         .merge(routes::metrics::router())
         .merge(routes::webhook_git::router())

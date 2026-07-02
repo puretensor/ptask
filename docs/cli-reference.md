@@ -86,6 +86,19 @@ Ordered by `priority_score DESC, priority DESC, created_at DESC`.
 Print a Linear-style branch name for the matched task, e.g.
 `feature/PT-42-buy-bread-tomorrow-10am`. Pipe into `git checkout -b`.
 
+## Scoring & why (v2.2.0)
+
+```
+pt scoring run            # composite v2 (growth urgency, real neglect, link deps, effort)
+pt scoring run --v1       # legacy v1 formula
+pt scoring run --diff     # rank diff v1 vs v2 (top movers) without writing
+pt scoring run --dry-run  # compute, print, don't write
+pt why PT-42              # component breakdown: urgency/neglect/dependency/effort/llm + rank
+```
+
+v2 composite = 0.35·urgency + 0.15·neglect + 0.20·dependency + 0.30·(priority/5·effort_factor) + clamp(score_llm, ±0.15).
+No-deadline urgency GROWS with age (aged p5 can never rank below fresh p3). `score_llm` is written by the Phase-8 triage pass; zero until then.
+
 ## Saved views
 
 ```

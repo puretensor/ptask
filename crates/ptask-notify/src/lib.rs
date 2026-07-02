@@ -20,8 +20,15 @@ pub struct HttpDispatch;
 
 impl Dispatch for HttpDispatch {
     /// Send `text` via the Telegram Bot API. `Ok(true)` on HTTP 2xx,
-    /// `Ok(false)` on network failure / non-2xx (logged).
-    async fn send_telegram(&self, cfg: &DispatchCfg, text: &str) -> Result<bool> {
+    /// `Ok(false)` on network failure / non-2xx (logged). Non-empty
+    /// `buttons` render as one inline-keyboard row; taps are forwarded by
+    /// nexus (the bot's single `getUpdates` owner) to `POST /tg/callback`.
+    async fn send_telegram(
+        &self,
+        cfg: &DispatchCfg,
+        text: &str,
+        buttons: &[(String, String)],
+    ) -> Result<bool> {
         let (Some(token), Some(chat)) = (cfg.telegram_token.as_deref(), cfg.telegram_chat_id)
         else {
             return Ok(false);
@@ -31,7 +38,14 @@ impl Dispatch for HttpDispatch {
             .as_deref()
             .unwrap_or("https://api.telegram.org");
         let url = format!("{}/bot{}/sendMessage", base, token);
-        let body = serde_json::json!({"chat_id": chat, "text": text, "parse_mode": "HTML"});
+        let mut body = serde_json::json!({"chat_id": chat, "text": text, "parse_mode": "HTML"});
+        if !buttons.is_empty() {
+            let row: Vec<serde_json::Value> = buttons
+                .iter()
+                .map(|(label, data)| serde_json::json!({"text": label, "callback_data": data}))
+                .collect();
+            body["reply_markup"] = serde_json::json!({"inline_keyboard": [row]});
+        }
         let client = reqwest::Client::new();
         match client.post(url).json(&body).send().await {
             Ok(r) if r.status().is_success() => Ok(true),
@@ -137,14 +151,14 @@ mod tests {
             telegram_api_base: Some("http://127.0.0.1:1".into()),
             ..Default::default()
         };
-        let sent = HttpDispatch.send_telegram(&cfg, "x").await.unwrap();
+        let sent = HttpDispatch.send_telegram(&cfg, "x", &[]).await.unwrap();
         assert!(!sent);
     }
 
     #[tokio::test]
     async fn telegram_unconfigured_is_ok_false() {
         let cfg = DispatchCfg::default();
-        assert!(!HttpDispatch.send_telegram(&cfg, "x").await.unwrap());
+        assert!(!HttpDispatch.send_telegram(&cfg, "x", &[]).await.unwrap());
         assert!(!HttpDispatch.send_email(&cfg, "s", "b").await.unwrap());
     }
 }

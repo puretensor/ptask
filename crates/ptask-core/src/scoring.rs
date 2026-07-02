@@ -117,6 +117,86 @@ pub fn composite_score(urgency: f64, dependency: f64, neglect: f64, manual: f64)
         .clamp(0.0, 1.0)
 }
 
+// -------- scoring v2 (Phase 6) ----------------------------------------------
+//
+// The v1 formula was degenerate in production: dependency and neglect were
+// identically zero for every active task (40% dead weight), and no-deadline
+// urgency DECAYED with age, so 99/117-day-old p5 tasks ranked below fresh
+// p3s — the engine actively fought the operator (250 manual priority
+// changes in 14 days). v2 fixes the semantics; v1 stays for `--v1`.
+
+/// v2 urgency. WITH a deadline: the proven sigmoid. WITHOUT: a
+/// priority-anchored saturating GROWTH curve — pressure rises with age and
+/// an aged p5 can never rank below a fresh p3.
+pub fn urgency_score_v2(
+    deadline: Option<&Zoned>,
+    created_at: &Zoned,
+    priority: i64,
+    now: &Zoned,
+) -> f64 {
+    if let Some(d) = deadline {
+        let days_until =
+            (d.timestamp().as_second() - now.timestamp().as_second()) as f64 / 86_400.0;
+        return (1.0 / (1.0 + ((days_until - 7.0) / 2.0).exp())).clamp(0.0, 1.0);
+    }
+    let age_days = ((now.timestamp().as_second() - created_at.timestamp().as_second()) as f64
+        / 86_400.0)
+        .max(0.0);
+    let p = priority.clamp(1, 5) as f64;
+    (0.08 * p + 0.25 * (1.0 - (-age_days / 21.0).exp())).clamp(0.0, 0.85)
+}
+
+/// v2 neglect: time since last touch, saturating at 30 days. The v1 version
+/// was semantically inverted (attention RAISED "neglect") and read an
+/// interactions window nothing wrote views into.
+pub fn neglect_score_v2(updated_at: &Zoned, now: &Zoned) -> f64 {
+    let days = ((now.timestamp().as_second() - updated_at.timestamp().as_second()) as f64
+        / 86_400.0)
+        .max(0.0);
+    (days / 30.0).min(1.0)
+}
+
+/// v2 dependency: blocker pressure — how many ACTIVE tasks are waiting on
+/// this one (incoming `depends_on` edges), saturating at 5.
+pub fn dependency_score_v2(active_dependents: i64) -> f64 {
+    (active_dependents as f64 / 5.0).min(1.0)
+}
+
+/// WSJF-lite effort damping from the duration estimate: shorter tasks get a
+/// mild boost (blend keeps it a nudge, not a takeover). None = neutral.
+pub fn effort_factor(duration_min: Option<i64>) -> f64 {
+    match duration_min {
+        Some(d) if d > 0 => {
+            let f = 1.0 / (1.0 + d as f64 / 240.0);
+            0.8 + 0.2 * f
+        }
+        _ => 1.0,
+    }
+}
+
+pub const W2_URGENCY: f64 = 0.35;
+pub const W2_DEPENDENCY: f64 = 0.15;
+pub const W2_NEGLECT: f64 = 0.20;
+pub const W2_MANUAL: f64 = 0.30;
+
+/// v2 composite: weighted blend × effort factor + bounded LLM adjustment.
+/// `score_llm` is clamped to ±0.15 — a nudge on top of the deterministic
+/// base, never an overwrite.
+pub fn composite_score_v2(
+    urgency: f64,
+    dependency: f64,
+    neglect: f64,
+    manual: f64,
+    duration_min: Option<i64>,
+    score_llm: f64,
+) -> f64 {
+    let base = W2_URGENCY * urgency
+        + W2_DEPENDENCY * dependency
+        + W2_NEGLECT * neglect
+        + W2_MANUAL * manual;
+    (base * effort_factor(duration_min) + score_llm.clamp(-0.15, 0.15)).clamp(0.0, 1.0)
+}
+
 // -------- dependency graph ---------------------------------------------------
 
 /// Directed dependency graph (`dep → task`).
@@ -262,6 +342,10 @@ struct ScoringRow {
     created_at: String,
     deadline: Option<String>,
     depends_on: String,
+    updated_at: String,
+    duration_min: Option<i64>,
+    score_llm: f64,
+    active_dependents: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +363,12 @@ struct ScoreWrite {
 /// but no DB writes happen — mirrors the dry-run semantics fixed in v0.7.1
 /// for accountability.
 pub fn run_once_at(db: &Db, dry_run: bool, now: &Zoned) -> Result<ScoringReport> {
+    run_once_at_mode(db, dry_run, now, true)
+}
+
+/// Mode-aware scoring run. `v2 = false` keeps the legacy formula for
+/// comparison (`pt scoring run --v1`).
+pub fn run_once_at_mode(db: &Db, dry_run: bool, now: &Zoned, v2: bool) -> Result<ScoringReport> {
     // Expired snoozes wake here so they re-enter ordering without a
     // dedicated timer (the scoring run is hourly).
     if !dry_run {
@@ -318,12 +408,30 @@ pub fn run_once_at(db: &Db, dry_run: bool, now: &Zoned) -> Result<ScoringReport>
 
         let interactions = load_interactions_14d(db, &row.id)?;
 
-        let urgency = urgency_score(deadline.as_ref(), &created_at, now);
-        let manual = manual_score(row.priority);
-        let neglect = neglect_score(&interactions, now);
-        let cent = *centrality.get(&row.id).unwrap_or(&0.0);
-        let dep = dependency_score(cent, graph.descendants_count(&row.id));
-        let composite = composite_score(urgency, dep, neglect, manual);
+        let (urgency, manual, neglect, dep, composite) = if v2 {
+            let urgency = urgency_score_v2(deadline.as_ref(), &created_at, row.priority, now);
+            let manual = manual_score(row.priority);
+            let updated = parse_iso_to_utc(&row.updated_at).unwrap_or_else(|| now.clone());
+            let neglect = neglect_score_v2(&updated, now);
+            let dep = dependency_score_v2(row.active_dependents);
+            let composite = composite_score_v2(
+                urgency,
+                dep,
+                neglect,
+                manual,
+                row.duration_min,
+                row.score_llm,
+            );
+            (urgency, manual, neglect, dep, composite)
+        } else {
+            let urgency = urgency_score(deadline.as_ref(), &created_at, now);
+            let manual = manual_score(row.priority);
+            let neglect = neglect_score(&interactions, now);
+            let cent = *centrality.get(&row.id).unwrap_or(&0.0);
+            let dep = dependency_score(cent, graph.descendants_count(&row.id));
+            let composite = composite_score(urgency, dep, neglect, manual);
+            (urgency, manual, neglect, dep, composite)
+        };
 
         info!(
             target: "ptask::scoring",
@@ -366,16 +474,94 @@ pub fn run_once(db: &Db, dry_run: bool) -> Result<ScoringReport> {
     run_once_at(db, dry_run, &now)
 }
 
+/// Component breakdown for one task — powers `pt why`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WhyBreakdown {
+    pub task_uuid: String,
+    pub pt_id: Option<String>,
+    pub title: String,
+    pub urgency: f64,
+    pub dependency: f64,
+    pub neglect: f64,
+    pub manual: f64,
+    pub effort_factor: f64,
+    pub score_llm: f64,
+    pub composite: f64,
+    pub weights: (f64, f64, f64, f64),
+    pub rank: usize,
+    pub of: usize,
+}
+
+/// Compute the v2 breakdown + rank for one task among active tasks.
+pub fn why(db: &Db, task_uuid: &str) -> Result<WhyBreakdown> {
+    let now = crate::dates::now_in_operator_tz()?;
+    let rows = load_scoring_rows(db)?;
+    let mut scored: Vec<(String, f64)> = Vec::with_capacity(rows.len());
+    let mut mine = None;
+    for row in &rows {
+        let created = parse_iso_to_utc(&row.created_at).unwrap_or_else(|| now.clone());
+        let deadline = row.deadline.as_deref().and_then(parse_iso_to_utc);
+        let urgency = urgency_score_v2(deadline.as_ref(), &created, row.priority, &now);
+        let manual = manual_score(row.priority);
+        let updated = parse_iso_to_utc(&row.updated_at).unwrap_or_else(|| now.clone());
+        let neglect = neglect_score_v2(&updated, &now);
+        let dep = dependency_score_v2(row.active_dependents);
+        let composite = composite_score_v2(
+            urgency,
+            dep,
+            neglect,
+            manual,
+            row.duration_min,
+            row.score_llm,
+        );
+        scored.push((row.id.clone(), composite));
+        if row.id == task_uuid {
+            mine = Some(WhyBreakdown {
+                task_uuid: row.id.clone(),
+                pt_id: None,
+                title: row.title.clone(),
+                urgency,
+                dependency: dep,
+                neglect,
+                manual,
+                effort_factor: effort_factor(row.duration_min),
+                score_llm: row.score_llm.clamp(-0.15, 0.15),
+                composite,
+                weights: (W2_URGENCY, W2_DEPENDENCY, W2_NEGLECT, W2_MANUAL),
+                rank: 0,
+                of: 0,
+            });
+        }
+    }
+    let mut mine =
+        mine.ok_or_else(|| crate::Error::Other("task not found among active scoring rows".into()))?;
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    mine.rank = scored
+        .iter()
+        .position(|(id, _)| id == task_uuid)
+        .unwrap_or(0)
+        + 1;
+    mine.of = scored.len();
+    mine.pt_id = db
+        .with_conn(|c| crate::pt_id::lookup_pt_id(c, task_uuid))
+        .unwrap_or(None);
+    Ok(mine)
+}
+
 // -------- DB helpers ---------------------------------------------------------
 
 fn load_scoring_rows(db: &Db) -> Result<Vec<ScoringRow>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
-        "SELECT id, title, COALESCE(priority, 2), created_at, deadline,
-                COALESCE(depends_on, '[]')
-         FROM tasks
-         WHERE status NOT IN ('done', 'dismissed')
-         ORDER BY id",
+        "SELECT t.id, t.title, COALESCE(t.priority, 2), t.created_at, t.deadline,
+                COALESCE(t.depends_on, '[]'), t.updated_at, t.duration_min,
+                COALESCE(t.score_llm, 0.0),
+                (SELECT COUNT(*) FROM task_links l JOIN tasks a ON a.id = l.from_uuid
+                 WHERE l.to_uuid = t.id AND l.kind = 'depends_on'
+                   AND a.status_v2 NOT IN ('done','dismissed')) AS active_dependents
+         FROM tasks t
+         WHERE t.status NOT IN ('done', 'dismissed')
+         ORDER BY t.id",
     )?;
     let it = stmt.query_map([], |r| {
         Ok(ScoringRow {
@@ -385,6 +571,10 @@ fn load_scoring_rows(db: &Db) -> Result<Vec<ScoringRow>> {
             created_at: r.get(3)?,
             deadline: r.get(4)?,
             depends_on: r.get(5)?,
+            updated_at: r.get(6)?,
+            duration_min: r.get(7)?,
+            score_llm: r.get(8)?,
+            active_dependents: r.get(9)?,
         })
     })?;
     let mut v = Vec::new();
@@ -824,7 +1014,7 @@ mod tests {
     fn run_once_at_writes_all_four_columns() {
         let (_d, db) = fresh_db();
         insert_task(&db, "task-1", "alpha", 3, None, &[]);
-        let r = run_once_at(&db, false, &now()).unwrap();
+        let r = run_once_at_mode(&db, false, &now(), false).unwrap();
         assert_eq!(r.tasks_scored, 1);
         assert!(!r.dry_run);
         let (composite, urgency, dep, neglect) = read_score(&db, "task-1");
@@ -872,7 +1062,7 @@ mod tests {
         insert_task(&db, "a", "alpha", 3, None, &[]);
         insert_task(&db, "b", "beta", 3, None, &["a"]);
         insert_task(&db, "c", "gamma", 3, None, &["b"]);
-        run_once_at(&db, false, &now()).unwrap();
+        run_once_at_mode(&db, false, &now(), false).unwrap();
         let dep_a = read_score(&db, "a").2; // descendants_count(a) = 2 → dep = min(1, 0 + 0.2) = 0.2
         let dep_b = read_score(&db, "b").2; // betweenness(b)=0.5, descendants(b)=1 → dep = 0.6
         let dep_c = read_score(&db, "c").2; // dep = 0
@@ -886,5 +1076,29 @@ mod tests {
         let (_d, db) = fresh_db();
         let r = run_once_at(&db, false, &now()).unwrap();
         assert_eq!(r.tasks_scored, 0);
+    }
+    /// PHASE-6 GATE (unit): the v2 curve fixes the inversion — an aged p5
+    /// with no deadline MUST outrank a fresh p3, and blocker pressure is a
+    /// real signal from task_links.
+    #[test]
+    fn v2_aged_p5_outranks_fresh_p3_and_blockers_count() {
+        let now = now();
+        let aged_p5 = urgency_score_v2(None, &z("2026-03-01T12:00:00Z"), 5, &now);
+        let fresh_p3 = urgency_score_v2(None, &z("2026-05-12T12:00:00Z"), 3, &now);
+        assert!(
+            aged_p5 > fresh_p3,
+            "aged p5 {aged_p5} must beat fresh p3 {fresh_p3}"
+        );
+        // Composite too (same neglect/manual defaults, no LLM nudge):
+        let c5 = composite_score_v2(aged_p5, 0.0, 1.0, manual_score(5), None, 0.0);
+        let c3 = composite_score_v2(fresh_p3, 0.0, 0.0, manual_score(3), None, 0.0);
+        assert!(c5 > c3);
+        assert_eq!(dependency_score_v2(0), 0.0);
+        assert!(dependency_score_v2(3) > 0.5);
+        assert_eq!(dependency_score_v2(10), 1.0);
+        // LLM nudge is clamped.
+        let with_nudge = composite_score_v2(0.5, 0.0, 0.0, 0.5, None, 9.0);
+        let without = composite_score_v2(0.5, 0.0, 0.0, 0.5, None, 0.0);
+        assert!((with_nudge - without - 0.15).abs() < 1e-9);
     }
 }

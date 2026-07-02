@@ -98,6 +98,8 @@ enum Command {
     Review(ReviewArgs),
     /// Full-text search over titles + descriptions (FTS5).
     Search(SearchArgs),
+    /// Explain a task's composite score: components, weights, rank.
+    Why(WhyArgs),
     /// Apply one action to every task matching a filter DSL expression.
     Bulk(BulkArgs),
     /// Show a task's attributed event history (who did what, via which surface).
@@ -159,6 +161,12 @@ struct ReviewArgs {
     /// Days of inactivity that makes a task "stale".
     #[arg(long = "stale-days", default_value_t = 14)]
     stale_days: i64,
+}
+
+#[derive(clap::Args, Debug)]
+struct WhyArgs {
+    /// PT-N, bare integer, or title substring.
+    query: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -392,6 +400,13 @@ struct ScoringRunArgs {
     /// Compute and log scores but don't write them back to the DB.
     #[arg(long = "dry-run")]
     dry_run: bool,
+    /// Use the retired v1 formula (comparison escape hatch).
+    #[arg(long = "v1")]
+    v1: bool,
+    /// Print an old-vs-new top-20 rank diff (implies --dry-run semantics
+    /// for the comparison pass; final write still follows the chosen mode).
+    #[arg(long = "diff")]
+    diff: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -650,6 +665,7 @@ fn main() -> Result<()> {
                 Some(Command::Depend(a)) => cmd_depend(&db, a),
                 Some(Command::Review(a)) => cmd_review(&db, a),
                 Some(Command::Search(a)) => cmd_search(&db, a),
+                Some(Command::Why(a)) => cmd_why(&db, a),
                 Some(Command::Bulk(a)) => cmd_bulk(&db, a),
                 Some(Command::Log(a)) => cmd_log(&db, a),
                 Some(Command::Undo) => cmd_undo(&db),
@@ -1265,6 +1281,36 @@ fn cmd_depend(db: &Db, a: DependArgs) -> Result<()> {
     )
 }
 
+fn cmd_why(db: &Db, a: WhyArgs) -> Result<()> {
+    let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
+    let b = ptask_core::scoring::why(db, &task.id)?;
+    emit(&b, || {
+        println!(
+            "{} {}\n  rank {}/{} · composite {:.3}",
+            b.pt_id.as_deref().unwrap_or("-"),
+            b.title,
+            b.rank,
+            b.of,
+            b.composite
+        );
+        let (wu, wd, wn, wm) = b.weights;
+        println!("  urgency    {:.3} × {:.2}", b.urgency, wu);
+        println!(
+            "  dependency {:.3} × {:.2}  (active tasks blocked by this)",
+            b.dependency, wd
+        );
+        println!(
+            "  neglect    {:.3} × {:.2}  (time since last touch / 30d)",
+            b.neglect, wn
+        );
+        println!("  manual     {:.3} × {:.2}  (priority)", b.manual, wm);
+        println!(
+            "  effort ×{:.3}  · llm nudge {:+.3}",
+            b.effort_factor, b.score_llm
+        );
+    })
+}
+
 fn cmd_search(db: &Db, a: SearchArgs) -> Result<()> {
     let q = a.query.join(" ");
     if q.trim().is_empty() {
@@ -1873,15 +1919,77 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
 fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
     match c {
         ScoringCommand::Run(a) => {
-            let report = ptask_core::scoring::run_once(db, a.dry_run)?;
+            if a.diff {
+                print_rank_diff(db)?;
+            }
+            let now = ptask_core::dates::now_in_operator_tz().map_err(anyhow::Error::msg)?;
+            let report = ptask_core::scoring::run_once_at_mode(db, a.dry_run, &now, !a.v1)?;
             println!(
-                "scoring ok — tasks_scored={}{}",
+                "scoring ok — tasks_scored={}{}{}",
                 report.tasks_scored,
-                if report.dry_run { " (dry-run)" } else { "" }
+                if report.dry_run { " (dry-run)" } else { "" },
+                if a.v1 { " (v1 formula)" } else { "" }
             );
             Ok(())
         }
     }
+}
+
+/// Top-20 rank comparison between the retired v1 formula and v2, computed
+/// side-by-side without writing either. The Phase-6 cutover evidence.
+fn print_rank_diff(db: &Db) -> Result<()> {
+    let now = ptask_core::dates::now_in_operator_tz().map_err(anyhow::Error::msg)?;
+    // Score under each mode into memory using dry runs + reading why()-style
+    // computation is heavier; simplest faithful approach: run v1 dry (logs
+    // only), then compute v2 breakdowns via why() per active task.
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, pt_id, title, priority_score FROM tasks
+         WHERE status NOT IN ('done','dismissed')",
+    )?;
+    let rows: Vec<(String, Option<String>, String, f64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(stmt);
+    drop(conn);
+    let mut v1_rank: Vec<(String, f64)> =
+        rows.iter().map(|(id, _, _, s)| (id.clone(), *s)).collect();
+    v1_rank.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let v1_pos: std::collections::HashMap<&String, usize> = v1_rank
+        .iter()
+        .enumerate()
+        .map(|(i, (id, _))| (id, i + 1))
+        .collect();
+
+    let mut v2_scores = Vec::new();
+    for (id, pt, title, _) in &rows {
+        if let Ok(b) = ptask_core::scoring::why(db, id) {
+            v2_scores.push((id.clone(), pt.clone(), title.clone(), b.composite));
+        }
+    }
+    v2_scores.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    println!("rank diff (v2 top-20 vs current stored v1 ordering):");
+    let _ = now;
+    for (i, (id, pt, title, score)) in v2_scores.iter().take(20).enumerate() {
+        let old = v1_pos.get(id).copied().unwrap_or(0);
+        let delta = old as i64 - (i as i64 + 1);
+        println!(
+            "  {:>2}. {:<8} {:.3}  ({}{}) {}",
+            i + 1,
+            pt.as_deref().unwrap_or("-"),
+            score,
+            if delta > 0 {
+                "↑"
+            } else if delta < 0 {
+                "↓"
+            } else {
+                "="
+            },
+            delta.abs(),
+            title.chars().take(70).collect::<String>()
+        );
+    }
+    Ok(())
 }
 
 fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {

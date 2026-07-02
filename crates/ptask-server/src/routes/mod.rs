@@ -6,4 +6,5 @@ pub mod email;
 pub mod metrics;
 pub mod read;
 pub mod sync;
+pub mod tg;
 pub mod webhook_git;

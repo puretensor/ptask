@@ -222,6 +222,7 @@ mod tests {
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     deadline TEXT, last_reminded TEXT, next_reminder TEXT,
                     depends_on TEXT DEFAULT '[]', blocks_tasks TEXT DEFAULT '[]',
+                    task_type TEXT DEFAULT 'operational',
                     priority_score REAL DEFAULT 0.0
                  );
                  CREATE INDEX idx_tasks_status ON tasks(status);",

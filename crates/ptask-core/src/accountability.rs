@@ -87,11 +87,14 @@ struct EligibleTask {
     last_reminded: Option<String>,
     dismissal_count: i64,
     escalation_level: i64,
+    level_changed_at: Option<String>,
 }
 
-/// True when the UTC hour of `z` is in the quiet window 22:00 — 08:00 UTC.
+/// True in the quiet window 22:00 — 08:00 **Europe/London** (the operator's
+/// wall clock — the old UTC window drifted an hour every BST switch).
 pub fn in_quiet_hours_at(z: &Zoned) -> bool {
-    let h = z.with_time_zone(jiff::tz::TimeZone::UTC).hour();
+    let tz = jiff::tz::TimeZone::get("Europe/London").unwrap_or(jiff::tz::TimeZone::UTC);
+    let h = z.with_time_zone(tz).hour();
     !(QUIET_END_UTC_HOUR..QUIET_START_UTC_HOUR).contains(&h)
 }
 
@@ -129,14 +132,17 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
         "SELECT id, title, created_at, last_reminded,
-                COALESCE(dismissal_count, 0), COALESCE(escalation_level, 0)
+                COALESCE(dismissal_count, 0), COALESCE(escalation_level, 0),
+                level_changed_at
          FROM tasks
          WHERE status IN ('pending', 'delayed')
            AND NOT (COALESCE(status_v2,'') = 'snoozed'
                     AND snoozed_until IS NOT NULL AND snoozed_until > ?1)
+           AND COALESCE(task_type,'operational') != 'idea'
            AND (next_reminder IS NULL OR next_reminder <= ?1)
            AND COALESCE(escalation_level, 0) < 5
-         ORDER BY priority_score DESC, priority DESC, created_at DESC",
+         ORDER BY (last_reminded IS NOT NULL), last_reminded ASC,
+                  priority_score DESC, priority DESC",
     )?;
     let rows = stmt.query_map([now_iso], |r| {
         Ok(EligibleTask {
@@ -146,6 +152,7 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
             last_reminded: r.get(3)?,
             dismissal_count: r.get(4)?,
             escalation_level: r.get(5)?,
+            level_changed_at: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -163,10 +170,19 @@ fn should_advance(task: &EligibleTask, age_days: i64, now: &Zoned) -> bool {
     let level = task.escalation_level;
     let last = task.last_reminded.as_deref().and_then(parse_iso_to_utc);
     let secs_since = |z: &Zoned| now.timestamp().as_second() - z.timestamp().as_second();
+    // Time-at-level replaces the v1 dismissal_count gates, which had NO
+    // writer anywhere in the codebase — levels 2-3 were unreachable for a
+    // year while the doc claimed a 6-level ladder.
+    let level_age_days = task
+        .level_changed_at
+        .as_deref()
+        .and_then(parse_iso_to_utc)
+        .map(|z| secs_since(&z) / 86_400)
+        .unwrap_or(age_days);
     match level {
         0 => age_days >= 2,
-        1 => task.dismissal_count >= 1,
-        2 => task.dismissal_count >= 3,
+        1 => level_age_days >= 3,
+        2 => level_age_days >= 4,
         3 => last.as_ref().is_some_and(|z| secs_since(z) >= 48 * 3600),
         4 => last.as_ref().is_some_and(|z| secs_since(z) >= 7 * 86_400),
         _ => false,
@@ -223,7 +239,7 @@ fn set_escalation_level(db: &Db, task_uuid: &str, level: i64) -> Result<()> {
     let tx = conn.transaction()?;
     let now = crate::dates::format_iso(&crate::dates::now_in_operator_tz()?);
     tx.execute(
-        "UPDATE tasks SET escalation_level=?1, updated_at=?2 WHERE id=?3",
+        "UPDATE tasks SET escalation_level=?1, updated_at=?2, level_changed_at=?2 WHERE id=?3",
         params![level, now, task_uuid],
     )?;
     tx.execute(
@@ -333,10 +349,15 @@ pub struct NudgeRequest {
 /// ([`run_check_at`]) — implementations may assume real config and a live
 /// send is wanted.
 pub trait Dispatch: Send + Sync {
+    /// `buttons` are inline-keyboard actions rendered as one row under the
+    /// message; empty slice = no keyboard. Each pair is (label,
+    /// callback_data). Callback taps are received by nexus — the bot's
+    /// single `getUpdates` owner — and forwarded to `POST /tg/callback`.
     fn send_telegram(
         &self,
         cfg: &DispatchCfg,
         text: &str,
+        buttons: &[(String, String)],
     ) -> impl Future<Output = Result<bool>> + Send;
 
     fn send_email(
@@ -353,6 +374,20 @@ pub trait Dispatch: Send + Sync {
         cfg: &DispatchCfg,
         req: &NudgeRequest,
     ) -> impl Future<Output = Option<String>> + Send;
+}
+
+/// Inline actions attached to every Telegram nudge: the triage loop's
+/// missing actuator. callback_data is `<verb>:<task_uuid>` (fits Telegram's
+/// 64-byte limit: 9 + 36); the `/tg/callback` server route executes taps.
+pub fn nudge_buttons(task_uuid: &str) -> Vec<(String, String)> {
+    vec![
+        ("\u{2705} Done".into(), format!("ptdone:{task_uuid}")),
+        (
+            "\u{1f4a4} Snooze 3d".into(),
+            format!("ptsnooze:{task_uuid}"),
+        ),
+        ("\u{1f5d1} Dismiss".into(), format!("ptdismiss:{task_uuid}")),
+    ]
 }
 
 /// Run one accountability cycle. Mirrors `engine.run_check()`.
@@ -463,10 +498,11 @@ pub async fn run_check_at<D: Dispatch>(
                         false
                     } else {
                         let prefixed = format!("<b>Task #{}:</b> {}", level, message);
+                        let buttons = nudge_buttons(&task.id);
                         let r = if cfg.dry_run {
                             true
                         } else {
-                            dispatch.send_telegram(cfg, &prefixed).await?
+                            dispatch.send_telegram(cfg, &prefixed, &buttons).await?
                         };
                         if r {
                             telegram_consecutive_failures = 0;
@@ -635,11 +671,14 @@ mod tests {
     }
 
     #[test]
-    fn quiet_hours_match_22_to_08_utc() {
+    fn quiet_hours_match_22_to_08_london() {
+        // The window is the operator's wall clock (Europe/London), so build
+        // the probes IN that zone — during BST these are UTC+1.
+        let tz = jiff::tz::TimeZone::get("Europe/London").unwrap();
         let mk = |h: i8| {
             jiff::civil::date(2026, 5, 13)
                 .at(h, 0, 0, 0)
-                .to_zoned(jiff::tz::TimeZone::UTC)
+                .to_zoned(tz.clone())
                 .unwrap()
         };
         assert!(in_quiet_hours_at(&mk(22)));
@@ -663,7 +702,8 @@ mod tests {
     #[test]
     fn should_advance_transitions_match_spec() {
         let now = Zoned::now().with_time_zone(jiff::tz::TimeZone::UTC);
-        let mk = |level: i64, dismissal: i64, age_days: i64, last_offset_secs: Option<i64>| {
+        // (level, level_age_days, task_age_days, last_reminded_offset_secs)
+        let mk = |level: i64, level_age_days: i64, age_days: i64, last_offset_secs: Option<i64>| {
             EligibleTask {
                 id: "x".into(),
                 title: "t".into(),
@@ -675,25 +715,29 @@ mod tests {
                         &now.checked_sub(jiff::Span::new().seconds(s)).unwrap(),
                     )
                 }),
-                dismissal_count: dismissal,
+                dismissal_count: 0,
                 escalation_level: level,
+                level_changed_at: Some(crate::dates::format_iso(
+                    &now.checked_sub(jiff::Span::new().days(level_age_days))
+                        .unwrap(),
+                )),
             }
         };
-        // 0 → 1 at age 2d.
+        // 0 → 1 at task age 2d.
         assert!(should_advance(&mk(0, 0, 2, None), 2, &now));
         assert!(!should_advance(&mk(0, 0, 1, None), 1, &now));
-        // 1 → 2 after first dismissal.
-        assert!(should_advance(&mk(1, 1, 5, None), 5, &now));
-        assert!(!should_advance(&mk(1, 0, 5, None), 5, &now));
-        // 2 → 3 after third dismissal.
-        assert!(should_advance(&mk(2, 3, 5, None), 5, &now));
-        assert!(!should_advance(&mk(2, 2, 5, None), 5, &now));
+        // 1 → 2 after 3 days AT level 1 (time-at-level, not dismissals).
+        assert!(should_advance(&mk(1, 3, 10, None), 10, &now));
+        assert!(!should_advance(&mk(1, 2, 10, None), 10, &now));
+        // 2 → 3 after 4 days at level.
+        assert!(should_advance(&mk(2, 4, 20, None), 20, &now));
+        assert!(!should_advance(&mk(2, 3, 20, None), 20, &now));
         // 3 → 4 after 48h since last reminder.
-        assert!(should_advance(&mk(3, 3, 5, Some(48 * 3600)), 5, &now));
-        assert!(!should_advance(&mk(3, 3, 5, Some(40 * 3600)), 5, &now));
+        assert!(should_advance(&mk(3, 9, 20, Some(48 * 3600)), 20, &now));
+        assert!(!should_advance(&mk(3, 9, 20, Some(40 * 3600)), 20, &now));
         // 4 → 5 after 7 days since last reminder.
-        assert!(should_advance(&mk(4, 3, 9, Some(7 * 86_400)), 9, &now));
-        assert!(!should_advance(&mk(4, 3, 9, Some(5 * 86_400)), 9, &now));
+        assert!(should_advance(&mk(4, 20, 30, Some(7 * 86_400)), 30, &now));
+        assert!(!should_advance(&mk(4, 20, 30, Some(5 * 86_400)), 30, &now));
         // Level 5 never advances.
         assert!(!should_advance(&mk(5, 99, 99, Some(99 * 86_400)), 99, &now));
     }
@@ -707,6 +751,7 @@ mod tests {
             last_reminded: None,
             dismissal_count: 2,
             escalation_level: 0,
+            level_changed_at: None,
         };
         for lv in 1..=5 {
             let m = fallback_message(&t, lv, 5);
@@ -729,7 +774,12 @@ mod tests {
     /// but the type is still required by the signature.
     struct SendOk;
     impl Dispatch for SendOk {
-        async fn send_telegram(&self, _cfg: &DispatchCfg, _text: &str) -> Result<bool> {
+        async fn send_telegram(
+            &self,
+            _cfg: &DispatchCfg,
+            _text: &str,
+            _buttons: &[(String, String)],
+        ) -> Result<bool> {
             Ok(true)
         }
         async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {
@@ -744,7 +794,12 @@ mod tests {
     /// misconfiguration) — the dead-bot-token mode.
     struct SendFail;
     impl Dispatch for SendFail {
-        async fn send_telegram(&self, _cfg: &DispatchCfg, _text: &str) -> Result<bool> {
+        async fn send_telegram(
+            &self,
+            _cfg: &DispatchCfg,
+            _text: &str,
+            _buttons: &[(String, String)],
+        ) -> Result<bool> {
             Ok(false)
         }
         async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {

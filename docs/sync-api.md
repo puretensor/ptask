@@ -183,6 +183,20 @@ Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
 | `pt_webhook_send_total` | counter | `result` (`ok` / `error`) |
 | `pt_sync_commands_total` | counter | `kind` (`task_create` / `task_done` / ...) |
 
+## POST /tg/callback (v2.2.0)
+
+Executes a Telegram inline-button tap forwarded by nexus (the bot's single
+`getUpdates` owner). Requires `write` scope.
+
+```json
+{"data": "ptdone:<task-uuid>", "callback_id": "<telegram callback id>"}
+```
+
+Verbs: `ptdone` | `ptsnooze` (3 days) | `ptdismiss`. Idempotent per
+`callback_id` (journal uuid `tg-cb:<id>`); duplicate taps return
+`{"ok":true,"duplicate":true}`. Actions land in the journal as
+`actor=telegram`, `source=tg-callback`.
+
 ## GET /list (v2.0.0)
 
 `GET /list?filter=<DSL>&status=pending|all&limit=N` — server-side filtered
