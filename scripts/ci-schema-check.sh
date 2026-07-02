@@ -26,6 +26,7 @@ expected = {
     "pt_recurrence",
     "pt_event_log",
     "pt_webhook_log",
+    "pt_api_tokens",
 }
 present = {
     row[0]
