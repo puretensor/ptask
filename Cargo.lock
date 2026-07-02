@@ -104,9 +104,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "async-trait"
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-bot"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "jiff",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-cli"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2791,7 +2791,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-core"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "interim",
  "jiff",
@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-distill"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-server"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-tui"
-version = "1.14.0"
+version = "1.14.1"
 dependencies = [
  "anyhow",
  "crossterm",
