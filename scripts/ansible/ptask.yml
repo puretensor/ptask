@@ -159,6 +159,7 @@
         - ptask-distill.timer
         - ptask-accountability.timer
         - ptask-scoring.timer
+        - ptask-restore-verify.timer
       when: ptask_is_canonical
 
     - name: enable + start API service on canonical host
@@ -181,6 +182,7 @@
         - ptask-distill.timer
         - ptask-accountability.timer
         - ptask-scoring.timer
+        - ptask-restore-verify.timer
       when: not ptask_is_canonical
       failed_when: false
 
