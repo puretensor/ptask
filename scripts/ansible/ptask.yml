@@ -51,6 +51,7 @@
       - ptask-accountability.timer
       - ptask-scoring.service
       - ptask-scoring.timer
+      - ptask-failure-alert@.service
     ptask_service_units:
       - ptask-serve.service
     ptask_units: "{{ ptask_timer_units + ptask_service_units }}"

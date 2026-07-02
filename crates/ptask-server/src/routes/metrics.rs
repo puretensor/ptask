@@ -148,6 +148,80 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     writeln!(out, "# TYPE pt_recurrence_total gauge").ok();
     writeln!(out, "pt_recurrence_total {}", rec_count).ok();
 
+    // --- distill freshness ---
+    // Age of the last SUCCESSFUL distill run (`distill.run` event). The
+    // 2026-05 incident produced zero tasks for 7 weeks with no signal; the
+    // alert rule fires when this exceeds ~26h (daily timer + slack).
+    // -1 = never ran. SQLite's strftime handles the mixed +01:00/UTC
+    // offsets these rows carry.
+    let distill_age: i64 = db
+        .with_conn(|c| {
+            let n: Option<i64> = c.query_row(
+                "SELECT CAST(strftime('%s','now') AS INTEGER)
+                        - CAST(strftime('%s', MAX(ts)) AS INTEGER)
+                 FROM pt_event_log WHERE event_type = 'distill.run'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n.unwrap_or(-1))
+        })
+        .unwrap_or(-1);
+    writeln!(
+        out,
+        "# HELP pt_distill_last_success_age_seconds Seconds since the last successful distill run (-1 = never)."
+    )
+    .ok();
+    writeln!(out, "# TYPE pt_distill_last_success_age_seconds gauge").ok();
+    writeln!(out, "pt_distill_last_success_age_seconds {}", distill_age).ok();
+
+    let distill_failed: i64 = db
+        .with_conn(|c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM pt_event_log WHERE event_type = 'distill.failed'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n)
+        })
+        .unwrap_or(0);
+    writeln!(
+        out,
+        "# HELP pt_distill_failed_total Distill runs recorded as failed."
+    )
+    .ok();
+    writeln!(out, "# TYPE pt_distill_failed_total gauge").ok();
+    writeln!(out, "pt_distill_failed_total {}", distill_failed).ok();
+
+    // --- accountability dispatch freshness (per channel) ---
+    // Rows land in `notifications` only on successful sends, so channel age
+    // is a liveness signal for the dispatch path (the 401ing bot token sat
+    // undetected for 8 weeks because nothing measured this).
+    writeln!(
+        out,
+        "# HELP pt_notifications_last_sent_age_seconds Seconds since the last successful send per channel."
+    )
+    .ok();
+    writeln!(out, "# TYPE pt_notifications_last_sent_age_seconds gauge").ok();
+    db.with_conn(|c| {
+        let mut stmt = c.prepare(
+            "SELECT channel,
+                    CAST(strftime('%s','now') AS INTEGER)
+                    - CAST(strftime('%s', MAX(sent_at)) AS INTEGER)
+             FROM notifications GROUP BY channel",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (channel, age) = row?;
+            let _ = writeln!(
+                out,
+                "pt_notifications_last_sent_age_seconds{{channel=\"{}\"}} {}",
+                escape(&channel),
+                age
+            );
+        }
+        Ok(())
+    })?;
+
     Ok(out)
 }
 

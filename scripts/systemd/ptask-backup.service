@@ -4,6 +4,7 @@ Documentation=https://github.com/puretensor/ptask
 ConditionPathExists=%h/puretensor-tasks/tasks.db
 After=network-online.target
 Wants=network-online.target
+OnFailure=ptask-failure-alert@%n.service
 
 [Service]
 Type=oneshot
