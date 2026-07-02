@@ -20,7 +20,9 @@
 
 all:
   vars:
-    ansible_user: puretensorai
+    # Fleet nodes are provisioned/accessed as root; only the canonical
+    # workstation runs as the operator user.
+    ansible_user: root
     ptask_canonical_host: tensor-core
     ptask_serve_url: http://100.121.42.54:9501
 
@@ -30,31 +32,32 @@ all:
         ptask_canonical:
           hosts:
             tensor-core:
-              ansible_host: tensor-core.ts.puretensor.local
+              ansible_host: tensor-core
+              ansible_user: puretensorai
 
         ptask_tier0:
           hosts:
             mon1:
-              ansible_host: mon1.ts.puretensor.local
+              ansible_host: mon1
             mon2:
-              ansible_host: mon2.ts.puretensor.local
+              ansible_host: mon2
               # glibc 2.35 — build with `cargo build --release` inside
               # an ubuntu:22.04 container, override via -e ptask_binary=...
               ptask_arch_override: x86_64-ubuntu22
             mon3:
-              ansible_host: mon3.ts.puretensor.local
+              ansible_host: mon3
               # aarch64 — build with `--target aarch64-unknown-linux-gnu`
               # natively or in an arm64 container, override via -e ptask_binary=...
               ptask_arch_override: aarch64
             arx1:
-              ansible_host: arx1.ts.puretensor.local
+              ansible_host: arx1
             arx2:
-              ansible_host: arx2.ts.puretensor.local
+              ansible_host: arx2
             arx3:
-              ansible_host: arx3.ts.puretensor.local
+              ansible_host: arx3
             arx4:
-              ansible_host: arx4.ts.puretensor.local
+              ansible_host: arx4
             fox-n0:
-              ansible_host: fox-n0.ts.puretensor.local
+              ansible_host: fox-n0
             fox-n1:
-              ansible_host: fox-n1.ts.puretensor.local
+              ansible_host: fox-n1
