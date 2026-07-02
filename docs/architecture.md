@@ -104,7 +104,8 @@ carries no HTTP/TLS/executor dependencies.
 | `PTASK_SYNC_URL` | `pt remote` (clients) | `http://100.121.42.54:9501`. Set fleet-wide by `/etc/profile.d/ptask.sh`. |
 | `PTASK_API_TOKEN` | `pt serve`, `pt remote` | Required for non-loopback `pt serve` binds; clients send it as `Authorization: Bearer`. |
 | `PTASK_ALLOW_UNAUTHENTICATED` | `pt serve` | Emergency/test override for unauthenticated non-loopback binds. Do not set in production. |
-| `PTASK_DISTILL_PY_ROOT` | `pt distill` | `/home/puretensorai/puretensor-tasks-legacy` — the archived Python tree the shim still calls. Set by `~/.config/systemd/user/ptask-distill.service.d/python-root.conf` on the canonical host. Retained until `pt distill` is fully native. |
+| `PTASK_DISTILL_PY_ROOT` | `pt distill --legacy` | `/home/puretensorai/puretensor-tasks-legacy` — the RETIRED Python tree, kept only for the `--legacy` escape hatch. The default pipeline is native (v2.1.0). |
+| `GOOGLE_API_KEY`, `GEMINI_CONSOLIDATE_MODEL` | `pt distill` (native) | Gemini structured-output credentials/model for classify+consolidate. Missing key = preflight exit 3, fail closed. |
 | `PTASK_HAL_CLASSIFY_URL` | `pt distill` (native) | HAL endpoint for the speech-act classifier (v0.8.3). |
 | `PTASK_HAL_CONSOLIDATE_URL` | `pt distill` (native) | HAL endpoint for cluster → task consolidation (v0.8.7). |
 | `PTASK_TELEGRAM_BOT_TOKEN`, `PTASK_ACCOUNTABILITY_CHAT_ID`, `PTASK_SMTP_*` | accountability | Existing v0.7 surface. |

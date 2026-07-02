@@ -1,11 +1,11 @@
 [Unit]
-Description=pTask distillation pipeline — every 6 hours
+Description=pTask native distillation — hourly micro-runs
 Documentation=https://github.com/puretensor/ptask
 
 [Timer]
-# Same cadence as the legacy puretensor-tasks-distill.timer: 00:00, 06:00,
-# 12:00, 18:00 UTC with a 5-minute random jitter to spread fleet load.
-OnCalendar=*-*-* 00,06,12,18:00:00
+# Hourly delta runs (v2.1.0): the native pipeline only consumes NEW
+# raw_items, so each run is small and cheap — no more 60-day re-scans.
+OnCalendar=*-*-* *:15:00
 RandomizedDelaySec=300
 Persistent=true
 Unit=ptask-distill.service

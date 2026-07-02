@@ -52,11 +52,15 @@ pub struct WebhookConfig {
     pub github_secret: String,
 }
 
-/// Distillation shim configuration.
+/// Distillation configuration (native pipeline + legacy shim escape).
 #[derive(Debug, Clone, Default)]
 pub struct DistillConfig {
-    /// Root of the legacy Python pipeline (`python3 -m ingest.distill` cwd).
+    /// Root of the legacy Python pipeline (`pt distill --legacy` cwd).
     pub py_root: PathBuf,
+    /// Gemini API key for the native pipeline ($GOOGLE_API_KEY).
+    pub gemini_api_key: Option<String>,
+    /// Gemini model id ($GEMINI_CONSOLIDATE_MODEL, default gemini-2.5-flash).
+    pub gemini_model: String,
 }
 
 /// Configuration the accountability dispatcher needs. Plain data — the
@@ -148,6 +152,9 @@ impl Config {
                 py_root: std::env::var("PTASK_DISTILL_PY_ROOT")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| home_dir().join("puretensor-tasks")),
+                gemini_api_key: env_nonempty("GOOGLE_API_KEY"),
+                gemini_model: env_nonempty("GEMINI_CONSOLIDATE_MODEL")
+                    .unwrap_or_else(|| "gemini-2.5-flash".into()),
             },
         }
     }

@@ -106,7 +106,7 @@ pt view rm <name>                     # delete
 
 | Verb | Cadence | Description |
 |---|---|---|
-| `pt distill [--days 60]` | `*-*-* 00,06,12,18:00:00` | Distillation pipeline. v0.6.5 Python shim by default. |
+| `pt distill [--batch 300]` | hourly (`*:15`) | NATIVE fail-closed distillation (v2.1.0): consumes new `raw_items` only, Gemini structured-output classify+consolidate, token-overlap dedup vs 30d. Exit 3 = missing GOOGLE_API_KEY (preflight). `--legacy --days 60` runs the retired Python shim. |
 | `pt accountability run [--dry-run]` | `*:0/15` | Escalation state machine + dispatch. |
 | `pt scoring run [--dry-run]` | `hourly` | Composite priority recompute. |
 | `pt backfill` | one-shot | Mint PT-N for any task lacking one. |

@@ -1,5 +1,5 @@
 [Unit]
-Description=pTask distillation pipeline (Python subprocess shim until v0.9)
+Description=pTask native distillation (hourly delta over raw_items)
 Documentation=https://github.com/puretensor/ptask
 ConditionPathExists=%h/puretensor-tasks/.env
 After=network-online.target
@@ -9,7 +9,7 @@ OnFailure=ptask-failure-alert@%n.service
 [Service]
 Type=oneshot
 EnvironmentFile=%h/puretensor-tasks/.env
-ExecStart=%h/.cargo/bin/pt distill --days 60
+ExecStart=%h/.cargo/bin/pt distill --batch 300
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7

@@ -188,3 +188,11 @@ Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
 `GET /list?filter=<DSL>&status=pending|all&limit=N` — server-side filtered
 task list (read scope). The DSL is the `pt list` grammar; parse errors
 return 400 with the reason.
+
+## POST /capture fast lane (v2.1.0)
+
+`severity >= 3` (explicit field, or a puresentinel incident source with
+`[puresentinel sevN]` in the text) creates the task SYNCHRONOUSLY —
+attributed to the capturing token identity, `source_type=incident`,
+priority sev3→4, sev4+→5. The response then carries `task_uuid` + `pt_id`,
+and the raw_items record is marked processed. Requires capture scope.

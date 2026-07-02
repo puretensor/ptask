@@ -13,6 +13,8 @@
 pub mod classifier;
 pub mod collectors;
 pub mod consolidation;
+pub mod pipeline;
+pub mod providers;
 pub mod temporal_dedup;
 pub mod types;
 

@@ -396,10 +396,15 @@ struct ScoringRunArgs {
 
 #[derive(clap::Args, Debug)]
 struct DistillArgs {
-    /// Days of history for the Python pipeline to ingest (defaults to 60,
-    /// matching the legacy systemd unit).
+    /// Run the retired Python subprocess pipeline instead of the native one.
+    #[arg(long = "legacy")]
+    legacy: bool,
+    /// Days of history for the LEGACY pipeline to ingest.
     #[arg(long = "days", default_value_t = 60)]
     days: u32,
+    /// Max raw_items consumed per NATIVE run.
+    #[arg(long = "batch", default_value_t = 200)]
+    batch: usize,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1879,7 +1884,33 @@ fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
     }
 }
 
+fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
+    use ptask_distill::providers::GeminiProvider;
+    let cfg = ptask_core::Config::from_env().distill;
+    let Some(key) = cfg.gemini_api_key else {
+        eprintln!("distill: GOOGLE_API_KEY is not set — failing closed (exit 3)");
+        std::process::exit(3);
+    };
+    let provider = GeminiProvider::new(key, cfg.gemini_model)?;
+    match ptask_distill::pipeline::run_native(db, &provider, batch) {
+        Ok(r) => {
+            println!(
+                "distill native ok — consumed={} kept={} created={} deduped={} ({}ms)",
+                r.consumed, r.kept, r.created, r.skipped_dedup, r.duration_ms
+            );
+            Ok(())
+        }
+        Err(e) => {
+            ptask_distill::pipeline::record_failure(db, "gemini", &e.to_string());
+            anyhow::bail!("distill native FAILED (fail closed): {e:#}")
+        }
+    }
+}
+
 fn cmd_distill(db: &Db, a: DistillArgs) -> Result<()> {
+    if !a.legacy {
+        return cmd_distill_native(db, a.batch);
+    }
     let days = a.days.to_string();
     let py_root = ptask_core::Config::from_env().distill.py_root;
     let report = ptask_distill::run(db, &["--days", &days], &py_root)?;

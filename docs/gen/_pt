@@ -293,9 +293,11 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (distill)
 _arguments "${_arguments_options[@]}" : \
-'--days=[Days of history for the Python pipeline to ingest (defaults to 60, matching the legacy systemd unit)]:DAYS:_default' \
+'--days=[Days of history for the LEGACY pipeline to ingest]:DAYS:_default' \
+'--batch=[Max raw_items consumed per NATIVE run]:BATCH:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--legacy[Run the retired Python subprocess pipeline instead of the native one]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \

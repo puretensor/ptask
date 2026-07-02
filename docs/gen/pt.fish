@@ -164,9 +164,11 @@ complete -c pt -n "__fish_pt_using_subcommand branch" -l db -d 'Override the SQL
 complete -c pt -n "__fish_pt_using_subcommand branch" -l idempotency-key -d 'Idempotency key recorded with the mutation\'s event — a retried command with the same key returns ok without re-applying' -r
 complete -c pt -n "__fish_pt_using_subcommand branch" -l json -d 'Emit machine-readable JSON instead of human text (task-facing verbs)'
 complete -c pt -n "__fish_pt_using_subcommand branch" -s h -l help -d 'Print help'
-complete -c pt -n "__fish_pt_using_subcommand distill" -l days -d 'Days of history for the Python pipeline to ingest (defaults to 60, matching the legacy systemd unit)' -r
+complete -c pt -n "__fish_pt_using_subcommand distill" -l days -d 'Days of history for the LEGACY pipeline to ingest' -r
+complete -c pt -n "__fish_pt_using_subcommand distill" -l batch -d 'Max raw_items consumed per NATIVE run' -r
 complete -c pt -n "__fish_pt_using_subcommand distill" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand distill" -l idempotency-key -d 'Idempotency key recorded with the mutation\'s event — a retried command with the same key returns ok without re-applying' -r
+complete -c pt -n "__fish_pt_using_subcommand distill" -l legacy -d 'Run the retired Python subprocess pipeline instead of the native one'
 complete -c pt -n "__fish_pt_using_subcommand distill" -l json -d 'Emit machine-readable JSON instead of human text (task-facing verbs)'
 complete -c pt -n "__fish_pt_using_subcommand distill" -s h -l help -d 'Print help'
 complete -c pt -n "__fish_pt_using_subcommand accountability; and not __fish_seen_subcommand_from run help" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
