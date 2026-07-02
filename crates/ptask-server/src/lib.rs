@@ -15,7 +15,7 @@ pub mod webhooks;
 use anyhow::Result;
 use axum::Router;
 use ptask_core::Db;
-use ptask_core::config::{AuthConfig, WebhookConfig};
+use ptask_core::config::{AuthConfig, DashConfig, WebhookConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -27,6 +27,7 @@ pub struct AppState {
     pub db: Db,
     pub auth: Arc<AuthConfig>,
     pub webhooks: Arc<WebhookConfig>,
+    pub dash: Arc<DashConfig>,
 }
 
 impl AppState {
@@ -35,7 +36,13 @@ impl AppState {
             db,
             auth: Arc::new(auth),
             webhooks: Arc::new(webhooks),
+            dash: Arc::new(DashConfig::default()),
         }
+    }
+
+    pub fn with_dash(mut self, dash: DashConfig) -> Self {
+        self.dash = Arc::new(dash);
+        self
     }
 }
 
@@ -44,6 +51,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(routes::base::router())
         .merge(routes::capture::router())
+        .merge(routes::dashboard::router())
         .merge(routes::email::router())
         .merge(routes::sync::router())
         .merge(routes::tg::router())
@@ -62,12 +70,13 @@ pub async fn serve(
     addr: SocketAddr,
     auth_cfg: AuthConfig,
     webhook_cfg: WebhookConfig,
+    dash_cfg: DashConfig,
 ) -> Result<()> {
     if let Err(e) = auth::validate_bind_auth(&addr, &auth_cfg) {
         anyhow::bail!(e);
     }
     auth::warn_if_unconfigured(&auth_cfg);
-    let state = AppState::new(db, auth_cfg, webhook_cfg);
+    let state = AppState::new(db, auth_cfg, webhook_cfg).with_dash(dash_cfg);
     let app = router(state);
     info!(target: "ptask::server", %addr, "starting pt serve");
     let listener = TcpListener::bind(addr).await?;
@@ -1309,5 +1318,184 @@ Don't forget the sourdough.\r\n";
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// PHASE-7 GATE (server side): the absorbed cockpit surface. Basic auth
+    /// gates every /api route (401 without, 200 with); the task list carries
+    /// the sidecar's derived fields; and a full browser triage loop
+    /// (snooze → reopen → dismiss) lands in the journal as actor=dashboard.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_surface_auth_shapes_and_triage_loop() {
+        use ptask_core::config::DashConfig;
+        let db = open_test_db();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("triage me from a browser"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let dash = DashConfig {
+            user: "ops".into(),
+            pass: Some("cockpit-pw".into()),
+            ..Default::default()
+        };
+        let app = router(
+            AppState::new(db.clone(), Default::default(), Default::default()).with_dash(dash),
+        );
+        let basic = format!(
+            "Basic {}",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                b"ops:cockpit-pw"
+            )
+        );
+
+        // No credentials → 401 + WWW-Authenticate.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(resp.headers().contains_key("www-authenticate"));
+
+        // Credentials → 200 + the sidecar's stats shape.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/stats")
+                    .header("authorization", &basic)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let stats: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(stats["pending_total"].as_i64().unwrap() >= 1);
+        assert!(stats["by_priority"].is_object());
+        assert!(stats["by_status"].is_object());
+
+        // Task list carries pt_id + derived age_days.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks?status=pending&limit=10")
+                    .header("authorization", &basic)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let tasks: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let row = tasks["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == t.id.as_str())
+            .expect("created task appears in /api/tasks");
+        assert_eq!(row["pt_id"], t.pt_id.clone().unwrap().as_str());
+        assert!(row["age_days"].is_number());
+
+        // Triage loop: snooze → reopen → dismiss (verbs the cockpit never had).
+        for (verb, body_json) in [
+            ("snooze", serde_json::json!({"days": 2})),
+            ("dismiss", serde_json::json!({})),
+            ("reopen", serde_json::json!({})),
+            ("dismiss", serde_json::json!({})),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/tasks/{}/{}", t.id, verb))
+                        .method("POST")
+                        .header("content-type", "application/json")
+                        .header("authorization", &basic)
+                        .body(Body::from(serde_json::to_vec(&body_json).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "verb {} must succeed", verb);
+        }
+        db.with_conn(|c| {
+            let status: String = c
+                .query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&t.id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "dismissed");
+            let dash_events: i64 = c
+                .query_row(
+                    "SELECT COUNT(*) FROM pt_event_log WHERE task_uuid=?1 AND actor='dashboard'",
+                    [&t.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(dash_events >= 3, "triage verbs journaled as dashboard");
+            Ok(())
+        })
+        .unwrap();
+
+        // Per-task journal endpoint for the detail drawer.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{}/events", t.id))
+                    .header("authorization", &basic)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let hist: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(hist["events"].as_array().unwrap().len() >= 3);
+
+        // Browser create with quick-add tokens via explicit fields.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("authorization", &basic)
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "title": "browser-created task @web",
+                            "priority": 4
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(created["ok"].as_bool().unwrap());
+        assert!(created["pt_id"].as_str().unwrap().starts_with("PT-"));
     }
 }

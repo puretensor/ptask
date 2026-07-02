@@ -1128,7 +1128,13 @@ fn cmd_serve(db: Db, a: ServeArgs) -> Result<()> {
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    rt.block_on(ptask_server::serve(db, addr, config.auth, config.webhooks))
+    rt.block_on(ptask_server::serve(
+        db,
+        addr,
+        config.auth,
+        config.webhooks,
+        config.dash,
+    ))
 }
 
 fn cmd_bot(db: Db) -> Result<()> {

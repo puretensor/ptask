@@ -183,6 +183,25 @@ Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
 | `pt_webhook_send_total` | counter | `result` (`ok` / `error`) |
 | `pt_sync_commands_total` | counter | `kind` (`task_create` / `task_done` / ...) |
 
+## Dashboard surface (v2.3.0)
+
+The Triage Cockpit's API lives in `pt serve` (the Python sidecar shrank to a
+voice shim). HTTP **Basic** auth (`PTASK_DASH_USER`/`PTASK_DASH_PASS`; open
+when no password configured — local/dev only). Same shapes as the sidecar
+v0.6.0 contract.
+
+Reads: `GET /api/stats · /api/tasks?status=&limit= · /api/critical?limit= ·
+/api/timeline · /api/heatmap · /api/tasks/{id}/events` (journal history) ·
+`GET /api/stream` (SSE, `event: change` frames with journal deltas).
+`GET /` serves the cockpit when `PTASK_DASH_WWW` exists, else the banner.
+
+Writes (attributed `actor=dashboard`): `POST /api/tasks` (create, quick-add
+tokens parse) · `POST /api/tasks/{id}/done|dismiss|reopen` ·
+`/{id}/snooze {days}` · `/{id}/priority {level}` ·
+`/{id}/edit {title?,description?,priority?,deadline?|null}`.
+`POST /api/voice` proxies to the Python voice shim (`PTASK_VOICE_SHIM_URL`,
+default http://127.0.0.1:9510).
+
 ## POST /tg/callback (v2.2.0)
 
 Executes a Telegram inline-button tap forwarded by nexus (the bot's single

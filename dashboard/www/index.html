@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0a0a0f">
+<link rel="manifest" href="/manifest.webmanifest">
 <title>PTASK · Triage Cockpit</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMTAwIDEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9InB0ZyIgeDE9IjAlIiB5MT0iMCUiIHgyPSIxMDAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzAwRDRBQSIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzAwODBGRiIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHg9IjIiIHk9IjIiIHdpZHRoPSI5NiIgaGVpZ2h0PSI5NiIgcng9IjIyIiBmaWxsPSIjMGQxNjIyIiBzdHJva2U9IiMxZDJjM2QiIHN0cm9rZS13aWR0aD0iMiIvPjxwYXRoIGQ9Ik0yMCAyNCBIODAgTDU3IDU0IFY3OCBMNDMgNzAgVjU0IFoiIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNwdGcpIiBzdHJva2Utd2lkdGg9IjUuNSIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjUwIiBjeT0iMjQiIHI9IjAiIGZpbGw9InVybCgjcHRnKSIvPjwvc3ZnPg==">
 <style>
@@ -400,6 +402,39 @@ section{margin-top:22px}
 .vmsg.warn{color:var(--p4)}
 .vmsg.heard{color:var(--muted);font-style:italic}
 [data-theme="lcars"] .vbtn{border-radius:0 12px 12px 0}
+/* ---- v2.3: keyboard selection + triage buttons + detail drawer + review ---- */
+.tcard.sel,.ccard.sel{outline:2px solid var(--accent);outline-offset:1px;box-shadow:var(--glow)}
+.btn-act{cursor:pointer;background:transparent;border:1px solid var(--border);color:var(--muted);
+  border-radius:6px;width:24px;height:24px;font-size:12px;line-height:1;transition:all .15s;flex:none}
+.btn-act:hover{color:var(--text);border-color:var(--accent)}
+.btn-act.dis:hover{background:var(--p5);color:#fff;border-color:var(--p5)}
+.btn-act.snz:hover{background:var(--p2);color:#fff;border-color:var(--p2)}
+@media(pointer:coarse){.btn-done,.btn-act{width:32px;height:32px;font-size:15px}.pchip{padding:5px 9px;font-size:12px}}
+.kbdbar{position:fixed;bottom:12px;right:14px;z-index:60;background:var(--panel2);border:var(--card-border);
+  border-radius:10px;padding:7px 12px;font-size:10px;color:var(--dim);box-shadow:var(--shadow)}
+.kbdbar b{color:var(--muted)}
+.review-banner{display:none;margin-top:16px;padding:10px 16px;border-radius:10px;background:rgba(255,159,67,.14);
+  border:1px solid var(--p4);color:var(--p4);font-weight:700;font-size:12px;letter-spacing:.05em}
+body.review .review-banner{display:block}
+body.review section{display:none}
+body.review #review-sec{display:block}
+#review-sec{display:none}
+#review-list .tcard{max-width:760px}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(480px,92vw);z-index:95;background:var(--bg2);
+  border-left:var(--card-border);box-shadow:var(--shadow);padding:20px;overflow-y:auto;
+  transform:translateX(102%);transition:transform .25s}
+.drawer.open{transform:none}
+.drawer h3{font-size:15px;margin-bottom:6px;padding-right:30px}
+.drawer .dmeta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;font-size:11px;color:var(--muted)}
+.drawer .ddesc{font-size:12px;color:var(--muted);white-space:pre-wrap;margin-bottom:16px;line-height:1.5}
+.drawer .dhist{border-top:1px solid var(--border);padding-top:12px}
+.drawer .dhist h4{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-bottom:8px}
+.devt{display:flex;gap:8px;font-size:11px;padding:5px 0;border-bottom:1px dashed var(--border)}
+.devt .who{color:var(--accent);font-weight:700;min-width:74px}
+.devt .what{color:var(--text)}
+.devt .when{margin-left:auto;color:var(--dim);white-space:nowrap}
+.dclose{position:absolute;top:14px;right:14px;cursor:pointer;background:transparent;border:1px solid var(--border);
+  color:var(--muted);border-radius:6px;width:26px;height:26px}
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}}
 </style>
 </head>
@@ -449,6 +484,12 @@ section{margin-top:22px}
     <div class="heat" id="heat"></div>
   </section>
 
+  <div class="review-banner" id="rv-banner"></div>
+  <section id="review-sec">
+    <div class="sec-h"><h2>🔎 Review Mode — stalest first</h2><div class="ln"></div><span class="ct" id="rv-ct"></span></div>
+    <div id="review-list"></div>
+  </section>
+
   <div class="statusbar">
     <span class="live"><span class="dot"></span>LIVE</span>
     <span id="status">connecting…</span>
@@ -457,6 +498,14 @@ section{margin-top:22px}
   </div>
 </main>
 <div class="toast" id="toast"></div>
+<div class="kbdbar"><b>j/k</b> move · <b>x</b> done · <b>d</b> dismiss · <b>s</b> snooze · <b>e</b> edit · <b>o</b> detail · <b>1-5</b> priority · <b>r</b> review</div>
+<aside class="drawer" id="drawer" aria-label="Task detail">
+  <button class="dclose" id="d-close" title="close">✕</button>
+  <h3 id="d-title"></h3>
+  <div class="dmeta" id="d-meta"></div>
+  <div class="ddesc" id="d-desc"></div>
+  <div class="dhist"><h4>History</h4><div id="d-hist"></div></div>
+</aside>
 <!-- body-level overlays (survive the 15s #lanes/#crit re-render) -->
 <div id="pmenu" class="popover" role="menu" aria-label="Set task priority" hidden></div>
 <div id="confirm" class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-h" hidden>
@@ -547,6 +596,13 @@ async function markDone(id){
     const j=await r.json(); toast(j.ok?('✓ '+id+' done'):('✗ '+(j.message||'failed'))); if(j.ok) load();
   }catch(e){toast('✗ '+e.message);}
 }
+async function act(id,verb,body){
+  try{const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/'+verb,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
+    const j=await r.json();
+    toast(j.ok?({done:'\u2713 ',dismiss:'\ud83d\uddd1 ',snooze:'\ud83d\udca4 ',reopen:'\u21a9 '}[verb]+(j.pt_id||id)+' '+(j.message||verb)):('\u2717 '+(j.error||j.message||'failed')));
+    if(j.ok) load(true);
+  }catch(e){toast('\u2717 '+e.message);}
+}
 async function setPriority(id,level,ev){
   if(ev) ev.stopPropagation();
   if(level<1||level>5) return;
@@ -562,6 +618,7 @@ function closePopups(){
   const pm=$('#pmenu'); pm.hidden=true; pm.innerHTML='';
   $('#confirm').hidden=true;
   $('#compose').hidden=true;
+  _editId=null; const ch=$('#compose-h'); if(ch) ch.textContent='New task';
 }
 function openPriorityMenu(ev,id,cur){
   ev.preventDefault(); ev.stopPropagation();
@@ -643,15 +700,24 @@ async function submitCompose(ev){
   if(title.length<3){toast('title too short');$('#c-title').focus();return;}
   const description=$('#c-desc').value.trim();
   const deadline=$('#c-deadline').value||'';          // '' or YYYY-MM-DD
-  const payload={title,priority:_sev};
-  if(description) payload.description=description;
-  if(deadline) payload.deadline=deadline;
   const btn=$('#c-create'); btn.disabled=true;
   try{
-    const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    const j=await r.json();
-    if(j.ok){ closePopups(); $('#qa').value=''; toast('✓ created · P'+_sev+' '+PNAME[_sev]); load(); }
-    else { toast('✗ '+(j.message||'failed')); }
+    let r,j;
+    if(_editId){
+      const payload={title,priority:_sev,description,deadline:deadline||null};
+      r=await fetch('/api/tasks/'+encodeURIComponent(_editId)+'/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      j=await r.json();
+      if(j.ok){ closePopups(); toast('✎ '+(j.pt_id||_editId)+' updated'); load(true); }
+      else { toast('✗ '+(j.error||j.message||'failed')); }
+    }else{
+      const payload={title,priority:_sev};
+      if(description) payload.description=description;
+      if(deadline) payload.deadline=deadline;
+      r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      j=await r.json();
+      if(j.ok){ closePopups(); $('#qa').value=''; toast('✓ created · P'+_sev+' '+PNAME[_sev]); load(); }
+      else { toast('✗ '+(j.error||j.message||'failed')); }
+    }
   }catch(e){ toast('✗ '+e.message); }
   finally{ btn.disabled=false; }
 }
@@ -732,9 +798,9 @@ function renderCritical(tasks){
   $('#crit-ct').textContent=tasks.length+' highest composite score';
   $('#crit').innerHTML=tasks.map(t=>{
     const isNew=!first&&!seenCrit.has(t.id);
-    return `<div class="ccard ${isNew?'new':''} fade">
+    return `<div class="ccard ${isNew?'new':''} fade" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
       <div class="scorebar"></div>
-      <h3>${esc(t.title)}</h3>
+      <h3 style="cursor:pointer" onclick="openDrawer('${t.id}')">${esc(t.title)}</h3>
       <div class="meta">
         ${ptrigger(t)}
         <span class="score">${(t.priority_score).toFixed(3)}</span>${scoreMini(t.priority_score)}
@@ -758,10 +824,12 @@ function renderLanes(tasks){
     return `<div class="lane l${p}">
       <div class="lane-h"><span class="lbl">P${p} ${PNAME[p]}</span><span class="n">${n}</span></div>
       <div class="lane-body" data-p="${p}" role="group" aria-label="P${p} ${PNAME[p]} — ${n} task${n===1?'':'s'}">
-      ${list.map(t=>`<div class="tcard">
-        <div class="tt">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
+      ${list.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
+        <div class="tt" style="cursor:pointer" onclick="openDrawer('${t.id}')">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
         ${ptrigger(t)}
+        <button class="btn-act snz" title="snooze 3d (shift: 7d)" onclick="act('${t.pt_id||t.id}','snooze',{days:event.shiftKey?7:3})">💤</button>
+        <button class="btn-act dis" title="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')">🗑</button>
         <button class="btn-done" title="done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button></div>
       </div>`).join('')}
       </div>
@@ -818,20 +886,114 @@ function renderHeat(h){
   $('#heat').innerHTML=html;
 }
 
-/* ---- load loop ---- */
-async function load(){
-  if(_popupOpen) return;   // don't wipe the board while a picker/confirm popup is open
+/* ---- v2.3: task cache + selection model + keyboard triage ---- */
+let _tasks=[], _sel=-1, _review=false;
+function cards(){return $$(_review?'#review-list .tcard':'.tcard,.ccard');}
+function select(i){
+  const cs=cards(); if(!cs.length){_sel=-1;return;}
+  _sel=((i%cs.length)+cs.length)%cs.length;
+  cs.forEach((c,ix)=>c.classList.toggle('sel',ix===_sel));
+  cs[_sel].scrollIntoView({block:'nearest',behavior:'smooth'});
+}
+function selId(){const cs=cards();return _sel>=0&&cs[_sel]?cs[_sel].dataset.id:null;}
+function selUuid(){const cs=cards();return _sel>=0&&cs[_sel]?cs[_sel].dataset.uuid:null;}
+function typing(){const a=document.activeElement;return a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA');}
+document.addEventListener('keydown',e=>{
+  if(_popupOpen||typing()||e.metaKey||e.ctrlKey||e.altKey) return;
+  const k=e.key;
+  if(k==='j'){e.preventDefault();select(_sel+1);}
+  else if(k==='k'){e.preventDefault();select(_sel-1);}
+  else if(k==='x'&&selId()){e.preventDefault();act(selId(),'done');}
+  else if(k==='d'&&selId()){e.preventDefault();act(selId(),'dismiss');}
+  else if(k==='s'&&selId()){e.preventDefault();act(selId(),'snooze',{days:e.shiftKey?7:3});}
+  else if(k==='e'&&selId()){e.preventDefault();openEdit(selId());}
+  else if(k==='o'&&selUuid()){e.preventDefault();openDrawer(selUuid());}
+  else if('12345'.includes(k)&&selId()){e.preventDefault();setPriority(selId(),parseInt(k,10));}
+  else if(k==='r'||(k==='q'&&_review)){e.preventDefault();toggleReview();}
+  else if(k==='Escape'){const dr=$('#drawer');if(dr.classList.contains('open')){dr.classList.remove('open');}else{_sel=-1;cards().forEach(c=>c.classList.remove('sel'));}}
+});
+
+/* ---- review mode: the 12 stalest actionable tasks, keyboard-first ---- */
+function toggleReview(){
+  _review=!_review; _sel=-1;
+  document.body.classList.toggle('review',_review);
+  if(_review) renderReview();
+}
+function renderReview(){
+  const stale=[..._tasks].filter(t=>t.age_days!=null).sort((a,b)=>b.age_days-a.age_days).slice(0,12);
+  $('#rv-banner').textContent='REVIEW MODE — '+stale.length+' stalest · j/k move · x done · d dismiss · s snooze · e edit · r exit';
+  $('#rv-ct').textContent=stale.length+' tasks, oldest first';
+  $('#review-list').innerHTML=stale.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}" style="margin-bottom:10px">
+    <div class="tt" style="cursor:pointer" onclick="openDrawer('${t.id}')"><b>${t.pt_id||''}</b> ${esc(t.title)}</div>
+    <div class="tm">${ptrigger(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
+      <span class="score">${(t.priority_score||0).toFixed(2)}</span>
+      <button class="btn-act snz" title="snooze 3d" onclick="act('${t.pt_id||t.id}','snooze',{days:3})">💤</button>
+      <button class="btn-act dis" title="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')">🗑</button>
+      <button class="btn-done" title="done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button></div>
+  </div>`).join('');
+  select(0);
+}
+
+/* ---- task detail drawer (description + attributed history) ---- */
+async function openDrawer(uuid){
+  const t=_tasks.find(x=>x.id===uuid);
+  const dr=$('#drawer');
+  $('#d-title').textContent=(t&&t.title)||uuid;
+  $('#d-meta').innerHTML=t?`${ptrigger(t)}<span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>${dueChip(t)}<span class="score">${(t.priority_score||0).toFixed(3)}</span><span class="age">${esc(t.source_type||'')}</span>`:'';
+  $('#d-desc').textContent=(t&&(t.description||t.ai_reasoning))||'(no description)';
+  $('#d-hist').innerHTML='<span class="age">loading…</span>';
+  dr.classList.add('open');
   try{
+    const j=await api('/api/tasks/'+encodeURIComponent(uuid)+'/events');
+    $('#d-hist').innerHTML=(j.events||[]).slice(0,60).map(e=>
+      `<div class="devt"><span class="who">${esc(e.actor||'—')}</span><span class="what">${esc(e.event_type)}</span><span class="when">${esc((e.ts||'').slice(0,16).replace('T',' '))}</span></div>`
+    ).join('')||'<span class="age">no history</span>';
+  }catch(e){$('#d-hist').innerHTML='<span class="age">history unavailable: '+esc(e.message)+'</span>';}
+}
+$('#d-close').onclick=()=>$('#drawer').classList.remove('open');
+
+/* ---- edit modal (reuses the composer) ---- */
+let _editId=null;
+function openEdit(id){
+  const t=_tasks.find(x=>(x.pt_id||x.id)===id||x.id===id); if(!t) return;
+  _editId=id; _popupOpen=true;
+  $('#compose-h').textContent='Edit '+(t.pt_id||'task');
+  $('#c-title').value=t.title; $('#c-desc').value=t.description||'';
+  $('#c-deadline').value=(t.deadline_date||'');
+  buildSev(t.priority);
+  $('#compose').hidden=false;
+  $('#c-title').focus({preventScroll:true});
+}
+
+/* ---- SSE live updates (replaces the 15s poll when connected) ---- */
+let _poll=null,_es=null;
+function startPoll(){if(!_poll)_poll=setInterval(load,15000);}
+function stopPoll(){if(_poll){clearInterval(_poll);_poll=null;}}
+function startSSE(){
+  try{_es=new EventSource('/api/stream');}catch(e){startPoll();return;}
+  _es.addEventListener('change',()=>{if(!_popupOpen)load(true);});
+  _es.onopen=()=>{stopPoll();$('#status').textContent='live (SSE)';};
+  _es.onerror=()=>{startPoll();};
+}
+
+/* ---- load loop ---- */
+async function load(force){
+  if(_popupOpen&&!force) return;   // don't wipe the board while a picker/confirm popup is open
+  try{
+    const keepId=selId();
     const [stats,crit,all,tl,heat]=await Promise.all([
       api('/api/stats'),api('/api/critical?limit=12'),api('/api/tasks?status=pending&limit=600'),
       api('/api/timeline'),api('/api/heatmap')]);
+    _tasks=all.tasks;
     renderChips(stats); renderCritical(crit.tasks); renderLanes(all.tasks);
     renderTimeline(tl.items); renderHeat(heat);
+    if(_review) renderReview();
+    if(keepId){const cs=cards();const ix=cs.findIndex(c=>c.dataset.id===keepId);if(ix>=0)select(ix);}
     $('#status').textContent='updated '+new Date().toLocaleTimeString()+' · '+stats.pending_total+' pending';
     first=false;
   }catch(e){$('#status').textContent='⚠ '+e.message;}
 }
-load(); setInterval(load,15000);
+load(); startPoll(); startSSE();
 </script>
 </body>
 </html>

@@ -24,6 +24,23 @@ pub struct Config {
     pub notify: DispatchCfg,
     pub webhooks: WebhookConfig,
     pub distill: DistillConfig,
+    pub dash: DashConfig,
+}
+
+/// Triage-cockpit surface served by `pt serve` (v2.3.0 — absorbed from the
+/// Python sidecar). Basic auth, NOT bearer tokens: the consumer is a browser.
+#[derive(Debug, Clone, Default)]
+pub struct DashConfig {
+    /// Basic-auth user (`$PTASK_DASH_USER`, default "ops").
+    pub user: String,
+    /// Basic-auth password (`$PTASK_DASH_PASS`). None = dashboard routes
+    /// open (local/dev) — mirror of the sidecar's disabled-if-unset rule.
+    pub pass: Option<String>,
+    /// Static www dir (`$PTASK_DASH_WWW`, default ~/ptask/dashboard/www).
+    pub www_dir: PathBuf,
+    /// Voice shim passthrough (`$PTASK_VOICE_SHIM_URL`, default
+    /// http://127.0.0.1:9510) — /api/voice proxies here (STT stays Python).
+    pub voice_shim_url: String,
 }
 
 /// API-token material for `pt serve` (enforce-if-configured).
@@ -155,6 +172,15 @@ impl Config {
                 gemini_api_key: env_nonempty("GOOGLE_API_KEY"),
                 gemini_model: env_nonempty("GEMINI_CONSOLIDATE_MODEL")
                     .unwrap_or_else(|| "gemini-2.5-flash".into()),
+            },
+            dash: DashConfig {
+                user: env_nonempty("PTASK_DASH_USER").unwrap_or_else(|| "ops".into()),
+                pass: env_nonempty("PTASK_DASH_PASS"),
+                www_dir: std::env::var("PTASK_DASH_WWW")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| home_dir().join("ptask").join("dashboard").join("www")),
+                voice_shim_url: env_nonempty("PTASK_VOICE_SHIM_URL")
+                    .unwrap_or_else(|| "http://127.0.0.1:9510".into()),
             },
         }
     }
