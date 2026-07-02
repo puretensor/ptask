@@ -9,17 +9,17 @@
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use ptask_core::config::AuthConfig;
 use std::net::SocketAddr;
 use std::sync::Once;
 use tracing::warn;
 
 const API_TOKEN_ENV: &str = "PTASK_API_TOKEN";
-const METRICS_TOKEN_ENV: &str = "PTASK_METRICS_TOKEN";
 const ALLOW_UNAUTH_ENV: &str = "PTASK_ALLOW_UNAUTHENTICATED";
 const TOKEN_HEADER: &str = "x-ptask-token";
 
-pub fn require_write_token(headers: &HeaderMap) -> Option<Response> {
-    let expected = configured_token(API_TOKEN_ENV)?;
+pub fn require_write_token(auth: &AuthConfig, headers: &HeaderMap) -> Option<Response> {
+    let expected = auth.api_token.as_deref()?;
     match presented_token(headers) {
         Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => None,
         _ => Some(unauthorized()),
@@ -32,14 +32,11 @@ pub fn require_write_token(headers: &HeaderMap) -> Option<Response> {
 /// fleet-wide write token. Enforce-if-configured: with neither env set the
 /// scrape stays open (back-compat); with only `PTASK_API_TOKEN` set the
 /// behaviour is unchanged from before.
-pub fn require_read_token(headers: &HeaderMap) -> Option<Response> {
-    let allowed: Vec<String> = [
-        configured_token(METRICS_TOKEN_ENV),
-        configured_token(API_TOKEN_ENV),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+pub fn require_read_token(auth: &AuthConfig, headers: &HeaderMap) -> Option<Response> {
+    let allowed: Vec<&str> = [auth.metrics_token.as_deref(), auth.api_token.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
     if allowed.is_empty() {
         return None;
     }
@@ -68,12 +65,8 @@ fn unauthorized() -> Response {
 /// Loopback keeps the old local-dev behaviour. Any non-loopback bind must have
 /// `PTASK_API_TOKEN` configured, unless an operator explicitly sets
 /// `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately isolated deployment.
-pub fn validate_bind_auth(addr: &SocketAddr) -> Result<(), String> {
-    validate_bind_auth_state(
-        addr,
-        configured_token(API_TOKEN_ENV).is_some(),
-        allow_unauthenticated_override(),
-    )
+pub fn validate_bind_auth(addr: &SocketAddr, auth: &AuthConfig) -> Result<(), String> {
+    validate_bind_auth_state(addr, auth.api_token.is_some(), auth.allow_unauthenticated)
 }
 
 fn validate_bind_auth_state(
@@ -95,9 +88,9 @@ fn validate_bind_auth_state(
 /// operator running unauthenticated sees it once in the log without flooding
 /// it on every `/metrics` scrape. Mirrors the fail-open-but-warn-when-unset
 /// posture: auth enforces only once a token is configured.
-pub fn warn_if_unconfigured() {
+pub fn warn_if_unconfigured(auth: &AuthConfig) {
     static WARNED: Once = Once::new();
-    if configured_token(API_TOKEN_ENV).is_none() {
+    if auth.api_token.is_none() {
         WARNED.call_once(|| {
             warn!(
                 target: "ptask::auth",
@@ -107,13 +100,6 @@ pub fn warn_if_unconfigured() {
             );
         });
     }
-}
-
-fn allow_unauthenticated_override() -> bool {
-    std::env::var(ALLOW_UNAUTH_ENV)
-        .ok()
-        .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
 }
 
 /// Compare two byte slices in time independent of where they first differ,
@@ -129,13 +115,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
-}
-
-fn configured_token(env: &str) -> Option<String> {
-    std::env::var(env)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 fn presented_token(headers: &HeaderMap) -> Option<String> {

@@ -7,6 +7,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod accountability;
+pub mod config;
 pub mod dag;
 pub mod dates;
 pub mod error;
@@ -25,6 +26,7 @@ pub mod tasks;
 pub mod views;
 pub mod webhook_log;
 
+pub use config::Config;
 pub use error::{Error, Result};
 pub use storage::{Db, default_db_path};
 pub use tasks::{Extensions, NewTask, Task};

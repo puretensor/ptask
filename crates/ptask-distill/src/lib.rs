@@ -32,7 +32,7 @@ use ptask_core::Db;
 use ptask_core::event_log;
 use ptask_core::pt_id;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 use tracing::{info, warn};
 
@@ -56,20 +56,12 @@ pub struct RunReport {
     pub soft_failure: Option<String>,
 }
 
-/// Where the legacy Python lives. Override via env for fleet rollouts.
-pub fn python_root() -> PathBuf {
-    std::env::var("PTASK_DISTILL_PY_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-            PathBuf::from(home).join("puretensor-tasks")
-        })
-}
-
-/// Run `python3 -m ingest.distill [args]` against the configured root.
+/// Run `python3 -m ingest.distill [args]` against `py_root` (the legacy
+/// Python pipeline root — comes from `Config::from_env().distill.py_root`
+/// at the entrypoint; this crate never reads the environment).
 /// Records a `distill.run` event in `pt_event_log` regardless of outcome.
-pub fn run(db: &Db, args: &[&str]) -> Result<RunReport> {
-    let root = python_root();
+pub fn run(db: &Db, args: &[&str], py_root: &Path) -> Result<RunReport> {
+    let root = py_root;
     info!(target: "ptask::distill", cwd = %root.display(), "starting distill subprocess");
     let before_tasks = task_uuid_set(db).context("snapshotting tasks before distill")?;
     let start = std::time::Instant::now();
@@ -240,8 +232,7 @@ fn tail(s: &str, max_bytes: usize) -> String {
 mod tests {
     use super::*;
     use rusqlite::params;
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use std::path::PathBuf;
 
     #[test]
     fn tail_keeps_short_strings_intact() {
@@ -307,7 +298,6 @@ mod tests {
 
     #[test]
     fn run_flags_soft_failure_when_all_clusters_fail_but_exit_is_zero() {
-        let _env = env_lock();
         let (root, _db_path, db) = fake_python_root_and_db(
             r#"import sys
 print("collected 100 items")
@@ -315,11 +305,7 @@ print("Stage 5: 8/8 clusters failed consolidation", file=sys.stderr)
 sys.exit(0)
 "#,
         );
-        unsafe {
-            std::env::set_var("PTASK_DISTILL_PY_ROOT", &root);
-        }
-
-        let report = run(&db, &[]).unwrap();
+        let report = run(&db, &[], &root).unwrap();
         assert_eq!(report.exit_code, Some(0));
         assert!(!report.success, "all-clusters-failed must not count as ok");
         assert!(report.soft_failure.is_some());
@@ -336,28 +322,14 @@ sys.exit(0)
         })
         .unwrap();
 
-        unsafe {
-            std::env::remove_var("PTASK_DISTILL_PY_ROOT");
-        }
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn python_root_defaults_to_home_puretensor_tasks() {
-        let _env = env_lock();
-        unsafe {
-            std::env::remove_var("PTASK_DISTILL_PY_ROOT");
-        }
-        let p = python_root();
-        assert!(p.ends_with("puretensor-tasks"));
-    }
-
-    #[test]
     fn run_backfills_python_created_tasks_and_records_task_events() {
-        let _env = env_lock();
         let (root, db_path, db) = fake_python_root_and_db(
-            r#"import os, sqlite3
-con = sqlite3.connect(os.environ["DB_PATH"])
+            r#"import sqlite3
+con = sqlite3.connect("tasks.db")
 con.execute("INSERT INTO tasks (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
             ("py-task-1", "distilled from python", "2026-05-13T12:00:00+00:00",
              "2026-05-13T12:00:00+00:00"))
@@ -365,12 +337,8 @@ con.commit()
 print("created one task")
 "#,
         );
-        unsafe {
-            std::env::set_var("PTASK_DISTILL_PY_ROOT", &root);
-            std::env::set_var("DB_PATH", &db_path);
-        }
-
-        let report = run(&db, &["--days", "60"]).unwrap();
+        let _ = &db_path;
+        let report = run(&db, &["--days", "60"], &root).unwrap();
         assert!(report.success, "stderr: {}", report.stderr_tail);
         assert_eq!(report.new_tasks, 1);
         assert_eq!(report.backfilled_pt_ids, 1);
@@ -405,24 +373,15 @@ print("created one task")
         })
         .unwrap();
 
-        unsafe {
-            std::env::remove_var("PTASK_DISTILL_PY_ROOT");
-            std::env::remove_var("DB_PATH");
-        }
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn run_records_failed_event_when_subprocess_cannot_spawn() {
-        let _env = env_lock();
         let (root, _db_path, db) = fake_python_root_and_db("");
         let missing_root =
             std::env::temp_dir().join(format!("ptask-distill-missing-{}", uuid::Uuid::new_v4()));
-        unsafe {
-            std::env::set_var("PTASK_DISTILL_PY_ROOT", &missing_root);
-        }
-
-        let report = run(&db, &[]).unwrap();
+        let report = run(&db, &[], &missing_root).unwrap();
         assert!(!report.success);
         assert!(report.stderr_tail.contains("spawn failed"));
         db.with_conn(|c| {
@@ -438,14 +397,7 @@ print("created one task")
         })
         .unwrap();
 
-        unsafe {
-            std::env::remove_var("PTASK_DISTILL_PY_ROOT");
-        }
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn fake_python_root_and_db(script: &str) -> (PathBuf, PathBuf, Db) {

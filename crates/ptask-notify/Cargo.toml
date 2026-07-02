@@ -1,0 +1,20 @@
+[package]
+name = "ptask-notify"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+homepage = { workspace = true }
+rust-version = { workspace = true }
+description = "Network notification adapters (Telegram/SMTP/HAL) implementing ptask-core's Dispatch trait"
+
+[dependencies]
+ptask-core = { path = "../ptask-core" }
+reqwest = { workspace = true }
+lettre = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

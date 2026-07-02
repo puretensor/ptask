@@ -1,8 +1,8 @@
 //! Outbound HMAC-signed webhook dispatch.
 //!
-//! Config (env-driven for v0.3.5; promotable to a config file later):
-//!   PTASK_WEBHOOK_URLS    comma-separated list of POST targets
-//!   PTASK_WEBHOOK_SECRET  HMAC-SHA256 shared secret
+//! Config comes from `AppState.webhooks` (populated by the entrypoint's
+//! `Config::from_env`): `outbound_urls` = comma-separated POST targets,
+//! `outbound_secret` = HMAC-SHA256 shared secret.
 //!
 //! Each event becomes one POST per URL with body:
 //!   { "event_type": "...", "task_uuid": "...?", "payload": {...}, "ts": "<iso>" }
@@ -37,28 +37,6 @@ fn http_client() -> &'static reqwest::Client {
     })
 }
 
-#[derive(Default)]
-pub struct WebhookConfig {
-    pub urls: Vec<String>,
-    pub secret: String,
-}
-
-impl WebhookConfig {
-    pub fn from_env() -> Self {
-        let urls = std::env::var("PTASK_WEBHOOK_URLS")
-            .ok()
-            .map(|s| {
-                s.split(',')
-                    .map(|p| p.trim().to_string())
-                    .filter(|p| !p.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let secret = std::env::var("PTASK_WEBHOOK_SECRET").unwrap_or_default();
-        Self { urls, secret }
-    }
-}
-
 /// Sign a body with HMAC-SHA256. Returns the hex digest. Empty secret →
 /// returns an empty string (caller can decide whether to send the header).
 pub fn sign(body: &[u8], secret: &str) -> String {
@@ -79,8 +57,8 @@ pub async fn dispatch(
     task_uuid: Option<&str>,
     payload: &serde_json::Value,
 ) {
-    let cfg = WebhookConfig::from_env();
-    if cfg.urls.is_empty() {
+    let cfg = &state.webhooks;
+    if cfg.outbound_urls.is_empty() {
         return;
     }
     let ts = ptask_core::dates::format_iso(
@@ -96,10 +74,10 @@ pub async fn dispatch(
         "ts": ts,
     });
     let body = serde_json::to_vec(&envelope).unwrap_or_default();
-    let sig = sign(&body, &cfg.secret);
+    let sig = sign(&body, &cfg.outbound_secret);
     let client = http_client();
 
-    for url in &cfg.urls {
+    for url in &cfg.outbound_urls {
         let mut req = client
             .post(url)
             .header("content-type", "application/json")

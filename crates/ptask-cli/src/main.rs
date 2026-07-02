@@ -875,11 +875,13 @@ fn cmd_serve(db: Db, a: ServeArgs) -> Result<()> {
             .with_context(|| format!("parsing --bind {:?}", s))?,
         None => ptask_server::default_bind(),
     };
+    // The one env read for this process — everything downstream is injected.
+    let config = ptask_core::Config::from_env();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    rt.block_on(ptask_server::serve(db, addr))
+    rt.block_on(ptask_server::serve(db, addr, config.auth, config.webhooks))
 }
 
 fn cmd_bot(db: Db) -> Result<()> {
@@ -900,7 +902,7 @@ fn cmd_branch(db: &Db, a: BranchArgs) -> Result<()> {
 fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
     match c {
         AccountabilityCommand::Run(a) => {
-            let mut cfg = ptask_core::accountability::DispatchCfg::from_env();
+            let mut cfg = ptask_core::Config::from_env().notify;
             if a.dry_run {
                 cfg.dry_run = true;
             }
@@ -908,7 +910,11 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                 .enable_all()
                 .build()
                 .context("building tokio runtime")?;
-            let report = rt.block_on(ptask_core::accountability::run_check(&db, &cfg))?;
+            let report = rt.block_on(ptask_core::accountability::run_check(
+                &db,
+                &cfg,
+                &ptask_notify::HttpDispatch,
+            ))?;
             if report.quiet_hours {
                 println!("quiet hours — no dispatch");
                 return Ok(());
@@ -1221,7 +1227,8 @@ fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
 
 fn cmd_distill(db: &Db, a: DistillArgs) -> Result<()> {
     let days = a.days.to_string();
-    let report = ptask_distill::run(db, &["--days", &days])?;
+    let py_root = ptask_core::Config::from_env().distill.py_root;
+    let report = ptask_distill::run(db, &["--days", &days], &py_root)?;
     if report.success {
         println!(
             "distill ok ({}ms; {} stdout lines, {} stderr lines)",

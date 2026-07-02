@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-bot"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "jiff",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-cli"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2778,6 +2778,7 @@ dependencies = [
  "ptask-bot",
  "ptask-core",
  "ptask-distill",
+ "ptask-notify",
  "ptask-server",
  "ptask-tui",
  "reqwest",
@@ -2791,15 +2792,13 @@ dependencies = [
 
 [[package]]
 name = "ptask-core"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "interim",
  "jiff",
- "lettre",
  "r2d2",
  "r2d2_sqlite",
  "refinery",
- "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2812,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-distill"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2836,8 +2835,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptask-notify"
+version = "1.16.0"
+dependencies = [
+ "lettre",
+ "ptask-core",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ptask-server"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2860,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-tui"
-version = "1.15.2"
+version = "1.16.0"
 dependencies = [
  "anyhow",
  "crossterm",

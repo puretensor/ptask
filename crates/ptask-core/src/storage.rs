@@ -3,7 +3,8 @@
 //! - `rusqlite` with the `bundled` feature: SQLite compiled into the binary.
 //! - `r2d2` pool with per-connection pragmas applied on acquire.
 //! - WAL journal mode (better concurrent reads), busy_timeout 30s, FK on.
-//! - Default DB path resolves $PTASK_DB, then ~/puretensor-tasks/tasks.db.
+//! - Path resolution lives in `crate::config` — storage itself never
+//!   touches the process environment.
 
 use crate::error::{Error, Result};
 use r2d2::Pool;
@@ -14,17 +15,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
 
-/// Default path: `~/puretensor-tasks/tasks.db` (the existing Python store).
-pub fn default_db_path() -> PathBuf {
-    if let Ok(p) = std::env::var("PTASK_DB") {
-        return PathBuf::from(p);
-    }
-    // Home dir → ~/puretensor-tasks/tasks.db
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    PathBuf::from(home)
-        .join("puretensor-tasks")
-        .join("tasks.db")
-}
+/// Default path: `$PTASK_DB`, else `~/puretensor-tasks/tasks.db`. Delegates
+/// to [`crate::config::env_db_path`] — kept as a re-export so existing
+/// callers don't churn.
+pub use crate::config::env_db_path as default_db_path;
 
 #[derive(Clone)]
 pub struct Db {

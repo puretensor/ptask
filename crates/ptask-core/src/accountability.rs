@@ -41,7 +41,7 @@ use crate::error::{Error, Result};
 use jiff::Zoned;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 pub const DAILY_BUDGET_MAX: i64 = 3;
 
@@ -277,208 +277,68 @@ fn stamp_reminder(db: &Db, task_uuid: &str, now: &Zoned) -> Result<()> {
     Ok(())
 }
 
-/// Configuration the dispatcher needs. Reads env in `from_env`; tests build
-/// it directly to avoid touching shared process state.
-#[derive(Debug, Clone, Default)]
-pub struct DispatchCfg {
-    pub telegram_token: Option<String>,
-    pub telegram_chat_id: Option<i64>,
-    pub smtp_host: Option<String>,
-    pub smtp_port: u16,
-    pub smtp_user: Option<String>,
-    pub smtp_pass: Option<String>,
-    pub notify_email: Option<String>,
-    /// Always CC'd on every outbound email per CLAUDE.md.
-    pub cc_email: Option<String>,
-    pub hal_nudge_url: Option<String>,
-    /// Telegram Bot API base override (tests point this at an unroutable
-    /// address). `None` means the real `https://api.telegram.org`.
-    pub telegram_api_base: Option<String>,
-    /// Suppress side-effecting sends. Tests set this; production never does.
-    pub dry_run: bool,
+/// Dispatch configuration lives in the central config module; re-exported
+/// here so existing `accountability::DispatchCfg` callers keep working.
+pub use crate::config::DispatchCfg;
+
+/// Everything HAL needs to compose a nudge message for one task.
+#[derive(Debug, Clone)]
+pub struct NudgeRequest {
+    pub task_uuid: String,
+    pub title: String,
+    pub level: i64,
+    pub age_days: i64,
+    pub dismissal_count: i64,
 }
 
-impl DispatchCfg {
-    pub fn from_env() -> Self {
-        let smtp_port = std::env::var("PTASK_SMTP_PORT")
-            .or_else(|_| std::env::var("SMTP_PORT"))
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(587);
-        DispatchCfg {
-            telegram_token: env_first(&["PTASK_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"]),
-            telegram_chat_id: env_first(&[
-                "PTASK_ACCOUNTABILITY_CHAT_ID",
-                "PTASK_TELEGRAM_DIGEST_CHATS",
-                "TELEGRAM_CHAT_ID",
-            ])
-            .and_then(|s| s.split(',').next()?.trim().parse().ok()),
-            smtp_host: env_first(&["PTASK_SMTP_HOST", "SMTP_HOST"]),
-            smtp_port,
-            smtp_user: env_first(&["PTASK_SMTP_USER", "SMTP_USER"]),
-            smtp_pass: env_first(&["PTASK_SMTP_PASS", "SMTP_PASS"]),
-            notify_email: env_first(&["PTASK_NOTIFY_EMAIL", "NOTIFY_EMAIL"]),
-            cc_email: env_first(&["PTASK_NOTIFY_CC", "PTASK_OPS_EMAIL"])
-                .or_else(|| Some("ops@puretensor.ai".to_string())),
-            hal_nudge_url: std::env::var("PTASK_HAL_NUDGE_URL").ok(),
-            telegram_api_base: std::env::var("PTASK_TELEGRAM_API_BASE").ok(),
-            dry_run: std::env::var("PTASK_ACCOUNTABILITY_DRY_RUN")
-                .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
-        }
-    }
+/// Side-effecting notification channels. Core decides *what* to send and
+/// records outcomes; the network implementations (reqwest/lettre) live in
+/// `ptask-notify` so this crate carries no HTTP/TLS/executor dependencies
+/// and tests can inject deterministic fakes instead of scrubbing process
+/// env or dialing unroutable ports.
+///
+/// Contract for the send methods: `Ok(true)` = delivered, `Ok(false)` =
+/// attempted but failed (network / non-2xx), `Err` = misconfiguration.
+/// Config-missing and dry-run short-circuits are handled by the CALLER
+/// ([`run_check_at`]) — implementations may assume real config and a live
+/// send is wanted.
+pub trait Dispatch: Send + Sync {
+    fn send_telegram(
+        &self,
+        cfg: &DispatchCfg,
+        text: &str,
+    ) -> impl Future<Output = Result<bool>> + Send;
 
-    /// True when both pieces of Telegram config are present — a failed send
-    /// under this condition is a real delivery failure, not missing config.
-    pub fn telegram_configured(&self) -> bool {
-        self.telegram_token.is_some() && self.telegram_chat_id.is_some()
-    }
+    fn send_email(
+        &self,
+        cfg: &DispatchCfg,
+        subject: &str,
+        body: &str,
+    ) -> impl Future<Output = Result<bool>> + Send;
 
-    /// True when the SMTP quadruple required by [`send_email`] is present.
-    pub fn email_configured(&self) -> bool {
-        self.smtp_host.is_some()
-            && self.smtp_user.is_some()
-            && self.smtp_pass.is_some()
-            && self.notify_email.is_some()
-    }
-}
-
-fn env_first(names: &[&str]) -> Option<String> {
-    for n in names {
-        if let Ok(v) = std::env::var(n)
-            && !v.trim().is_empty()
-        {
-            return Some(v);
-        }
-    }
-    None
-}
-
-/// Send `text` via the Telegram Bot API. `Ok(true)` on HTTP 2xx, `Ok(false)`
-/// on network failure (logged), `Err` only for misconfiguration. `dry_run`
-/// short-circuits to `Ok(true)` without touching the network.
-pub async fn send_telegram(cfg: &DispatchCfg, text: &str) -> Result<bool> {
-    let (Some(token), Some(chat)) = (cfg.telegram_token.as_deref(), cfg.telegram_chat_id) else {
-        return Ok(false);
-    };
-    if cfg.dry_run {
-        return Ok(true);
-    }
-    let base = cfg
-        .telegram_api_base
-        .as_deref()
-        .unwrap_or("https://api.telegram.org");
-    let url = format!("{}/bot{}/sendMessage", base, token);
-    let body = serde_json::json!({"chat_id": chat, "text": text, "parse_mode": "HTML"});
-    let client = reqwest::Client::new();
-    match client.post(url).json(&body).send().await {
-        Ok(r) if r.status().is_success() => Ok(true),
-        Ok(r) => {
-            warn!(target: "ptask::accountability", status = %r.status(), "telegram send failed");
-            Ok(false)
-        }
-        Err(e) => {
-            warn!(target: "ptask::accountability", error = %e, "telegram send error");
-            Ok(false)
-        }
-    }
-}
-
-/// Send a single email via SMTP. CC is mandatory (CLAUDE.md). Returns
-/// `Ok(true)` on send, `Ok(false)` on missing config / network failure.
-pub async fn send_email(cfg: &DispatchCfg, subject: &str, body: &str) -> Result<bool> {
-    let (Some(host), Some(user), Some(pass), Some(to)) = (
-        cfg.smtp_host.as_deref(),
-        cfg.smtp_user.as_deref(),
-        cfg.smtp_pass.as_deref(),
-        cfg.notify_email.as_deref(),
-    ) else {
-        return Ok(false);
-    };
-    if cfg.dry_run {
-        return Ok(true);
-    }
-    use lettre::message::Mailbox;
-    use lettre::transport::smtp::AsyncSmtpTransport;
-    use lettre::transport::smtp::authentication::Credentials;
-    use lettre::{AsyncTransport, Message, Tokio1Executor};
-
-    let from: Mailbox = format!("HAL <{}>", user)
-        .parse()
-        .map_err(|e| Error::Other(format!("invalid SMTP_USER address {:?}: {}", user, e)))?;
-    let to: Mailbox = to
-        .parse()
-        .map_err(|e| Error::Other(format!("invalid NOTIFY_EMAIL {:?}: {}", to, e)))?;
-    let mut builder = Message::builder().from(from).to(to).subject(subject);
-    if let Some(cc) = cfg.cc_email.as_deref() {
-        let cc: Mailbox = cc
-            .parse()
-            .map_err(|e| Error::Other(format!("invalid CC {:?}: {}", cc, e)))?;
-        builder = builder.cc(cc);
-    }
-    let email = builder
-        .body(body.to_string())
-        .map_err(|e| Error::Other(format!("build email: {}", e)))?;
-    let creds = Credentials::new(user.to_string(), pass.to_string());
-    let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
-        .map_err(|e| Error::Other(format!("smtp transport: {}", e)))?
-        .port(cfg.smtp_port)
-        .credentials(creds)
-        .build();
-    match mailer.send(email).await {
-        Ok(_) => Ok(true),
-        Err(e) => {
-            warn!(target: "ptask::accountability", error = %e, "email send failed");
-            Ok(false)
-        }
-    }
-}
-
-/// Ask HAL to compose the message body. Falls back silently if `hal_nudge_url`
-/// is unset or the call fails.
-async fn maybe_compose_via_hal(
-    cfg: &DispatchCfg,
-    task: &EligibleTask,
-    level: i64,
-    age_days: i64,
-) -> Option<String> {
-    let url = cfg.hal_nudge_url.as_deref()?;
-    if cfg.dry_run {
-        return None;
-    }
-    let body = serde_json::json!({
-        "task_uuid": task.id,
-        "title": task.title,
-        "level": level,
-        "age_days": age_days,
-        "dismissal_count": task.dismissal_count,
-    });
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(url)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(8))
-        .send()
-        .await
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let v: serde_json::Value = resp.json().await.ok()?;
-    v.get("message")
-        .and_then(|m| m.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    /// Ask HAL to compose the message body. `None` = unavailable/failed;
+    /// the caller falls back to the static template.
+    fn compose_via_hal(
+        &self,
+        cfg: &DispatchCfg,
+        req: &NudgeRequest,
+    ) -> impl Future<Output = Option<String>> + Send;
 }
 
 /// Run one accountability cycle. Mirrors `engine.run_check()`.
-pub async fn run_check(db: &Db, cfg: &DispatchCfg) -> Result<RunReport> {
+pub async fn run_check<D: Dispatch>(db: &Db, cfg: &DispatchCfg, dispatch: &D) -> Result<RunReport> {
     let now = crate::dates::now_in_operator_tz()?;
-    run_check_at(db, cfg, &now).await
+    run_check_at(db, cfg, dispatch, &now).await
 }
 
 /// Same as [`run_check`] but with an injected `now`. Tests use this to
 /// pin the wall-clock anchor outside of the quiet-hours window.
-pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<RunReport> {
+pub async fn run_check_at<D: Dispatch>(
+    db: &Db,
+    cfg: &DispatchCfg,
+    dispatch: &D,
+    now: &Zoned,
+) -> Result<RunReport> {
     let now_utc = now.with_time_zone(jiff::tz::TimeZone::UTC);
     let now_iso_utc = crate::dates::format_iso(&now_utc);
     let date_utc = now_utc.date().to_string();
@@ -543,10 +403,19 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
         }
         let level = task.escalation_level;
 
-        let message = match maybe_compose_via_hal(cfg, &task, level, age_days).await {
-            Some(m) => m,
-            None => fallback_message(&task, level, age_days),
+        let composed = if cfg.hal_nudge_url.is_none() || cfg.dry_run {
+            None
+        } else {
+            let req = NudgeRequest {
+                task_uuid: task.id.clone(),
+                title: task.title.clone(),
+                level,
+                age_days,
+                dismissal_count: task.dismissal_count,
+            };
+            dispatch.compose_via_hal(cfg, &req).await
         };
+        let message = composed.unwrap_or_else(|| fallback_message(&task, level, age_days));
         let mut dispatched = DispatchedFor {
             task_uuid: task.id.clone(),
             level,
@@ -561,9 +430,15 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
                         || telegram_consecutive_failures >= TELEGRAM_CIRCUIT_BREAK
                     {
                         false
+                    } else if !cfg.telegram_configured() {
+                        false
                     } else {
                         let prefixed = format!("<b>Task #{}:</b> {}", level, message);
-                        let r = send_telegram(cfg, &prefixed).await?;
+                        let r = if cfg.dry_run {
+                            true
+                        } else {
+                            dispatch.send_telegram(cfg, &prefixed).await?
+                        };
                         if r {
                             telegram_consecutive_failures = 0;
                             dispatched.telegram_sent = true;
@@ -571,7 +446,7 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
                             if !cfg.dry_run {
                                 increment_daily_budget(db, &date_utc)?;
                             }
-                        } else if cfg.telegram_configured() {
+                        } else {
                             report.send_failures += 1;
                             telegram_consecutive_failures += 1;
                             if telegram_consecutive_failures == TELEGRAM_CIRCUIT_BREAK {
@@ -587,18 +462,26 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
                     }
                 }
                 "email" => {
-                    let subject = format!(
-                        "[PureTensor] Task escalated (level {}): {}",
-                        level,
-                        task.title.chars().take(60).collect::<String>()
-                    );
-                    let r = send_email(cfg, &subject, &message).await?;
-                    if r {
-                        dispatched.email_sent = true;
-                    } else if cfg.email_configured() {
-                        report.send_failures += 1;
+                    if !cfg.email_configured() {
+                        false
+                    } else {
+                        let subject = format!(
+                            "[PureTensor] Task escalated (level {}): {}",
+                            level,
+                            task.title.chars().take(60).collect::<String>()
+                        );
+                        let r = if cfg.dry_run {
+                            true
+                        } else {
+                            dispatch.send_email(cfg, &subject, &message).await?
+                        };
+                        if r {
+                            dispatched.email_sent = true;
+                        } else {
+                            report.send_failures += 1;
+                        }
+                        r
                     }
-                    r
                 }
                 _ => false,
             };
@@ -806,6 +689,36 @@ mod tests {
             .unwrap()
     }
 
+    /// Dispatch fake: every send succeeds. Dry-run tests never reach it,
+    /// but the type is still required by the signature.
+    struct SendOk;
+    impl Dispatch for SendOk {
+        async fn send_telegram(&self, _cfg: &DispatchCfg, _text: &str) -> Result<bool> {
+            Ok(true)
+        }
+        async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {
+            Ok(true)
+        }
+        async fn compose_via_hal(&self, _cfg: &DispatchCfg, _req: &NudgeRequest) -> Option<String> {
+            None
+        }
+    }
+
+    /// Dispatch fake: every attempted send fails (delivery failure, not
+    /// misconfiguration) — the dead-bot-token mode.
+    struct SendFail;
+    impl Dispatch for SendFail {
+        async fn send_telegram(&self, _cfg: &DispatchCfg, _text: &str) -> Result<bool> {
+            Ok(false)
+        }
+        async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {
+            Ok(false)
+        }
+        async fn compose_via_hal(&self, _cfg: &DispatchCfg, _req: &NudgeRequest) -> Option<String> {
+            None
+        }
+    }
+
     #[tokio::test]
     async fn dry_run_reports_dispatch_without_mutating_database() {
         let (_dir, db) = fresh_db();
@@ -818,7 +731,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let report = run_check_at(&db, &cfg, &anchor).await.unwrap();
+        let report = run_check_at(&db, &cfg, &SendOk, &anchor).await.unwrap();
         assert_eq!(report.eligible, 1);
         assert_eq!(report.dispatched.len(), 1);
         assert!(report.dispatched[0].telegram_sent);
@@ -869,12 +782,9 @@ mod tests {
         let cfg = DispatchCfg {
             telegram_token: Some("test".into()),
             telegram_chat_id: Some(1),
-            // Unroutable port — every send fails with connection refused
-            // without touching the real network.
-            telegram_api_base: Some("http://127.0.0.1:1".into()),
             ..Default::default()
         };
-        let report = run_check_at(&db, &cfg, &anchor).await.unwrap();
+        let report = run_check_at(&db, &cfg, &SendFail, &anchor).await.unwrap();
         assert_eq!(report.eligible, 5);
         assert_eq!(
             report.dispatched.len(),
@@ -902,7 +812,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let report = run_check_at(&db, &cfg, &anchor).await.unwrap();
+        let report = run_check_at(&db, &cfg, &SendOk, &anchor).await.unwrap();
         assert_eq!(report.dispatched.len(), 0);
         assert_eq!(report.budget_used_before, DAILY_BUDGET_MAX);
         assert_eq!(report.budget_used_after, DAILY_BUDGET_MAX);
@@ -936,7 +846,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let report = run_check_at(&db, &cfg, &anchor).await.unwrap();
+        let report = run_check_at(&db, &cfg, &SendOk, &anchor).await.unwrap();
         assert_eq!(report.dispatched.len(), 1);
         assert!(!report.dispatched[0].telegram_sent);
         assert!(report.dispatched[0].email_sent);
@@ -959,7 +869,7 @@ mod tests {
             dry_run: true,
             ..Default::default()
         };
-        let report = run_check_at(&db, &cfg, &quiet).await.unwrap();
+        let report = run_check_at(&db, &cfg, &SendOk, &quiet).await.unwrap();
         assert!(report.quiet_hours);
         assert_eq!(report.dispatched.len(), 0);
     }

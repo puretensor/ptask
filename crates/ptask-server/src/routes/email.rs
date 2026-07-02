@@ -35,7 +35,7 @@ async fn email(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_write_token(&headers) {
+    if let Some(resp) = crate::auth::require_write_token(&state.auth, &headers) {
         return resp;
     }
     let Some(msg) = MessageParser::default().parse(&body[..]) else {

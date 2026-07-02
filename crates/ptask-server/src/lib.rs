@@ -15,7 +15,9 @@ pub mod webhooks;
 use anyhow::Result;
 use axum::Router;
 use ptask_core::Db;
+use ptask_core::config::{AuthConfig, WebhookConfig};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -23,6 +25,18 @@ use tracing::info;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
+    pub auth: Arc<AuthConfig>,
+    pub webhooks: Arc<WebhookConfig>,
+}
+
+impl AppState {
+    pub fn new(db: Db, auth: AuthConfig, webhooks: WebhookConfig) -> Self {
+        Self {
+            db,
+            auth: Arc::new(auth),
+            webhooks: Arc::new(webhooks),
+        }
+    }
 }
 
 /// Build the axum Router. Exposed so tests can hit it without binding a port.
@@ -40,13 +54,20 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Run the server on `addr` until SIGINT / SIGTERM. Blocks the current task.
-pub async fn serve(db: Db, addr: SocketAddr) -> Result<()> {
-    if let Err(e) = auth::validate_bind_auth(&addr) {
+/// `auth`/`webhooks` come from the entrypoint's one `Config::from_env()` —
+/// the server itself never reads the process environment.
+pub async fn serve(
+    db: Db,
+    addr: SocketAddr,
+    auth_cfg: AuthConfig,
+    webhook_cfg: WebhookConfig,
+) -> Result<()> {
+    if let Err(e) = auth::validate_bind_auth(&addr, &auth_cfg) {
         anyhow::bail!(e);
     }
-    let state = AppState { db };
+    auth::warn_if_unconfigured(&auth_cfg);
+    let state = AppState::new(db, auth_cfg, webhook_cfg);
     let app = router(state);
-    auth::warn_if_unconfigured();
     info!(target: "ptask::server", %addr, "starting pt serve");
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app)
@@ -90,12 +111,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
-
-    // Serializes tests that read/write the process-global PTASK_API_TOKEN env.
-    // ANY test that exercises a token-gated route (/sync, /capture, /email) MUST
-    // hold this lock, or a concurrent token-setting test can flip its request to
-    // 401. (This is why the env-mutating + every gated-route test below lock it.)
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn open_test_db() -> Db {
         let dir = tempfile::tempdir().unwrap();
@@ -163,7 +178,7 @@ mod tests {
     #[tokio::test]
     async fn healthz_returns_ok() {
         let db = open_test_db();
-        let app = router(AppState { db });
+        let app = router(AppState::new(db, Default::default(), Default::default()));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -183,7 +198,7 @@ mod tests {
     #[tokio::test]
     async fn version_returns_crate_version() {
         let db = open_test_db();
-        let app = router(AppState { db });
+        let app = router(AppState::new(db, Default::default(), Default::default()));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -203,11 +218,12 @@ mod tests {
 
     #[tokio::test]
     async fn capture_inserts_raw_item() {
-        // Hits the token-gated /capture route; hold ENV_LOCK so a concurrent
-        // test that sets PTASK_API_TOKEN can't flip this to 401.
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        let app = router(AppState { db: db.clone() });
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
         let body = serde_json::json!({"text": "buy bread", "source": "http-test"});
         let resp = app
             .oneshot(
@@ -233,11 +249,8 @@ mod tests {
 
     #[tokio::test]
     async fn capture_rejects_empty_text() {
-        // Gated /capture route; hold ENV_LOCK (a leaked token would 401 before
-        // the 400 we assert).
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        let app = router(AppState { db });
+        let app = router(AppState::new(db, Default::default(), Default::default()));
         let body = serde_json::json!({"text": "   "});
         let resp = app
             .oneshot(
@@ -255,11 +268,12 @@ mod tests {
 
     #[tokio::test]
     async fn sync_round_trip_create_then_done() {
-        // Gated /sync route; hold ENV_LOCK so a concurrent token-setting test
-        // can't flip these 200s to 401.
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        let app = router(AppState { db: db.clone() });
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
 
         // First call: create one task via sync command.
         let req1 = serde_json::json!({
@@ -374,9 +388,12 @@ mod tests {
 
     #[tokio::test]
     async fn sync_round_trip_priority_edit_reopen() {
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        let app = router(AppState { db: db.clone() });
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
 
         // Create a task.
         let created = post_sync(
@@ -487,9 +504,12 @@ mod tests {
 
     #[tokio::test]
     async fn task_retext_and_read_routes() {
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        let app = router(AppState { db: db.clone() });
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
 
         // Create a ready task with a label so /detail has something to show.
         let created = post_sync(
@@ -593,9 +613,12 @@ mod tests {
         // must cover the request's own commands, so an idle re-sync with that
         // token yields an empty delta (no perpetual self-redelivery) and the
         // same token back.
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        let app = router(AppState { db: db.clone() });
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
 
         let req1 = serde_json::json!({
             "sync_token": "*",
@@ -654,9 +677,12 @@ mod tests {
         // the core function (the CLI/TUI/bot path — no /sync involved) must
         // show up in a remote client's delta, and a local deletion must
         // arrive as a tombstone. Pre-unification both were invisible.
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        let app = router(AppState { db: db.clone() });
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
 
         // Seed one event so the baseline cursor is non-zero (a "0" token is
         // the full-sync sentinel and would mask the delta behaviour).
@@ -729,8 +755,6 @@ mod tests {
 
     #[tokio::test]
     async fn sync_full_sync_returns_existing_tasks_without_events() {
-        // Gated /sync route; hold ENV_LOCK against concurrent token-setting test.
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
         // Raw SQL insert: a task that genuinely predates pt_event_log (every
         // tasks::create now records an event, so simulate the legacy rows
@@ -760,7 +784,7 @@ mod tests {
         };
         assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), 0);
 
-        let app = router(AppState { db });
+        let app = router(AppState::new(db, Default::default(), Default::default()));
         let req = serde_json::json!({"sync_token": "*", "commands": []});
         let resp = app
             .oneshot(
@@ -790,12 +814,12 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn sync_requires_api_token_when_configured() {
-        let _env = ENV_LOCK.lock().await;
-        unsafe {
-            std::env::set_var("PTASK_API_TOKEN", "test-token");
-        }
         let db = open_test_db();
-        let app = router(AppState { db });
+        let auth = AuthConfig {
+            api_token: Some("test-token".into()),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db, auth, Default::default()));
         let req = serde_json::json!({"sync_token": "*", "commands": []});
 
         let resp = app
@@ -825,9 +849,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        unsafe {
-            std::env::remove_var("PTASK_API_TOKEN");
-        }
     }
 
     #[test]
@@ -861,16 +882,11 @@ mod tests {
         assert!(id > 0);
     }
 
-    // /metrics is now token-gated (enforce-if-configured), so this test holds
-    // ENV_LOCK and asserts the back-compat path: token UNSET → scrape allowed.
+    // Back-compat path: no token configured → scrape allowed.
     #[tokio::test(flavor = "current_thread")]
     async fn metrics_returns_prometheus_text() {
-        let _env = ENV_LOCK.lock().await;
-        unsafe {
-            std::env::remove_var("PTASK_API_TOKEN");
-        }
         let db = open_test_db();
-        let app = router(AppState { db });
+        let app = router(AppState::new(db, Default::default(), Default::default()));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -903,13 +919,13 @@ mod tests {
     // covers reads (write ⊇ read).
     #[tokio::test(flavor = "current_thread")]
     async fn metrics_token_is_read_only() {
-        let _env = ENV_LOCK.lock().await;
-        unsafe {
-            std::env::set_var("PTASK_API_TOKEN", "write-secret");
-            std::env::set_var("PTASK_METRICS_TOKEN", "scrape-secret");
-        }
         let db = open_test_db();
-        let app = router(AppState { db });
+        let auth = AuthConfig {
+            api_token: Some("write-secret".into()),
+            metrics_token: Some("scrape-secret".into()),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db, auth, Default::default()));
 
         // Metrics token → /metrics 200.
         let resp = app
@@ -953,22 +969,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-        unsafe {
-            std::env::remove_var("PTASK_API_TOKEN");
-            std::env::remove_var("PTASK_METRICS_TOKEN");
-        }
     }
 
-    // env set + missing/wrong credential → 401; env set + correct → 200.
+    // token set + missing/wrong credential → 401; token set + correct → 200.
     #[tokio::test(flavor = "current_thread")]
     async fn metrics_requires_api_token_when_configured() {
-        let _env = ENV_LOCK.lock().await;
-        unsafe {
-            std::env::set_var("PTASK_API_TOKEN", "metrics-token");
-        }
         let db = open_test_db();
-        let app = router(AppState { db });
+        let auth = AuthConfig {
+            api_token: Some("metrics-token".into()),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db, auth, Default::default()));
 
         // Missing credential → 401.
         let resp = app
@@ -1031,25 +1042,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-
-        unsafe {
-            std::env::remove_var("PTASK_API_TOKEN");
-        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn gitea_webhook_closes_pt_n_on_fixes() {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
         // Create a task we can close via the magic word.
         let t = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("close me")).unwrap();
         let pt = t.pt_id.clone().unwrap();
-        // Set the secret for this test scope.
-        unsafe {
-            std::env::set_var("PTASK_GITEA_WEBHOOK_SECRET", "test-secret");
-        }
         let body = serde_json::json!({
             "ref": "refs/heads/main",
             "commits": [
@@ -1061,7 +1063,11 @@ mod tests {
         let mut mac = Hmac::<Sha256>::new_from_slice(b"test-secret").unwrap();
         mac.update(&body_bytes);
         let sig = hex::encode(mac.finalize().into_bytes());
-        let app = router(AppState { db: db.clone() });
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), Default::default(), hooks));
         let resp = app
             .clone()
             .oneshot(
@@ -1123,21 +1129,17 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        // Cleanup.
-        unsafe {
-            std::env::remove_var("PTASK_GITEA_WEBHOOK_SECRET");
-        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn gitea_webhook_rejects_bad_signature() {
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        unsafe {
-            std::env::set_var("PTASK_GITEA_WEBHOOK_SECRET", "test-secret");
-        }
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            ..Default::default()
+        };
         let body = serde_json::json!({"ref": "refs/heads/main", "commits": []});
-        let app = router(AppState { db });
+        let app = router(AppState::new(db, Default::default(), hooks));
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1151,17 +1153,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        unsafe {
-            std::env::remove_var("PTASK_GITEA_WEBHOOK_SECRET");
-        }
     }
 
     #[tokio::test]
     async fn email_endpoint_parses_subject_and_body() {
-        // Gated /email route; hold ENV_LOCK against concurrent token-setting test.
-        let _env = ENV_LOCK.lock().await;
         let db = open_test_db();
-        let app = router(AppState { db: db.clone() });
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
         let raw = "Subject: Buy bread tomorrow\r\n\
 From: ops@example.test\r\n\
 Message-ID: <abc@example.test>\r\n\
@@ -1205,7 +1206,7 @@ Don't forget the sourdough.\r\n";
     #[tokio::test]
     async fn root_banner() {
         let db = open_test_db();
-        let app = router(AppState { db });
+        let app = router(AppState::new(db, Default::default(), Default::default()));
         let resp = app
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await

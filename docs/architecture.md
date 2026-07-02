@@ -74,9 +74,17 @@ The fleet isn't uniform — Ansible has per-host overrides:
 | **mon3** | **aarch64** | Build `--target aarch64-unknown-linux-gnu` |
 
 Use `-e ptask_binary=/path/to/per-host/build` on the per-host Ansible
-invocation to override the default `target/release/pt`.
+invocation to override the default per-arch `dist/pt-<target-triple>`
+artifact.
 
 ## Environment
+
+Since v1.16.0 the environment is read exactly once per process, at the
+binary entrypoint, via `ptask_core::config::Config::from_env()`; library
+code (auth, storage, accountability, webhooks, distill) receives injected
+config and never touches `std::env`. Network dispatch (Telegram/SMTP/HAL)
+lives in the `ptask-notify` crate behind the `Dispatch` trait — ptask-core
+carries no HTTP/TLS/executor dependencies.
 
 | Variable | Used by | Purpose |
 |---|---|---|

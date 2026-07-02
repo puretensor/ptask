@@ -6,9 +6,8 @@
 //! through `ptask_core::magic_words::parse` and route Closes/Fixes
 //! directives through `tasks::mark_done`.
 //!
-//! Config (env-driven):
-//!   PTASK_GITEA_WEBHOOK_SECRET    shared secret for Gitea (`X-Gitea-Signature`)
-//!   PTASK_GITHUB_WEBHOOK_SECRET   shared secret for GitHub (`X-Hub-Signature-256`)
+//! Secrets come from `AppState.webhooks` (gitea_secret / github_secret),
+//! populated once by the entrypoint's `Config::from_env`.
 //!
 //! Every event (verified or not) gets logged to pt_webhook_log with the
 //! `signature_ok` flag set accordingly.
@@ -64,7 +63,7 @@ async fn gitea(
         .get("X-Gitea-Signature")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let secret = std::env::var("PTASK_GITEA_WEBHOOK_SECRET").unwrap_or_default();
+    let secret = state.webhooks.gitea_secret.clone();
     handle("gitea", &state, &body, &secret, sig).await
 }
 
@@ -79,7 +78,7 @@ async fn github(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let sig = sig_raw.strip_prefix("sha256=").unwrap_or(sig_raw);
-    let secret = std::env::var("PTASK_GITHUB_WEBHOOK_SECRET").unwrap_or_default();
+    let secret = state.webhooks.github_secret.clone();
     handle("github", &state, &body, &secret, sig).await
 }
 

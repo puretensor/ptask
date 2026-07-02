@@ -20,9 +20,9 @@ refinery = { workspace = true }
 uuid = { workspace = true }
 jiff = { workspace = true }
 interim = { workspace = true }
-reqwest = { workspace = true }
-lettre = { workspace = true }
-tokio = { workspace = true }
+# Deliberately NO reqwest/lettre/tokio: the domain crate is pure. Network
+# dispatch implementations live in ptask-notify behind the Dispatch trait.
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true }
