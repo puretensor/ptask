@@ -469,6 +469,31 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
     if q.is_empty() {
         return Err(crate::Error::Other("empty task query".into()));
     }
+
+    // Exact task uuid (the /tg/callback + machine-caller path — a uuid must
+    // never fall through to title-substring matching).
+    if q.len() == 36
+        && q.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+    {
+        let row = conn.query_row(
+            "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
+                    t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+             FROM tasks t
+             WHERE t.id = ?1",
+            [&q.to_ascii_lowercase()],
+            row_to_task,
+        );
+        return match row {
+            Ok(t) => Ok(t),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Err(crate::Error::Other(format!("no task with uuid {}", q)))
+            }
+            Err(e) => Err(e.into()),
+        };
+    }
     let upper = q.to_ascii_uppercase();
 
     let pt_candidate: Option<String> = if upper.starts_with("PT-") {
