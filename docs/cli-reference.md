@@ -126,8 +126,13 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote show <query>` | base row + side-table detail via `GET /detail/{uuid}` (read-only) |
 | `pt remote next [-n N]` | DAG-ready tasks via `GET /next` (server resolves `depends_on`) |
 | `pt remote dismiss <query>` | server-side `/resolve` + `task_dismiss` (soft close; reversible via reopen) |
+| `pt remote version` | compare client vs server `GET /version`; exits non-zero on skew |
 
 `--url` defaults to `$PTASK_SYNC_URL` then `http://100.121.42.54:9501`.
+
+Every remote error also runs the version handshake: a 401/404 from a
+mismatched deploy appends `version skew: client vX vs server vY` to the
+error instead of masquerading as an auth/routing failure.
 
 ## Codegen
 

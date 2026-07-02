@@ -468,6 +468,14 @@ _arguments "${_arguments_options[@]}" : \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
 && ret=0
 ;;
+(version)
+_arguments "${_arguments_options[@]}" : \
+'--url=[Override the canonical endpoint]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_pt__subcmd__remote__subcmd__help_commands" \
@@ -513,6 +521,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (dismiss)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(version)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -739,6 +751,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (dismiss)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(version)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1004,6 +1020,7 @@ _pt__subcmd__help__subcmd__remote_commands() {
 'show:\`pt remote show <query>\` — print one task'\''s full row + detail (read-only)' \
 'next:\`pt remote next \[-n N\]\` — DAG-ready tasks from the canonical host' \
 'dismiss:\`pt remote dismiss <query>\` — soft-close a task (reversible via reopen)' \
+'version:\`pt remote version\` — compare this client'\''s version against the canonical server'\''s \`GET /version\`. Exits non-zero on skew' \
     )
     _describe -t commands 'pt help remote commands' commands "$@"
 }
@@ -1051,6 +1068,11 @@ _pt__subcmd__help__subcmd__remote__subcmd__reopen_commands() {
 _pt__subcmd__help__subcmd__remote__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt help remote show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__version_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__version_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote version commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__reopen_commands] )) ||
 _pt__subcmd__help__subcmd__reopen_commands() {
@@ -1146,6 +1168,7 @@ _pt__subcmd__remote_commands() {
 'show:\`pt remote show <query>\` — print one task'\''s full row + detail (read-only)' \
 'next:\`pt remote next \[-n N\]\` — DAG-ready tasks from the canonical host' \
 'dismiss:\`pt remote dismiss <query>\` — soft-close a task (reversible via reopen)' \
+'version:\`pt remote version\` — compare this client'\''s version against the canonical server'\''s \`GET /version\`. Exits non-zero on skew' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'pt remote commands' commands "$@"
@@ -1182,6 +1205,7 @@ _pt__subcmd__remote__subcmd__help_commands() {
 'show:\`pt remote show <query>\` — print one task'\''s full row + detail (read-only)' \
 'next:\`pt remote next \[-n N\]\` — DAG-ready tasks from the canonical host' \
 'dismiss:\`pt remote dismiss <query>\` — soft-close a task (reversible via reopen)' \
+'version:\`pt remote version\` — compare this client'\''s version against the canonical server'\''s \`GET /version\`. Exits non-zero on skew' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'pt remote help commands' commands "$@"
@@ -1236,6 +1260,11 @@ _pt__subcmd__remote__subcmd__help__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote help show commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__version_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__version_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help version commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__remote__subcmd__list_commands] )) ||
 _pt__subcmd__remote__subcmd__list_commands() {
     local commands; commands=()
@@ -1260,6 +1289,11 @@ _pt__subcmd__remote__subcmd__reopen_commands() {
 _pt__subcmd__remote__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__version_commands] )) ||
+_pt__subcmd__remote__subcmd__version_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote version commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__reopen_commands] )) ||
 _pt__subcmd__reopen_commands() {

@@ -131,6 +131,16 @@ enum RemoteCommand {
     Next(RemoteNextArgs),
     /// `pt remote dismiss <query>` — soft-close a task (reversible via reopen).
     Dismiss(RemoteDismissArgs),
+    /// `pt remote version` — compare this client's version against the
+    /// canonical server's `GET /version`. Exits non-zero on skew.
+    Version(RemoteVersionArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteVersionArgs {
+    /// Override the canonical endpoint.
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -905,12 +915,19 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
             }
             let tg = report.dispatched.iter().filter(|d| d.telegram_sent).count();
             let em = report.dispatched.iter().filter(|d| d.email_sent).count();
+            // All-channels-dead is a hard failure: the 2026-05→06 incidents
+            // (dead Gemini key, 401ing bot token) both hid behind an exit-0
+            // "ok" line for weeks. Print the report, then fail the unit.
+            let all_dead =
+                report.eligible > 0 && report.dispatched.is_empty() && report.send_failures > 0;
             println!(
-                "accountability ok — eligible={} dispatched={} telegrams={} emails={} budget={}/{}",
+                "accountability {} — eligible={} dispatched={} telegrams={} emails={} failures={} budget={}/{}",
+                if all_dead { "FAILED" } else { "ok" },
                 report.eligible,
                 report.dispatched.len(),
                 tg,
                 em,
+                report.send_failures,
                 report.budget_used_after,
                 ptask_core::accountability::DAILY_BUDGET_MAX,
             );
@@ -918,6 +935,13 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                 println!(
                     "  {} level={} telegram={} email={}",
                     d.task_uuid, d.level, d.telegram_sent, d.email_sent
+                );
+            }
+            if all_dead {
+                anyhow::bail!(
+                    "accountability dispatch dead — {} eligible, 0 dispatched, {} send failures",
+                    report.eligible,
+                    report.send_failures
                 );
             }
             Ok(())
@@ -1155,6 +1179,28 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 task.status
             );
             Ok(())
+        }
+        RemoteCommand::Version(a) => {
+            let client = match a.url {
+                Some(u) => remote::RemoteClient::with_url(&u)?,
+                None => remote::RemoteClient::from_env()?,
+            };
+            let local = ptask_core::VERSION;
+            println!("client v{local}");
+            match client.server_version() {
+                Some(server) if server == local => {
+                    println!("server v{server} — in sync");
+                    Ok(())
+                }
+                Some(server) => {
+                    println!("server v{server} — VERSION SKEW");
+                    anyhow::bail!(
+                        "client/server version skew (v{local} vs v{server}) — \
+                         redeploy pt (scripts/ansible/ptask.yml)"
+                    )
+                }
+                None => anyhow::bail!("server unreachable or predates GET /version"),
+            }
         }
     }
 }

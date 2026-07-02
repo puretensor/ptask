@@ -41,9 +41,15 @@ use crate::error::{Error, Result};
 use jiff::Zoned;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 pub const DAILY_BUDGET_MAX: i64 = 3;
+
+/// Consecutive Telegram send failures after which the channel is treated as
+/// dead for the remainder of the run. Prevents hammering a 401ing bot token
+/// once per eligible task (45 WARN lines per cycle during the 2026-06/07
+/// dead-token incident) while still proving the failure three times.
+pub const TELEGRAM_CIRCUIT_BREAK: i64 = 3;
 pub const MIN_HOURS_BETWEEN_TASK_REMINDERS: i64 = 4;
 pub const QUIET_START_UTC_HOUR: i8 = 22;
 pub const QUIET_END_UTC_HOUR: i8 = 8;
@@ -67,6 +73,10 @@ pub struct RunReport {
     pub budget_used_after: i64,
     pub eligible: i64,
     pub dispatched: Vec<DispatchedFor>,
+    /// Send attempts that failed while the channel WAS configured. Eligible
+    /// tasks with zero dispatches and non-zero failures means every channel
+    /// is dead — callers must fail loud, not report ok.
+    pub send_failures: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +291,9 @@ pub struct DispatchCfg {
     /// Always CC'd on every outbound email per CLAUDE.md.
     pub cc_email: Option<String>,
     pub hal_nudge_url: Option<String>,
+    /// Telegram Bot API base override (tests point this at an unroutable
+    /// address). `None` means the real `https://api.telegram.org`.
+    pub telegram_api_base: Option<String>,
     /// Suppress side-effecting sends. Tests set this; production never does.
     pub dry_run: bool,
 }
@@ -308,9 +321,24 @@ impl DispatchCfg {
             cc_email: env_first(&["PTASK_NOTIFY_CC", "PTASK_OPS_EMAIL"])
                 .or_else(|| Some("ops@puretensor.ai".to_string())),
             hal_nudge_url: std::env::var("PTASK_HAL_NUDGE_URL").ok(),
+            telegram_api_base: std::env::var("PTASK_TELEGRAM_API_BASE").ok(),
             dry_run: std::env::var("PTASK_ACCOUNTABILITY_DRY_RUN")
                 .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
         }
+    }
+
+    /// True when both pieces of Telegram config are present — a failed send
+    /// under this condition is a real delivery failure, not missing config.
+    pub fn telegram_configured(&self) -> bool {
+        self.telegram_token.is_some() && self.telegram_chat_id.is_some()
+    }
+
+    /// True when the SMTP quadruple required by [`send_email`] is present.
+    pub fn email_configured(&self) -> bool {
+        self.smtp_host.is_some()
+            && self.smtp_user.is_some()
+            && self.smtp_pass.is_some()
+            && self.notify_email.is_some()
     }
 }
 
@@ -335,7 +363,11 @@ pub async fn send_telegram(cfg: &DispatchCfg, text: &str) -> Result<bool> {
     if cfg.dry_run {
         return Ok(true);
     }
-    let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+    let base = cfg
+        .telegram_api_base
+        .as_deref()
+        .unwrap_or("https://api.telegram.org");
+    let url = format!("{}/bot{}/sendMessage", base, token);
     let body = serde_json::json!({"chat_id": chat, "text": text, "parse_mode": "HTML"});
     let client = reqwest::Client::new();
     match client.post(url).json(&body).send().await {
@@ -472,6 +504,7 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
     let eligible = fetch_eligible(db, &now_iso_utc)?;
     report.eligible = eligible.len() as i64;
     let mut sent_telegrams = 0i64;
+    let mut telegram_consecutive_failures = 0i64;
 
     for mut task in eligible {
         let age_days = task_age_days(&task, &now_utc);
@@ -524,16 +557,30 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
         for channel in channels {
             let ok = match *channel {
                 "telegram" => {
-                    if sent_telegrams >= telegram_remaining {
+                    if sent_telegrams >= telegram_remaining
+                        || telegram_consecutive_failures >= TELEGRAM_CIRCUIT_BREAK
+                    {
                         false
                     } else {
                         let prefixed = format!("<b>Task #{}:</b> {}", level, message);
                         let r = send_telegram(cfg, &prefixed).await?;
                         if r {
+                            telegram_consecutive_failures = 0;
                             dispatched.telegram_sent = true;
                             sent_telegrams += 1;
                             if !cfg.dry_run {
                                 increment_daily_budget(db, &date_utc)?;
+                            }
+                        } else if cfg.telegram_configured() {
+                            report.send_failures += 1;
+                            telegram_consecutive_failures += 1;
+                            if telegram_consecutive_failures == TELEGRAM_CIRCUIT_BREAK {
+                                error!(
+                                    target: "ptask::accountability",
+                                    failures = telegram_consecutive_failures,
+                                    "telegram channel circuit-broken for this run — \
+                                     suppressing further attempts"
+                                );
                             }
                         }
                         r
@@ -548,6 +595,8 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
                     let r = send_email(cfg, &subject, &message).await?;
                     if r {
                         dispatched.email_sent = true;
+                    } else if cfg.email_configured() {
+                        report.send_failures += 1;
                     }
                     r
                 }
@@ -573,6 +622,7 @@ pub async fn run_check_at(db: &Db, cfg: &DispatchCfg, now: &Zoned) -> Result<Run
         sent_telegrams,
         emails = report.dispatched.iter().filter(|d| d.email_sent).count(),
         eligible = report.eligible,
+        send_failures = report.send_failures,
         "run_check complete"
     );
     Ok(report)
@@ -807,6 +857,33 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dead_telegram_endpoint_circuit_breaks_and_counts_failures() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        for i in 0..5 {
+            aged_task_before(&db, &format!("stale task {}", i), 3, &anchor);
+        }
+        let cfg = DispatchCfg {
+            telegram_token: Some("test".into()),
+            telegram_chat_id: Some(1),
+            // Unroutable port — every send fails with connection refused
+            // without touching the real network.
+            telegram_api_base: Some("http://127.0.0.1:1".into()),
+            ..Default::default()
+        };
+        let report = run_check_at(&db, &cfg, &anchor).await.unwrap();
+        assert_eq!(report.eligible, 5);
+        assert_eq!(
+            report.dispatched.len(),
+            0,
+            "nothing dispatched on a dead channel"
+        );
+        // Exactly CIRCUIT_BREAK attempts, then the channel is suppressed for
+        // the rest of the run — not one failure per eligible task.
+        assert_eq!(report.send_failures, TELEGRAM_CIRCUIT_BREAK);
     }
 
     #[tokio::test]

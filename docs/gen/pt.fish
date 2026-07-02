@@ -136,18 +136,19 @@ complete -c pt -n "__fish_pt_using_subcommand scoring; and __fish_seen_subcomman
 complete -c pt -n "__fish_pt_using_subcommand scoring; and __fish_seen_subcommand_from run" -s h -l help -d 'Print help'
 complete -c pt -n "__fish_pt_using_subcommand scoring; and __fish_seen_subcommand_from help" -f -a "run" -d 'Recompute the four score_* columns + priority_score for every task with status NOT IN (\'done\', \'dismissed\')'
 complete -c pt -n "__fish_pt_using_subcommand scoring; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -s h -l help -d 'Print help'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "add" -d '`pt remote add "..."` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http://100.121.42.54:9501)'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "list" -d '`pt remote list` — fetch the live task set from the canonical host'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "done" -d '`pt remote done <query>` — mark a task done by PT-N or title substring'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "priority" -d '`pt remote priority <query> <level>` — set priority on the canonical host'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "edit" -d '`pt remote edit <query> --deadline <iso> | --clear-deadline`'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "reopen" -d '`pt remote reopen <query>` — flip a done/dismissed task back to pending'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "show" -d '`pt remote show <query>` — print one task\'s full row + detail (read-only)'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "next" -d '`pt remote next [-n N]` — DAG-ready tasks from the canonical host'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "dismiss" -d '`pt remote dismiss <query>` — soft-close a task (reversible via reopen)'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -s h -l help -d 'Print help'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "add" -d '`pt remote add "..."` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http://100.121.42.54:9501)'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "list" -d '`pt remote list` — fetch the live task set from the canonical host'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "done" -d '`pt remote done <query>` — mark a task done by PT-N or title substring'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "priority" -d '`pt remote priority <query> <level>` — set priority on the canonical host'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "edit" -d '`pt remote edit <query> --deadline <iso> | --clear-deadline`'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "reopen" -d '`pt remote reopen <query>` — flip a done/dismissed task back to pending'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "show" -d '`pt remote show <query>` — print one task\'s full row + detail (read-only)'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "next" -d '`pt remote next [-n N]` — DAG-ready tasks from the canonical host'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "dismiss" -d '`pt remote dismiss <query>` — soft-close a task (reversible via reopen)'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "version" -d '`pt remote version` — compare this client\'s version against the canonical server\'s `GET /version`. Exits non-zero on skew'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss version help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from add" -l url -d 'Override the canonical endpoint' -r
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from add" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help'
@@ -183,6 +184,9 @@ complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from dismiss" -l url -r
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from dismiss" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from dismiss" -s h -l help -d 'Print help'
+complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from version" -l url -d 'Override the canonical endpoint' -r
+complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from version" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
+complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from version" -s h -l help -d 'Print help'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "add" -d '`pt remote add "..."` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http://100.121.42.54:9501)'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "list" -d '`pt remote list` — fetch the live task set from the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "done" -d '`pt remote done <query>` — mark a task done by PT-N or title substring'
@@ -192,6 +196,7 @@ complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "show" -d '`pt remote show <query>` — print one task\'s full row + detail (read-only)'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "next" -d '`pt remote next [-n N]` — DAG-ready tasks from the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "dismiss" -d '`pt remote dismiss <query>` — soft-close a task (reversible via reopen)'
+complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "version" -d '`pt remote version` — compare this client\'s version against the canonical server\'s `GET /version`. Exits non-zero on skew'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c pt -n "__fish_pt_using_subcommand backfill" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand backfill" -s h -l help -d 'Print help'
@@ -237,3 +242,4 @@ complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_f
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "show" -d '`pt remote show <query>` — print one task\'s full row + detail (read-only)'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "next" -d '`pt remote next [-n N]` — DAG-ready tasks from the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "dismiss" -d '`pt remote dismiss <query>` — soft-close a task (reversible via reopen)'
+complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "version" -d '`pt remote version` — compare this client\'s version against the canonical server\'s `GET /version`. Exits non-zero on skew'

@@ -52,6 +52,40 @@ impl RemoteClient {
         })
     }
 
+    /// Fetch the server's advertised version from the open `GET /version`
+    /// route. `None` when the server is unreachable or predates the route.
+    pub fn server_version(&self) -> Option<String> {
+        let url = format!("{}/version", self.base);
+        let resp = self
+            .client
+            .get(&url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v: Value = resp.json().ok()?;
+        v.get("ptask_core")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Loud client/server skew diagnosis appended to remote errors, so a
+    /// 401/404 from a mismatched deploy names its real cause instead of
+    /// reading like an auth or routing problem (the fleet ran 1.0.2 clients
+    /// against a token-enforced 1.10.1 server for weeks undiagnosed).
+    fn skew_hint(&self) -> String {
+        let client = ptask_core::VERSION;
+        match self.server_version() {
+            Some(server) if server != client => format!(
+                "\nversion skew: client v{client} vs server v{server} — \
+                 redeploy pt so both sides match (scripts/ansible/ptask.yml)"
+            ),
+            _ => String::new(),
+        }
+    }
+
     fn sync(&self, req: &Value) -> Result<SyncResp> {
         let url = format!("{}/sync", self.base);
         let mut builder = self.client.post(&url).json(req);
@@ -62,7 +96,7 @@ impl RemoteClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().unwrap_or_default();
-            return Err(anyhow!("remote /sync {status}: {body}"));
+            return Err(anyhow!("remote /sync {status}: {body}{}", self.skew_hint()));
         }
         resp.json::<SyncResp>().context("parse /sync response")
     }
@@ -79,7 +113,10 @@ impl RemoteClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().unwrap_or_default();
-            return Err(anyhow!("remote GET {path} {status}: {body}"));
+            return Err(anyhow!(
+                "remote GET {path} {status}: {body}{}",
+                self.skew_hint()
+            ));
         }
         resp.json::<Value>()
             .with_context(|| format!("parse GET {path}"))
@@ -103,7 +140,10 @@ impl RemoteClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().unwrap_or_default();
-            return Err(anyhow!("remote GET {path} {status}: {body}"));
+            return Err(anyhow!(
+                "remote GET {path} {status}: {body}{}",
+                self.skew_hint()
+            ));
         }
         resp.json::<Value>()
             .with_context(|| format!("parse GET {path}"))

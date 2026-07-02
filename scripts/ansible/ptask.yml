@@ -5,13 +5,21 @@
 # systemd units (serve / backup / distill / accountability / scoring), enables
 # the canonical API service + timers, and verifies the binary version.
 #
-# Usage from the workstation:
+# Usage from the workstation — populate dist/ with the per-arch release
+# artifacts first (the fleet is heterogeneous: mon3 is aarch64, mon2 has
+# a glibc-2.35 floor; both are covered by the release.yml artifacts):
 #
 #   cd ~/ptask
-#   cargo build --release --bin pt
+#   gh release download vX.Y.Z --pattern 'pt-*' -D dist --clobber
 #   ansible-playbook -i scripts/ansible/inventory.yml scripts/ansible/ptask.yml
 #
-# Override the binary path:
+# Each host receives the artifact matching its `ptask_arch_override`
+# (inventory.yml): pt-aarch64-unknown-linux-gnu for aarch64 hosts,
+# pt-x86_64-unknown-linux-gnu for everything else. NEVER push the
+# controller-built target/release/pt to the whole fleet — that is how
+# mon3 got an x86_64 binary (exec format error).
+#
+# Force one specific binary onto every host (single-arch escape hatch):
 #
 #   ansible-playbook ... -e ptask_binary=/path/to/pt
 #
@@ -25,7 +33,14 @@
   become: false
 
   vars:
-    ptask_binary: "{{ playbook_dir }}/../../target/release/pt"
+    ptask_dist_dir: "{{ playbook_dir }}/../../dist"
+    # Per-host target triple, driven by `ptask_arch_override` in the
+    # inventory. Matches the artifact names release.yml publishes.
+    ptask_target_triple: >-
+      {{ 'aarch64-unknown-linux-gnu'
+         if (ptask_arch_override | default('')) == 'aarch64'
+         else 'x86_64-unknown-linux-gnu' }}
+    ptask_binary: "{{ ptask_dist_dir }}/pt-{{ ptask_target_triple }}"
     ptask_systemd_dir: "{{ ansible_env.HOME }}/.config/systemd/user"
     ptask_timer_units:
       - ptask-backup.service
@@ -45,21 +60,38 @@
     ptask_is_canonical: "{{ inventory_hostname == ptask_canonical_host }}"
 
   pre_tasks:
-    - name: verify controller-side binary exists
+    # Per host, NOT run_once — the artifact path differs by architecture,
+    # so every host must verify its own binary exists on the controller.
+    - name: verify controller-side binary exists for this host's arch
       delegate_to: localhost
       ansible.builtin.stat:
         path: "{{ ptask_binary }}"
       register: pt_local
-      run_once: true
 
     - name: fail if binary missing
       delegate_to: localhost
-      run_once: true
       ansible.builtin.fail:
         msg: |
-          Binary not found at {{ ptask_binary }}.
-          Build it first: cargo build --release --bin pt
+          Binary not found at {{ ptask_binary }} (host {{ inventory_hostname }},
+          triple {{ ptask_target_triple }}).
+          Download the release artifacts first:
+            gh release download vX.Y.Z --pattern 'pt-*' -D dist --clobber
+          or cross-build:
+            cargo build --release --bin pt --target {{ ptask_target_triple }}
+            cp target/{{ ptask_target_triple }}/release/pt dist/pt-{{ ptask_target_triple }}
       when: not pt_local.stat.exists
+
+    # Belt-and-braces: refuse to copy a binary whose ELF architecture does
+    # not match the target host. Catches a hand-copied wrong-arch file in
+    # dist/ before it lands on a node.
+    - name: verify binary ELF architecture matches host
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        set -o pipefail
+        file -b "{{ ptask_binary }}" | grep -q "{{ 'aarch64' if ptask_target_triple.startswith('aarch64') else 'x86-64' }}"
+      args:
+        executable: /bin/bash
+      changed_when: false
 
   tasks:
     - name: ensure ~/.cargo/bin exists
