@@ -59,6 +59,36 @@ pub fn unprocessed_count(db: &Db) -> Result<i64> {
     Ok(n)
 }
 
+/// Mark one inbox row consumed (fast-lane or distill). Idempotent.
+pub fn mark_processed(db: &Db, id: i64) -> Result<()> {
+    let conn = db.get()?;
+    conn.execute("UPDATE raw_items SET processed = 1 WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Fetch a batch of unconsumed inbox rows, oldest first.
+pub fn fetch_unprocessed(db: &Db, limit: usize) -> Result<Vec<RawItem>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, text, source_type, source_file, source_date,
+                commitment_score, processed, created_at
+         FROM raw_items WHERE processed = 0 ORDER BY id ASC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit as i64], |r| {
+        Ok(RawItem {
+            id: r.get(0)?,
+            text: r.get(1)?,
+            source_type: r.get(2)?,
+            source_file: r.get(3)?,
+            source_date: r.get(4)?,
+            commitment_score: r.get(5)?,
+            processed: r.get::<_, i64>(6)? != 0,
+            created_at: r.get(7)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,34 +118,4 @@ mod tests {
         insert(&db, "y", "http", "src").unwrap();
         assert_eq!(unprocessed_count(&db).unwrap(), 2);
     }
-}
-
-/// Mark one inbox row consumed (fast-lane or distill). Idempotent.
-pub fn mark_processed(db: &Db, id: i64) -> Result<()> {
-    let conn = db.get()?;
-    conn.execute("UPDATE raw_items SET processed = 1 WHERE id = ?1", [id])?;
-    Ok(())
-}
-
-/// Fetch a batch of unconsumed inbox rows, oldest first.
-pub fn fetch_unprocessed(db: &Db, limit: usize) -> Result<Vec<RawItem>> {
-    let conn = db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT id, text, source_type, source_file, source_date,
-                commitment_score, processed, created_at
-         FROM raw_items WHERE processed = 0 ORDER BY id ASC LIMIT ?1",
-    )?;
-    let rows = stmt.query_map([limit as i64], |r| {
-        Ok(RawItem {
-            id: r.get(0)?,
-            text: r.get(1)?,
-            source_type: r.get(2)?,
-            source_file: r.get(3)?,
-            source_date: r.get(4)?,
-            commitment_score: r.get(5)?,
-            processed: r.get::<_, i64>(6)? != 0,
-            created_at: r.get(7)?,
-        })
-    })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
