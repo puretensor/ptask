@@ -1026,6 +1026,13 @@ pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
         rows.collect::<std::result::Result<_, _>>()?
     };
 
+    // Tasks with a newer, non-undoable modification (priority/deadline/text/
+    // start/snooze edit) seen earlier in this newest-first scan. Their
+    // `task.created` must NOT be deleted: the create is no longer the last
+    // thing that happened, so deleting would silently discard the later edit.
+    let mut modified_after_create: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     for (id, task_uuid, event_type, payload) in candidates {
         let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
         let exists: bool = {
@@ -1055,13 +1062,24 @@ pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
                 });
             }
             "task.created" => {
+                if modified_after_create.contains(&task_uuid) {
+                    // Created, then edited — "undo the create" would delete a
+                    // task the operator has since worked on. Skip it.
+                    continue;
+                }
                 delete_task(db, &task_uuid, ctx)?;
                 return Ok(UndoOutcome {
                     reversed_event_id: id,
                     description: format!("deleted {} (undid create)", task_uuid),
                 });
             }
-            _ => continue,
+            _ => {
+                // A non-undoable edit (priority/deadline/text/start/snooze).
+                // Record it so this task's create is protected from deletion
+                // underneath a later modification.
+                modified_after_create.insert(task_uuid);
+                continue;
+            }
         }
     }
     Err(crate::Error::Other(
@@ -2281,5 +2299,60 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn undo_does_not_delete_task_edited_after_create() {
+        // Regression: `create → priority edit → undo` walked past the
+        // (non-undoable) edit event to `task.created` and DELETED the task,
+        // discarding it and all its edits. Undo must leave the task intact and
+        // report nothing undoable instead.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let t = create(&db, NewTask::minimal("keep me"), &ctx).unwrap();
+        update_priority(&db, &t.id, 4, &ctx).unwrap();
+
+        let res = undo_last(&db, &ctx);
+        assert!(
+            res.is_err(),
+            "a priority edit is not undoable — expected Err, got {:?}",
+            res.ok().map(|o| o.description)
+        );
+
+        let count: i64 = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT COUNT(*) FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "task must survive undo-after-edit, not be deleted"
+        );
+    }
+
+    #[test]
+    fn undo_still_deletes_a_bare_create() {
+        // Guard the intended behaviour: with no edits after the create, undo of
+        // a fresh create still deletes it.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let t = create(&db, NewTask::minimal("oops"), &ctx).unwrap();
+        let out = undo_last(&db, &ctx).unwrap();
+        assert!(out.description.contains("deleted"));
+
+        let count: i64 = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT COUNT(*) FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(count, 0, "bare-create undo should delete the task");
     }
 }
