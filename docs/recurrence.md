@@ -1,8 +1,8 @@
 # Recurrence
 
-Recurring tasks live in `pt_recurrence`. The parser is a winnow grammar
-that compiles natural-language input to an RFC 5545 RRULE string + a
-mode flag (`fixed` or `completion`).
+Recurring tasks live in `pt_recurrence`. The parser is hand-written and
+compiles natural-language input to an RRULE-style string + a mode flag
+(`fixed` or `completion`).
 
 ## Modes
 
