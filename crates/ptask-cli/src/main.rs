@@ -1010,10 +1010,19 @@ fn cmd_reopen(db: &Db, a: ReopenArgs) -> Result<()> {
     Ok(())
 }
 
+/// Short display handle for a task with no PT-N: the first 8 chars of its id.
+/// Char-safe — a raw `&id[..8]` panics when the id is shorter than 8 bytes or
+/// when byte 8 lands inside a multi-byte scalar. Remote-path ids come from the
+/// canonical server's JSON (`pt remote *`), so an unexpected id shape must not
+/// crash the CLI; local ids are 36-char UUIDs where this is a no-op.
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
 fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
     let t = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
     let d = tasks::load_detail(db, &t.id)?;
-    let pt = t.pt_id.as_deref().unwrap_or(&t.id[..8]);
+    let pt = t.pt_id.as_deref().unwrap_or_else(|| short_id(&t.id));
     println!(
         "{}  [{}]",
         pt,
@@ -1450,8 +1459,8 @@ fn cmd_depend(db: &Db, a: DependArgs) -> Result<()> {
             println!(
                 "{} {} depends-on {} ({})",
                 if a.clear { "cleared:" } else { "ok:" },
-                from.pt_id.as_deref().unwrap_or(&from.id[..8]),
-                to.pt_id.as_deref().unwrap_or(&to.id[..8]),
+                from.pt_id.as_deref().unwrap_or_else(|| short_id(&from.id)),
+                to.pt_id.as_deref().unwrap_or_else(|| short_id(&to.id)),
                 to.title
             )
         },
@@ -1662,7 +1671,7 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
 
 fn cmd_log(db: &Db, a: LogArgs) -> Result<()> {
     let task = tasks::resolve_for_lookup(db, &a.query, true).map_err(anyhow::Error::msg)?;
-    let pt = task.pt_id.as_deref().unwrap_or(&task.id[..8]);
+    let pt = task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id));
     let events = ptask_core::event_log::history_for_task(db, &task.id, a.limit)?;
     if events.is_empty() {
         println!("{} {} — no journal events", pt, task.title);
@@ -1805,7 +1814,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             // mis-parse — the PT-653 class — is visible at the moment of creation.
             println!(
                 "remote add ok — {} {} · {} ({})",
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
                 task.title,
                 task.priority,
                 priority::label(task.priority)
@@ -1845,7 +1854,10 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 return Ok(());
             }
             for t in &tasks_out {
-                let label = t.pt_id.clone().unwrap_or_else(|| t.id[..8].to_string());
+                let label = t
+                    .pt_id
+                    .clone()
+                    .unwrap_or_else(|| short_id(&t.id).to_string());
                 println!("{:8}  p{}  {:9}  {}", label, t.priority, t.status, t.title);
             }
             Ok(())
@@ -1858,7 +1870,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let task = client.done(&a.query)?;
             println!(
                 "remote done ok — {} {}",
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
                 task.title
             );
             Ok(())
@@ -1872,7 +1884,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let task = client.priority(&a.query, level)?;
             println!(
                 "remote priority ok — {} {} · p{} ({})",
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
                 task.title,
                 task.priority,
                 priority::label(task.priority)
@@ -1903,7 +1915,11 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 a.deadline.as_deref().map(Some)
             };
             let task = client.edit(&a.query, a.title.as_deref(), a.desc.as_deref(), deadline_op)?;
-            let pt = task.pt_id.as_deref().unwrap_or(&task.id[..8]).to_string();
+            let pt = task
+                .pt_id
+                .as_deref()
+                .unwrap_or_else(|| short_id(&task.id))
+                .to_string();
             println!("remote edit ok — {} {}", pt, task.title);
             if has_deadline {
                 println!("  deadline → {}", task.deadline.as_deref().unwrap_or("--"));
@@ -1924,7 +1940,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let task = client.reopen(&a.query)?;
             println!(
                 "remote reopen ok — {} {} · {}",
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
                 task.title,
                 task.status
             );
@@ -1936,7 +1952,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 None => remote::RemoteClient::from_env()?,
             };
             let t = client.show(&a.query)?;
-            let pt = t.pt_id.as_deref().unwrap_or(&t.id[..8]);
+            let pt = t.pt_id.as_deref().unwrap_or_else(|| short_id(&t.id));
             println!(
                 "{}  [{}]",
                 pt,
@@ -1991,7 +2007,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             }
             for t in &rows {
                 let label = priority::label(t.priority).to_ascii_uppercase();
-                let pt = t.pt_id.as_deref().unwrap_or(&t.id[..8]);
+                let pt = t.pt_id.as_deref().unwrap_or_else(|| short_id(&t.id));
                 let due = t.deadline.as_deref().unwrap_or("--");
                 println!("[{:8}] {:8}  {}  ({})", label, pt, t.title, due);
             }
@@ -2005,7 +2021,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let task = client.dismiss(&a.query)?;
             println!(
                 "remote dismiss ok — {} {} · {}",
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
                 task.title,
                 task.status
             );
@@ -2019,7 +2035,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let task = client.start(&a.query)?;
             println!(
                 "remote start ok — {} {} · in progress",
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
                 task.title
             );
             Ok(())
@@ -2035,7 +2051,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let task = client.snooze(&a.query, &until_iso)?;
             println!(
                 "remote snooze ok — {} {} · until {}",
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
                 task.title,
                 until_iso
             );
@@ -2050,7 +2066,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             println!(
                 "remote depend {} — {} {}",
                 if a.clear { "cleared" } else { "ok" },
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
                 task.title
             );
             Ok(())
@@ -2063,7 +2079,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let task = client.rm(&a.query)?;
             println!(
                 "remote rm ok — {} {} · deleted",
-                task.pt_id.as_deref().unwrap_or(&task.id[..8]),
+                task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
                 task.title
             );
             Ok(())
@@ -2232,4 +2248,24 @@ fn cmd_backfill(db: &Db) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_id;
+
+    #[test]
+    fn short_id_is_char_boundary_safe() {
+        // Normal 36-char UUID → first 8 chars (the common local case).
+        assert_eq!(short_id("0123456789abcdef-0000"), "01234567");
+        // Shorter than 8 bytes → whole string, no panic (out-of-range slice).
+        assert_eq!(short_id("abc"), "abc");
+        assert_eq!(short_id(""), "");
+        // A remote-supplied id whose byte 8 lands inside a multi-byte scalar
+        // must not panic (`&id[..8]` did): "1234567é" has 'é' at bytes 7..9.
+        assert_eq!(short_id("1234567é"), "1234567é");
+        // Multi-byte chars before byte 8: 'ú' starts at byte 8 (a boundary),
+        // so the first 8 bytes are the 4 two-byte scalars "áéíó".
+        assert_eq!(short_id("áéíóúab8xyz"), "áéíó");
+    }
 }

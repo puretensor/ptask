@@ -174,8 +174,13 @@ fn parse_deadline(s: &str) -> Option<(String, f64)> {
         return None;
     }
     let z = ptask_core::dates::parse_iso_to_utc(s).or_else(|| {
-        // Date-only "YYYY-MM-DD" → midnight UTC.
-        ptask_core::dates::parse_iso_to_utc(&format!("{}T00:00:00+00:00", &s[..10.min(s.len())]))
+        // Date-only "YYYY-MM-DD" → midnight UTC. `s.get(..10)` is char-safe:
+        // a raw `&s[..10]` panics when byte 10 lands inside a multi-byte scalar
+        // (a poisoned deadline row would then crash every dashboard read that
+        // touches it). Non-boundary / short input falls back to `s`, which then
+        // fails the parse and yields None.
+        let prefix = s.get(..10).unwrap_or(s);
+        ptask_core::dates::parse_iso_to_utc(&format!("{prefix}T00:00:00+00:00"))
     })?;
     let now = ptask_core::dates::now_in_operator_tz()
         .ok()?
@@ -956,4 +961,24 @@ pub async fn root(State(state): State<AppState>, headers: HeaderMap) -> Response
         ptask_core::VERSION
     )
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_deadline;
+
+    #[test]
+    fn parse_deadline_is_char_boundary_safe() {
+        // Regression: a raw `&s[..10]` panics when byte 10 lands inside a
+        // multi-byte scalar. A poisoned `deadline` row would then crash every
+        // dashboard read that touches it (/api/stats, /api/tasks, timeline …).
+        // "123456789é" is 11 bytes with 'é' at bytes 9..11, so byte 10 is not
+        // a char boundary. Must return None, not panic.
+        assert_eq!(parse_deadline("123456789é"), None);
+        // A valid date-only string still parses to (date, days_until).
+        assert!(parse_deadline("2026-01-01").is_some());
+        // Empty / junk resolve cleanly to None.
+        assert_eq!(parse_deadline(""), None);
+        assert_eq!(parse_deadline("not-a-date"), None);
+    }
 }
