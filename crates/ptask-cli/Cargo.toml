@@ -34,11 +34,11 @@ uuid = { workspace = true }
 
 [features]
 default = []
-# Build the candle-backed native ML pipeline into `pt`. Off by default:
-# the live distill path is the Python subprocess shim, and the native
-# stack nearly doubles the dependency tree (~170 crates) for code with
-# no production caller yet.
-native-ml = ["ptask-distill/native-ml"]
+# Build the candle-backed native ML pipeline into `pt`. Off by default for
+# dev builds (the candle stack nearly doubles the dependency tree). The
+# PRODUCTION binary is built WITH this feature as of v2.5.0: it powers
+# semantic dedup in both the distill pipeline and the capture fast lane.
+native-ml = ["ptask-distill/native-ml", "ptask-server/semantic-dedup"]
 
 [dev-dependencies]
 axum = { workspace = true }

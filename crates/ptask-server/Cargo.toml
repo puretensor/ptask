@@ -28,6 +28,15 @@ hex  = { workspace = true }
 rusqlite = { workspace = true }
 mail-parser = { workspace = true }
 
+# Semantic dedup for the capture fast lane (v2.5.0). Optional: pulls the
+# candle embedding stack via ptask-distill's native-ml feature. Without it
+# the fast lane still dedups on exact capture_key; semantic matching is a
+# no-op that fails open.
+ptask-distill = { workspace = true, optional = true }
+
+[features]
+semantic-dedup = ["dep:ptask-distill", "ptask-distill/native-ml"]
+
 [dev-dependencies]
 tempfile = "3"
 tower = "0.5"

@@ -162,6 +162,132 @@ async fn capture(
             .chars()
             .take(200)
             .collect();
+
+        // ---- v2.5.0 signal intelligence: refresh, don't duplicate ----------
+        // The same live incident re-captured (deterministic capture_key) or
+        // re-worded (semantic >= 0.82) bumps the existing open task instead of
+        // minting a new PT-N. Fail-open: any error falls through to create.
+        let open_incidents: Vec<(String, String, Option<String>)> = state
+            .db
+            .with_conn(|c| {
+                let mut stmt = c.prepare(
+                    "SELECT id, title, capture_key FROM tasks
+                     WHERE source_type = 'incident'
+                       AND status_v2 NOT IN ('done','dismissed')",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?))
+                })?;
+                Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+            })
+            .unwrap_or_default();
+
+        let exact = req.client_key.as_ref().and_then(|k| {
+            open_incidents
+                .iter()
+                .find(|(_, _, ck)| ck.as_deref() == Some(k.as_str()))
+                .map(|(uuid, _, _)| (uuid.clone(), 1.0f32, "capture_key"))
+        });
+        let matched = if exact.is_some() {
+            exact
+        } else {
+            let title_owned = title.clone();
+            let cands: Vec<(String, String)> = open_incidents
+                .iter()
+                .map(|(u, t, _)| (u.clone(), t.clone()))
+                .collect();
+            tokio::task::spawn_blocking(move || {
+                crate::dedup::best_match(&title_owned, &cands, crate::dedup::CAPTURE_THRESHOLD)
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(|(u, s)| (u, s, "semantic"))
+        };
+
+        if let Some((existing_uuid, score, how)) = matched {
+            let now = ptask_core::dates::format_iso(
+                &ptask_core::dates::now_in_operator_tz().unwrap_or_else(|_| jiff::Zoned::now()),
+            );
+            let refresh = state.db.with_conn(|c| {
+                c.execute(
+                    "UPDATE tasks SET
+                         capture_count = capture_count + 1,
+                         last_captured_at = ?1,
+                         updated_at = ?1,
+                         capture_key = COALESCE(capture_key, ?2)
+                     WHERE id = ?3",
+                    rusqlite::params![now, req.client_key, existing_uuid],
+                )?;
+                Ok(())
+            });
+            match refresh {
+                Ok(()) => {
+                    let ctx = EventCtx {
+                        actor: identity.client_id.clone(),
+                        source: "capture".into(),
+                        event_uuid: None,
+                    };
+                    let ev_uuid = format!("capture-occurrence:{}", row.id);
+                    let payload = serde_json::json!({
+                        "matched_by": how,
+                        "score": score,
+                        "severity": sev,
+                        "raw_item_id": row.id,
+                        "client_key": req.client_key,
+                        "title": title,
+                    });
+                    if let Err(e) = ptask_core::event_log::record(
+                        &state.db,
+                        &ev_uuid,
+                        Some(&existing_uuid),
+                        "task.capture_occurrence",
+                        &payload,
+                        &ctx,
+                    ) {
+                        tracing::warn!(target: "ptask::capture", error = %e, "occurrence event failed");
+                    }
+                    if let Err(e) = ptask_core::raw_items::mark_processed(&state.db, row.id) {
+                        tracing::warn!(target: "ptask::capture", error = %e, "mark_processed failed");
+                    }
+                    let existing_pt: Option<String> = state
+                        .db
+                        .with_conn(|c| {
+                            Ok(c.query_row(
+                                "SELECT pt_id FROM tasks WHERE id = ?1",
+                                [&existing_uuid],
+                                |r| r.get::<_, Option<String>>(0),
+                            )?)
+                        })
+                        .unwrap_or(None);
+                    tracing::info!(
+                        target: "ptask::capture",
+                        severity = sev,
+                        matched_by = how,
+                        score = score,
+                        pt_id = existing_pt.as_deref().unwrap_or("-"),
+                        "fast-lane incident deduped onto existing task"
+                    );
+                    return (
+                        StatusCode::OK,
+                        Json(CaptureResp {
+                            id: row.id,
+                            source_type: row.source_type,
+                            source_date: row.source_date,
+                            duplicate: true,
+                            task_uuid: Some(existing_uuid),
+                            pt_id: existing_pt,
+                        }),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    // Fail open: fall through to normal create.
+                    tracing::warn!(target: "ptask::capture", error = %e, "occurrence refresh failed — creating new task");
+                }
+            }
+        }
+
         let new = ptask_core::NewTask {
             title,
             description: text.clone(),
@@ -185,6 +311,18 @@ async fn capture(
             Ok(t) => {
                 task_uuid = Some(t.id.clone());
                 pt_id = t.pt_id.clone();
+                if let Some(key) = req.client_key.as_deref() {
+                    let set = state.db.with_conn(|c| {
+                        c.execute(
+                            "UPDATE tasks SET capture_key = ?1 WHERE id = ?2",
+                            rusqlite::params![key, t.id],
+                        )?;
+                        Ok(())
+                    });
+                    if let Err(e) = set {
+                        tracing::warn!(target: "ptask::capture", error = %e, "capture_key set failed");
+                    }
+                }
                 if let Err(e) = ptask_core::raw_items::mark_processed(&state.db, row.id) {
                     tracing::warn!(target: "ptask::capture", error = %e, "mark_processed failed");
                 }

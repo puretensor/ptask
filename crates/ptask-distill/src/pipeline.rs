@@ -93,10 +93,10 @@ pub fn run_native<P: LlmProvider>(db: &Db, provider: &P, batch: usize) -> Result
 
         // Dedup universe: everything active + anything touched in 30 days
         // (incl. done/dismissed — the operator said no once already).
-        let existing: Vec<String> = {
+        let existing: Vec<(String, String)> = {
             let conn = db.get()?;
             let mut stmt = conn.prepare(
-                "SELECT title FROM tasks
+                "SELECT id, title FROM tasks
                  WHERE status_v2 NOT IN ('done','dismissed')
                     OR updated_at >= ?1",
             )?;
@@ -105,15 +105,96 @@ pub fn run_native<P: LlmProvider>(db: &Db, provider: &P, batch: usize) -> Result
                     .checked_sub(ptask_core::jiff::Span::new().days(30))
                     .map_err(|e| anyhow::anyhow!("cutoff math: {e}"))?,
             );
-            let rows = stmt.query_map([cutoff], |r| r.get::<_, String>(0))?;
+            let rows = stmt.query_map([cutoff], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
             rows.collect::<std::result::Result<_, _>>()?
         };
 
+        // v2.5.0: semantic layer over the Jaccard gate. The embedder loads
+        // once per run; a load failure degrades to Jaccard-only (fail open).
+        #[cfg(feature = "native-ml")]
+        let embedder = match crate::embeddings::Embedder::from_hf_cache() {
+            Ok(e) => Some(e),
+            Err(e) => {
+                warn!(target: "ptask::distill", error = %e, "embedder unavailable — Jaccard-only dedup this run");
+                None
+            }
+        };
+        #[cfg(feature = "native-ml")]
+        let semantic_candidates: Vec<crate::semantic_dedup::Candidate> = existing
+            .iter()
+            .map(|(id, title)| crate::semantic_dedup::Candidate {
+                id: id.clone(),
+                title: title.clone(),
+            })
+            .collect();
+
         for cand in candidates {
-            if existing.iter().any(|t| title_similar(t, &cand.title)) {
+            if existing.iter().any(|(_, t)| title_similar(t, &cand.title)) {
                 skipped += 1;
-                info!(target: "ptask::distill", title = %cand.title, "dedup skip");
+                info!(target: "ptask::distill", title = %cand.title, "dedup skip (jaccard)");
                 continue;
+            }
+            // Exact-hash temporal dedup: the same candidate text distilled
+            // twice inside 7 days is a re-ingest, not new work.
+            match crate::temporal_dedup::check_and_record(db, "distill-candidate", &cand.title, 7) {
+                Ok(true) => {
+                    skipped += 1;
+                    info!(target: "ptask::distill", title = %cand.title, "dedup skip (temporal)");
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(target: "ptask::distill", error = %e, "temporal dedup failed — failing open");
+                }
+            }
+            // Semantic dedup: paraphrases of anything in the 30d universe
+            // (including dismissed — that is the resurrection bug) skip.
+            #[cfg(feature = "native-ml")]
+            if let Some(embedder) = embedder.as_ref() {
+                match crate::semantic_dedup::find_duplicate(
+                    embedder,
+                    &cand.title,
+                    &semantic_candidates,
+                    crate::semantic_dedup::DEFAULT_THRESHOLD,
+                ) {
+                    Ok(Some(dup)) => {
+                        skipped += 1;
+                        info!(
+                            target: "ptask::distill",
+                            title = %cand.title,
+                            matched = %dup.title,
+                            score = dup.score,
+                            "dedup skip (semantic)"
+                        );
+                        let ev_uuid = format!(
+                            "distill-semantic-dup:{}",
+                            crate::temporal_dedup::text_hash(&cand.title)
+                        );
+                        let payload = serde_json::json!({
+                            "candidate_title": cand.title,
+                            "matched_task": dup.id,
+                            "matched_title": dup.title,
+                            "score": dup.score,
+                        });
+                        if let Err(e) = event_log::record(
+                            db,
+                            &ev_uuid,
+                            Some(&dup.id),
+                            "distill.semantic_dedup",
+                            &payload,
+                            &ctx,
+                        ) {
+                            warn!(target: "ptask::distill", error = %e, "semantic-dedup event failed");
+                        }
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(target: "ptask::distill", error = %e, "semantic dedup failed — failing open");
+                    }
+                }
             }
             let new = NewTask {
                 title: cand.title.chars().take(200).collect(),
