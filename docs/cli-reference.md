@@ -96,7 +96,7 @@ pt scoring run --dry-run  # compute, print, don't write
 pt why PT-42              # component breakdown: urgency/neglect/dependency/effort/llm + rank
 ```
 
-v2 composite = 0.35·urgency + 0.15·neglect + 0.20·dependency + 0.30·(priority/5·effort_factor) + clamp(score_llm, ±0.15).
+v2 composite = 0.35·urgency + 0.20·neglect + 0.15·dependency + 0.30·(priority/5·effort_factor) + clamp(score_llm, ±0.15).
 No-deadline urgency GROWS with age (aged p5 can never rank below fresh p3). `score_llm` is written by the Phase-8 triage pass; zero until then.
 
 ## Saved views
@@ -130,7 +130,7 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 
 | Verb | Cadence | Description |
 |---|---|---|
-| `pt distill [--batch 300]` | hourly (`*:15`) | NATIVE fail-closed distillation (v2.1.0): consumes new `raw_items` only, Gemini structured-output classify+consolidate, token-overlap dedup vs 30d. Exit 3 = missing GOOGLE_API_KEY (preflight). `--legacy --days 60` runs the retired Python shim. |
+| `pt distill [--batch 200]` | hourly (`*:15`) | NATIVE fail-closed distillation (v2.1.0): consumes new `raw_items` only, Gemini structured-output classify+consolidate, token-overlap dedup vs 30d. Exit 3 = missing GOOGLE_API_KEY (preflight). `--legacy --days 60` runs the retired Python shim. |
 | `pt accountability run [--dry-run]` | `*:0/15` | Escalation state machine + dispatch. |
 | `pt scoring run [--dry-run]` | `hourly` | Composite priority recompute. |
 | `pt backfill` | one-shot | Mint PT-N for any task lacking one. |

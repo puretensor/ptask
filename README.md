@@ -18,7 +18,7 @@ pt bot                                            # Telegram bot
 
 ## Architecture
 
-Single Cargo workspace, single binary `pt`. Domain logic in `ptask-core`. Surfaces in `ptask-cli`, `ptask-server`, `ptask-tui`, `ptask-bot`, `ptask-distill`. SQLite via `rusqlite` (bundled). Migrations via `refinery`. TUI via `ratatui`. HTTP via `axum`. Dates via `jiff` + `interim`. Filter DSL + recurrence via `winnow`.
+Single Cargo workspace, single binary `pt`. Domain logic in `ptask-core`. Surfaces in `ptask-cli`, `ptask-server`, `ptask-tui`, `ptask-bot`, `ptask-distill`. SQLite via `rusqlite` (bundled). Migrations via `refinery`. TUI via `ratatui`. HTTP via `axum`. Dates via `jiff` + `interim`. Filter DSL + recurrence: hand-written parsers (no parser-combinator dependency).
 
 ## Design References
 
