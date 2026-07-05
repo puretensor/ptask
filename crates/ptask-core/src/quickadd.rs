@@ -298,15 +298,20 @@ fn tokenize_quoted(head: &str) -> (Vec<&str>, Vec<bool>) {
 /// Parse a duration suffix `Nm`, `Nh`, or `Nd` to minutes. Returns None on
 /// unrecognised input.
 fn parse_duration(s: &str) -> Option<i64> {
-    if s.len() < 2 {
+    // Split off the last *char* (not byte): `s.len() - 1` can land inside a
+    // trailing multi-byte scalar (e.g. `~5°`), and `str::split_at` panics on a
+    // non-char boundary. The valid units are single ASCII chars, so anything
+    // multi-byte falls through to the `_ => None` arm.
+    let unit = s.chars().last()?;
+    let num_part = &s[..s.len() - unit.len_utf8()];
+    if num_part.is_empty() {
         return None;
     }
-    let (num_part, unit) = s.split_at(s.len() - 1);
     let n: i64 = num_part.parse().ok()?;
     match unit {
-        "m" => Some(n),
-        "h" => Some(n.checked_mul(60)?),
-        "d" => Some(n.checked_mul(60 * 24)?),
+        'm' => Some(n),
+        'h' => Some(n.checked_mul(60)?),
+        'd' => Some(n.checked_mul(60 * 24)?),
         _ => None,
     }
 }
@@ -531,6 +536,33 @@ mod tests {
         assert_eq!(q.title, "Review the p1 incident postmortem");
         assert_eq!(q.priority, Some(2), "quoted p1 must not set priority");
         assert!(q.deadline.is_none());
+    }
+
+    #[test]
+    fn parse_duration_rejects_trailing_multibyte_without_panic() {
+        // Regression: `split_at(s.len() - 1)` panicked when the final char was
+        // multi-byte — reachable from `pt add "task ~5°"` and the MCP task_add
+        // tool, both of which funnel through quickadd. Must return None.
+        assert_eq!(parse_duration("5°"), None);
+        assert_eq!(parse_duration("5€"), None);
+        assert_eq!(parse_duration("1²"), None);
+        // Valid ASCII units still parse.
+        assert_eq!(parse_duration("5m"), Some(5));
+        assert_eq!(parse_duration("2h"), Some(120));
+        assert_eq!(parse_duration("3d"), Some(3 * 60 * 24));
+        // Degenerate inputs resolve to None, never panic.
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("m"), None);
+        assert_eq!(parse_duration("°"), None);
+    }
+
+    #[test]
+    fn quickadd_parse_survives_multibyte_duration_token() {
+        // End-to-end: the token that used to panic is now just literal title
+        // text (unrecognised duration), not a crash.
+        let q = parse_at("ship the thing ~5°", anchor()).unwrap();
+        assert!(q.duration_min.is_none());
+        assert!(q.title.contains("ship the thing"));
     }
 
     #[test]
