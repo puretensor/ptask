@@ -23,7 +23,113 @@ use ptask_core::tokens::Scope;
 use serde::{Deserialize, Serialize};
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/capture", post(capture))
+    Router::new()
+        .route("/capture", post(capture))
+        .route("/capture/resolve", post(resolve))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolveReq {
+    /// The deterministic capture key the incident was captured under.
+    pub client_key: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResolveResp {
+    /// Tasks transitioned to done. 0 for an unknown key (idempotent no-op —
+    /// incidents captured before v2.5.0 carry keys ptask never saw).
+    pub closed: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pt_ids: Vec<String>,
+}
+
+/// POST /capture/resolve — close-on-recovery (v2.6.0). The capturing source
+/// reports the condition cleared; every OPEN task carrying that capture_key
+/// is marked done with provenance. Capture scope: this is the recovery half
+/// of the capture contract, and it can only touch tasks the capture path
+/// itself created (keyed, machine-sourced).
+async fn resolve(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ResolveReq>,
+) -> impl IntoResponse {
+    let identity = match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Capture)
+    {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let key = req.client_key.trim().to_string();
+    if key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "client_key must be non-empty"})),
+        )
+            .into_response();
+    }
+    let open: Vec<String> = state
+        .db
+        .with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id FROM tasks
+                 WHERE capture_key = ?1 AND status_v2 NOT IN ('done','dismissed')",
+            )?;
+            let rows = stmt.query_map([&key], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+        .unwrap_or_default();
+
+    let mut closed = 0usize;
+    let mut pt_ids = Vec::new();
+    for uuid in &open {
+        let task = match ptask_core::tasks::resolve_for_lookup(&state.db, uuid, false) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(target: "ptask::capture", error = %e, uuid = %uuid, "resolve lookup failed");
+                continue;
+            }
+        };
+        let ctx = EventCtx {
+            actor: identity.client_id.clone(),
+            source: "capture-resolve".into(),
+            event_uuid: Some(format!("capture-resolve:{}:{}", key, uuid)),
+        };
+        match ptask_core::tasks::mark_done(&state.db, &task, &ctx) {
+            Ok(_) => {
+                closed += 1;
+                if let Some(pt) = task.pt_id.clone() {
+                    pt_ids.push(pt);
+                }
+                let payload = serde_json::json!({
+                    "client_key": key,
+                    "note": req.note,
+                });
+                let ev_uuid = format!("capture-resolve-note:{}:{}", key, uuid);
+                if let Err(e) = ptask_core::event_log::record(
+                    &state.db,
+                    &ev_uuid,
+                    Some(uuid),
+                    "task.capture_resolved",
+                    &payload,
+                    &ctx,
+                ) {
+                    tracing::warn!(target: "ptask::capture", error = %e, "resolve event failed");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(target: "ptask::capture", error = %e, uuid = %uuid, "mark_done failed");
+            }
+        }
+    }
+    tracing::info!(
+        target: "ptask::capture",
+        client_key = %key,
+        closed,
+        actor = %identity.client_id,
+        "capture resolve processed"
+    );
+    (StatusCode::OK, Json(ResolveResp { closed, pt_ids })).into_response()
 }
 
 #[derive(Debug, Deserialize)]

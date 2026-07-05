@@ -21,6 +21,7 @@ pub mod priority;
 pub mod pt_id;
 pub mod quickadd;
 pub mod raw_items;
+pub mod reap;
 pub mod recurrence;
 pub mod scoring;
 pub mod status;

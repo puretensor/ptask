@@ -100,6 +100,9 @@ enum Command {
     /// Snooze a task until a date — it leaves `pt next` and reminders,
     /// then wakes to todo automatically.
     Snooze(SnoozeArgs),
+    /// Reap stale machine-generated tasks (incident >7d idle, distilled
+    /// >30d idle) — soft-dismiss, reversible via `pt reopen`.
+    Reap(ReapArgs),
     /// Manage dependency edges: PT-A depends on PT-B.
     Depend(DependArgs),
     /// Interactive review sweep: stale, snoozed-expired, and triage items.
@@ -173,6 +176,16 @@ struct SnoozeArgs {
     query: String,
     /// Wake date/time: ISO or natural ("tomorrow 9am", "next monday").
     until: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReapArgs {
+    /// List what would be dismissed without touching anything.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+    /// Emit the report as JSON (machine callers / timers).
+    #[arg(long = "json")]
+    json: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -697,6 +710,7 @@ fn main() -> Result<()> {
                 Some(Command::Scoring(c)) => cmd_scoring(&db, c),
                 Some(Command::Start(a)) => cmd_start(&db, a),
                 Some(Command::Snooze(a)) => cmd_snooze(&db, a),
+                Some(Command::Reap(a)) => cmd_reap(&db, a),
                 Some(Command::Depend(a)) => cmd_depend(&db, a),
                 Some(Command::Review(a)) => cmd_review(&db, a),
                 Some(Command::Search(a)) => cmd_search(&db, a),
@@ -2107,6 +2121,40 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             }
         }
     }
+}
+
+fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
+    let ctx = ptask_core::event_log::EventCtx::system("reap");
+    let report = ptask_core::reap::run(db, a.dry_run, &ctx)?;
+    if a.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    if report.reaped.is_empty() {
+        println!("reap ok — nothing stale");
+        return Ok(());
+    }
+    for r in &report.reaped {
+        println!(
+            "{} {} [{}] idle since {} — {}",
+            if report.dry_run { "would dismiss" } else { "dismissed" },
+            r.pt_id.as_deref().unwrap_or(&r.uuid),
+            r.source_type,
+            r.updated_at,
+            r.title
+        );
+    }
+    println!(
+        "reap ok — {} task(s){}{} (reverse with `pt reopen <PT-N>`)",
+        report.reaped.len(),
+        if report.dry_run { " (dry-run)" } else { "" },
+        if report.errors > 0 {
+            format!(", {} error(s)", report.errors)
+        } else {
+            String::new()
+        }
+    );
+    Ok(())
 }
 
 fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
