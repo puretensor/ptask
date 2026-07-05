@@ -240,9 +240,14 @@ pub fn list_with_filter(
 ) -> Result<Vec<Task>> {
     let conn = db.get()?;
     let mut sql = String::from(
+        // The filter DSL compiles `@label` / `#project` atoms to `x.labels` /
+        // `x.project` (see filter::to_sql), so the base query must join the
+        // pt_extensions compat view under alias `x`. LEFT JOIN keeps tasks with
+        // no extension row (e.g. pre-backfill legacy rows) visible for
+        // non-label/project filters.
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
-         FROM tasks t",
+         FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid = t.id",
     );
     let mut conds: Vec<String> = Vec::new();
     let mut bound: Vec<rusqlite::types::Value> = Vec::new();
@@ -1503,6 +1508,42 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn list_with_filter_matches_label_and_project() {
+        // Regression: the `@label` / `#project` filter atoms compile to
+        // `x.labels` / `x.project`, which require the base query to
+        // `LEFT JOIN pt_extensions x ON x.task_uuid = t.id` (documented at
+        // filter.rs `to_sql`). `list_with_filter` omitted that join, so every
+        // label/project filter errored at runtime with `no such column:
+        // x.labels` across the CLI, HTTP, MCP, bot, and TUI surfaces.
+        let (_dir, db) = fresh_db();
+        let ext = Extensions {
+            labels: vec!["ops".into()],
+            project: Some("fleet".into()),
+            ..Default::default()
+        };
+        create_with_extensions(
+            &db,
+            NewTask::minimal("wire up the fleet dashboard"),
+            ext,
+            &EventCtx::test(),
+        )
+        .unwrap();
+
+        let by_label = crate::filter::parse("@ops").unwrap();
+        let hit = list_with_filter(&db, Some(&by_label), Some("pending"), None, 50).unwrap();
+        assert_eq!(hit.len(), 1, "@ops label filter should match the task");
+
+        let by_project = crate::filter::parse("#fleet").unwrap();
+        let hit = list_with_filter(&db, Some(&by_project), Some("pending"), None, 50).unwrap();
+        assert_eq!(hit.len(), 1, "#fleet project filter should match the task");
+
+        // A non-matching label still resolves cleanly (empty, not an error).
+        let miss = crate::filter::parse("@nope").unwrap();
+        let hit = list_with_filter(&db, Some(&miss), Some("pending"), None, 50).unwrap();
+        assert!(hit.is_empty(), "unrelated label should match nothing");
     }
 
     #[test]
