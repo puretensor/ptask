@@ -465,6 +465,11 @@ body.review section{display:none}
 body.review #review-sec{display:block}
 #review-sec{display:none}
 #review-list .tcard{max-width:760px}
+/* scrim behind the drawer — makes role=dialog an honest modal: dims + blocks
+   the board, click-out closes, and a Tab trap keeps focus inside (JS) */
+.drawer-scrim{position:fixed;inset:0;z-index:94;background:rgba(0,0,0,.45);
+  opacity:0;pointer-events:none;transition:opacity .25s}
+.drawer-scrim.show{opacity:1;pointer-events:auto}
 .drawer{position:fixed;top:0;right:0;bottom:0;width:min(480px,92vw);z-index:95;background:var(--bg2);
   border-left:var(--card-border);box-shadow:var(--shadow);padding:20px;overflow-y:auto;
   transform:translateX(102%);transition:transform .25s}
@@ -557,7 +562,8 @@ body.review #review-sec{display:block}
   </div>
 </main>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<aside class="drawer" id="drawer" role="dialog" aria-label="Task detail" tabindex="-1">
+<div class="drawer-scrim" id="drawer-scrim"></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="Task detail" tabindex="-1">
   <button class="dclose" id="d-close" title="close" aria-label="Close task detail">✕</button>
   <h3 id="d-title"></h3>
   <div class="dmeta" id="d-meta"></div>
@@ -1110,6 +1116,7 @@ async function openDrawer(uuid){
   $('#d-desc').textContent=(t&&(t.description||t.ai_reasoning))||'(no description)';
   $('#d-hist').innerHTML='<span class="age">loading…</span>';
   dr.classList.add('open');
+  $('#drawer-scrim').classList.add('show');
   $('#d-close').focus({preventScroll:true});
   try{
     const j=await api('/api/tasks/'+encodeURIComponent(uuid)+'/events');
@@ -1118,8 +1125,20 @@ async function openDrawer(uuid){
     ).join('')||'<span class="age">no history</span>';
   }catch(e){$('#d-hist').innerHTML='<span class="age">history unavailable: '+esc(e.message)+'</span>';}
 }
-function closeDrawer(){ $('#drawer').classList.remove('open'); restoreInvoker(); }
+function drawerOpen(){ return $('#drawer').classList.contains('open'); }
+function closeDrawer(){ $('#drawer').classList.remove('open'); $('#drawer-scrim').classList.remove('show'); restoreInvoker(); }
 $('#d-close').onclick=closeDrawer;
+$('#drawer-scrim').onclick=closeDrawer;   // click the dimmed board to dismiss
+/* focus trap — the drawer is now aria-modal; Tab must not reach the board */
+$('#drawer').addEventListener('keydown',e=>{
+  if(e.key!=='Tab') return;
+  const f=[...$('#drawer').querySelectorAll('button,a[href],input,textarea,select,[tabindex]:not([tabindex="-1"])')]
+    .filter(el=>!el.disabled&&el.offsetParent!==null);
+  if(!f.length) return;
+  const i=f.indexOf(document.activeElement);
+  if(e.shiftKey){ if(i<=0){e.preventDefault();f[f.length-1].focus();} }
+  else if(i===f.length-1||i<0){e.preventDefault();f[0].focus();}
+});
 
 /* ---- edit modal (reuses the composer) ---- */
 let _editId=null;
