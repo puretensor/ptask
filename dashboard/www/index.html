@@ -338,7 +338,9 @@ section{margin-top:22px}
 .pmi{display:flex;align-items:center;gap:9px;width:100%;padding:7px 10px;border:none;border-radius:7px;
   background:transparent;color:var(--text);font-family:var(--font);font-size:12px;font-weight:600;
   cursor:pointer;text-align:left;transition:background .12s}
-.pmi:hover,.pmi:focus-visible{background:var(--panel2);outline:none}
+.pmi:hover{background:var(--panel2)}
+.pmi:focus-visible{background:var(--panel2);outline:2px solid var(--accent);outline-offset:-2px}
+.ccard h3:focus-visible,.tcard .tt:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
 .pmi .pdot{width:10px;height:10px;border-radius:50%;flex:none}
 .pmi .pnm{flex:1;white-space:nowrap}
 .pmi .pk{color:var(--accent);font-weight:800}
@@ -497,10 +499,10 @@ body.review #review-sec{display:block}
     <span id="ver"></span>
   </div>
 </main>
-<div class="toast" id="toast"></div>
-<div class="kbdbar"><b>j/k</b> move · <b>x</b> done · <b>d</b> dismiss · <b>s</b> snooze · <b>e</b> edit · <b>o</b> detail · <b>1-5</b> priority · <b>r</b> review</div>
-<aside class="drawer" id="drawer" aria-label="Task detail">
-  <button class="dclose" id="d-close" title="close">✕</button>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="kbdbar" aria-hidden="true"><b>j/k</b> move · <b>x</b> done · <b>d</b> dismiss · <b>s</b> snooze · <b>e</b> edit · <b>o</b> detail · <b>1-5</b> priority · <b>r</b> review</div>
+<aside class="drawer" id="drawer" role="dialog" aria-label="Task detail" tabindex="-1">
+  <button class="dclose" id="d-close" title="close" aria-label="Close task detail">✕</button>
   <h3 id="d-title"></h3>
   <div class="dmeta" id="d-meta"></div>
   <div class="ddesc" id="d-desc"></div>
@@ -612,16 +614,42 @@ async function setPriority(id,level,ev){
 }
 
 /* ---- severity picker + done-confirm (body-level overlays; survive the 15s refresh) ---- */
+/* focus bookkeeping: overlays return focus to the control that opened them
+   (or its re-rendered twin — cards rebuild every refresh, so refind by selector) */
+let _invoker=null,_invokerSel=null;
+function rememberInvoker(sel){_invoker=document.activeElement;_invokerSel=sel||null;}
+function restoreInvoker(){
+  const el=(_invoker&&_invoker.isConnected&&_invoker!==document.body)?_invoker
+    :(_invokerSel?document.querySelector(_invokerSel):null);
+  _invoker=null;_invokerSel=null;
+  if(el) el.focus({preventScroll:true});
+}
+/* keep Tab inside whichever overlay is open (WCAG 2.4.3 focus trap) */
+function trapTab(e){
+  const box=!$('#pmenu').hidden?$('#pmenu')
+    :!$('#confirm').hidden?$('#confirm .modal-card')
+    :!$('#compose').hidden?$('#compose .modal-card'):null;
+  if(!box) return;
+  const f=[...box.querySelectorAll('button,input,textarea,select,a[href],[tabindex]:not([tabindex="-1"])')]
+    .filter(el=>!el.disabled&&el.offsetParent!==null);
+  if(!f.length) return;
+  const i=f.indexOf(document.activeElement);
+  if(e.shiftKey){ if(i<=0){e.preventDefault();f[f.length-1].focus();} }
+  else if(i===f.length-1||i<0){e.preventDefault();f[0].focus();}
+}
 function closePopups(){
+  const wasOpen=_popupOpen;
   _popupOpen=false; _pmId=null; _pmCur=null;
   if(typeof _vstate!=='undefined'&&_vstate==='rec') stopRec(false);   // discard + release mic on close
   const pm=$('#pmenu'); pm.hidden=true; pm.innerHTML='';
   $('#confirm').hidden=true;
   $('#compose').hidden=true;
   _editId=null; const ch=$('#compose-h'); if(ch) ch.textContent='New task';
+  if(wasOpen) restoreInvoker();
 }
 function openPriorityMenu(ev,id,cur){
   ev.preventDefault(); ev.stopPropagation();
+  rememberInvoker(`[data-id="${id}"] .pchip`);
   _popupOpen=true; _pmId=id; _pmCur=cur;
   const pm=$('#pmenu');
   pm.innerHTML=[5,4,3,2,1].map(n=>
@@ -645,6 +673,7 @@ function pickPriority(level){
   if(level!==cur) setPriority(id,level);
 }
 function confirmDone(id){
+  rememberInvoker(`[data-id="${id}"] .btn-done`);
   _popupOpen=true;
   $('#confirm-body').textContent='“'+(_taskTitle[id]||id)+'”';
   $('#confirm').hidden=false;
@@ -656,6 +685,7 @@ function confirmDone(id){
 document.addEventListener('keydown',e=>{
   if(!_popupOpen) return;
   if(e.key==='Escape'){ closePopups(); return; }
+  if(e.key==='Tab'){ trapTab(e); return; }
   const pm=$('#pmenu'); if(pm.hidden) return;
   const items=[...pm.querySelectorAll('.pmi')]; if(!items.length) return;
   const i=items.indexOf(document.activeElement);
@@ -674,15 +704,29 @@ function buildSev(sel){
   _sev=sel;
   $('#c-sev').innerHTML=[5,4,3,2,1].map(n=>
     `<button type="button" class="sv p${n}${n===sel?' on':''}" role="radio" data-lvl="${n}"`+
-    ` aria-checked="${n===sel?'true':'false'}" style="--sc:${PCOL[n]}" onclick="pickSev(${n})">`+
+    ` aria-checked="${n===sel?'true':'false'}" tabindex="${n===sel?0:-1}"`+
+    ` style="--sc:${PCOL[n]}" onclick="pickSev(${n})">`+
     `<span class="sd"></span>P${n} ${PNAME[n]}</button>`).join('');
 }
 function pickSev(n){
   _sev=n;
   $$('#c-sev .sv').forEach(b=>{const on=b.dataset.lvl===String(n);
-    b.classList.toggle('on',on); b.setAttribute('aria-checked',on?'true':'false');});
+    b.classList.toggle('on',on); b.setAttribute('aria-checked',on?'true':'false');
+    b.tabIndex=on?0:-1;});
 }
+/* radiogroup keyboard pattern: arrows move + select, one roving tab stop */
+$('#c-sev').addEventListener('keydown',e=>{
+  const order=[5,4,3,2,1], i=order.indexOf(_sev);
+  let n=null;
+  if(e.key==='ArrowRight'||e.key==='ArrowDown') n=order[(i+1)%5];
+  else if(e.key==='ArrowLeft'||e.key==='ArrowUp') n=order[(i+4)%5];
+  else if(e.key==='Home') n=5; else if(e.key==='End') n=1;
+  if(n==null) return;
+  e.preventDefault(); pickSev(n);
+  const b=$(`#c-sev [data-lvl="${n}"]`); if(b) b.focus();
+});
 function openCompose(seed){
+  rememberInvoker('#qabtn');
   _popupOpen=true;
   const s=(seed||'').slice(0,400);
   $('#c-title').value=s; $('#c-desc').value=''; $('#c-deadline').value='';
@@ -800,13 +844,13 @@ function renderCritical(tasks){
     const isNew=!first&&!seenCrit.has(t.id);
     return `<div class="ccard ${isNew?'new':''} fade" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
       <div class="scorebar"></div>
-      <h3 style="cursor:pointer" onclick="openDrawer('${t.id}')">${esc(t.title)}</h3>
+      <h3 style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}">${esc(t.title)}</h3>
       <div class="meta">
         ${ptrigger(t)}
         <span class="score">${(t.priority_score).toFixed(3)}</span>${scoreMini(t.priority_score)}
         ${dueChip(t)}
         <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
-        <button class="btn-done" title="mark done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button>
+        <button class="btn-done" title="mark done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button>
       </div></div>`;
   }).join('');
   seenCrit=new Set(tasks.map(t=>t.id));
@@ -825,12 +869,12 @@ function renderLanes(tasks){
       <div class="lane-h"><span class="lbl">P${p} ${PNAME[p]}</span><span class="n">${n}</span></div>
       <div class="lane-body" data-p="${p}" role="group" aria-label="P${p} ${PNAME[p]} — ${n} task${n===1?'':'s'}">
       ${list.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
-        <div class="tt" style="cursor:pointer" onclick="openDrawer('${t.id}')">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
+        <div class="tt" style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
         ${ptrigger(t)}
-        <button class="btn-act snz" title="snooze 3d (shift: 7d)" onclick="act('${t.pt_id||t.id}','snooze',{days:event.shiftKey?7:3})">💤</button>
-        <button class="btn-act dis" title="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')">🗑</button>
-        <button class="btn-done" title="done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button></div>
+        <button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" onclick="act('${t.pt_id||t.id}','snooze',{days:event.shiftKey?7:3})">💤</button>
+        <button class="btn-act dis" title="dismiss" aria-label="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')">🗑</button>
+        <button class="btn-done" title="done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button></div>
       </div>`).join('')}
       </div>
     </div>`;
@@ -910,7 +954,7 @@ document.addEventListener('keydown',e=>{
   else if(k==='o'&&selUuid()){e.preventDefault();openDrawer(selUuid());}
   else if('12345'.includes(k)&&selId()){e.preventDefault();setPriority(selId(),parseInt(k,10));}
   else if(k==='r'||(k==='q'&&_review)){e.preventDefault();toggleReview();}
-  else if(k==='Escape'){const dr=$('#drawer');if(dr.classList.contains('open')){dr.classList.remove('open');}else{_sel=-1;cards().forEach(c=>c.classList.remove('sel'));}}
+  else if(k==='Escape'){const dr=$('#drawer');if(dr.classList.contains('open')){closeDrawer();}else{_sel=-1;cards().forEach(c=>c.classList.remove('sel'));}}
 });
 
 /* ---- review mode: the 12 stalest actionable tasks, keyboard-first ---- */
@@ -924,12 +968,12 @@ function renderReview(){
   $('#rv-banner').textContent='REVIEW MODE — '+stale.length+' stalest · j/k move · x done · d dismiss · s snooze · e edit · r exit';
   $('#rv-ct').textContent=stale.length+' tasks, oldest first';
   $('#review-list').innerHTML=stale.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}" style="margin-bottom:10px">
-    <div class="tt" style="cursor:pointer" onclick="openDrawer('${t.id}')"><b>${t.pt_id||''}</b> ${esc(t.title)}</div>
+    <div class="tt" style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}"><b>${t.pt_id||''}</b> ${esc(t.title)}</div>
     <div class="tm">${ptrigger(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
       <span class="score">${(t.priority_score||0).toFixed(2)}</span>
-      <button class="btn-act snz" title="snooze 3d" onclick="act('${t.pt_id||t.id}','snooze',{days:3})">💤</button>
-      <button class="btn-act dis" title="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')">🗑</button>
-      <button class="btn-done" title="done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button></div>
+      <button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" onclick="act('${t.pt_id||t.id}','snooze',{days:3})">💤</button>
+      <button class="btn-act dis" title="dismiss" aria-label="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')">🗑</button>
+      <button class="btn-done" title="done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button></div>
   </div>`).join('');
   select(0);
 }
@@ -938,11 +982,13 @@ function renderReview(){
 async function openDrawer(uuid){
   const t=_tasks.find(x=>x.id===uuid);
   const dr=$('#drawer');
+  if(!dr.classList.contains('open')) rememberInvoker(`[data-uuid="${uuid}"] [role="button"]`);
   $('#d-title').textContent=(t&&t.title)||uuid;
   $('#d-meta').innerHTML=t?`${ptrigger(t)}<span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>${dueChip(t)}<span class="score">${(t.priority_score||0).toFixed(3)}</span><span class="age">${esc(t.source_type||'')}</span>`:'';
   $('#d-desc').textContent=(t&&(t.description||t.ai_reasoning))||'(no description)';
   $('#d-hist').innerHTML='<span class="age">loading…</span>';
   dr.classList.add('open');
+  $('#d-close').focus({preventScroll:true});
   try{
     const j=await api('/api/tasks/'+encodeURIComponent(uuid)+'/events');
     $('#d-hist').innerHTML=(j.events||[]).slice(0,60).map(e=>
@@ -950,12 +996,14 @@ async function openDrawer(uuid){
     ).join('')||'<span class="age">no history</span>';
   }catch(e){$('#d-hist').innerHTML='<span class="age">history unavailable: '+esc(e.message)+'</span>';}
 }
-$('#d-close').onclick=()=>$('#drawer').classList.remove('open');
+function closeDrawer(){ $('#drawer').classList.remove('open'); restoreInvoker(); }
+$('#d-close').onclick=closeDrawer;
 
 /* ---- edit modal (reuses the composer) ---- */
 let _editId=null;
 function openEdit(id){
   const t=_tasks.find(x=>(x.pt_id||x.id)===id||x.id===id); if(!t) return;
+  rememberInvoker(`[data-id="${id}"] .pchip`);
   _editId=id; _popupOpen=true;
   $('#compose-h').textContent='Edit '+(t.pt_id||'task');
   $('#c-title').value=t.title; $('#c-desc').value=t.description||'';
