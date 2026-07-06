@@ -116,11 +116,12 @@ header{
 }
 [data-theme="lcars"] header{border-bottom:4px solid #ff9f43}
 .hdr{display:flex;align-items:center;gap:16px;padding:12px 18px;max-width:1500px;margin:0 auto;flex-wrap:wrap}
+@media(max-width:640px){.clock{display:none}.hdr{gap:10px;padding:10px 14px}}
 .brand{display:flex;align-items:center;gap:12px}
 .cube{width:34px;height:34px;flex:none;filter:drop-shadow(0 0 8px rgba(0,212,170,.5))}
 .brandtxt{display:flex;flex-direction:column;line-height:1.05}
 .brandtxt b{font-family:var(--font-head);font-size:18px;letter-spacing:.14em;color:#fff;font-weight:800}
-.brandtxt small{font-size:9px;letter-spacing:.34em;color:var(--teal);text-transform:uppercase}
+.brandtxt small{font-size:10px;letter-spacing:.3em;color:var(--teal);text-transform:uppercase}
 .accentline{height:3px;background:var(--grad);width:100%}
 
 .clock{margin-left:6px;font-size:12px;color:var(--hdr-muted);font-variant-numeric:tabular-nums}
@@ -173,10 +174,10 @@ section{margin-top:22px}
 .scoremini i{display:block;height:100%;background:var(--grad)}
 
 /* priority badge — dark ink on every fill (white failed 4.5:1 on p1/p2/p5) */
-.pbadge{font-family:var(--font);font-weight:800;font-size:10px;padding:2px 7px;border-radius:5px;color:var(--ink)}
+.pbadge{font-family:var(--font);font-weight:800;font-size:10px;padding:2px 7px;border-radius:6px;color:var(--ink)}
 .p5{background:var(--p5)} .p4{background:var(--p4)} .p3{background:var(--p3)} .p2{background:var(--p2)} .p1{background:var(--p1)}
 
-.due{padding:2px 7px;border-radius:5px;background:var(--panel2);font-size:10px;font-weight:600}
+.due{padding:2px 7px;border-radius:6px;background:var(--panel2);font-size:10px;font-weight:600}
 .due.over{background:rgba(255,59,92,.18);color:var(--p5t)}
 .due.soon{background:rgba(255,159,67,.18);color:var(--p4t)}
 .age{color:var(--dim);font-size:10px}
@@ -191,7 +192,7 @@ section{margin-top:22px}
 /* priority chip — click to open the direct severity picker */
 .pchip{
   font-family:var(--font);font-weight:800;font-size:10px;line-height:1.4;
-  padding:5px 7px 5px 8px;border-radius:5px;color:var(--ink);border:none;cursor:pointer;
+  padding:5px 7px 5px 8px;border-radius:6px;color:var(--ink);border:none;cursor:pointer;
   display:inline-flex;align-items:center;gap:3px;transition:filter .15s;min-height:24px;
 }
 [data-theme="lcars"] .pchip{border-radius:0 8px 8px 0}
@@ -234,6 +235,12 @@ section{margin-top:22px}
   transition:transform .15s,box-shadow .15s;position:relative;
 }
 .tcard:hover{transform:translateX(3px);box-shadow:var(--glow)}
+/* three action buttons on every one of ~100 cards fought the titles for
+   weight — rest dim, wake on card hover/focus (always solid on touch) */
+.tcard .btn-act,.tcard .btn-done{opacity:.55}
+.tcard:hover .btn-act,.tcard:hover .btn-done,
+.tcard:focus-within .btn-act,.tcard:focus-within .btn-done{opacity:1}
+@media(pointer:coarse){.tcard .btn-act,.tcard .btn-done{opacity:1}}
 .tcard .tt{line-height:1.3;margin-bottom:6px}
 .tcard .tm{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 
@@ -253,7 +260,7 @@ section{margin-top:22px}
 .heat{background:var(--card-bg);border:var(--card-border);border-radius:var(--radius);padding:16px;backdrop-filter:var(--backdrop);box-shadow:var(--shadow)}
 .heat table{border-collapse:separate;border-spacing:5px;width:100%}
 .heat th{font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:4px}
-.heat td{text-align:center;border-radius:7px;font-size:13px;font-weight:700;padding:12px 4px;color:#fff;font-variant-numeric:tabular-nums;transition:transform .15s}
+.heat td{text-align:center;border-radius:6px;font-size:13px;font-weight:700;padding:12px 4px;color:#fff;font-variant-numeric:tabular-nums;transition:transform .15s}
 .heat td:hover{transform:scale(1.08)}
 .heat .rowlbl{font-family:var(--font);font-weight:800;font-size:12px;color:var(--text);background:transparent}
 
@@ -364,7 +371,7 @@ section{margin-top:22px}
 [hidden]{display:none!important}
 .popover{position:fixed;z-index:96;min-width:154px;padding:5px;
   background:var(--bg2);border:var(--card-border);border-radius:10px;box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.5))}
-.pmi{display:flex;align-items:center;gap:9px;width:100%;padding:7px 10px;border:none;border-radius:7px;
+.pmi{display:flex;align-items:center;gap:9px;width:100%;padding:7px 10px;border:none;border-radius:6px;
   background:transparent;color:var(--text);font-family:var(--font);font-size:12px;font-weight:600;
   cursor:pointer;text-align:left;transition:background .12s}
 .pmi:hover{background:var(--panel2)}
@@ -407,7 +414,7 @@ section{margin-top:22px}
 /* severity selector — five mutually-exclusive pills (radiogroup) */
 .sev{display:flex;gap:6px;flex-wrap:wrap}
 .sev button{flex:1 1 0;min-width:88px;display:flex;align-items:center;justify-content:center;gap:7px;
-  cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:9px;
+  cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:10px;
   padding:9px 6px;font-family:var(--font);font-size:11px;font-weight:700;color:var(--muted);
   text-transform:uppercase;letter-spacing:.03em;transition:all .15s;white-space:nowrap}
 .sev button .sd{width:11px;height:11px;border-radius:50%;flex:none;background:var(--sc)}
@@ -571,7 +578,7 @@ body.review #review-sec{display:block}
       <div class="fld">
         <label for="c-title">Title</label>
         <input type="text" id="c-title" maxlength="400" placeholder="What needs doing?" required>
-        <span class="hint">tip: <b>@label</b> <b>#project</b> <b>~2h</b> still parse inline from the title</span>
+        <span class="hint"><b>@label</b> <b>#project</b> <b>~2h</b> parse inline</span>
       </div>
       <div class="fld">
         <label for="c-desc">Description <span class="opt">— optional</span></label>
@@ -774,7 +781,7 @@ function openCompose(seed){
   $('#c-title').value=s; $('#c-desc').value=''; $('#c-deadline').value='';
   buildSev(2);
   // voice control: ready when the browser allows mic (secure context), else guide to HTTPS
-  if(voiceSupported()){ setVoiceState('idle'); voiceMsg('or speak it — title, description, severity & deadline auto-fill'); }
+  if(voiceSupported()){ setVoiceState('idle'); voiceMsg('dictate to fill every field'); }
   else { setVoiceState('off'); voiceMsg('open https://ptask.puretensor.ai to dictate — the mic needs a secure (HTTPS) connection','warn'); }
   $('#compose').hidden=false;
   // seeded enough for a title → land in description; else focus the title
@@ -893,7 +900,7 @@ function renderCritical(tasks){
       <h3 style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}">${esc(t.title)}</h3>
       <div class="meta">
         ${ptrigger(t)}
-        <span class="score">${(t.priority_score).toFixed(3)}</span>${scoreMini(t.priority_score)}
+        <span class="score">${(t.priority_score).toFixed(2)}</span>${scoreMini(t.priority_score)}
         ${dueChip(t)}
         <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
         <button class="btn-done" title="mark done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button>
@@ -1055,7 +1062,7 @@ async function openDrawer(uuid){
   const dr=$('#drawer');
   if(!dr.classList.contains('open')) rememberInvoker(`[data-uuid="${uuid}"] [role="button"]`);
   $('#d-title').textContent=(t&&t.title)||uuid;
-  $('#d-meta').innerHTML=t?`${ptrigger(t)}<span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>${dueChip(t)}<span class="score">${(t.priority_score||0).toFixed(3)}</span><span class="age">${esc(t.source_type||'')}</span>`:'';
+  $('#d-meta').innerHTML=t?`${ptrigger(t)}<span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>${dueChip(t)}<span class="score">${(t.priority_score||0).toFixed(2)}</span><span class="age">${esc(t.source_type||'')}</span>`:'';
   $('#d-desc').textContent=(t&&(t.description||t.ai_reasoning))||'(no description)';
   $('#d-hist').innerHTML='<span class="age">loading…</span>';
   dr.classList.add('open');
