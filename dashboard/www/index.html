@@ -127,6 +127,11 @@ header{
 .clock{margin-left:6px;font-size:12px;color:var(--hdr-muted);font-variant-numeric:tabular-nums}
 .spacer{flex:1}
 .chips{display:flex;gap:8px;flex-wrap:wrap}
+/* compact single-line count summary — phone only (see @640 below) */
+.chips-c{display:none;font-size:12px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.chips-c b{color:var(--text);font-weight:800}
+.chips-c b.c5{color:var(--p5t)} .chips-c b.c4{color:var(--p4t)} .chips-c b.cov{color:var(--p5t)}
+@media(max-width:640px){.chips{display:none}.chips-c{display:block}}
 .chip{
   display:flex;align-items:center;gap:6px;padding:5px 9px;border-radius:var(--chip-radius);
   background:var(--panel);border:var(--card-border);font-size:12px;font-weight:600;
@@ -501,6 +506,7 @@ body.review #review-sec{display:block}
     <span class="clock" id="clock">--:--:-- UTC</span>
     <div class="spacer"></div>
     <div class="chips" id="chips"></div>
+    <div class="chips-c" id="chips-c" aria-label="task counts"></div>
     <div class="quickadd">
       <input id="qa" placeholder="new task…" maxlength="400" aria-label="New task title — opens the composer">
       <button id="qabtn">+ Add</button>
@@ -917,6 +923,12 @@ function renderChips(s){
     <span class="chip over"><b>${s.overdue}</b> overdue</span>
     <span class="chip"><b>${s.due_within_7d}</b> due ≤7d</span>
     <span class="chip"><b>${s.pending_total}</b> open</span>`;
+  /* phone: one compact line instead of five wrapping chips (saved ~2 header
+     rows). Only one of #chips / #chips-c is display:'d, so no double SR read. */
+  $('#chips-c').innerHTML=
+    `<b class="c5">${c5}</b> crit · <b class="c4">${c4}</b> urg`+
+    (s.overdue>0?` · <b class="cov">${s.overdue}</b> over`:'')+
+    ` · <b>${s.pending_total}</b> open`;
   $('#ver').textContent='pt · v'+s.version;
 }
 function renderCritical(tasks){
