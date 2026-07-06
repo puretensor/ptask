@@ -638,7 +638,7 @@ function dueChip(t){
 /* priority chip — click opens the direct severity picker (jump to any P5…P1). */
 function ptrigger(t){
   const p=t.priority, id=(t.pt_id||t.id);
-  return `<button class="pchip p${p}" aria-haspopup="menu" title="priority P${p} ${PNAME[p]} — click to change" onclick="openPriorityMenu(event,'${id}',${p})">P${p}<span class="car">▾</span></button>`;
+  return `<button class="pchip p${p}" aria-haspopup="menu" data-act="prio" data-id="${id}" data-p="${p}" title="priority P${p} ${PNAME[p]} — click to change">P${p}<span class="car">▾</span></button>`;
 }
 function scoreMini(s){const w=Math.min(100,Math.round(s*100));return `<span class="scoremini"><i style="width:${w}%"></i></span>`;}
 async function api(p){const r=await fetch(p,{headers:{'Accept':'application/json'}});if(!r.ok)throw new Error(p+' '+r.status);return r.json();}
@@ -664,6 +664,35 @@ async function setPriority(id,level,ev){
     const j=await r.json(); toast(j.ok?('⇅ '+id+' → P'+level+' '+PNAME[level]):('✗ '+(j.message||'failed'))); if(j.ok) load();
   }catch(e){toast('✗ '+e.message);}
 }
+/* ---- event delegation: one click + one keydown handler for all card/menu
+   controls. No inline on* attributes anywhere (CSP-clean, and the DOM stops
+   carrying ~560 handler strings). Ids/uuids ride on data-* attributes; the
+   action element or its nearest [data-id]/[data-uuid] card supplies them. ---- */
+function _actIds(el){
+  const c=el.closest('[data-id]'), u=el.closest('[data-uuid]');
+  return {id:el.dataset.id||(c&&c.dataset.id), uuid:el.dataset.uuid||(u&&u.dataset.uuid)};
+}
+document.addEventListener('click',e=>{
+  const el=e.target.closest('[data-act]'); if(!el) return;
+  const kind=el.dataset.act, {id,uuid}=_actIds(el);
+  if(kind==='drawer'){ if(uuid) openDrawer(uuid); }
+  else if(kind==='done'){ if(id) confirmDone(id); }
+  else if(kind==='snooze'){ if(id) act(id,'snooze',{days:e.shiftKey?7:3}); }
+  else if(kind==='dismiss'){ if(id) act(id,'dismiss'); }
+  else if(kind==='prio'){ openPriorityMenu(e,el,el.dataset.id,+el.dataset.p); }
+  else if(kind==='pick-prio'){ pickPriority(+el.dataset.n); }
+  else if(kind==='pick-sev'){ pickSev(+el.dataset.n); }
+});
+/* Enter/Space activation for the role=button elements that aren't <button>
+   (card titles, timeline points) — real buttons already emit click on them */
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ') return;
+  const el=e.target.closest('[data-act]');
+  if(!el||el.tagName==='BUTTON') return;
+  e.preventDefault();
+  const {uuid}=_actIds(el);
+  if(el.dataset.act==='drawer'&&uuid) openDrawer(uuid);
+});
 
 /* ---- severity picker + done-confirm (body-level overlays; survive the 15s refresh) ---- */
 /* focus bookkeeping: overlays return focus to the control that opened them
@@ -699,18 +728,18 @@ function closePopups(){
   _editId=null; const ch=$('#compose-h'); if(ch) ch.textContent='New task';
   if(wasOpen) restoreInvoker();
 }
-function openPriorityMenu(ev,id,cur){
-  ev.preventDefault(); ev.stopPropagation();
-  rememberInvoker(`[data-id="${id}"] .pchip`);
+function openPriorityMenu(ev,el,id,cur){
+  ev.preventDefault();
+  rememberInvoker(`[data-act="prio"][data-id="${id}"]`);
   _popupOpen=true; _pmId=id; _pmCur=cur;
   const pm=$('#pmenu');
   pm.innerHTML=[5,4,3,2,1].map(n=>
-    `<button class="pmi${n===cur?' cur':''}" role="menuitem"${n===cur?' aria-current="true"':''} onclick="pickPriority(${n})">`+
+    `<button class="pmi${n===cur?' cur':''}" role="menuitem"${n===cur?' aria-current="true"':''} data-act="pick-prio" data-n="${n}">`+
     `<span class="pdot" style="background:${PCOL[n]}"></span>`+
     `<span class="pnm">P${n} ${PNAME[n]}</span>`+
     `<span class="pk">${n===cur?'✓':''}</span></button>`).join('');
   pm.hidden=false;
-  const r=ev.currentTarget.getBoundingClientRect(), m=6;
+  const r=el.getBoundingClientRect(), m=6;
   let left=r.left, top=r.bottom+4;
   if(left+pm.offsetWidth>innerWidth-m) left=innerWidth-pm.offsetWidth-m;
   if(left<m) left=m;
@@ -757,7 +786,7 @@ function buildSev(sel){
   $('#c-sev').innerHTML=[5,4,3,2,1].map(n=>
     `<button type="button" class="sv p${n}${n===sel?' on':''}" role="radio" data-lvl="${n}"`+
     ` aria-checked="${n===sel?'true':'false'}" tabindex="${n===sel?0:-1}"`+
-    ` style="--sc:${PCOL[n]}" onclick="pickSev(${n})">`+
+    ` style="--sc:${PCOL[n]}" data-act="pick-sev" data-n="${n}">`+
     `<span class="sd"></span>P${n} ${PNAME[n]}</button>`).join('');
 }
 function pickSev(n){
@@ -900,13 +929,13 @@ function renderCritical(tasks){
     const isNew=!first&&!seenCrit.has(t.id);
     return `<div class="ccard${isNew?' new':''}${first?' fade':''}" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
       <div class="scorebar"></div>
-      <h3 style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}">${esc(t.title)}</h3>
+      <h3 style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title)}</h3>
       <div class="meta">
         ${ptrigger(t)}
         <span class="score">${(t.priority_score).toFixed(2)}</span>${scoreMini(t.priority_score)}
         ${dueChip(t)}
         <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
-        <button class="btn-done" title="mark done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button>
+        <button class="btn-done" title="mark done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button>
       </div></div>`;
   }).join('');
   seenCrit=new Set(tasks.map(t=>t.id));
@@ -925,12 +954,12 @@ function renderLanes(tasks){
       <div class="lane-h"><span class="lbl">P${p} ${PNAME[p]}</span><span class="n">${n}</span></div>
       <div class="lane-body" data-p="${p}" role="group" aria-label="P${p} ${PNAME[p]} — ${n} task${n===1?'':'s'}">
       ${n===0?'<div class="ph">none</div>':''}${list.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
-        <div class="tt" style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
+        <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
         ${ptrigger(t)}
-        <button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" onclick="act('${t.pt_id||t.id}','snooze',{days:event.shiftKey?7:3})"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
-        <button class="btn-act dis" title="dismiss" aria-label="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
-        <button class="btn-done" title="done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
+        <button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
+        <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
+        <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
       </div>`).join('')}
       </div>
     </div>`;
@@ -962,8 +991,8 @@ function renderTimeline(items){
   let html=`<div class="tl-now" style="left:${xpct(0)}%"></div>`;
   items.forEach(i=>{
     const x=xpct(i.days_until), col=PCOL[i.priority];
-    html+=`<span class="tl-pt" role="img" tabindex="0" style="left:${x}%;background:${col}"`+
-      ` title="${esc(i.title)} · ${i.deadline_date}" aria-label="${esc(i.title)}, due ${i.deadline_date}"></span>`;
+    html+=`<span class="tl-pt" role="button" tabindex="0" data-act="drawer" data-uuid="${i.id}" style="left:${x}%;background:${col}"`+
+      ` title="${esc(i.title)} · ${i.deadline_date}" aria-label="${esc(i.title)}, due ${i.deadline_date} — open detail"></span>`;
   });
   /* one label per cluster of nearby points — per-point labels collided and
      merged into unreadable strings whenever dates landed close together */
@@ -1049,12 +1078,12 @@ function renderReview(){
   $('#rv-ct').textContent=stale.length+' tasks, oldest first';
   if(!stale.length){$('#review-list').innerHTML='<div class="ph">nothing pending to review</div>';return;}
   $('#review-list').innerHTML=stale.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}" style="margin-bottom:10px">
-    <div class="tt" style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}"><b>${t.pt_id||''}</b> ${esc(t.title)}</div>
+    <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer"><b>${t.pt_id||''}</b> ${esc(t.title)}</div>
     <div class="tm">${ptrigger(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
       <span class="score">${(t.priority_score||0).toFixed(2)}</span>
-      <button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" onclick="act('${t.pt_id||t.id}','snooze',{days:3})"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
-      <button class="btn-act dis" title="dismiss" aria-label="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
-      <button class="btn-done" title="done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
+      <button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
+      <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
+      <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
   </div>`).join('');
   select(0);
 }
