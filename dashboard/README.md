@@ -22,8 +22,32 @@ self-contained `index.html`, vanilla JS + CSS custom properties).
 |-------|------|
 | **Mission Control** | Dark telemetry ops board, teal→blue glow, dense (default) |
 | **Crystal / Glass** | Glassmorphism, frosted panels, gradient, crystal-cube motif |
-| **LCARS** | Star-Trek ops console, blocky amber/orange/lavender |
+| **LCARS** | Star-Trek ops console, blocky amber/orange/lavender (rail collapses <700px) |
 | **Executive** | Light, minimal, whitespace |
+
+## Design tokens (v2.6.8 design pass — see DESIGN_BASELINE.md)
+
+Rules the 2026-07-06 audit added after measuring 276 contrast failures across
+the four themes (worst: Exec board — `P3 HIGH` lane label at 1.27:1, heatmap
+counts at 1.3:1; Mission statusbar/ages at 2.6-2.9:1):
+
+- **`--ink`** — the only text color allowed on saturated fills (priority
+  badges/chips, severity pills, gradient buttons). Dark ink passes ≥4.5:1 on
+  every fill and both `--grad` endpoints; white never did on P1/P2/P5/teal.
+- **`--p5t…--p1t`, `--accent-t`, `--hdr-muted`, `--live`** — *text variants*:
+  same hue as the fill tokens but readable as text on the theme's surfaces.
+  Dark themes alias them to the fills; Exec overrides with darkened versions.
+  Any new "priority-colored text" must use `--pNt`, never `--pN`.
+- **`--heat-base`** — per-theme opaque base the heatmap cells blend against so
+  cell ink can be luminance-picked (`renderHeat`), re-rendered on theme switch.
+- **`--dim`** must stay ≥4.5:1 on `--bg2`/`--panel2`; it is real content
+  (ages, status, hints), not decoration.
+- Radii scale is 3-step: 14 (panels) / 10 (cards, inputs) / 6 (chips, badges,
+  small buttons). Type floor is 10px. Control icons are the inline SVG sprite
+  (`#i-check` etc.), never emoji; toast text may keep emoji.
+- Themes are costumes over the same bones: a skin may never cost correctness
+  (contrast, overflow, touch targets) at any width — LCARS drops its rail and
+  elbow padding below 700px for exactly this reason (320px reflow).
 
 ## Layout
 
