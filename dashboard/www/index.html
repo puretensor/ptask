@@ -343,6 +343,12 @@ section{margin-top:22px}
 .statusbar{display:flex;align-items:center;gap:10px;margin-top:24px;padding:10px 14px;background:var(--bg2);border:var(--card-border);border-radius:10px;font-size:11px;color:var(--dim)}
 .live{display:flex;align-items:center;gap:6px;color:var(--live)}
 .live .dot{animation:pulse 2s infinite}
+/* connection lost: stop claiming LIVE — amber badge, still dot, loud status */
+.statusbar.err{border:1px solid var(--p4)}
+.statusbar.err .live{color:var(--p4t)}
+.statusbar.err .live .dot{animation:none}
+.statusbar.err #status{color:var(--p4t);font-weight:700}
+.ph{padding:16px 4px;font-size:12px;color:var(--dim)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes flash{0%{box-shadow:0 0 0 0 rgba(255,59,92,.7)}100%{box-shadow:0 0 0 16px rgba(255,59,92,0)}}
 .new{animation:flash 1.2s ease-out 2}
@@ -490,22 +496,22 @@ body.review #review-sec{display:block}
 <main class="wrap" id="main">
   <section id="critical-sec">
     <div class="sec-h"><h2>⚠ Critical Now</h2><div class="ln"></div><span class="ct" id="crit-ct"></span></div>
-    <div class="crit-strip" id="crit"></div>
+    <div class="crit-strip" id="crit"><div class="ph">loading…</div></div>
   </section>
 
   <section>
     <div class="sec-h"><h2>Priority Lanes</h2><div class="ln"></div><span class="ct">ranked by composite score within each level</span></div>
-    <div class="lanes" id="lanes"></div>
+    <div class="lanes" id="lanes"><div class="ph">loading…</div></div>
   </section>
 
   <section>
     <div class="sec-h"><h2>Deadline Timeline</h2><div class="ln"></div><span class="ct" id="tl-ct"></span></div>
-    <div class="timeline"><div class="tl-track" id="tltrack"></div></div>
+    <div class="timeline"><div class="tl-track" id="tltrack"><div class="tl-lab" style="left:50%;top:-8px">loading…</div></div></div>
   </section>
 
   <section>
     <div class="sec-h"><h2>Neglect Heatmap</h2><div class="ln"></div><span class="ct">pending tasks · priority × age</span></div>
-    <div class="heat" id="heat"></div>
+    <div class="heat" id="heat"><div class="ph">loading…</div></div>
   </section>
 
   <div class="review-banner" id="rv-banner"></div>
@@ -514,8 +520,8 @@ body.review #review-sec{display:block}
     <div id="review-list"></div>
   </section>
 
-  <div class="statusbar">
-    <span class="live"><span class="dot"></span>LIVE</span>
+  <div class="statusbar" id="sbar">
+    <span class="live"><span class="dot"></span><span id="live-lbl">LIVE</span></span>
     <span id="status">connecting…</span>
     <div class="spacer" style="flex:1"></div>
     <span id="ver"></span>
@@ -864,9 +870,13 @@ function renderChips(s){
 }
 function renderCritical(tasks){
   $('#crit-ct').textContent=tasks.length+' highest composite score';
+  if(!tasks.length){
+    $('#crit').innerHTML='<div class="ph">nothing critical — the board is clear</div>';
+    seenCrit=new Set(); return;
+  }
   $('#crit').innerHTML=tasks.map(t=>{
     const isNew=!first&&!seenCrit.has(t.id);
-    return `<div class="ccard ${isNew?'new':''} fade" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
+    return `<div class="ccard${isNew?' new':''}${first?' fade':''}" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
       <div class="scorebar"></div>
       <h3 style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}">${esc(t.title)}</h3>
       <div class="meta">
@@ -892,7 +902,7 @@ function renderLanes(tasks){
     return `<div class="lane l${p}">
       <div class="lane-h"><span class="lbl">P${p} ${PNAME[p]}</span><span class="n">${n}</span></div>
       <div class="lane-body" data-p="${p}" role="group" aria-label="P${p} ${PNAME[p]} — ${n} task${n===1?'':'s'}">
-      ${list.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
+      ${n===0?'<div class="ph">none</div>':''}${list.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
         <div class="tt" style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
         ${ptrigger(t)}
@@ -966,6 +976,7 @@ function heatColor(v,max){
 }
 function renderHeat(h){
   _lastHeat=h;
+  if(!h.rows.length){$('#heat').innerHTML='<div class="ph">no pending tasks</div>';return;}
   let max=0; h.rows.forEach(r=>Object.values(r.cells).forEach(v=>{if(v>max)max=v;}));
   let html='<table><tr><th></th>'+h.buckets.map(b=>`<th>${b}</th>`).join('')+'</tr>';
   h.rows.forEach(r=>{
@@ -1014,6 +1025,7 @@ function renderReview(){
   const stale=[..._tasks].filter(t=>t.age_days!=null).sort((a,b)=>b.age_days-a.age_days).slice(0,12);
   $('#rv-banner').textContent='REVIEW MODE — '+stale.length+' stalest · j/k move · x done · d dismiss · s snooze · e edit · r exit';
   $('#rv-ct').textContent=stale.length+' tasks, oldest first';
+  if(!stale.length){$('#review-list').innerHTML='<div class="ph">nothing pending to review</div>';return;}
   $('#review-list').innerHTML=stale.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}" style="margin-bottom:10px">
     <div class="tt" style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}"><b>${t.pt_id||''}</b> ${esc(t.title)}</div>
     <div class="tm">${ptrigger(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
@@ -1072,6 +1084,7 @@ function startSSE(){
 }
 
 /* ---- load loop ---- */
+let _lastGood=null;
 async function load(force){
   if(_popupOpen&&!force) return;   // don't wipe the board while a picker/confirm popup is open
   try{
@@ -1084,9 +1097,15 @@ async function load(force){
     renderTimeline(tl.items); renderHeat(heat);
     if(_review) renderReview();
     if(keepId){const cs=cards();const ix=cs.findIndex(c=>c.dataset.id===keepId);if(ix>=0)select(ix);}
-    $('#status').textContent='updated '+new Date().toLocaleTimeString()+' · '+stats.pending_total+' pending';
+    _lastGood=new Date().toLocaleTimeString();
+    $('#sbar').classList.remove('err'); $('#live-lbl').textContent='LIVE';
+    $('#status').textContent='updated '+_lastGood+' · '+stats.pending_total+' pending';
     first=false;
-  }catch(e){$('#status').textContent='⚠ '+e.message;}
+  }catch(e){
+    /* the board keeps showing the last good data — say so, loudly enough */
+    $('#sbar').classList.add('err'); $('#live-lbl').textContent='STALE';
+    $('#status').textContent='⚠ connection lost ('+e.message+')'+(_lastGood?' — showing data from '+_lastGood:'')+' · retrying';
+  }
 }
 load(); startPoll(); startSSE();
 </script>
