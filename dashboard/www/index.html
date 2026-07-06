@@ -465,10 +465,22 @@ body.review #review-sec{display:block}
 .devt .when{margin-left:auto;color:var(--dim);white-space:nowrap}
 .dclose{position:absolute;top:14px;right:14px;cursor:pointer;background:transparent;border:1px solid var(--border);
   color:var(--muted);border-radius:6px;width:26px;height:26px}
+/* inline SVG control glyphs — emoji rendered platform-dependent and clashed
+   with the telemetry character (DESIGN_BASELINE §2) */
+.ic{width:1em;height:1em;display:inline-block;vertical-align:-.12em;pointer-events:none}
+.sec-h h2 .ic{margin-right:2px}
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}}
 </style>
 </head>
 <body>
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="M2.5 8.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-zzz" viewBox="0 0 16 16"><path d="M2 4h5L2.5 9H8M9 8h4l-3.6 4H13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.5 4h11M5.5 4V2.5h5V4M4 4l.7 9.5h6.6L12 4M6.5 6.8v4M9.5 6.8v4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-mic" viewBox="0 0 16 16"><rect x="6" y="1.5" width="4" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 8a4.5 4.5 0 0 0 9 0M8 12.5V15M5.5 15h5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2 15 14H1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 6.5v3.2M8 11.8v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+</svg>
 <a href="#main" class="skip">Skip to dashboard</a>
 <header>
   <div class="hdr">
@@ -495,7 +507,7 @@ body.review #review-sec{display:block}
 
 <main class="wrap" id="main">
   <section id="critical-sec">
-    <div class="sec-h"><h2>⚠ Critical Now</h2><div class="ln"></div><span class="ct" id="crit-ct"></span></div>
+    <div class="sec-h"><h2><svg class="ic" aria-hidden="true"><use href="#i-warn"/></svg> Critical Now</h2><div class="ln"></div><span class="ct" id="crit-ct"></span></div>
     <div class="crit-strip" id="crit"><div class="ph">loading…</div></div>
   </section>
 
@@ -516,7 +528,7 @@ body.review #review-sec{display:block}
 
   <div class="review-banner" id="rv-banner"></div>
   <section id="review-sec">
-    <div class="sec-h"><h2>🔎 Review Mode — stalest first</h2><div class="ln"></div><span class="ct" id="rv-ct"></span></div>
+    <div class="sec-h"><h2>Review Mode — stalest first</h2><div class="ln"></div><span class="ct" id="rv-ct"></span></div>
     <div id="review-list"></div>
   </section>
 
@@ -544,7 +556,7 @@ body.review #review-sec{display:block}
     <p class="modal-body" id="confirm-body"></p>
     <div class="modal-actions">
       <button type="button" class="mbtn" id="confirm-cancel">Cancel</button>
-      <button type="button" class="mbtn primary" id="confirm-ok">✓ Mark done</button>
+      <button type="button" class="mbtn primary" id="confirm-ok"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> Mark done</button>
     </div>
   </div>
 </div>
@@ -553,7 +565,7 @@ body.review #review-sec{display:block}
     <h3 id="compose-h">New task</h3>
     <form class="cform" id="cform" autocomplete="off">
       <div class="vbar">
-        <button type="button" class="vbtn" id="v-btn">🎤 Speak to fill</button>
+        <button type="button" class="vbtn" id="v-btn"><svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg> Speak to fill</button>
         <span class="vmsg" id="v-msg"></span>
       </div>
       <div class="fld">
@@ -808,10 +820,10 @@ function voiceMsg(t,cls){const m=$('#v-msg');m.textContent=t||'';m.className='vm
 function setVoiceState(s){
   _vstate=s; const b=$('#v-btn');
   b.classList.remove('rec','proc','off'); b.disabled=false;
-  if(s==='idle')      b.textContent='🎤 Speak to fill';
-  else if(s==='rec'){ b.classList.add('rec'); b.textContent='⏹ Stop · 0s'; }
-  else if(s==='proc'){b.classList.add('proc'); b.disabled=true; b.textContent='✍️ transcribing & drafting…';}
-  else if(s==='off'){ b.classList.add('off'); b.disabled=true; b.textContent='🎤 voice needs HTTPS'; }
+  if(s==='idle')      b.innerHTML='<svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg> Speak to fill';
+  else if(s==='rec'){ b.classList.add('rec'); b.innerHTML='<svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg> Stop · 0s'; }
+  else if(s==='proc'){b.classList.add('proc'); b.disabled=true; b.textContent='transcribing & drafting…';}
+  else if(s==='off'){ b.classList.add('off'); b.disabled=true; b.innerHTML='<svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg> voice needs HTTPS'; }
 }
 function voiceSupported(){return window.isSecureContext&&navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder;}
 async function startRec(){
@@ -831,7 +843,7 @@ async function startRec(){
     };
     _rec.start(); _recStart=Date.now(); setVoiceState('rec'); voiceMsg('listening… click to stop');
     _recTimer=setInterval(()=>{const s=Math.floor((Date.now()-_recStart)/1000);
-      $('#v-btn').textContent='⏹ Stop · '+s+'s'; if(s>=60) stopRec(true);},250);
+      $('#v-btn').innerHTML='<svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg> Stop · '+s+'s'; if(s>=60) stopRec(true);},250);
   }catch(e){ setVoiceState('idle'); voiceMsg('mic blocked: '+(e&&e.message||e),'warn'); }
 }
 function stopRec(send){
@@ -884,7 +896,7 @@ function renderCritical(tasks){
         <span class="score">${(t.priority_score).toFixed(3)}</span>${scoreMini(t.priority_score)}
         ${dueChip(t)}
         <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
-        <button class="btn-done" title="mark done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button>
+        <button class="btn-done" title="mark done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button>
       </div></div>`;
   }).join('');
   seenCrit=new Set(tasks.map(t=>t.id));
@@ -906,9 +918,9 @@ function renderLanes(tasks){
         <div class="tt" style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
         ${ptrigger(t)}
-        <button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" onclick="act('${t.pt_id||t.id}','snooze',{days:event.shiftKey?7:3})">💤</button>
-        <button class="btn-act dis" title="dismiss" aria-label="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')">🗑</button>
-        <button class="btn-done" title="done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button></div>
+        <button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" onclick="act('${t.pt_id||t.id}','snooze',{days:event.shiftKey?7:3})"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
+        <button class="btn-act dis" title="dismiss" aria-label="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
+        <button class="btn-done" title="done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
       </div>`).join('')}
       </div>
     </div>`;
@@ -1030,9 +1042,9 @@ function renderReview(){
     <div class="tt" style="cursor:pointer" role="button" tabindex="0" onclick="openDrawer('${t.id}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openDrawer('${t.id}')}"><b>${t.pt_id||''}</b> ${esc(t.title)}</div>
     <div class="tm">${ptrigger(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
       <span class="score">${(t.priority_score||0).toFixed(2)}</span>
-      <button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" onclick="act('${t.pt_id||t.id}','snooze',{days:3})">💤</button>
-      <button class="btn-act dis" title="dismiss" aria-label="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')">🗑</button>
-      <button class="btn-done" title="done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')">✓</button></div>
+      <button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" onclick="act('${t.pt_id||t.id}','snooze',{days:3})"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
+      <button class="btn-act dis" title="dismiss" aria-label="dismiss" onclick="act('${t.pt_id||t.id}','dismiss')"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
+      <button class="btn-done" title="done" aria-label="mark done" onclick="confirmDone('${t.pt_id||t.id}')"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
   </div>`).join('');
   select(0);
 }
