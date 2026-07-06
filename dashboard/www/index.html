@@ -115,7 +115,7 @@ header{
   transition:background var(--speed);
 }
 [data-theme="lcars"] header{border-bottom:4px solid #ff9f43}
-.hdr{display:flex;align-items:center;gap:16px;padding:12px 18px;max-width:1500px;margin:0 auto;flex-wrap:wrap}
+.hdr{display:flex;align-items:center;gap:12px;padding:12px 18px;max-width:1500px;margin:0 auto;flex-wrap:wrap}
 @media(max-width:640px){.clock{display:none}.hdr{gap:10px;padding:10px 14px}}
 .brand{display:flex;align-items:center;gap:12px}
 .cube{width:34px;height:34px;flex:none;filter:drop-shadow(0 0 8px rgba(0,212,170,.5))}
@@ -128,7 +128,7 @@ header{
 .spacer{flex:1}
 .chips{display:flex;gap:8px;flex-wrap:wrap}
 .chip{
-  display:flex;align-items:center;gap:6px;padding:5px 11px;border-radius:var(--chip-radius);
+  display:flex;align-items:center;gap:6px;padding:5px 9px;border-radius:var(--chip-radius);
   background:var(--panel);border:var(--card-border);font-size:12px;font-weight:600;
   text-transform:var(--uppercase);letter-spacing:var(--letter);white-space:nowrap;
 }
@@ -143,7 +143,7 @@ header{
 .themes button{
   font-family:var(--font);font-size:11px;font-weight:600;cursor:pointer;
   background:transparent;color:var(--muted);border:none;border-radius:calc(var(--chip-radius) - 2px);
-  padding:7px 10px;text-transform:var(--uppercase);letter-spacing:var(--letter);transition:all .2s;
+  padding:7px 8px;text-transform:var(--uppercase);letter-spacing:var(--letter);transition:all .2s;
   min-height:24px;
 }
 .themes button:hover{color:var(--text)}
@@ -447,9 +447,12 @@ section{margin-top:22px}
 .btn-act.dis:hover{background:var(--p5);color:#fff;border-color:var(--p5)}
 .btn-act.snz:hover{background:var(--p2);color:#fff;border-color:var(--p2)}
 @media(pointer:coarse){.btn-done,.btn-act{width:38px;height:38px;font-size:16px}.pchip{padding:7px 10px;font-size:12px;min-height:32px}.tl-pt::after{inset:-12px}}
-.kbdbar{position:fixed;bottom:12px;right:14px;z-index:60;background:var(--panel2);border:var(--card-border);
-  border-radius:10px;padding:7px 12px;font-size:10px;color:var(--dim);box-shadow:var(--shadow)}
-.kbdbar b{color:var(--muted)}
+/* keyboard hints live IN the statusbar — the old fixed bottom-right bar sat
+   permanently over lane content (lanes cap to the viewport, so it never
+   scrolled out of the way). Hidden where keys don't exist. */
+.kbd-hints{font-size:10px;color:var(--dim);white-space:nowrap}
+.kbd-hints b{color:var(--muted)}
+@media(max-width:900px),(pointer:coarse){.kbd-hints{display:none}}
 .review-banner{display:none;margin-top:16px;padding:10px 16px;border-radius:10px;background:rgba(255,159,67,.14);
   border:1px solid var(--p4);color:var(--p4t);font-weight:700;font-size:12px;letter-spacing:.05em}
 body.review .review-banner{display:block}
@@ -543,11 +546,11 @@ body.review #review-sec{display:block}
     <span class="live"><span class="dot"></span><span id="live-lbl">LIVE</span></span>
     <span id="status">connecting…</span>
     <div class="spacer" style="flex:1"></div>
+    <span class="kbd-hints" aria-hidden="true"><b>j/k</b> move · <b>x</b> done · <b>d</b> dismiss · <b>s</b> snooze · <b>e</b> edit · <b>o</b> detail · <b>1-5</b> priority · <b>r</b> review</span>
     <span id="ver"></span>
   </div>
 </main>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<div class="kbdbar" aria-hidden="true"><b>j/k</b> move · <b>x</b> done · <b>d</b> dismiss · <b>s</b> snooze · <b>e</b> edit · <b>o</b> detail · <b>1-5</b> priority · <b>r</b> review</div>
 <aside class="drawer" id="drawer" role="dialog" aria-label="Task detail" tabindex="-1">
   <button class="dclose" id="d-close" title="close" aria-label="Close task detail">✕</button>
   <h3 id="d-title"></h3>
