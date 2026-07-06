@@ -1,45 +1,76 @@
 # pTask
 
-> Sovereign single-binary Rust task manager for PureTensor. Replaces `puretensor-tasks` (Python). Single command `pt` for capture, find, finish, review — from terminal, TUI, Telegram, email, or HAL.
+> **PureTensor's sovereign, single-binary task manager.** One command — `pt` — to capture, find, finish, and review work, from terminal, TUI, Telegram, HTTP API, MCP-native agents, or the web cockpit. Rust, SQLite, no subscriptions, no cloud dependency.
 
-**Status:** production-active on the PureTensor fleet. The current version lives in [`Cargo.toml`](Cargo.toml) (`workspace.package.version`) — this line intentionally names no number, after the v1.1.1/v1.2.0 README drift. See [`docs/master-plan.md`](docs/master-plan.md) for the historical 12-phase build plan and current follow-ups.
+**Status:** production-active on the PureTensor fleet since the v1.0 activation (2026-05-14); the v2 agent-native program completed 2026-07-02. The current version lives in [`Cargo.toml`](Cargo.toml) (`workspace.package.version`) — this line intentionally names no number, after the v1.1.1/v1.2.0 README drift.
 
-## Quick Start (when shipped)
+## What it does
+
+- **Capture fast** — inline-token quick-add (`tomorrow 10am @home p1 ~30m`), natural-language dates, idempotent `capture` lane that fast-tracks fleet incidents (severity ≥ 3) into tasks.
+- **Find fast** — Linear-style `PT-N` IDs, filter DSL (`pt list "(today | overdue) & p1"`), FTS5 full-text search, saved views.
+- **Work in order** — DAG dependencies (`pt next` shows only unblocked tasks), composite priority scoring with explainability (`pt why PT-42`), recurrence (`every` vs `every!`), snooze.
+- **Stay honest** — attributed event log (`pt log`: who did what, via which surface), `pt undo`, accountability escalation state machine with Telegram/SMTP/HAL notifications, staleness reaper for machine-generated tasks.
+- **Feed the agents** — MCP server (11 tools over streamable-HTTP and stdio), atomic `task_claim` so parallel agents can't collide, `discovered_from` provenance links, deterministic `task_digest` session priming, scoped named API tokens.
+- **Distill the noise** — distillation pipeline turns raw fleet signals into deduplicated tasks (semantic + temporal dedup, close-on-recovery). Rust orchestrator owns the timer and audit log; native candle-based ML stages sit behind the `native-ml` feature while the legacy Python shim remains the production entry point.
+
+## Quick start
 
 ```bash
 pt add "Buy bread tomorrow 10am @home p1 ~30m"   # inline-token quick-add
 pt list "(today | overdue) & p1"                  # filter DSL
 pt next                                           # DAG-ready tasks
 pt done PT-42                                     # complete
-pt                                                # opens TUI
-pt serve                                          # axum sync API
-pt bot                                            # Telegram bot
+pt why PT-42                                      # explain a task's priority score
+pt                                                # opens the TUI
+pt serve                                          # axum HTTP server: sync API, capture, webhooks, metrics
+pt bot                                            # Telegram bot (long-poll)
+pt mcp                                            # MCP server over stdio
 ```
+
+`pt --help` lists all ~40 subcommands; `pt gen-manpage` / `pt gen-completions` generate the manpage and shell completions. Full reference: [`docs/cli-reference.md`](docs/cli-reference.md).
+
+## Surfaces
+
+| Surface | Entry point | Notes |
+|---|---|---|
+| CLI | `pt <verb>` | `--json` for machine output, `--idempotency-key` for safe retries |
+| TUI | `pt` / `pt tui` | ratatui |
+| Sync API | `pt serve` | axum; canonical store on tensor-core, clients use `pt remote` |
+| Telegram | `pt bot` | Bot API long-poll |
+| MCP (agents) | `pt mcp` (stdio) or `/mcp` mount on the server | 11 tools; bearer-gated HTTP for HAL, scoped REST tokens for other agents — [`docs/agent-surface.md`](docs/agent-surface.md) |
+| Web | [`dashboard/`](dashboard/) | **PTASK Triage Cockpit** — read-only Python sidecar over the same DB; writes delegate to the `pt` binary |
 
 ## Architecture
 
-Single Cargo workspace, single binary `pt`. Domain logic in `ptask-core`. Surfaces in `ptask-cli`, `ptask-server`, `ptask-tui`, `ptask-bot`, `ptask-distill`. SQLite via `rusqlite` (bundled). Migrations via `refinery`. TUI via `ratatui`. HTTP via `axum`. Dates via `jiff` + `interim`. Filter DSL + recurrence: hand-written parsers (no parser-combinator dependency).
+Single Cargo workspace, single binary `pt`. SQLite via `rusqlite` (bundled), migrations via `refinery`, TUI via `ratatui`, HTTP via `axum`, dates via `jiff` + `interim`. Filter DSL and recurrence use hand-written parsers (no parser-combinator dependency).
 
-## Design References
+| Crate | Role |
+|---|---|
+| `ptask-core` | Domain logic: storage, parsing, scoring, accountability |
+| `ptask-cli` | The `pt` binary and all subcommands |
+| `ptask-server` | Sync API, capture, webhooks, MCP HTTP mount, metrics |
+| `ptask-tui` | Terminal UI |
+| `ptask-bot` | Telegram bot |
+| `ptask-distill` | Distillation orchestrator + native ML stages (`native-ml` feature) |
+| `ptask-notify` | Notification adapters (Telegram/SMTP/HAL) behind ptask-core's `Dispatch` trait |
 
-- [`docs/master-plan.md`](docs/master-plan.md) — the 12-phase build plan
-- Linear's data model (cycles, projects, fixed status categories, `<TEAM>-<N>` IDs)
-- Todoist's inline-token quick-add + filter DSL + recurrence (`every` vs `every!`)
-- dstask's file-per-task git audit layer (deferred to v1.0.0)
-- Existing Python implementation at `~/puretensor-tasks/` — preserved for reference until v0.9.0
+Fleet topology (canonical store, Litestream WAL replication to CephFS, per-node roles, ansible rollout): [`docs/architecture.md`](docs/architecture.md). Backups, restore drills, and timers: [`docs/operations.md`](docs/operations.md).
 
-## Workflow
+## Documentation
 
-This repo is built phase-by-phase by Claude on `main`. After each phase, Codex performs a separate review pass and opens PRs with improvements. The operator merges. See `docs/master-plan.md` § "Workflow Contract" for the contract.
+- [`docs/cli-reference.md`](docs/cli-reference.md) — every subcommand
+- [`docs/dsl.md`](docs/dsl.md) — the filter DSL
+- [`docs/recurrence.md`](docs/recurrence.md) — recurrence semantics (`every` vs `every!`)
+- [`docs/sync-api.md`](docs/sync-api.md) — HTTP API
+- [`docs/agent-surface.md`](docs/agent-surface.md) — MCP tools, claim/lease mechanics, provenance
+- [`docs/architecture.md`](docs/architecture.md) — fleet topology and canonical-store election
+- [`docs/operations.md`](docs/operations.md) — backups, timers, runbooks
+- [`docs/master-plan.md`](docs/master-plan.md) — the historical 12-phase build plan (complete) and design lineage
+
+## Design lineage
+
+Linear's data model (fixed status categories, `<TEAM>-<N>` IDs, cycles), Todoist's quick-add + filter DSL + recurrence, dstask's git-diffable export, HAL-grade triage. pTask replaced the Python `puretensor-tasks` system (retired from active duty at v1.0; kept for reference). Built phase-by-phase by Claude on `main` with separate Codex review passes, merged by the operator — see `docs/master-plan.md` § "Workflow Contract".
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-## Web dashboard (`dashboard/`)
-
-The official ptask web UI — the **PTASK Triage Cockpit**, a read-only Python sidecar
-(`dashboard/server.py` + `dashboard/www/`) over the `pt` task DB. Absorbed from the former
-standalone `ptask-dashboard` repo in v1.6.0 (88→30 consolidation). Runs via the
-`ptask-dashboard.service` user unit (`WorkingDirectory=~/ptask/dashboard`); secrets stay in
-`~/puretensor-tasks/.dashboard.env`.
