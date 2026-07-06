@@ -49,6 +49,24 @@ counts at 1.3:1; Mission statusbar/ages at 2.6-2.9:1):
   (contrast, overflow, touch targets) at any width — LCARS drops its rail and
   elbow padding below 700px for exactly this reason (320px reflow).
 
+## Interaction model (v2.7.x)
+
+- **Event delegation, no inline handlers.** Rendered controls carry
+  `data-act` (+ `data-id`/`data-uuid`/`data-n`/`data-p`); two document-level
+  listeners (click + Enter/Space) dispatch every action. There are **no
+  inline `on*` attributes** in rendered HTML — the page is CSP-clean and the
+  15s re-render doesn't reattach hundreds of handler strings. Add a new
+  control by giving it a `data-act` and a branch in the click delegate, never
+  an inline `onclick`.
+- **Focus return** survives the re-render: overlays remember their invoker by
+  a stable `[data-act][data-id]` selector and refocus the re-rendered twin.
+- **Modal drawer.** The detail drawer is a real `aria-modal` dialog — scrim
+  dims + blocks the board, click-scrim / Escape / close-button all dismiss,
+  Tab is trapped inside. Timeline points open it too (`data-act=drawer`).
+- **Phone header** (<640px): the five count chips collapse to one compact
+  summary line (`#chips-c`); only one of `#chips`/`#chips-c` is displayed so
+  screen readers read the counts once.
+
 ## Layout
 
 - **Header** — crystal-cube mark, live UTC clock, count chips (crit / urgent /
