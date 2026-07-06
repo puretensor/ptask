@@ -142,7 +142,8 @@ header{
 .themes button{
   font-family:var(--font);font-size:11px;font-weight:600;cursor:pointer;
   background:transparent;color:var(--muted);border:none;border-radius:calc(var(--chip-radius) - 2px);
-  padding:5px 9px;text-transform:var(--uppercase);letter-spacing:var(--letter);transition:all .2s;
+  padding:7px 10px;text-transform:var(--uppercase);letter-spacing:var(--letter);transition:all .2s;
+  min-height:24px;
 }
 .themes button:hover{color:var(--text)}
 .themes button.on{background:var(--grad);color:var(--ink);box-shadow:var(--glow)}
@@ -190,8 +191,8 @@ section{margin-top:22px}
 /* priority chip — click to open the direct severity picker */
 .pchip{
   font-family:var(--font);font-weight:800;font-size:10px;line-height:1.4;
-  padding:2px 6px 2px 7px;border-radius:5px;color:var(--ink);border:none;cursor:pointer;
-  display:inline-flex;align-items:center;gap:3px;transition:filter .15s;
+  padding:5px 7px 5px 8px;border-radius:5px;color:var(--ink);border:none;cursor:pointer;
+  display:inline-flex;align-items:center;gap:3px;transition:filter .15s;min-height:24px;
 }
 [data-theme="lcars"] .pchip{border-radius:0 8px 8px 0}
 .pchip:hover{filter:brightness(1.12)}
@@ -241,9 +242,11 @@ section{margin-top:22px}
 .tl-track{position:relative;height:8px;background:var(--panel2);border-radius:4px;margin:30px 10px 44px}
 .tl-now{position:absolute;top:-6px;bottom:-6px;width:2px;background:var(--accent);box-shadow:var(--glow)}
 .tl-now::after{content:'NOW';position:absolute;top:-18px;left:-12px;font-size:9px;color:var(--accent);font-weight:700}
-.tl-pt{position:absolute;top:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;border:2px solid var(--bg);cursor:pointer;transition:transform .15s}
+.tl-pt{position:absolute;top:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;border:2px solid var(--bg);cursor:pointer;transition:transform .15s;display:block}
+.tl-pt::after{content:'';position:absolute;inset:-6px}   /* 26px hit/touch target around the 14px dot */
 .tl-pt:hover{transform:translate(-50%,-50%) scale(1.5);z-index:5}
-.tl-lab{position:absolute;font-size:9px;color:var(--muted);white-space:nowrap;transform:translateX(-50%)}
+.tl-pt:focus-visible{outline:2px solid var(--accent);outline-offset:2px;z-index:5}
+.tl-lab{position:absolute;font-size:10px;color:var(--muted);white-space:nowrap;transform:translateX(-50%)}
 .tl-lab.top{top:-26px} .tl-lab.bot{top:18px}
 
 /* heatmap */
@@ -328,6 +331,13 @@ section{margin-top:22px}
 [data-theme="lcars"] .chip{border-radius:0 14px 14px 0;border:none;background:#1d1d28}
 [data-theme="lcars"] .statusbar{border:none;border-radius:8px 24px 24px 8px;background:#0d0d12;box-shadow:inset 14px 0 0 #cc88ff;padding-left:26px}
 [data-theme="lcars"] .brandtxt b{color:#ff9f43}
+/* costume off below 700px — the 74px rail + 118px indent ate a third of a
+   phone screen and forced horizontal scroll at 320px */
+@media(max-width:700px){
+  [data-theme="lcars"] .wrap{padding-left:18px}
+  [data-theme="lcars"] .wrap::before{display:none}
+  [data-theme="lcars"] .sec-h h2{padding:8px 14px;font-size:13px}
+}
 
 /* footer / status */
 .statusbar{display:flex;align-items:center;gap:10px;margin-top:24px;padding:10px 14px;background:var(--bg2);border:var(--card-border);border-radius:10px;font-size:11px;color:var(--dim)}
@@ -359,9 +369,10 @@ section{margin-top:22px}
 .pmi .pk{color:var(--accent-t);font-weight:800}
 .pmi.cur{cursor:default}
 .modal{position:fixed;inset:0;z-index:97;display:flex;align-items:center;justify-content:center;
-  background:rgba(0,0,0,.55);padding:20px}
+  background:rgba(0,0,0,.55);padding:20px;overflow-y:auto}
 .modal-card{background:var(--bg2);border:var(--card-border);border-radius:14px;
-  box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.5));padding:20px 22px;max-width:440px;width:100%}
+  box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.5));padding:20px 22px;max-width:440px;width:100%;
+  max-height:calc(100vh - 40px);overflow-y:auto}   /* short viewports / 200% zoom: scroll, don't clip */
 .modal-card h3{font-family:var(--font-head);font-size:15px;font-weight:800;margin-bottom:10px;color:var(--text)}
 .modal-body{font-size:13px;color:var(--muted);line-height:1.45;margin-bottom:18px;word-break:break-word}
 .modal-actions{display:flex;gap:10px;justify-content:flex-end}
@@ -422,7 +433,7 @@ section{margin-top:22px}
 .btn-act:hover{color:var(--text);border-color:var(--accent)}
 .btn-act.dis:hover{background:var(--p5);color:#fff;border-color:var(--p5)}
 .btn-act.snz:hover{background:var(--p2);color:#fff;border-color:var(--p2)}
-@media(pointer:coarse){.btn-done,.btn-act{width:32px;height:32px;font-size:15px}.pchip{padding:5px 9px;font-size:12px}}
+@media(pointer:coarse){.btn-done,.btn-act{width:38px;height:38px;font-size:16px}.pchip{padding:7px 10px;font-size:12px;min-height:32px}.tl-pt::after{inset:-12px}}
 .kbdbar{position:fixed;bottom:12px;right:14px;z-index:60;background:var(--panel2);border:var(--card-border);
   border-radius:10px;padding:7px 12px;font-size:10px;color:var(--dim);box-shadow:var(--shadow)}
 .kbdbar b{color:var(--muted)}
@@ -917,11 +928,24 @@ function renderTimeline(items){
   const pad=(hi-lo)*0.06; lo-=pad; hi+=pad;
   const xpct=d=>((d-lo)/(hi-lo))*100;
   let html=`<div class="tl-now" style="left:${xpct(0)}%"></div>`;
-  items.forEach((i,ix)=>{
+  items.forEach(i=>{
     const x=xpct(i.days_until), col=PCOL[i.priority];
-    const side=ix%2?'bot':'top';
-    html+=`<div class="tl-pt" style="left:${x}%;background:${col}" title="${esc(i.title)} · ${i.deadline_date}"></div>`;
-    html+=`<div class="tl-lab ${side}" style="left:${x}%;${side=='bot'?'top:18px':''}">${i.deadline_date.slice(5)}</div>`;
+    html+=`<span class="tl-pt" role="img" tabindex="0" style="left:${x}%;background:${col}"`+
+      ` title="${esc(i.title)} · ${i.deadline_date}" aria-label="${esc(i.title)}, due ${i.deadline_date}"></span>`;
+  });
+  /* one label per cluster of nearby points — per-point labels collided and
+     merged into unreadable strings whenever dates landed close together */
+  const pts=items.map(i=>({x:xpct(i.days_until),d:i.deadline_date})).sort((a,b)=>a.x-b.x);
+  const clusters=[];
+  pts.forEach(p=>{
+    const c=clusters[clusters.length-1];
+    if(c&&p.x-c.x1<6){c.x1=p.x;c.ds.push(p.d);}
+    else clusters.push({x0:p.x,x1:p.x,ds:[p.d]});
+  });
+  clusters.forEach((c,ix)=>{
+    const x=(c.x0+c.x1)/2, uniq=[...new Set(c.ds)];
+    const lbl=uniq[0].slice(5)+(uniq.length>1?` +${uniq.length-1}`:(c.ds.length>1?` ×${c.ds.length}`:''));
+    html+=`<div class="tl-lab ${ix%2?'bot':'top'}" style="left:${x}%">${lbl}</div>`;
   });
   $('#tltrack').innerHTML=html;
 }
