@@ -44,6 +44,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -58,7 +59,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 MAX_POST_BYTES = 16 * 1024
 MAX_AUDIO_BYTES = 12 * 1024 * 1024  # voice clips (webm/opus) — separate, larger cap
 
@@ -281,6 +282,39 @@ def q_heatmap():
         "buckets": [b[2] for b in AGE_BUCKETS],
         "rows": [{"priority": p, "cells": grid[p]} for p in range(5, 0, -1)],
     }
+
+
+def q_task_events(task_uuid: str, limit: int = 60):
+    """Return attributed event history for the detail drawer."""
+    con = connect()
+    try:
+        rows = con.execute(
+            """
+            SELECT uuid, task_uuid, event_type, actor, ts, payload
+            FROM pt_event_log
+            WHERE task_uuid=?
+            ORDER BY ts DESC
+            LIMIT ?
+            """,
+            (task_uuid, limit),
+        )
+        events = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"] or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            events.append({
+                "uuid": r["uuid"],
+                "task_uuid": r["task_uuid"],
+                "event_type": r["event_type"],
+                "actor": r["actor"],
+                "ts": r["ts"],
+                "payload": payload,
+            })
+        return events
+    finally:
+        con.close()
 
 
 # --------------------------------------------------------------------- writes
@@ -603,6 +637,25 @@ class Handler(BaseHTTPRequestHandler):
         }.get(target.suffix, "application/octet-stream")
         self._text(target.read_bytes(), 200, ctype)
 
+    def _stream(self):
+        self.send_response(200)
+        self._security_headers()
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        try:
+            self.wfile.write(b"retry: 15000\n\n")
+            self.wfile.flush()
+            while True:
+                self.wfile.write(
+                    f"event: change\ndata: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n\n".encode()
+                )
+                self.wfile.flush()
+                time.sleep(15)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
     # -- routes --
     def do_GET(self):
         u = urlparse(self.path)
@@ -627,6 +680,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"items": q_timeline()})
             if path == "/api/heatmap":
                 return self._json(q_heatmap())
+            if path == "/api/stream":
+                return self._stream()
+            m = re.match(r"^/api/tasks/([^/]+)/events$", path)
+            if m:
+                task_uuid = m.group(1)
+                if not _ID_RE.match(task_uuid):
+                    return self._json({"error": "bad id"}, 400)
+                limit = parse_limit(qs.get("limit", ["60"])[0], 60, 200)
+                return self._json({"events": q_task_events(task_uuid, limit=limit)})
             if path == "/version":
                 return self._json({"version": VERSION})
             return self._serve_static(path)

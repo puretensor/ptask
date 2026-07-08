@@ -1,4 +1,6 @@
 import os
+import sqlite3
+import tempfile
 import unittest
 
 import server
@@ -32,6 +34,44 @@ class QueryLimitTests(unittest.TestCase):
     def test_parse_limit_rejects_non_integer_values(self):
         with self.assertRaises(ValueError):
             server.parse_limit("many", 500, 5000)
+
+
+class EventHistoryTests(unittest.TestCase):
+    def test_q_task_events_reads_attributed_log(self):
+        old_db = server.DB_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute(
+                """
+                CREATE TABLE pt_event_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT NOT NULL UNIQUE,
+                    task_uuid TEXT,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    actor TEXT
+                )
+                """
+            )
+            con.execute(
+                """
+                INSERT INTO pt_event_log(uuid, task_uuid, event_type, payload, ts, actor)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("evt-1", "PT-1", "task.status.changed", '{"to":"done"}',
+                 "2026-07-08T12:00:00+00:00", "hal"),
+            )
+            con.commit()
+            con.close()
+            server.DB_PATH = f.name
+            try:
+                events = server.q_task_events("PT-1")
+            finally:
+                server.DB_PATH = old_db
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["actor"], "hal")
+        self.assertEqual(events[0]["payload"], {"to": "done"})
 
 
 class BuildAddArgsTests(unittest.TestCase):

@@ -158,6 +158,8 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.6.1** — accessibility polish: interactive task titles in Critical Now and
+  Priority Lanes now expose at least a 24px hit target with visible focus rings.
 - **v0.6.0** — **🎤 speak-to-fill voice capture** in the composer. A mic button
   records (MediaRecorder) and POSTs the clip to `POST /api/voice`, which runs the
   fleet's local Whisper (`large-v3-turbo`, STT) then **AWS Bedrock Claude Haiku 4.5**

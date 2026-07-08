@@ -172,7 +172,13 @@ section{margin-top:22px}
 [data-theme="lcars"] .ccard{border-radius:4px 18px 18px 4px;border-left:10px solid var(--p5)}
 .ccard:hover{transform:translateY(-2px);box-shadow:var(--glow),var(--shadow)}
 .ccard .scorebar{position:absolute;top:0;right:0;height:100%;width:4px;background:var(--grad);opacity:.5}
-.ccard h3{font-size:14px;font-weight:600;margin-bottom:8px;padding-right:8px;line-height:1.3}
+.ccard h3{
+  font-size:14px;font-weight:600;margin-bottom:8px;padding-right:8px;line-height:1.3;
+  min-height:24px;display:flex;align-items:center;
+}
+.ccard h3:focus-visible,.tcard .tt:focus-visible{
+  outline:2px solid var(--accent);outline-offset:2px;border-radius:6px;
+}
 .ccard .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--muted)}
 .score{font-family:var(--font);font-weight:700;color:var(--accent-t);font-size:12px}
 .scoremini{display:inline-block;height:5px;width:54px;border-radius:3px;background:var(--panel2);overflow:hidden;vertical-align:middle}
@@ -246,7 +252,7 @@ section{margin-top:22px}
 .tcard:hover .btn-act,.tcard:hover .btn-done,
 .tcard:focus-within .btn-act,.tcard:focus-within .btn-done{opacity:1}
 @media(pointer:coarse){.tcard .btn-act,.tcard .btn-done{opacity:1}}
-.tcard .tt{line-height:1.3;margin-bottom:6px}
+.tcard .tt{line-height:1.3;margin-bottom:6px;min-height:24px;display:flex;align-items:center}
 .tcard .tm{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 
 /* timeline */
