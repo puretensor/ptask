@@ -7,8 +7,8 @@
 --    working until Phase 7 absorbs it.
 -- 2. tasks.status_v2 — the real 8-state model. The legacy tasks.status
 --    column REMAINS the compat surface (kept in sync by every Rust write
---    path) for older readers that still inspect tasks.status directly.
---    status: pending|done|delayed|dismissed|
+--    path) because the legacy Python distill still WRITES tasks rows; a
+--    view can't cover a writer. status: pending|done|delayed|dismissed|
 --    blocked ⇄ status_v2: triage|backlog|todo|in_progress|snoozed|done|
 --    dismissed|blocked.
 -- 3. task_links replaces the depends_on/blocks_tasks JSON blobs (0
