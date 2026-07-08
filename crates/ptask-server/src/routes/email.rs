@@ -2,7 +2,7 @@
 //!
 //! Accepts a raw RFC 822 message body (Content-Type: `message/rfc822` or
 //! `text/plain`). Mail-parser extracts Subject + body; the text is dropped
-//! into `raw_items` as a capture with `source='email'`. The Python distill
+//! into `raw_items` as a capture with `source='email'`. The native distill
 //! pipeline picks it up downstream (until v0.9).
 //!
 //! For provider-shaped JSON envelopes (Mailgun, Postmark, SendGrid) deploy

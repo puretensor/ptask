@@ -61,17 +61,22 @@ Restore: copy a snapshot back to `~/puretensor-tasks/tasks.db` (stop Python
 services first if running). The pre-v0.1.0 baseline is at
 `~/puretensor-tasks/tasks.db.pre-ptask-backup`.
 
-## Distillation (v0.6.5)
+## Distillation (v3.0.0)
 
-`pt distill` runs the existing Python `ingest.distill` pipeline as a
-subprocess and records each invocation in `pt_event_log`. The Python ML
-is unchanged; Rust owns the timer + audit-log surface and will swap the
-subprocess for a native pipeline at v0.9.0.
+`pt distill` runs the native Rust delta pipeline over unprocessed
+`raw_items` and records each invocation in `pt_event_log`. It preflights
+Gemini before consuming data, sends classify/consolidate calls with
+`thinkingBudget=0`, retries transient Gemini failures, deduplicates
+candidates, writes tasks through `ptask-core`, and fails closed with a
+`distill.failed` event on provider or pipeline errors.
+
+The legacy Python distiller is retired from the CLI and from the timer path.
+It remains only in `~/puretensor-tasks-legacy` as historical reference.
 
 ### Cutover from `puretensor-tasks-distill.timer`
 
-The legacy system-mode timer was already disabled on the workstation —
-the cutover here is just installing the user-mode `ptask-distill.timer`.
+The legacy system-mode timer was already disabled on the workstation.
+The cutover here is installing the user-mode `ptask-distill.timer`.
 For nodes still running the legacy unit, disable it first:
 
 ```bash
@@ -89,8 +94,8 @@ systemctl --user enable --now ptask-distill.timer
 loginctl enable-linger "$USER"
 ```
 
-Cadence: `*-*-* 00,06,12,18:00:00 UTC` with 300s jitter (matches the
-legacy unit). `pt distill --days 60` matches the legacy invocation.
+Cadence: hourly with 300s jitter. `pt distill --batch 300` is the production
+service command; interactive runs can lower `--batch` for smoke tests.
 
 ### Inspect
 
@@ -107,16 +112,17 @@ sqlite3 ~/puretensor-tasks/tasks.db \
 ```bash
 systemctl --user start ptask-distill.service
 # Or from a shell:
-pt distill --days 60
+pt distill --batch 300
 ```
 
 ### Failure behaviour
 
-Non-zero Python exit → `pt distill` writes a `distill.failed` event to
-`pt_event_log` with the captured stderr tail, then exits with the same
-code. systemd records the failure; the operator's existing Telegram
-alert pipeline (or any HMAC webhook subscriber) can scrape
-`pt_event_log` for `distill.failed` events.
+Any native provider or pipeline error writes a `distill.failed` event to
+`pt_event_log` with the provider name and detailed error chain, then exits
+non-zero. systemd records the failure; the operator's existing Telegram
+alert pipeline (or any HMAC webhook subscriber) can scrape `pt_event_log`
+for `distill.failed` events. A missing `GOOGLE_API_KEY` exits 3 before any
+raw item is consumed.
 
 ## Accountability (v0.7.0)
 

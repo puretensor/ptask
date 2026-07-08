@@ -150,6 +150,7 @@ mod tests {
         assert_eq!(dry.reaped.len(), 2, "{:?}", dry.reaped);
         assert!(ids.contains(&stale_incident.id.as_str()));
         assert!(ids.contains(&stale_distilled.id.as_str()));
+        assert!(!ids.contains(&fresh_incident.id.as_str()));
         let conn = db.get().unwrap();
         let pending: i64 = conn
             .query_row(

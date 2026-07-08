@@ -84,7 +84,7 @@ enum Command {
     Delegate(DelegateArgs),
     /// Print a Linear-style branch name for a task.
     Branch(BranchArgs),
-    /// Run the distillation pipeline (Python subprocess shim until v0.9).
+    /// Run the native Rust distillation pipeline.
     Distill(DistillArgs),
     /// Run one accountability cycle (escalation + Telegram/email).
     #[command(subcommand)]
@@ -455,13 +455,7 @@ struct ScoringRunArgs {
 
 #[derive(clap::Args, Debug)]
 struct DistillArgs {
-    /// Run the retired Python subprocess pipeline instead of the native one.
-    #[arg(long = "legacy")]
-    legacy: bool,
-    /// Days of history for the LEGACY pipeline to ingest.
-    #[arg(long = "days", default_value_t = 60)]
-    days: u32,
-    /// Max raw_items consumed per NATIVE run.
+    /// Max raw_items consumed per native run.
     #[arg(long = "batch", default_value_t = 200)]
     batch: usize,
 }
@@ -2137,7 +2131,11 @@ fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
     for r in &report.reaped {
         println!(
             "{} {} [{}] idle since {} — {}",
-            if report.dry_run { "would dismiss" } else { "dismissed" },
+            if report.dry_run {
+                "would dismiss"
+            } else {
+                "dismissed"
+            },
             r.pt_id.as_deref().unwrap_or(&r.uuid),
             r.source_type,
             r.updated_at,
@@ -2257,32 +2255,7 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
 }
 
 fn cmd_distill(db: &Db, a: DistillArgs) -> Result<()> {
-    if !a.legacy {
-        return cmd_distill_native(db, a.batch);
-    }
-    let days = a.days.to_string();
-    let py_root = ptask_core::Config::from_env().distill.py_root;
-    let report = ptask_distill::run(db, &["--days", &days], &py_root)?;
-    if report.success {
-        println!(
-            "distill ok ({}ms; {} stdout lines, {} stderr lines)",
-            report.duration_ms, report.stdout_lines, report.stderr_lines
-        );
-        Ok(())
-    } else {
-        eprintln!(
-            "distill FAILED (exit={:?}, {}ms)",
-            report.exit_code, report.duration_ms
-        );
-        if let Some(reason) = &report.soft_failure {
-            eprintln!("soft failure: {}", reason);
-        }
-        if !report.stderr_tail.is_empty() {
-            eprintln!("--- stderr tail ---\n{}", report.stderr_tail);
-        }
-        // A soft failure carries exit_code Some(0); never exit 0 on failure.
-        std::process::exit(report.exit_code.filter(|&c| c != 0).unwrap_or(1));
-    }
+    cmd_distill_native(db, a.batch)
 }
 
 fn cmd_backfill(db: &Db) -> Result<()> {

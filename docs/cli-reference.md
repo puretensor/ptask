@@ -130,7 +130,7 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 
 | Verb | Cadence | Description |
 |---|---|---|
-| `pt distill [--batch 200]` | hourly (`*:15`) | NATIVE fail-closed distillation (v2.1.0): consumes new `raw_items` only, Gemini structured-output classify+consolidate, token-overlap dedup vs 30d. Exit 3 = missing GOOGLE_API_KEY (preflight). `--legacy --days 60` runs the retired Python shim. |
+| `pt distill [--batch 200]` | hourly (`*:15`) | Native fail-closed distillation: consumes new `raw_items` only, Gemini structured-output classify+consolidate with `thinkingBudget=0`, transient retry, and token/semantic/temporal dedup. Exit 3 = missing GOOGLE_API_KEY before consumption. |
 | `pt accountability run [--dry-run]` | `*:0/15` | Escalation state machine + dispatch. |
 | `pt scoring run [--dry-run]` | `hourly` | Composite priority recompute. |
 | `pt backfill` | one-shot | Mint PT-N for any task lacking one. |

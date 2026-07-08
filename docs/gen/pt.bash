@@ -31,6 +31,18 @@ _pt() {
             pt,branch)
                 cmd="pt__subcmd__branch"
                 ;;
+            pt,bulk)
+                cmd="pt__subcmd__bulk"
+                ;;
+            pt,delegate)
+                cmd="pt__subcmd__delegate"
+                ;;
+            pt,depend)
+                cmd="pt__subcmd__depend"
+                ;;
+            pt,digest)
+                cmd="pt__subcmd__digest"
+                ;;
             pt,dismiss)
                 cmd="pt__subcmd__dismiss"
                 ;;
@@ -42,6 +54,9 @@ _pt() {
                 ;;
             pt,edit)
                 cmd="pt__subcmd__edit"
+                ;;
+            pt,export)
+                cmd="pt__subcmd__export"
                 ;;
             pt,gen-completions)
                 cmd="pt__subcmd__gen__subcmd__completions"
@@ -55,11 +70,20 @@ _pt() {
             pt,list)
                 cmd="pt__subcmd__list"
                 ;;
+            pt,log)
+                cmd="pt__subcmd__log"
+                ;;
+            pt,mcp)
+                cmd="pt__subcmd__mcp"
+                ;;
             pt,next)
                 cmd="pt__subcmd__next"
                 ;;
             pt,priority)
                 cmd="pt__subcmd__priority"
+                ;;
+            pt,reap)
+                cmd="pt__subcmd__reap"
                 ;;
             pt,remote)
                 cmd="pt__subcmd__remote"
@@ -67,11 +91,17 @@ _pt() {
             pt,reopen)
                 cmd="pt__subcmd__reopen"
                 ;;
+            pt,review)
+                cmd="pt__subcmd__review"
+                ;;
             pt,rm)
                 cmd="pt__subcmd__rm"
                 ;;
             pt,scoring)
                 cmd="pt__subcmd__scoring"
+                ;;
+            pt,search)
+                cmd="pt__subcmd__search"
                 ;;
             pt,serve)
                 cmd="pt__subcmd__serve"
@@ -79,11 +109,26 @@ _pt() {
             pt,show)
                 cmd="pt__subcmd__show"
                 ;;
+            pt,snooze)
+                cmd="pt__subcmd__snooze"
+                ;;
+            pt,start)
+                cmd="pt__subcmd__start"
+                ;;
+            pt,token)
+                cmd="pt__subcmd__token"
+                ;;
             pt,tui)
                 cmd="pt__subcmd__tui"
                 ;;
+            pt,undo)
+                cmd="pt__subcmd__undo"
+                ;;
             pt,view)
                 cmd="pt__subcmd__view"
+                ;;
+            pt,why)
+                cmd="pt__subcmd__why"
                 ;;
             pt__subcmd__accountability,help)
                 cmd="pt__subcmd__accountability__subcmd__help"
@@ -112,6 +157,18 @@ _pt() {
             pt__subcmd__help,branch)
                 cmd="pt__subcmd__help__subcmd__branch"
                 ;;
+            pt__subcmd__help,bulk)
+                cmd="pt__subcmd__help__subcmd__bulk"
+                ;;
+            pt__subcmd__help,delegate)
+                cmd="pt__subcmd__help__subcmd__delegate"
+                ;;
+            pt__subcmd__help,depend)
+                cmd="pt__subcmd__help__subcmd__depend"
+                ;;
+            pt__subcmd__help,digest)
+                cmd="pt__subcmd__help__subcmd__digest"
+                ;;
             pt__subcmd__help,dismiss)
                 cmd="pt__subcmd__help__subcmd__dismiss"
                 ;;
@@ -123,6 +180,9 @@ _pt() {
                 ;;
             pt__subcmd__help,edit)
                 cmd="pt__subcmd__help__subcmd__edit"
+                ;;
+            pt__subcmd__help,export)
+                cmd="pt__subcmd__help__subcmd__export"
                 ;;
             pt__subcmd__help,gen-completions)
                 cmd="pt__subcmd__help__subcmd__gen__subcmd__completions"
@@ -136,11 +196,20 @@ _pt() {
             pt__subcmd__help,list)
                 cmd="pt__subcmd__help__subcmd__list"
                 ;;
+            pt__subcmd__help,log)
+                cmd="pt__subcmd__help__subcmd__log"
+                ;;
+            pt__subcmd__help,mcp)
+                cmd="pt__subcmd__help__subcmd__mcp"
+                ;;
             pt__subcmd__help,next)
                 cmd="pt__subcmd__help__subcmd__next"
                 ;;
             pt__subcmd__help,priority)
                 cmd="pt__subcmd__help__subcmd__priority"
+                ;;
+            pt__subcmd__help,reap)
+                cmd="pt__subcmd__help__subcmd__reap"
                 ;;
             pt__subcmd__help,remote)
                 cmd="pt__subcmd__help__subcmd__remote"
@@ -148,11 +217,17 @@ _pt() {
             pt__subcmd__help,reopen)
                 cmd="pt__subcmd__help__subcmd__reopen"
                 ;;
+            pt__subcmd__help,review)
+                cmd="pt__subcmd__help__subcmd__review"
+                ;;
             pt__subcmd__help,rm)
                 cmd="pt__subcmd__help__subcmd__rm"
                 ;;
             pt__subcmd__help,scoring)
                 cmd="pt__subcmd__help__subcmd__scoring"
+                ;;
+            pt__subcmd__help,search)
+                cmd="pt__subcmd__help__subcmd__search"
                 ;;
             pt__subcmd__help,serve)
                 cmd="pt__subcmd__help__subcmd__serve"
@@ -160,17 +235,35 @@ _pt() {
             pt__subcmd__help,show)
                 cmd="pt__subcmd__help__subcmd__show"
                 ;;
+            pt__subcmd__help,snooze)
+                cmd="pt__subcmd__help__subcmd__snooze"
+                ;;
+            pt__subcmd__help,start)
+                cmd="pt__subcmd__help__subcmd__start"
+                ;;
+            pt__subcmd__help,token)
+                cmd="pt__subcmd__help__subcmd__token"
+                ;;
             pt__subcmd__help,tui)
                 cmd="pt__subcmd__help__subcmd__tui"
                 ;;
+            pt__subcmd__help,undo)
+                cmd="pt__subcmd__help__subcmd__undo"
+                ;;
             pt__subcmd__help,view)
                 cmd="pt__subcmd__help__subcmd__view"
+                ;;
+            pt__subcmd__help,why)
+                cmd="pt__subcmd__help__subcmd__why"
                 ;;
             pt__subcmd__help__subcmd__accountability,run)
                 cmd="pt__subcmd__help__subcmd__accountability__subcmd__run"
                 ;;
             pt__subcmd__help__subcmd__remote,add)
                 cmd="pt__subcmd__help__subcmd__remote__subcmd__add"
+                ;;
+            pt__subcmd__help__subcmd__remote,depend)
+                cmd="pt__subcmd__help__subcmd__remote__subcmd__depend"
                 ;;
             pt__subcmd__help__subcmd__remote,dismiss)
                 cmd="pt__subcmd__help__subcmd__remote__subcmd__dismiss"
@@ -193,11 +286,32 @@ _pt() {
             pt__subcmd__help__subcmd__remote,reopen)
                 cmd="pt__subcmd__help__subcmd__remote__subcmd__reopen"
                 ;;
+            pt__subcmd__help__subcmd__remote,rm)
+                cmd="pt__subcmd__help__subcmd__remote__subcmd__rm"
+                ;;
             pt__subcmd__help__subcmd__remote,show)
                 cmd="pt__subcmd__help__subcmd__remote__subcmd__show"
                 ;;
+            pt__subcmd__help__subcmd__remote,snooze)
+                cmd="pt__subcmd__help__subcmd__remote__subcmd__snooze"
+                ;;
+            pt__subcmd__help__subcmd__remote,start)
+                cmd="pt__subcmd__help__subcmd__remote__subcmd__start"
+                ;;
+            pt__subcmd__help__subcmd__remote,version)
+                cmd="pt__subcmd__help__subcmd__remote__subcmd__version"
+                ;;
             pt__subcmd__help__subcmd__scoring,run)
                 cmd="pt__subcmd__help__subcmd__scoring__subcmd__run"
+                ;;
+            pt__subcmd__help__subcmd__token,create)
+                cmd="pt__subcmd__help__subcmd__token__subcmd__create"
+                ;;
+            pt__subcmd__help__subcmd__token,list)
+                cmd="pt__subcmd__help__subcmd__token__subcmd__list"
+                ;;
+            pt__subcmd__help__subcmd__token,revoke)
+                cmd="pt__subcmd__help__subcmd__token__subcmd__revoke"
                 ;;
             pt__subcmd__help__subcmd__view,list)
                 cmd="pt__subcmd__help__subcmd__view__subcmd__list"
@@ -213,6 +327,9 @@ _pt() {
                 ;;
             pt__subcmd__remote,add)
                 cmd="pt__subcmd__remote__subcmd__add"
+                ;;
+            pt__subcmd__remote,depend)
+                cmd="pt__subcmd__remote__subcmd__depend"
                 ;;
             pt__subcmd__remote,dismiss)
                 cmd="pt__subcmd__remote__subcmd__dismiss"
@@ -238,11 +355,26 @@ _pt() {
             pt__subcmd__remote,reopen)
                 cmd="pt__subcmd__remote__subcmd__reopen"
                 ;;
+            pt__subcmd__remote,rm)
+                cmd="pt__subcmd__remote__subcmd__rm"
+                ;;
             pt__subcmd__remote,show)
                 cmd="pt__subcmd__remote__subcmd__show"
                 ;;
+            pt__subcmd__remote,snooze)
+                cmd="pt__subcmd__remote__subcmd__snooze"
+                ;;
+            pt__subcmd__remote,start)
+                cmd="pt__subcmd__remote__subcmd__start"
+                ;;
+            pt__subcmd__remote,version)
+                cmd="pt__subcmd__remote__subcmd__version"
+                ;;
             pt__subcmd__remote__subcmd__help,add)
                 cmd="pt__subcmd__remote__subcmd__help__subcmd__add"
+                ;;
+            pt__subcmd__remote__subcmd__help,depend)
+                cmd="pt__subcmd__remote__subcmd__help__subcmd__depend"
                 ;;
             pt__subcmd__remote__subcmd__help,dismiss)
                 cmd="pt__subcmd__remote__subcmd__help__subcmd__dismiss"
@@ -268,8 +400,20 @@ _pt() {
             pt__subcmd__remote__subcmd__help,reopen)
                 cmd="pt__subcmd__remote__subcmd__help__subcmd__reopen"
                 ;;
+            pt__subcmd__remote__subcmd__help,rm)
+                cmd="pt__subcmd__remote__subcmd__help__subcmd__rm"
+                ;;
             pt__subcmd__remote__subcmd__help,show)
                 cmd="pt__subcmd__remote__subcmd__help__subcmd__show"
+                ;;
+            pt__subcmd__remote__subcmd__help,snooze)
+                cmd="pt__subcmd__remote__subcmd__help__subcmd__snooze"
+                ;;
+            pt__subcmd__remote__subcmd__help,start)
+                cmd="pt__subcmd__remote__subcmd__help__subcmd__start"
+                ;;
+            pt__subcmd__remote__subcmd__help,version)
+                cmd="pt__subcmd__remote__subcmd__help__subcmd__version"
                 ;;
             pt__subcmd__scoring,help)
                 cmd="pt__subcmd__scoring__subcmd__help"
@@ -282,6 +426,30 @@ _pt() {
                 ;;
             pt__subcmd__scoring__subcmd__help,run)
                 cmd="pt__subcmd__scoring__subcmd__help__subcmd__run"
+                ;;
+            pt__subcmd__token,create)
+                cmd="pt__subcmd__token__subcmd__create"
+                ;;
+            pt__subcmd__token,help)
+                cmd="pt__subcmd__token__subcmd__help"
+                ;;
+            pt__subcmd__token,list)
+                cmd="pt__subcmd__token__subcmd__list"
+                ;;
+            pt__subcmd__token,revoke)
+                cmd="pt__subcmd__token__subcmd__revoke"
+                ;;
+            pt__subcmd__token__subcmd__help,create)
+                cmd="pt__subcmd__token__subcmd__help__subcmd__create"
+                ;;
+            pt__subcmd__token__subcmd__help,help)
+                cmd="pt__subcmd__token__subcmd__help__subcmd__help"
+                ;;
+            pt__subcmd__token__subcmd__help,list)
+                cmd="pt__subcmd__token__subcmd__help__subcmd__list"
+                ;;
+            pt__subcmd__token__subcmd__help,revoke)
+                cmd="pt__subcmd__token__subcmd__help__subcmd__revoke"
                 ;;
             pt__subcmd__view,help)
                 cmd="pt__subcmd__view__subcmd__help"
@@ -320,13 +488,17 @@ _pt() {
 
     case "${cmd}" in
         pt)
-            opts="-h -V --db --help --version add list done priority edit reopen show dismiss rm next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
+            opts="-h -V --db --json --idempotency-key --help --version add list done priority edit reopen show dismiss rm next view tui serve bot mcp digest export delegate branch distill accountability scoring remote start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -338,13 +510,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__accountability)
-            opts="-h --db --help run help"
+            opts="-h --db --json --idempotency-key --help run help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -398,13 +574,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__accountability__subcmd__run)
-            opts="-h --dry-run --db --help"
+            opts="-h --dry-run --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -416,7 +596,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__add)
-            opts="-p -d -h --priority --description --deadline --reason --raw --db --help <TITLE>"
+            opts="-p -d -h --priority --description --deadline --reason --raw --db --json --idempotency-key --help <TITLE>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -450,6 +630,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -458,13 +642,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__backfill)
-            opts="-h --db --help"
+            opts="-h --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -476,13 +664,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__bot)
-            opts="-h --db --help"
+            opts="-h --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -494,13 +686,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__branch)
-            opts="-h --db --help <QUERY>"
+            opts="-h --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -511,14 +707,22 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        pt__subcmd__dismiss)
-            opts="-h --db --help <QUERY>"
+        pt__subcmd__bulk)
+            opts="-h --set-priority --done --dismiss --dry-run --db --json --idempotency-key --help <FILTER>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --set-priority)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -529,8 +733,56 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        pt__subcmd__distill)
-            opts="-h --days --db --help"
+        pt__subcmd__delegate)
+            opts="-h --db --json --idempotency-key --help <ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__depend)
+            opts="-h --on --clear --db --json --idempotency-key --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --on)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__digest)
+            opts="-h --days --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -544,6 +796,58 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__dismiss)
+            opts="-h --db --json --idempotency-key --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__distill)
+            opts="-h --batch --db --json --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --batch)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -552,13 +856,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__done)
-            opts="-h --db --help <QUERY>"
+            opts="-h --db --json --idempotency-key --help <QUERIES>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -570,7 +878,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__edit)
-            opts="-h --deadline --clear-deadline --title --desc --db --help <QUERY>"
+            opts="-h --deadline --clear-deadline --title --desc --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -592,6 +900,36 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__export)
+            opts="-h --out --git --db --json --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --out)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -600,13 +938,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__gen__subcmd__completions)
-            opts="-h --db --help bash zsh fish"
+            opts="-h --db --json --idempotency-key --help bash zsh fish"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -618,13 +960,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__gen__subcmd__manpage)
-            opts="-h --db --help"
+            opts="-h --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -636,7 +982,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help)
-            opts="add list done priority edit reopen show dismiss rm next view tui serve bot branch distill accountability scoring remote backfill gen-manpage gen-completions help"
+            opts="add list done priority edit reopen show dismiss rm next view tui serve bot mcp digest export delegate branch distill accountability scoring remote start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -733,6 +1079,62 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__bulk)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__delegate)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__depend)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__digest)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__help__subcmd__dismiss)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -776,6 +1178,20 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help__subcmd__edit)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__export)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -845,6 +1261,34 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__log)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__mcp)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__help__subcmd__next)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -873,8 +1317,22 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__reap)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__help__subcmd__remote)
-            opts="add list done priority edit reopen show next dismiss"
+            opts="add list done priority edit reopen show next dismiss start snooze depend rm version"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -888,6 +1346,20 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help__subcmd__remote__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__remote__subcmd__depend)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -999,6 +1471,20 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__remote__subcmd__rm)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__help__subcmd__remote__subcmd__show)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -1013,7 +1499,63 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__remote__subcmd__snooze)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__remote__subcmd__start)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__remote__subcmd__version)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__help__subcmd__reopen)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__review)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1069,6 +1611,20 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__search)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__help__subcmd__serve)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -1097,7 +1653,105 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__snooze)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__start)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__token)
+            opts="create list revoke"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__token__subcmd__create)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__token__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__token__subcmd__revoke)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__help__subcmd__tui)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__undo)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1181,8 +1835,22 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__help__subcmd__why)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__list)
-            opts="-s -p -n -v -h --status --priority --limit --verbose --db --help [FILTER]"
+            opts="-s -p -n -v -h --status --priority --limit --verbose --db --json --idempotency-key --help [FILTER]"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1216,6 +1884,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1223,8 +1895,8 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        pt__subcmd__next)
-            opts="-n -h --limit --db --help"
+        pt__subcmd__log)
+            opts="-n -h --limit --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1242,6 +1914,62 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__mcp)
+            opts="-h --db --json --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__next)
+            opts="-n -h --limit --db --json --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --limit)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1250,13 +1978,39 @@ _pt() {
             return 0
             ;;
         pt__subcmd__priority)
-            opts="-h --db --help <QUERY> <LEVEL>"
+            opts="-h --db --json --idempotency-key --help <QUERY> <LEVEL>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__reap)
+            opts="-h --dry-run --json --db --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1268,13 +2022,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote)
-            opts="-h --db --help add list done priority edit reopen show next dismiss help"
+            opts="-h --db --json --idempotency-key --help add list done priority edit reopen show next dismiss start snooze depend rm version help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1286,7 +2044,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__add)
-            opts="-h --url --db --help <TEXT>"
+            opts="-h --url --db --json --idempotency-key --help <TEXT>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1297,6 +2055,40 @@ _pt() {
                     return 0
                     ;;
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__depend)
+            opts="-h --on --clear --url --db --json --idempotency-key --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --on)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1308,7 +2100,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__dismiss)
-            opts="-h --url --db --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1319,6 +2111,10 @@ _pt() {
                     return 0
                     ;;
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1330,7 +2126,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__done)
-            opts="-h --url --db --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1344,6 +2140,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1352,7 +2152,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__edit)
-            opts="-h --deadline --clear-deadline --title --desc --url --db --help <QUERY>"
+            opts="-h --deadline --clear-deadline --title --desc --url --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1378,6 +2178,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1386,7 +2190,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__help)
-            opts="add list done priority edit reopen show next dismiss help"
+            opts="add list done priority edit reopen show next dismiss start snooze depend rm version help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1400,6 +2204,20 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__help__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__help__subcmd__depend)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1525,6 +2343,20 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__remote__subcmd__help__subcmd__rm)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__remote__subcmd__help__subcmd__show)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -1539,8 +2371,50 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__remote__subcmd__help__subcmd__snooze)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__help__subcmd__start)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__help__subcmd__version)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__remote__subcmd__list)
-            opts="-s -p -n -h --status --priority --limit --url --db --help"
+            opts="-s -f -p -n -h --status --filter --priority --limit --url --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1551,6 +2425,14 @@ _pt() {
                     return 0
                     ;;
                 -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --filter)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -f)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1578,6 +2460,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1586,7 +2472,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__next)
-            opts="-n -h --limit --url --db --help"
+            opts="-n -h --limit --url --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1608,6 +2494,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1616,7 +2506,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__priority)
-            opts="-h --url --db --help <QUERY> <LEVEL>"
+            opts="-h --url --db --json --idempotency-key --help <QUERY> <LEVEL>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1627,6 +2517,10 @@ _pt() {
                     return 0
                     ;;
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1638,7 +2532,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__reopen)
-            opts="-h --url --db --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1649,6 +2543,36 @@ _pt() {
                     return 0
                     ;;
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__rm)
+            opts="-h --url --db --json --idempotency-key --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1660,7 +2584,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__show)
-            opts="-h --url --db --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1674,6 +2598,88 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__snooze)
+            opts="-h --url --db --json --idempotency-key --help <QUERY> [UNTIL]..."
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__start)
+            opts="-h --url --db --json --idempotency-key --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__remote__subcmd__version)
+            opts="-h --url --db --json --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --url)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1682,13 +2688,43 @@ _pt() {
             return 0
             ;;
         pt__subcmd__reopen)
-            opts="-h --db --help <QUERY>"
+            opts="-h --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__review)
+            opts="-h --stale-days --db --json --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --stale-days)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1700,13 +2736,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__rm)
-            opts="-y -h --yes --db --help <QUERY>"
+            opts="-y -h --yes --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1718,13 +2758,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__scoring)
-            opts="-h --db --help run help"
+            opts="-h --db --json --idempotency-key --help run help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1778,13 +2822,47 @@ _pt() {
             return 0
             ;;
         pt__subcmd__scoring__subcmd__run)
-            opts="-h --dry-run --db --help"
+            opts="-h --dry-run --v1 --diff --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__search)
+            opts="-n -h --limit --db --json --idempotency-key --help [QUERY]..."
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --limit)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1796,7 +2874,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__serve)
-            opts="-h --bind --db --help"
+            opts="-h --bind --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1810,6 +2888,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1818,13 +2900,223 @@ _pt() {
             return 0
             ;;
         pt__subcmd__show)
-            opts="-h --db --help <QUERY>"
+            opts="-h --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__snooze)
+            opts="-h --db --json --idempotency-key --help <QUERY> [UNTIL]..."
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__start)
+            opts="-h --db --json --idempotency-key --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__token)
+            opts="-h --db --json --idempotency-key --help create list revoke help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__token__subcmd__create)
+            opts="-h --scope --db --json --idempotency-key --help <CLIENT_ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --scope)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__token__subcmd__help)
+            opts="create list revoke help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__token__subcmd__help__subcmd__create)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__token__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__token__subcmd__help__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__token__subcmd__help__subcmd__revoke)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__token__subcmd__list)
+            opts="-h --db --json --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__token__subcmd__revoke)
+            opts="-h --db --json --idempotency-key --help <CLIENT_ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1836,13 +3128,39 @@ _pt() {
             return 0
             ;;
         pt__subcmd__tui)
-            opts="-h --db --help"
+            opts="-h --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__undo)
+            opts="-h --db --json --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1854,13 +3172,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view)
-            opts="-h --db --help save list show rm help"
+            opts="-h --db --json --idempotency-key --help save list show rm help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1956,13 +3278,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view__subcmd__list)
-            opts="-h --db --help"
+            opts="-h --db --json --idempotency-key --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1974,13 +3300,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view__subcmd__rm)
-            opts="-h --db --help <NAME>"
+            opts="-h --db --json --idempotency-key --help <NAME>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1992,13 +3322,17 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view__subcmd__save)
-            opts="-h --db --help <NAME> <FILTER>"
+            opts="-h --db --json --idempotency-key --help <NAME> <FILTER>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2010,7 +3344,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view__subcmd__show)
-            opts="-n -h --limit --db --help <NAME>"
+            opts="-n -h --limit --db --json --idempotency-key --help <NAME>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2025,6 +3359,32 @@ _pt() {
                     return 0
                     ;;
                 --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__why)
+            opts="-h --db --json --idempotency-key --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

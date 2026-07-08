@@ -367,6 +367,13 @@ Bonus this phase:
 
 **Exit criteria — partial:** every native module is in tree, clippy-clean, fmt-clean, and unit-tested. Phase boundary tagged at v0.9.0; live cutover deferred to a v0.9.x release once HAL endpoints exist and parity is verified. Python pipeline stays authoritative until that flip.
 
+**Superseded by v3.0.0:** `pt distill` is now the native Rust v2 pipeline.
+The Python subprocess shim, `--legacy`, `--days`, `PTASK_DISTILL_PY_ROOT`,
+`PTASK_HAL_CLASSIFY_URL`, and `PTASK_HAL_CONSOLIDATE_URL` are retired from
+the active runtime. Gemini classify/consolidate now goes through
+`ptask_distill::providers::GeminiProvider` with `thinkingBudget=0`, bounded
+timeouts, transient retry, and detailed `distill.failed` payloads.
+
 ---
 
 ### v0.10.0 — Multi-Node Fleet Rollout ✅ shipped (deployment kit; live deploy operator-supervised)

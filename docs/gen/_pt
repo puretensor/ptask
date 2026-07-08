@@ -281,6 +281,46 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(mcp)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(digest)
+_arguments "${_arguments_options[@]}" : \
+'--days=[Lookback window in days]:DAYS:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+'--out=[Output directory (default ~/puretensor-tasks/export)]:OUT:_files' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--git[Commit the export in-place (init a repo on first run)]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(delegate)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- Task handle (PT-N / uuid / title substring):_default' \
+&& ret=0
+;;
 (branch)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
@@ -293,11 +333,9 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (distill)
 _arguments "${_arguments_options[@]}" : \
-'--days=[Days of history for the LEGACY pipeline to ingest]:DAYS:_default' \
-'--batch=[Max raw_items consumed per NATIVE run]:BATCH:_default' \
+'--batch=[Max raw_items consumed per native run]:BATCH:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
-'--legacy[Run the retired Python subprocess pipeline instead of the native one]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
@@ -380,6 +418,8 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--dry-run[Compute and log scores but don'\''t write them back to the DB]' \
+'--v1[Use the retired v1 formula (comparison escape hatch)]' \
+'--diff[Print an old-vs-new top-20 rank diff (implies --dry-run semantics for the comparison pass; final write still follows the chosen mode)]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '-h[Print help]' \
 '--help[Print help]' \
@@ -700,6 +740,16 @@ _arguments "${_arguments_options[@]}" : \
 '*::until -- Wake date/time\: ISO or natural ("tomorrow 9am", "next monday"):_default' \
 && ret=0
 ;;
+(reap)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--dry-run[List what would be dismissed without touching anything]' \
+'--json[Emit the report as JSON (machine callers / timers)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (depend)
 _arguments "${_arguments_options[@]}" : \
 '--on=[The prerequisite task]:ON:_default' \
@@ -732,6 +782,16 @@ _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
 '*::query -- FTS5 query (words, phrases, AND/OR/NOT):_default' \
+&& ret=0
+;;
+(why)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N, bare integer, or title substring:_default' \
 && ret=0
 ;;
 (bulk)
@@ -976,6 +1036,22 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(mcp)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(digest)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delegate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (branch)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1104,6 +1180,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(reap)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (depend)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1113,6 +1193,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(why)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1198,16 +1282,22 @@ _pt_commands() {
 'tui:Launch the terminal UI (ratatui)' \
 'serve:Run the HTTP server (sync API, capture, webhooks, metrics)' \
 'bot:Run the Telegram bot (Bot API long-poll)' \
+'mcp:Serve the MCP server over stdio (agent-native tool surface)' \
+'digest:Session-priming digest\: recent done/dismissed/created + ready queue' \
+'export:Export tasks/links/labels as JSONL (optionally git-commit the export)' \
+'delegate:Print the operator-gated delegation command for a task (skeleton)' \
 'branch:Print a Linear-style branch name for a task' \
-'distill:Run the distillation pipeline (Python subprocess shim until v0.9)' \
+'distill:Run the native Rust distillation pipeline' \
 'accountability:Run one accountability cycle (escalation + Telegram/email)' \
 'scoring:Recompute composite priority scores for all active tasks' \
 'remote:Talk to a remote canonical \`pt serve\` (no local DB)' \
 'start:Mark a task in progress (you'\''re actively working it)' \
 'snooze:Snooze a task until a date — it leaves \`pt next\` and reminders, then wakes to todo automatically' \
+'reap:Reap stale machine-generated tasks (incident >7d idle, distilled >30d idle) — soft-dismiss, reversible via \`pt reopen\`' \
 'depend:Manage dependency edges\: PT-A depends on PT-B' \
 'review:Interactive review sweep\: stale, snoozed-expired, and triage items' \
 'search:Full-text search over titles + descriptions (FTS5)' \
+'why:Explain a task'\''s composite score\: components, weights, rank' \
 'bulk:Apply one action to every task matching a filter DSL expression' \
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
 'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
@@ -1275,10 +1365,20 @@ _pt__subcmd__bulk_commands() {
     local commands; commands=()
     _describe -t commands 'pt bulk commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__delegate_commands] )) ||
+_pt__subcmd__delegate_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt delegate commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__depend_commands] )) ||
 _pt__subcmd__depend_commands() {
     local commands; commands=()
     _describe -t commands 'pt depend commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__digest_commands] )) ||
+_pt__subcmd__digest_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt digest commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__dismiss_commands] )) ||
 _pt__subcmd__dismiss_commands() {
@@ -1299,6 +1399,11 @@ _pt__subcmd__done_commands() {
 _pt__subcmd__edit_commands() {
     local commands; commands=()
     _describe -t commands 'pt edit commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__export_commands] )) ||
+_pt__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt export commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__gen-completions_commands] )) ||
 _pt__subcmd__gen-completions_commands() {
@@ -1327,16 +1432,22 @@ _pt__subcmd__help_commands() {
 'tui:Launch the terminal UI (ratatui)' \
 'serve:Run the HTTP server (sync API, capture, webhooks, metrics)' \
 'bot:Run the Telegram bot (Bot API long-poll)' \
+'mcp:Serve the MCP server over stdio (agent-native tool surface)' \
+'digest:Session-priming digest\: recent done/dismissed/created + ready queue' \
+'export:Export tasks/links/labels as JSONL (optionally git-commit the export)' \
+'delegate:Print the operator-gated delegation command for a task (skeleton)' \
 'branch:Print a Linear-style branch name for a task' \
-'distill:Run the distillation pipeline (Python subprocess shim until v0.9)' \
+'distill:Run the native Rust distillation pipeline' \
 'accountability:Run one accountability cycle (escalation + Telegram/email)' \
 'scoring:Recompute composite priority scores for all active tasks' \
 'remote:Talk to a remote canonical \`pt serve\` (no local DB)' \
 'start:Mark a task in progress (you'\''re actively working it)' \
 'snooze:Snooze a task until a date — it leaves \`pt next\` and reminders, then wakes to todo automatically' \
+'reap:Reap stale machine-generated tasks (incident >7d idle, distilled >30d idle) — soft-dismiss, reversible via \`pt reopen\`' \
 'depend:Manage dependency edges\: PT-A depends on PT-B' \
 'review:Interactive review sweep\: stale, snoozed-expired, and triage items' \
 'search:Full-text search over titles + descriptions (FTS5)' \
+'why:Explain a task'\''s composite score\: components, weights, rank' \
 'bulk:Apply one action to every task matching a filter DSL expression' \
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
 'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
@@ -1385,10 +1496,20 @@ _pt__subcmd__help__subcmd__bulk_commands() {
     local commands; commands=()
     _describe -t commands 'pt help bulk commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__delegate_commands] )) ||
+_pt__subcmd__help__subcmd__delegate_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help delegate commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__depend_commands] )) ||
 _pt__subcmd__help__subcmd__depend_commands() {
     local commands; commands=()
     _describe -t commands 'pt help depend commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__digest_commands] )) ||
+_pt__subcmd__help__subcmd__digest_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help digest commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__dismiss_commands] )) ||
 _pt__subcmd__help__subcmd__dismiss_commands() {
@@ -1409,6 +1530,11 @@ _pt__subcmd__help__subcmd__done_commands() {
 _pt__subcmd__help__subcmd__edit_commands() {
     local commands; commands=()
     _describe -t commands 'pt help edit commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__export_commands] )) ||
+_pt__subcmd__help__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help export commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__gen-completions_commands] )) ||
 _pt__subcmd__help__subcmd__gen-completions_commands() {
@@ -1435,6 +1561,11 @@ _pt__subcmd__help__subcmd__log_commands() {
     local commands; commands=()
     _describe -t commands 'pt help log commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__mcp_commands] )) ||
+_pt__subcmd__help__subcmd__mcp_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help mcp commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__next_commands] )) ||
 _pt__subcmd__help__subcmd__next_commands() {
     local commands; commands=()
@@ -1444,6 +1575,11 @@ _pt__subcmd__help__subcmd__next_commands() {
 _pt__subcmd__help__subcmd__priority_commands() {
     local commands; commands=()
     _describe -t commands 'pt help priority commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__reap_commands] )) ||
+_pt__subcmd__help__subcmd__reap_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help reap commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__remote_commands] )) ||
 _pt__subcmd__help__subcmd__remote_commands() {
@@ -1651,6 +1787,11 @@ _pt__subcmd__help__subcmd__view__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt help view show commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__why_commands] )) ||
+_pt__subcmd__help__subcmd__why_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help why commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__list_commands] )) ||
 _pt__subcmd__list_commands() {
     local commands; commands=()
@@ -1661,6 +1802,11 @@ _pt__subcmd__log_commands() {
     local commands; commands=()
     _describe -t commands 'pt log commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__mcp_commands] )) ||
+_pt__subcmd__mcp_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt mcp commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__next_commands] )) ||
 _pt__subcmd__next_commands() {
     local commands; commands=()
@@ -1670,6 +1816,11 @@ _pt__subcmd__next_commands() {
 _pt__subcmd__priority_commands() {
     local commands; commands=()
     _describe -t commands 'pt priority commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__reap_commands] )) ||
+_pt__subcmd__reap_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt reap commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__remote_commands] )) ||
 _pt__subcmd__remote_commands() {
@@ -2060,6 +2211,11 @@ _pt__subcmd__view__subcmd__save_commands() {
 _pt__subcmd__view__subcmd__show_commands() {
     local commands; commands=()
     _describe -t commands 'pt view show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__why_commands] )) ||
+_pt__subcmd__why_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt why commands' commands "$@"
 }
 
 if [ "$funcstack[1]" = "_pt" ]; then

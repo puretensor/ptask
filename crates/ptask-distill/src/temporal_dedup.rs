@@ -6,7 +6,7 @@
 //! source text, keyed on `(source_type, text_hash)`, recorded into
 //! `pt_event_log` as `temporal_dedup.seen` rows. If we ingested the same
 //! raw line from the same source in the last 7 days we skip it without
-//! paying for an embedding or a HAL call.
+//! paying for embedding or Gemini work.
 //!
 //! Normalisation collapses whitespace and lowercases the input so that
 //! `"  Buy bread\n"` and `"buy bread"` hash identically — same content
@@ -17,8 +17,8 @@
 //! so re-recording the same key within one day is a no-op on duplicate
 //! UUIDs (event_log has a UNIQUE constraint).
 
-use crate::Db;
 use anyhow::{Result, anyhow};
+use ptask_core::Db;
 use rusqlite::params;
 use serde_json::json;
 use sha2::{Digest, Sha256};

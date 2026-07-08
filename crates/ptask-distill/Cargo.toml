@@ -1,6 +1,6 @@
 [package]
 name = "ptask-distill"
-description = "pTask distillation orchestrator. v0.6.x shims Python; v0.9.0 ports to Rust."
+description = "pTask native Rust distillation orchestrator."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,11 +18,9 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
-# Native ML (v0.8.2) — feature-gated since the native pipeline has never
-# driven production (`pt distill` runs the Python shim; the HAL endpoints
-# the native path needs were never stood up). Enable with `--features
-# native-ml` (or via ptask-cli's forwarding feature) to build the candle
-# embedding stack: ~170 extra crates and the largest share of compile time.
+# Native ML. Enable with `--features native-ml` (or via ptask-cli's
+# forwarding feature) to build the candle embedding stack: ~170 extra crates
+# and the largest share of compile time.
 candle-core = { workspace = true, optional = true }
 candle-nn = { workspace = true, optional = true }
 candle-transformers = { workspace = true, optional = true }

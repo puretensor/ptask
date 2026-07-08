@@ -1,6 +1,6 @@
 //! `raw_items` — staging table for incoming captures.
 //!
-//! The Python distill pipeline owns this table end-to-end (until v0.9).
+//! The native Rust distill pipeline owns this table end-to-end.
 //! pTask writes new captures here via `pt serve`'s `/capture` endpoint
 //! and the Telegram bot. Distillation picks them up, classifies, dedups,
 //! and consolidates into `tasks`.

@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH pt 1  "pt 2.1.0" 
+.TH pt 1  "pt 3.0.0"
 .SH NAME
 pt \- Sovereign task manager for PureTensor
 .SH SYNOPSIS
@@ -67,11 +67,23 @@ Run the HTTP server (sync API, capture, webhooks, metrics)
 pt\-bot(1)
 Run the Telegram bot (Bot API long\-poll)
 .TP
+pt\-mcp(1)
+Serve the MCP server over stdio (agent\-native tool surface)
+.TP
+pt\-digest(1)
+Session\-priming digest: recent done/dismissed/created + ready queue
+.TP
+pt\-export(1)
+Export tasks/links/labels as JSONL (optionally git\-commit the export)
+.TP
+pt\-delegate(1)
+Print the operator\-gated delegation command for a task (skeleton)
+.TP
 pt\-branch(1)
 Print a Linear\-style branch name for a task
 .TP
 pt\-distill(1)
-Run the distillation pipeline (Python subprocess shim until v0.9)
+Run the native Rust distillation pipeline
 .TP
 pt\-accountability(1)
 Run one accountability cycle (escalation + Telegram/email)
@@ -88,6 +100,9 @@ Mark a task in progress (you\*(Aqre actively working it)
 pt\-snooze(1)
 Snooze a task until a date — it leaves `pt next` and reminders, then wakes to todo automatically
 .TP
+pt\-reap(1)
+Reap stale machine\-generated tasks (incident >7d idle, distilled >30d idle) — soft\-dismiss, reversible via `pt reopen`
+.TP
 pt\-depend(1)
 Manage dependency edges: PT\-A depends on PT\-B
 .TP
@@ -96,6 +111,9 @@ Interactive review sweep: stale, snoozed\-expired, and triage items
 .TP
 pt\-search(1)
 Full\-text search over titles + descriptions (FTS5)
+.TP
+pt\-why(1)
+Explain a task\*(Aqs composite score: components, weights, rank
 .TP
 pt\-bulk(1)
 Apply one action to every task matching a filter DSL expression
@@ -121,4 +139,4 @@ Generate shell completions (bash/zsh/fish) to stdout
 pt\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH VERSION
-v2.1.0
+v3.0.0

@@ -33,10 +33,10 @@ ownership of one column-set per phase.
 | `raw_items → canonical_tasks → tasks` | Python | Python | Python | **Rust** (gated on HAL) |
 | `pt_extensions`, `pt_views`, `pt_recurrence`, `pt_event_log`, `pt_webhook_log` | Rust | Rust | Rust | Rust |
 
-`v0.9` cutover is **architectural** — every native module exists and is
-tested, but `pt distill` still shells out to Python until the operator
-stands up `PTASK_HAL_CLASSIFY_URL` + `PTASK_HAL_CONSOLIDATE_URL` and
-signs off on parity.
+`v0.9` cutover was architectural. As of v3.0.0, `pt distill` is the native
+Rust path and no longer shells out to Python. `PTASK_HAL_CLASSIFY_URL`,
+`PTASK_HAL_CONSOLIDATE_URL`, and `PTASK_DISTILL_PY_ROOT` are not part of
+the active distill runtime.
 
 ## Safety nets
 

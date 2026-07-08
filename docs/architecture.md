@@ -81,8 +81,8 @@ artifact.
 
 V010 merged `pt_extensions` into `tasks` (the side table survives as a
 compat VIEW for the dashboard sidecar until Phase 7), introduced the
-8-state `status_v2` model (legacy `tasks.status` is maintained in sync by
-every Rust write because the legacy Python distill still writes rows),
+8-state `status_v2` model (legacy `tasks.status` is maintained in sync for
+dashboard/accountability compatibility),
 `task_links` (depends_on/blocks/discovered_from/subtask_of),
 `task_labels`, `due_at`/`snoozed_until`/`parent_uuid`, one-way folded
 `interactions` into `pt_event_log`, UTC-normalized timestamps, and FTS5
@@ -104,10 +104,7 @@ carries no HTTP/TLS/executor dependencies.
 | `PTASK_SYNC_URL` | `pt remote` (clients) | `http://100.121.42.54:9501`. Set fleet-wide by `/etc/profile.d/ptask.sh`. |
 | `PTASK_API_TOKEN` | `pt serve`, `pt remote` | Required for non-loopback `pt serve` binds; clients send it as `Authorization: Bearer`. |
 | `PTASK_ALLOW_UNAUTHENTICATED` | `pt serve` | Emergency/test override for unauthenticated non-loopback binds. Do not set in production. |
-| `PTASK_DISTILL_PY_ROOT` | `pt distill --legacy` | `/home/puretensorai/puretensor-tasks-legacy` — the RETIRED Python tree, kept only for the `--legacy` escape hatch. The default pipeline is native (v2.1.0). |
-| `GOOGLE_API_KEY`, `GEMINI_CONSOLIDATE_MODEL` | `pt distill` (native) | Gemini structured-output credentials/model for classify+consolidate. Missing key = preflight exit 3, fail closed. |
-| `PTASK_HAL_CLASSIFY_URL` | `pt distill` (native) | HAL endpoint for the speech-act classifier (v0.8.3). |
-| `PTASK_HAL_CONSOLIDATE_URL` | `pt distill` (native) | HAL endpoint for cluster → task consolidation (v0.8.7). |
+| `GOOGLE_API_KEY`, `GEMINI_CONSOLIDATE_MODEL` | `pt distill` | Gemini structured-output credentials/model for native classify+consolidate. Missing key = preflight exit 3, fail closed. |
 | `PTASK_TELEGRAM_BOT_TOKEN`, `PTASK_ACCOUNTABILITY_CHAT_ID`, `PTASK_SMTP_*` | accountability | Existing v0.7 surface. |
 | `PTASK_LITESTREAM_*` | `litestream` | Only consulted by the alternate S3 replica config — unused while the CephFS replica is active. |
 

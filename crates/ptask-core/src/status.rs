@@ -2,10 +2,9 @@
 //!
 //! Eight checked states. The legacy `tasks.status` vocabulary
 //! (pending/delayed/done/dismissed/blocked) remains the compat surface for
-//! the not-yet-retired legacy consumers (Python distill writes it; the
-//! dashboard sidecar and accountability SQL read it), so every write path
-//! sets BOTH columns via [`legacy`]'s total mapping. The legacy column is
-//! dropped when those consumers retire (Phases 5–7).
+//! the dashboard sidecar and older accountability SQL, so every write path
+//! sets BOTH columns via [`legacy`]'s total mapping. The legacy column can
+//! be dropped after those readers are retired.
 
 use crate::error::{Error, Result};
 

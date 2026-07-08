@@ -3,7 +3,7 @@
 //!
 //! Every binary entrypoint calls [`Config::from_env`] exactly once and
 //! threads the pieces to where they're used (axum `AppState`, the
-//! accountability dispatcher, the distill shim). Library code never touches
+//! accountability dispatcher, and native distill). Library code never touches
 //! `std::env` — the v1.x pattern of ~20 ambient reads scattered through
 //! auth/storage/accountability/webhooks made behaviour depend on *when* a
 //! value was read and made tests non-hermetic on any host that exports
@@ -69,11 +69,9 @@ pub struct WebhookConfig {
     pub github_secret: String,
 }
 
-/// Distillation configuration (native pipeline + legacy shim escape).
+/// Native distillation configuration.
 #[derive(Debug, Clone, Default)]
 pub struct DistillConfig {
-    /// Root of the legacy Python pipeline (`pt distill --legacy` cwd).
-    pub py_root: PathBuf,
     /// Gemini API key for the native pipeline ($GOOGLE_API_KEY).
     pub gemini_api_key: Option<String>,
     /// Gemini model id ($GEMINI_CONSOLIDATE_MODEL, default gemini-2.5-flash).
@@ -166,9 +164,6 @@ impl Config {
                 github_secret: std::env::var("PTASK_GITHUB_WEBHOOK_SECRET").unwrap_or_default(),
             },
             distill: DistillConfig {
-                py_root: std::env::var("PTASK_DISTILL_PY_ROOT")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| home_dir().join("puretensor-tasks")),
                 gemini_api_key: env_nonempty("GOOGLE_API_KEY"),
                 gemini_model: env_nonempty("GEMINI_CONSOLIDATE_MODEL")
                     .unwrap_or_else(|| "gemini-2.5-flash".into()),

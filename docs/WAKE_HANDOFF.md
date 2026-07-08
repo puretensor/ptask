@@ -23,12 +23,13 @@ All five activation steps executed, with one deliberate withdrawal:
 
 ## Key deviations from the pre-v1.0 plan
 
-These triggered the v1.0.3 doc-reality patch:
+These triggered the v1.0.3 doc-reality patch. Item 4 was superseded by
+v3.0.0.
 
 1. **Canonical = tensor-core, not mon1.** mon1 has no `~/puretensor-tasks` and never did in this cycle. The pre-v1.0 docs were ahead of reality.
 2. **Litestream uses CephFS file replica, not S3 RGW.** RGW endpoint wasn't reachable; CephFS at `/mnt/ceph-backup` was. The repo config now documents the CephFS path as active and keeps the S3 path as a documented alternate.
 3. **Fleet is heterogeneous.** mon2 needs glibc 2.35 binary (Ubuntu 22.04); mon3 needs aarch64. Documented in `scripts/ansible/inventory.yml` per-host `ptask_arch_override`. Ansible playbook still assumes one controller-side binary works everywhere — the multi-arch build/dispatch logic is a v1.x.x follow-up.
-4. **`pt distill` still calls Python.** The Rust pipeline modules exist (v0.8.2 – v0.8.8) but aren't wired through `pt distill` yet. A systemd drop-in at `~/.config/systemd/user/ptask-distill.service.d/python-root.conf` sets `PTASK_DISTILL_PY_ROOT=/home/puretensorai/puretensor-tasks-legacy` so the shim still finds the archived Python tree. Native cutover is queued for v1.x.x.
+4. **Superseded: `pt distill` used to call Python.** As of v3.0.0, `pt distill` is the native Rust pipeline. The `PTASK_DISTILL_PY_ROOT` drop-in is obsolete and should be removed wherever found.
 
 ## Quick verification commands
 
@@ -46,11 +47,10 @@ pt --version
 pt remote list -n 1                                        # uses PTASK_SYNC_URL
 ```
 
-## Carryovers still to land (v1.x.x)
+## Carryovers still to land
 
 See `docs/master-plan.md` § Carryovers. None are deployment-blocking.
 
-- Native `pt distill` (drop the Python shim entirely).
 - Multi-arch / old-glibc build matrix in `release.yml` and the Ansible
   playbook.
 - DNS: either point `ptask.ts.puretensor.local` at tensor-core:9501 or

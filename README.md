@@ -11,7 +11,7 @@
 - **Work in order** — DAG dependencies (`pt next` shows only unblocked tasks), composite priority scoring with explainability (`pt why PT-42`), recurrence (`every` vs `every!`), snooze.
 - **Stay honest** — attributed event log (`pt log`: who did what, via which surface), `pt undo`, accountability escalation state machine with Telegram/SMTP/HAL notifications, staleness reaper for machine-generated tasks.
 - **Feed the agents** — MCP server (11 tools over streamable-HTTP and stdio), atomic `task_claim` so parallel agents can't collide, `discovered_from` provenance links, deterministic `task_digest` session priming, scoped named API tokens.
-- **Distill the noise** — distillation pipeline turns raw fleet signals into deduplicated tasks (semantic + temporal dedup, close-on-recovery). Rust orchestrator owns the timer and audit log; native candle-based ML stages sit behind the `native-ml` feature while the legacy Python shim remains the production entry point.
+- **Distill the noise** — native Rust distillation turns raw fleet signals into deduplicated tasks (Gemini structured-output classify/consolidate, semantic + temporal dedup, close-on-recovery). `pt distill` is canonical; the legacy Python pipeline is archived for reference only.
 
 ## Quick start
 
@@ -51,7 +51,7 @@ Single Cargo workspace, single binary `pt`. SQLite via `rusqlite` (bundled), mig
 | `ptask-server` | Sync API, capture, webhooks, MCP HTTP mount, metrics |
 | `ptask-tui` | Terminal UI |
 | `ptask-bot` | Telegram bot |
-| `ptask-distill` | Distillation orchestrator + native ML stages (`native-ml` feature) |
+| `ptask-distill` | Native Rust distillation orchestrator + ML stages (`native-ml` feature) |
 | `ptask-notify` | Notification adapters (Telegram/SMTP/HAL) behind ptask-core's `Dispatch` trait |
 
 Fleet topology (canonical store, Litestream WAL replication to CephFS, per-node roles, ansible rollout): [`docs/architecture.md`](docs/architecture.md). Backups, restore drills, and timers: [`docs/operations.md`](docs/operations.md).
