@@ -74,7 +74,7 @@ pub struct WebhookConfig {
 pub struct DistillConfig {
     /// Gemini API key for the native pipeline ($GOOGLE_API_KEY).
     pub gemini_api_key: Option<String>,
-    /// Gemini model id ($GEMINI_CONSOLIDATE_MODEL, default gemini-2.5-flash).
+    /// Gemini model id ($GEMINI_CONSOLIDATE_MODEL, default gemini-3.5-flash).
     pub gemini_model: String,
 }
 
@@ -166,7 +166,7 @@ impl Config {
             distill: DistillConfig {
                 gemini_api_key: env_nonempty("GOOGLE_API_KEY"),
                 gemini_model: env_nonempty("GEMINI_CONSOLIDATE_MODEL")
-                    .unwrap_or_else(|| "gemini-2.5-flash".into()),
+                    .unwrap_or_else(|| "gemini-3.5-flash".into()),
             },
             dash: DashConfig {
                 user: env_nonempty("PTASK_DASH_USER").unwrap_or_else(|| "ops".into()),
