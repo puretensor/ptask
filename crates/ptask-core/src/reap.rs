@@ -54,10 +54,10 @@ pub fn run(db: &Db, dry_run: bool, ctx: &EventCtx) -> Result<ReapReport> {
                AND (
                      (source_type = 'incident'
                       AND priority <= 4
-                      AND updated_at < strftime('%Y-%m-%dT%H:%M:%f', 'now', ?1) || '+00:00')
+                      AND julianday(updated_at) < julianday('now', ?1))
                   OR (source_type = 'distilled'
                       AND priority <= 3
-                      AND updated_at < strftime('%Y-%m-%dT%H:%M:%f', 'now', ?2) || '+00:00')
+                      AND julianday(updated_at) < julianday('now', ?2))
                )
              ORDER BY updated_at ASC",
         )?;
@@ -196,5 +196,38 @@ mod tests {
         age(&db, &t.id, 30);
         let dry = run(&db, true, &EventCtx::test()).unwrap();
         assert!(dry.reaped.is_empty(), "{:?}", dry.reaped);
+    }
+
+    #[test]
+    fn reaper_compares_mixed_offset_updated_at_as_instants() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("t.db")).unwrap();
+        let actually_fresh = mk(&db, "fresh across offset", "incident", 4);
+        let actually_stale = mk(&db, "stale across offset", "incident", 4);
+        db.with_conn(|c| {
+            // Incident cutoff is now-7d. This is cutoff+1h represented at
+            // -05:00; its wall-clock hour sorts before the UTC cutoff.
+            c.execute(
+                "UPDATE tasks SET updated_at =
+                    strftime('%Y-%m-%dT%H:%M:%f','now','-7 days','-4 hours') || '-05:00'
+                  WHERE id=?1",
+                [&actually_fresh.id],
+            )?;
+            // This is cutoff-1h represented at +05:00; its wall-clock hour
+            // sorts after the UTC cutoff.
+            c.execute(
+                "UPDATE tasks SET updated_at =
+                    strftime('%Y-%m-%dT%H:%M:%f','now','-7 days','+4 hours') || '+05:00'
+                  WHERE id=?1",
+                [&actually_stale.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let report = run(&db, true, &EventCtx::test()).unwrap();
+        let ids: Vec<&str> = report.reaped.iter().map(|r| r.uuid.as_str()).collect();
+        assert!(!ids.contains(&actually_fresh.id.as_str()));
+        assert!(ids.contains(&actually_stale.id.as_str()));
     }
 }

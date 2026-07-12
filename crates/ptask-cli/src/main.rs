@@ -1587,6 +1587,24 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
     Ok(())
 }
 
+type ReviewRow = (String, Option<String>, String, String, String);
+
+fn stale_review_tasks(db: &Db, cutoff_iso: &str) -> Result<Vec<ReviewRow>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.pt_id, t.title, t.status_v2, t.updated_at
+         FROM tasks t
+         WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
+           AND julianday(t.updated_at) < julianday(?1)
+         ORDER BY t.updated_at ASC",
+    )?;
+    Ok(stmt
+        .query_map([&cutoff_iso], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?)
+}
+
 fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
     use std::io::Write;
     let stale_cutoff = ptask_core::dates::now_in_operator_tz()
@@ -1594,21 +1612,7 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
         .checked_sub(ptask_core::jiff::Span::new().days(a.stale_days))
         .map_err(|e| anyhow::anyhow!("cutoff math: {e}"))?;
     let cutoff_iso = ptask_core::dates::format_iso(&stale_cutoff);
-    let conn = db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.pt_id, t.title, t.status_v2, t.updated_at
-         FROM tasks t
-         WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
-           AND t.updated_at < ?1
-         ORDER BY t.updated_at ASC",
-    )?;
-    let stale: Vec<(String, Option<String>, String, String, String)> = stmt
-        .query_map([&cutoff_iso], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-        })?
-        .collect::<std::result::Result<_, _>>()?;
-    drop(stmt);
-    drop(conn);
+    let stale = stale_review_tasks(db, &cutoff_iso)?;
 
     if stale.is_empty() {
         println!(
@@ -2273,7 +2277,7 @@ fn cmd_backfill(db: &Db) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::short_id;
+    use super::{short_id, stale_review_tasks};
 
     #[test]
     fn short_id_is_char_boundary_safe() {
@@ -2288,5 +2292,33 @@ mod tests {
         // Multi-byte chars before byte 8: 'ú' starts at byte 8 (a boundary),
         // so the first 8 bytes are the 4 two-byte scalars "áéíó".
         assert_eq!(short_id("áéíóúab8xyz"), "áéíó");
+    }
+
+    #[test]
+    fn stale_review_query_compares_instants_across_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("review.db")).unwrap();
+        let ctx = ptask_core::event_log::EventCtx::test();
+        let stale =
+            ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("stale"), &ctx).unwrap();
+        let fresh =
+            ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("fresh"), &ctx).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET updated_at='2026-07-01T10:30:00Z' WHERE id=?1",
+                [&stale.id],
+            )?;
+            c.execute(
+                "UPDATE tasks SET updated_at='2026-07-01T11:30:00Z' WHERE id=?1",
+                [&fresh.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let rows = stale_review_tasks(&db, "2026-07-01T12:00:00+01:00").unwrap();
+        let ids: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
+        assert!(ids.contains(&stale.id.as_str()));
+        assert!(!ids.contains(&fresh.id.as_str()));
     }
 }

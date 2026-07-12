@@ -89,6 +89,19 @@ fn select_kept_texts(texts: &[String], verdicts: &[Classification]) -> Result<Ve
     Ok(kept)
 }
 
+fn existing_tasks_since(db: &Db, cutoff: &str) -> Result<Vec<(String, String)>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, title FROM tasks
+         WHERE status_v2 NOT IN ('done','dismissed')
+            OR julianday(updated_at) >= julianday(?1)",
+    )?;
+    let rows = stmt.query_map([cutoff], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// One native run. `batch` bounds how many inbox rows are consumed.
 pub fn run_native<P: LlmProvider>(db: &Db, provider: &P, batch: usize) -> Result<NativeReport> {
     let start = std::time::Instant::now();
@@ -123,23 +136,12 @@ pub fn run_native<P: LlmProvider>(db: &Db, provider: &P, batch: usize) -> Result
 
         // Dedup universe: everything active + anything touched in 30 days
         // (incl. done/dismissed — the operator said no once already).
-        let existing: Vec<(String, String)> = {
-            let conn = db.get()?;
-            let mut stmt = conn.prepare(
-                "SELECT id, title FROM tasks
-                 WHERE status_v2 NOT IN ('done','dismissed')
-                    OR updated_at >= ?1",
-            )?;
-            let cutoff = ptask_core::dates::format_iso(
-                &ptask_core::dates::now_in_operator_tz()?
-                    .checked_sub(ptask_core::jiff::Span::new().days(30))
-                    .map_err(|e| anyhow::anyhow!("cutoff math: {e}"))?,
-            );
-            let rows = stmt.query_map([cutoff], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?;
-            rows.collect::<std::result::Result<_, _>>()?
-        };
+        let cutoff = ptask_core::dates::format_iso(
+            &ptask_core::dates::now_in_operator_tz()?
+                .checked_sub(ptask_core::jiff::Span::new().days(30))
+                .map_err(|e| anyhow::anyhow!("cutoff math: {e}"))?,
+        );
+        let existing = existing_tasks_since(db, &cutoff)?;
 
         // v2.5.0: semantic layer over the Jaccard gate. The embedder loads
         // once per run; a load failure degrades to Jaccard-only (fail open).
@@ -466,6 +468,40 @@ mod tests {
                 "malformed response must consume nothing"
             );
         }
+    }
+
+    #[test]
+    fn recent_terminal_task_cutoff_compares_instants_across_offsets() {
+        let (_dir, db) = fresh_db();
+        let recent =
+            ptask_core::tasks::create(&db, NewTask::minimal("recent terminal"), &EventCtx::test())
+                .unwrap();
+        let old =
+            ptask_core::tasks::create(&db, NewTask::minimal("old terminal"), &EventCtx::test())
+                .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET status='done', status_v2='done',
+                                  updated_at='2026-07-01T11:30:00Z'
+                  WHERE id=?1",
+                [&recent.id],
+            )?;
+            c.execute(
+                "UPDATE tasks SET status='done', status_v2='done',
+                                  updated_at='2026-07-01T10:30:00Z'
+                  WHERE id=?1",
+                [&old.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // 12:00 BST is 11:00 UTC. The recent row is 30 minutes newer even
+        // though both UTC hour fields sort below the cutoff's local hour.
+        let rows = existing_tasks_since(&db, "2026-07-01T12:00:00+01:00").unwrap();
+        let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&recent.id.as_str()));
+        assert!(!ids.contains(&old.id.as_str()));
     }
 
     #[test]

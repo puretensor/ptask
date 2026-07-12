@@ -126,8 +126,9 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             let now_iso = params.len();
             format!(
                 "(t.deadline IS NOT NULL AND t.status != 'done' AND \
-                 (substr(t.deadline,1,10) < ?{today} OR \
-                  (substr(t.deadline,1,10) = ?{today} AND length(t.deadline) > 10 AND t.deadline < ?{now_iso})))"
+                 ((length(t.deadline) = 10 AND substr(t.deadline,1,10) < ?{today}) OR \
+                  (length(t.deadline) > 10 \
+                   AND julianday(t.deadline) < julianday(?{now_iso}))))"
             )
         }
         Expr::NoDate => "t.deadline IS NULL".to_string(),
@@ -624,6 +625,8 @@ mod tests {
                ('today date-only', '2026-05-13', 'pending'),
                ('earlier today time', '2026-05-13T10:00:00+01:00', 'pending'),
                ('later today time', '2026-05-13T18:00:00+01:00', 'pending'),
+               ('past mixed offset', '2026-05-13T10:30:00Z', 'pending'),
+               ('future mixed offset', '2026-05-13T11:30:00Z', 'pending'),
                ('done yesterday', '2026-05-12', 'done');",
         )
         .unwrap();
@@ -640,6 +643,68 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<_, _>>()
             .unwrap();
-        assert_eq!(rows, vec!["earlier today time", "yesterday date-only"]);
+        assert_eq!(
+            rows,
+            vec![
+                "earlier today time",
+                "past mixed offset",
+                "yesterday date-only"
+            ]
+        );
+    }
+
+    #[test]
+    fn overdue_datetime_comparison_handles_offsets_across_calendar_dates() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (title TEXT, deadline TEXT, status TEXT);
+             CREATE TABLE pt_extensions (task_uuid TEXT, labels TEXT);
+             INSERT INTO tasks (title, deadline, status) VALUES
+               ('future with previous UTC date', '2026-05-12T23:30:00Z', 'pending'),
+               ('past with next local date', '2026-05-14T00:00:00+02:00', 'pending');",
+        )
+        .unwrap();
+
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        let just_after_midnight = jiff::civil::date(2026, 5, 13)
+            .at(0, 15, 0, 0)
+            .to_zoned(tz.clone())
+            .unwrap();
+        let sql = to_sql(&ast("overdue"), &just_after_midnight).unwrap();
+        let query = format!(
+            "SELECT title FROM tasks t LEFT JOIN pt_extensions x ON 1=0 WHERE {} ORDER BY title",
+            sql.where_clause
+        );
+        let params = bind_refs(&sql.params);
+        let rows: Vec<String> = conn
+            .prepare(&query)
+            .unwrap()
+            .query_map(params.as_slice(), |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert!(rows.is_empty(), "future instants were overdue: {rows:?}");
+
+        let just_before_midnight = jiff::civil::date(2026, 5, 13)
+            .at(23, 45, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        let sql = to_sql(&ast("overdue"), &just_before_midnight).unwrap();
+        let query = format!(
+            "SELECT title FROM tasks t LEFT JOIN pt_extensions x ON 1=0 WHERE {} ORDER BY title",
+            sql.where_clause
+        );
+        let params = bind_refs(&sql.params);
+        let rows: Vec<String> = conn
+            .prepare(&query)
+            .unwrap()
+            .query_map(params.as_slice(), |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert!(
+            rows.contains(&"past with next local date".to_string()),
+            "past cross-date instant was not overdue: {rows:?}"
+        );
     }
 }

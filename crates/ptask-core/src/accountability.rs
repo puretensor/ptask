@@ -137,9 +137,14 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
          FROM tasks
          WHERE status IN ('pending', 'delayed')
            AND NOT (COALESCE(status_v2,'') = 'snoozed'
-                    AND snoozed_until IS NOT NULL AND snoozed_until > ?1)
+                    AND snoozed_until IS NOT NULL
+                    AND ((length(snoozed_until) = 10
+                          AND snoozed_until > substr(?1, 1, 10))
+                         OR (length(snoozed_until) > 10
+                             AND julianday(snoozed_until) > julianday(?1))))
            AND COALESCE(task_type,'operational') != 'idea'
-           AND (next_reminder IS NULL OR next_reminder <= ?1)
+           AND (next_reminder IS NULL
+                OR julianday(next_reminder) <= julianday(?1))
            AND COALESCE(escalation_level, 0) < 5
          ORDER BY (last_reminded IS NOT NULL), last_reminded ASC,
                   priority_score DESC, priority DESC",
@@ -405,7 +410,10 @@ pub async fn run_check_at<D: Dispatch>(
     now: &Zoned,
 ) -> Result<RunReport> {
     let now_utc = now.with_time_zone(jiff::tz::TimeZone::UTC);
-    let now_iso_utc = crate::dates::format_iso(&now_utc);
+    let operator_tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ)
+        .map_err(|e| Error::Other(format!("operator tz: {e}")))?;
+    let now_operator = now.with_time_zone(operator_tz);
+    let now_iso_operator = crate::dates::format_iso(&now_operator);
     let date_utc = now_utc.date().to_string();
     let mut report = RunReport {
         quiet_hours: in_quiet_hours_at(now),
@@ -426,7 +434,7 @@ pub async fn run_check_at<D: Dispatch>(
         );
     }
 
-    let eligible = fetch_eligible(db, &now_iso_utc)?;
+    let eligible = fetch_eligible(db, &now_iso_operator)?;
     report.eligible = eligible.len() as i64;
     let mut sent_telegrams = 0i64;
     let mut telegram_consecutive_failures = 0i64;
@@ -697,6 +705,75 @@ mod tests {
         assert_eq!(increment_daily_budget(&db, "2026-05-13").unwrap(), 2);
         assert_eq!(get_daily_budget(&db, "2026-05-13").unwrap(), 2);
         assert_eq!(get_daily_budget(&db, "2026-05-14").unwrap(), 0);
+    }
+
+    #[test]
+    fn eligibility_respects_mixed_offset_snooze_and_reminder_instants() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let snoozed = create_with_extensions(
+            &db,
+            NewTask::minimal("future snooze"),
+            Extensions::default(),
+            &ctx,
+        )
+        .unwrap();
+        let reminded = create_with_extensions(
+            &db,
+            NewTask::minimal("future reminder"),
+            Extensions::default(),
+            &ctx,
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET status='delayed', status_v2='snoozed',
+                                  snoozed_until='2026-05-13T12:30:00Z'
+                  WHERE id=?1",
+                [&snoozed.id],
+            )?;
+            c.execute(
+                "UPDATE tasks SET next_reminder='2026-05-13T12:30:00Z'
+                  WHERE id=?1",
+                [&reminded.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // 13:00 BST is 12:00 UTC. Both timestamps are still 30 minutes in
+        // the future even though their hour fields sort before 13 lexically.
+        let eligible = fetch_eligible(&db, "2026-05-13T13:00:00+01:00").unwrap();
+        assert!(
+            eligible.is_empty(),
+            "unexpected eligible tasks: {eligible:?}"
+        );
+    }
+
+    #[test]
+    fn eligibility_treats_date_only_snooze_as_operator_midnight() {
+        let (_dir, db) = fresh_db();
+        let task = create_with_extensions(
+            &db,
+            NewTask::minimal("date-only snooze"),
+            Extensions::default(),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET status='delayed', status_v2='snoozed',
+                                  snoozed_until='2026-05-13'
+                  WHERE id=?1",
+                [&task.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let eligible = fetch_eligible(&db, "2026-05-13T00:30:00+01:00").unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].id, task.id);
     }
 
     #[test]

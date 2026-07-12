@@ -1171,19 +1171,32 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
         let mut stmt = conn.prepare(
             "SELECT id FROM tasks
              WHERE status_v2='snoozed' AND snoozed_until IS NOT NULL
-               AND snoozed_until <= ?1",
+               AND ((length(snoozed_until) = 10
+                     AND snoozed_until <= substr(?1, 1, 10))
+                    OR (length(snoozed_until) > 10
+                        AND julianday(snoozed_until) <= julianday(?1)))",
         )?;
         let rows = stmt.query_map([now_iso], |r| r.get::<_, String>(0))?;
         rows.collect::<std::result::Result<_, _>>()?
     };
+    let mut woken = 0usize;
     for uuid in &expired {
         let mut conn = db.get()?;
         let tx = conn.transaction()?;
-        tx.execute(
+        let changed = tx.execute(
             "UPDATE tasks SET status_v2='todo', status='pending',
-                              snoozed_until=NULL, updated_at=?1 WHERE id=?2",
+                              snoozed_until=NULL, updated_at=?1
+              WHERE id=?2 AND status_v2='snoozed'
+                AND snoozed_until IS NOT NULL
+                AND ((length(snoozed_until) = 10
+                      AND snoozed_until <= substr(?1, 1, 10))
+                     OR (length(snoozed_until) > 10
+                         AND julianday(snoozed_until) <= julianday(?1)))",
             params![now_iso, uuid],
         )?;
+        if changed == 0 {
+            continue;
+        }
         record_event_tx(
             &tx,
             ctx,
@@ -1192,8 +1205,9 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
             &serde_json::json!({ "task_uuid": uuid, "status": "todo", "woke_from_snooze": true }),
         )?;
         tx.commit()?;
+        woken += 1;
     }
-    Ok(expired.len())
+    Ok(woken)
 }
 
 /// Add a `depends_on` edge: `from` cannot start until `to` is done.
@@ -2340,6 +2354,73 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn wake_expired_snoozes_compares_instants_across_offsets() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let expired = create(&db, NewTask::minimal("wake me"), &ctx).unwrap();
+        let future = create(&db, NewTask::minimal("not yet"), &ctx).unwrap();
+        snooze(&db, &expired.id, "2026-07-01T07:00:00Z", &ctx).unwrap();
+        snooze(&db, &future.id, "2026-07-01T08:00:00Z", &ctx).unwrap();
+
+        // 08:30 BST is 07:30 UTC: only the first snooze has expired. A
+        // lexical comparison wakes both because "08:00Z" < "08:30+01".
+        assert_eq!(
+            wake_expired_snoozes(
+                &db,
+                "2026-07-01T08:30:00+01:00",
+                &EventCtx::system("wake-test")
+            )
+            .unwrap(),
+            1
+        );
+        db.with_conn(|c| {
+            let expired_status: String = c.query_row(
+                "SELECT status_v2 FROM tasks WHERE id=?1",
+                [&expired.id],
+                |r| r.get(0),
+            )?;
+            let future_status: String = c.query_row(
+                "SELECT status_v2 FROM tasks WHERE id=?1",
+                [&future.id],
+                |r| r.get(0),
+            )?;
+            assert_eq!(expired_status, "todo");
+            assert_eq!(future_status, "snoozed");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn wake_expired_snoozes_preserves_operator_date_semantics() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let task = create(&db, NewTask::minimal("wake on date"), &ctx).unwrap();
+        snooze(&db, &task.id, "2026-07-01", &ctx).unwrap();
+
+        assert_eq!(
+            wake_expired_snoozes(
+                &db,
+                "2026-06-30T23:30:00+01:00",
+                &EventCtx::system("wake-test")
+            )
+            .unwrap(),
+            0,
+            "date-only snooze must not wake on the preceding operator date"
+        );
+        assert_eq!(
+            wake_expired_snoozes(
+                &db,
+                "2026-07-01T00:30:00+01:00",
+                &EventCtx::system("wake-test")
+            )
+            .unwrap(),
+            1,
+            "date-only snooze expires at operator-local midnight"
+        );
     }
 
     #[test]
