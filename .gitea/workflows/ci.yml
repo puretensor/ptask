@@ -41,6 +41,15 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: production feature wiring
+        run: bash scripts/ci-production-build-check.sh
+
+      - name: production binary build
+        run: cargo build --release --bin pt --features native-ml --locked
+
+      - name: native ML tests
+        run: cargo test -p ptask-distill --features native-ml --locked
+
       - name: cargo test
         # PTASK_API_TOKEN must not leak in from the runner host — the
         # ptask-server auth tests require a hermetic env (see v1.13.0).

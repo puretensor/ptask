@@ -41,13 +41,14 @@ all:
               ansible_host: mon1
             mon2:
               ansible_host: mon2
-              # glibc 2.35 — build with `cargo build --release` inside
-              # an ubuntu:22.04 container, override via -e ptask_binary=...
+              # glibc 2.35 — inside an ubuntu:22.04 container, run:
+              # `cargo build --release --bin pt --features native-ml --locked`
+              # Override via -e ptask_binary=...
               ptask_arch_override: x86_64-ubuntu22
             mon3:
               ansible_host: mon3
-              # aarch64 — build with `--target aarch64-unknown-linux-gnu`
-              # natively or in an arm64 container, override via -e ptask_binary=...
+              # aarch64 — natively or in an arm64 container, run:
+              # `cargo build --release --bin pt --features native-ml --target aarch64-unknown-linux-gnu --locked`
               ptask_arch_override: aarch64
             arx1:
               ansible_host: arx1

@@ -68,10 +68,10 @@ The fleet isn't uniform — Ansible has per-host overrides:
 
 | Host | Arch / glibc | Binary source |
 |---|---|---|
-| tensor-core | x86_64, glibc 2.39 (Ubuntu 24.04) | `cargo build --release` on controller |
+| tensor-core | x86_64, glibc 2.39 (Ubuntu 24.04) | `cargo build --release --bin pt --features native-ml --locked` on controller |
 | mon1, arx1-4, fox-n0/1 | x86_64, glibc 2.39 | Same as controller |
 | **mon2** | x86_64, **glibc 2.35** | Build in `ubuntu:22.04` container |
-| **mon3** | **aarch64** | Build `--target aarch64-unknown-linux-gnu` |
+| **mon3** | **aarch64** | Add `--target aarch64-unknown-linux-gnu` to the production build command |
 
 Use `-e ptask_binary=/path/to/per-host/build` on the per-host Ansible
 invocation to override the default per-arch `dist/pt-<target-triple>`

@@ -80,7 +80,7 @@
           Download the release artifacts first:
             gh release download vX.Y.Z --pattern 'pt-*' -D dist --clobber
           or cross-build:
-            cargo build --release --bin pt --target {{ ptask_target_triple }}
+            cargo build --release --bin pt --features native-ml --target {{ ptask_target_triple }} --locked
             cp target/{{ ptask_target_triple }}/release/pt dist/pt-{{ ptask_target_triple }}
       when: not pt_local.stat.exists
 

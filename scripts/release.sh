@@ -32,8 +32,16 @@ echo "release: cargo fmt --check"
 cargo fmt --all -- --check
 echo "release: cargo clippy"
 cargo clippy --workspace --all-targets -- -D warnings
+echo "release: cargo clippy (production native-ml feature)"
+cargo clippy -p ptask-cli --all-targets --features native-ml -- -D warnings
 echo "release: cargo test"
 cargo test --workspace --locked --quiet
+echo "release: cargo test (native-ml)"
+cargo test -p ptask-distill --features native-ml --locked --quiet
+echo "release: production feature wiring"
+bash scripts/ci-production-build-check.sh
+echo "release: production binary build"
+cargo build --release --bin pt --features native-ml --locked
 
 # 3. Tag + push to both remotes.
 echo "release: tagging $TAG"

@@ -7,7 +7,8 @@ name: release
 #
 # Musl static-binary target deferred: candle + tokenizers + onig need
 # musl-clean build env validation that lives on the workstation, not in
-# CI. Once `cargo build --target x86_64-unknown-linux-musl --release`
+# CI. Once `cargo build --release --bin pt --features native-ml --target
+# x86_64-unknown-linux-musl --locked`
 # succeeds locally, add the target to the matrix.
 
 on:
@@ -61,7 +62,7 @@ jobs:
           PTASK_RELEASE_TAG: ${{ github.ref_name }}
 
       - name: cargo build --release
-        run: cargo build --release --bin pt --target ${{ matrix.target }} --locked
+        run: cargo build --release --bin pt --features native-ml --target ${{ matrix.target }} --locked
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
