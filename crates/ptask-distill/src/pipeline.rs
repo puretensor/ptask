@@ -19,8 +19,8 @@
 //! keep working unchanged; failures record `distill.failed` and exit
 //! non-zero.
 
-use crate::providers::LlmProvider;
-use anyhow::{Context, Result};
+use crate::providers::{Classification, LlmProvider};
+use anyhow::{Context, Result, bail};
 use ptask_core::Db;
 use ptask_core::event_log::{self, EventCtx};
 use ptask_core::{Extensions, NewTask};
@@ -55,6 +55,40 @@ fn title_similar(a: &str, b: &str) -> bool {
     inter / union >= 0.6
 }
 
+/// Select kept inputs only after proving the provider returned a complete,
+/// one-to-one index permutation. A response with the right length can still
+/// duplicate one index and omit another; silently accepting that drops work.
+fn select_kept_texts(texts: &[String], verdicts: &[Classification]) -> Result<Vec<String>> {
+    if verdicts.len() != texts.len() {
+        bail!(
+            "provider returned {} verdicts for {} items — failing closed",
+            verdicts.len(),
+            texts.len()
+        );
+    }
+    let mut seen = vec![false; texts.len()];
+    let mut kept = Vec::new();
+    for verdict in verdicts {
+        let Some(text) = texts.get(verdict.idx) else {
+            bail!(
+                "provider returned out-of-range verdict index {} for {} items — failing closed",
+                verdict.idx,
+                texts.len()
+            );
+        };
+        if std::mem::replace(&mut seen[verdict.idx], true) {
+            bail!(
+                "provider returned duplicate verdict index {} — failing closed",
+                verdict.idx
+            );
+        }
+        if verdict.keep {
+            kept.push(text.clone());
+        }
+    }
+    Ok(kept)
+}
+
 /// One native run. `batch` bounds how many inbox rows are consumed.
 pub fn run_native<P: LlmProvider>(db: &Db, provider: &P, batch: usize) -> Result<NativeReport> {
     let start = std::time::Instant::now();
@@ -80,11 +114,7 @@ pub fn run_native<P: LlmProvider>(db: &Db, provider: &P, batch: usize) -> Result
 
     let texts: Vec<String> = items.iter().map(|i| i.text.clone()).collect();
     let verdicts = provider.classify_batch(&texts)?;
-    let kept: Vec<String> = verdicts
-        .iter()
-        .filter(|v| v.keep)
-        .filter_map(|v| texts.get(v.idx).cloned())
-        .collect();
+    let kept = select_kept_texts(&texts, &verdicts)?;
 
     let mut created = 0usize;
     let mut skipped = 0usize;
@@ -281,7 +311,29 @@ pub fn record_failure(db: &Db, provider: &str, error: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::{Candidate, MockProvider};
+    use crate::providers::{Candidate, Classification, MockProvider};
+
+    struct IndexedProvider {
+        verdicts: Vec<Classification>,
+    }
+
+    impl LlmProvider for IndexedProvider {
+        fn classify_batch(&self, _texts: &[String]) -> Result<Vec<Classification>> {
+            Ok(self.verdicts.clone())
+        }
+
+        fn consolidate(&self, _items: &[String]) -> Result<Vec<Candidate>> {
+            panic!("malformed verdicts must fail before consolidation")
+        }
+
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            "indexed-test"
+        }
+    }
 
     fn fresh_db() -> (tempfile::TempDir, Db) {
         let dir = tempfile::tempdir().unwrap();
@@ -367,6 +419,53 @@ mod tests {
             1,
             "nothing consumed on failure"
         );
+    }
+
+    #[test]
+    fn malformed_verdict_indices_fail_without_consuming_input() {
+        for verdicts in [
+            vec![
+                Classification {
+                    idx: 0,
+                    keep: true,
+                    confidence: 1.0,
+                    reason: String::new(),
+                },
+                Classification {
+                    idx: 0,
+                    keep: true,
+                    confidence: 1.0,
+                    reason: String::new(),
+                },
+            ],
+            vec![
+                Classification {
+                    idx: 0,
+                    keep: true,
+                    confidence: 1.0,
+                    reason: String::new(),
+                },
+                Classification {
+                    idx: 2,
+                    keep: true,
+                    confidence: 1.0,
+                    reason: String::new(),
+                },
+            ],
+        ] {
+            let (_dir, db) = fresh_db();
+            seed_inbox(&db, &["first commitment", "second commitment"]);
+            let err = run_native(&db, &IndexedProvider { verdicts }, 100).unwrap_err();
+            assert!(
+                err.to_string().contains("verdict index"),
+                "unexpected error: {err:#}"
+            );
+            assert_eq!(
+                ptask_core::raw_items::unprocessed_count(&db).unwrap(),
+                2,
+                "malformed response must consume nothing"
+            );
+        }
     }
 
     #[test]

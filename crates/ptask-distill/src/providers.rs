@@ -139,17 +139,24 @@ impl GeminiProvider {
         let resp = self
             .client
             .post(self.endpoint())
-            .query(&[("key", self.api_key.as_str())])
+            // Keep credentials out of the URL. reqwest includes request URLs
+            // in transport errors, and the caller persists those errors in
+            // `distill.failed`; a query-string key could therefore land in
+            // SQLite and journald on DNS/connect failures.
+            .header("x-goog-api-key", self.api_key.as_str())
             .json(body)
             .send()
             .map_err(|e| {
                 let retryable = e.is_timeout() || e.is_connect() || e.is_request();
-                GeminiCallError::new(format!("transport error: {e}"), retryable)
+                GeminiCallError::new(format!("transport error: {}", e.without_url()), retryable)
             })?;
         let status = resp.status();
         let text = resp.text().map_err(|e| {
             let retryable = e.is_timeout() || e.is_connect() || e.is_request();
-            GeminiCallError::new(format!("response body read failed: {e}"), retryable)
+            GeminiCallError::new(
+                format!("response body read failed: {}", e.without_url()),
+                retryable,
+            )
         })?;
         if !status.is_success() {
             return Err(GeminiCallError::new(
@@ -396,5 +403,66 @@ mod tests {
         assert!(is_retryable_status(StatusCode::SERVICE_UNAVAILABLE));
         assert!(!is_retryable_status(StatusCode::BAD_REQUEST));
         assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn gemini_transport_errors_do_not_expose_api_key() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let secret = "sentinel-secret-api-key";
+        let provider = GeminiProvider::with_base_url(
+            secret.into(),
+            "test-model".into(),
+            format!("http://{addr}"),
+        )
+        .unwrap();
+
+        let err = provider
+            .generate_once(&serde_json::json!({"contents": []}))
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains(secret), "credential leaked in error: {err}");
+        assert!(!err.contains("?key="), "query credential leaked: {err}");
+    }
+
+    #[test]
+    fn gemini_sends_api_key_in_header_not_query() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 16 * 1024];
+            let n = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let body = r#"{"candidates":[{"content":{"parts":[{"text":"true"}]}}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            request
+        });
+        let secret = "sentinel-header-key";
+        let provider = GeminiProvider::with_base_url(
+            secret.into(),
+            "test-model".into(),
+            format!("http://{addr}/v1beta"),
+        )
+        .unwrap();
+
+        provider.preflight().unwrap();
+        let request = server.join().unwrap();
+        let lower = request.to_ascii_lowercase();
+        assert!(lower.starts_with("post /v1beta/models/test-model:generatecontent http/1.1\r\n"));
+        assert!(lower.contains(&format!("x-goog-api-key: {secret}\r\n")));
+        assert!(
+            !lower.contains("?key="),
+            "credential remained in URI: {request}"
+        );
     }
 }
