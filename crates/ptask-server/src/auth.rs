@@ -1,8 +1,9 @@
 //! Optional application-level auth for mutating HTTP routes.
 //!
-//! `pt serve` still defaults to unauthenticated localhost/Tailscale operation
-//! for backwards compatibility. Set `PTASK_API_TOKEN` to require callers of
-//! `/sync`, `/capture`, `/email`, and `/metrics` to send either:
+//! Loopback `pt serve` keeps unauthenticated local-development compatibility.
+//! Non-loopback listeners require both `PTASK_API_TOKEN` and dashboard Basic
+//! auth unless the explicit unauthenticated override is set. The API token
+//! requires machine-API callers to send either:
 //!   - `Authorization: Bearer <token>`
 //!   - `X-PTask-Token: <token>`
 
@@ -10,13 +11,14 @@ use axum::Json;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use ptask_core::Db;
-use ptask_core::config::AuthConfig;
+use ptask_core::config::{AuthConfig, DashConfig};
 use ptask_core::tokens::{self, Identity, Scope};
 use std::net::SocketAddr;
 use std::sync::Once;
 use tracing::warn;
 
 const API_TOKEN_ENV: &str = "PTASK_API_TOKEN";
+const DASH_PASS_ENV: &str = "PTASK_DASH_PASS";
 const ALLOW_UNAUTH_ENV: &str = "PTASK_ALLOW_UNAUTHENTICATED";
 const TOKEN_HEADER: &str = "x-ptask-token";
 
@@ -112,24 +114,38 @@ fn unauthorized() -> Response {
 /// Refuse externally reachable unauthenticated API listeners by default.
 ///
 /// Loopback keeps the old local-dev behaviour. Any non-loopback bind must have
-/// `PTASK_API_TOKEN` configured, unless an operator explicitly sets
-/// `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately isolated deployment.
-pub fn validate_bind_auth(addr: &SocketAddr, auth: &AuthConfig) -> Result<(), String> {
-    validate_bind_auth_state(addr, auth.api_token.is_some(), auth.allow_unauthenticated)
+/// both machine-API bearer auth and dashboard Basic auth configured, unless an
+/// operator explicitly sets `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately
+/// isolated deployment. The dashboard routes are always mounted, so an API
+/// token alone does not make the listener safe.
+pub fn validate_bind_auth(
+    addr: &SocketAddr,
+    auth: &AuthConfig,
+    dash: &DashConfig,
+) -> Result<(), String> {
+    validate_bind_auth_state(
+        addr,
+        auth.api_token.is_some(),
+        dash.pass.is_some(),
+        auth.allow_unauthenticated,
+    )
 }
 
 fn validate_bind_auth_state(
     addr: &SocketAddr,
     api_token_configured: bool,
+    dash_password_configured: bool,
     allow_unauthenticated: bool,
 ) -> Result<(), String> {
-    if addr.ip().is_loopback() || api_token_configured || allow_unauthenticated {
+    if addr.ip().is_loopback()
+        || (api_token_configured && dash_password_configured)
+        || allow_unauthenticated
+    {
         return Ok(());
     }
 
     Err(format!(
-        "{} is unset while binding {addr}; refusing to expose /sync, /capture, /email, and read APIs without application auth. Set {} or bind to 127.0.0.1. For an intentional isolated deployment only, set {}=1.",
-        API_TOKEN_ENV, API_TOKEN_ENV, ALLOW_UNAUTH_ENV
+        "refusing to bind {addr} without complete application auth; non-loopback listeners require both {API_TOKEN_ENV} for machine APIs and {DASH_PASS_ENV} for the always-mounted dashboard. Set the missing credential(s) or bind to 127.0.0.1. For an intentional isolated deployment only, set {ALLOW_UNAUTH_ENV}=1."
     ))
 }
 
@@ -196,26 +212,39 @@ mod tests {
     #[test]
     fn validate_bind_auth_allows_loopback_without_token() {
         let addr: SocketAddr = "127.0.0.1:9501".parse().unwrap();
-        assert!(validate_bind_auth_state(&addr, false, false).is_ok());
+        assert!(validate_bind_auth_state(&addr, false, false, false).is_ok());
     }
 
     #[test]
     fn validate_bind_auth_rejects_non_loopback_without_token() {
         let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
-        let err = validate_bind_auth_state(&addr, false, false).unwrap_err();
+        let err = validate_bind_auth_state(&addr, false, false, false).unwrap_err();
         assert!(err.contains(API_TOKEN_ENV));
+        assert!(err.contains(DASH_PASS_ENV));
         assert!(err.contains("refusing"));
     }
 
     #[test]
-    fn validate_bind_auth_allows_non_loopback_with_token() {
+    fn validate_bind_auth_rejects_non_loopback_with_only_api_token() {
         let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
-        assert!(validate_bind_auth_state(&addr, true, false).is_ok());
+        assert!(validate_bind_auth_state(&addr, true, false, false).is_err());
+    }
+
+    #[test]
+    fn validate_bind_auth_rejects_non_loopback_with_only_dashboard_password() {
+        let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
+        assert!(validate_bind_auth_state(&addr, false, true, false).is_err());
+    }
+
+    #[test]
+    fn validate_bind_auth_allows_non_loopback_with_both_credentials() {
+        let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
+        assert!(validate_bind_auth_state(&addr, true, true, false).is_ok());
     }
 
     #[test]
     fn validate_bind_auth_allows_explicit_override() {
         let addr: SocketAddr = "0.0.0.0:9501".parse().unwrap();
-        assert!(validate_bind_auth_state(&addr, false, true).is_ok());
+        assert!(validate_bind_auth_state(&addr, false, false, true).is_ok());
     }
 }

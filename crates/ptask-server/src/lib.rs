@@ -127,7 +127,7 @@ pub async fn serve(
     webhook_cfg: WebhookConfig,
     dash_cfg: DashConfig,
 ) -> Result<()> {
-    if let Err(e) = auth::validate_bind_auth(&addr, &auth_cfg) {
+    if let Err(e) = auth::validate_bind_auth(&addr, &auth_cfg, &dash_cfg) {
         anyhow::bail!(e);
     }
     auth::warn_if_unconfigured(&auth_cfg);

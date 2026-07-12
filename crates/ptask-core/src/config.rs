@@ -34,7 +34,8 @@ pub struct DashConfig {
     /// Basic-auth user (`$PTASK_DASH_USER`, default "ops").
     pub user: String,
     /// Basic-auth password (`$PTASK_DASH_PASS`). None = dashboard routes
-    /// open (local/dev) — mirror of the sidecar's disabled-if-unset rule.
+    /// open on loopback (local/dev). Non-loopback `pt serve` binds reject a
+    /// missing password unless the explicit unauthenticated override is set.
     pub pass: Option<String>,
     /// Static www dir (`$PTASK_DASH_WWW`, default ~/ptask/dashboard/www).
     pub www_dir: PathBuf,

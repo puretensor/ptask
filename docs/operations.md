@@ -276,12 +276,13 @@ loginctl enable-linger "$USER"
 ### Rust API server (`ptask-serve.service`)
 
 The canonical host also runs the Rust HTTP server so fleet clients can
-hit `/sync`. The unit binds a non-loopback Tailscale address, so
-`PTASK_API_TOKEN` must be present in `~/puretensor-tasks/.env` before the
-service will start:
+hit `/sync`. The unit binds a non-loopback Tailscale address and always mounts
+the dashboard, so both `PTASK_API_TOKEN` and `PTASK_DASH_PASS` must be present
+in `~/puretensor-tasks/.env` before the service will start:
 
 ```bash
 grep '^PTASK_API_TOKEN=' ~/puretensor-tasks/.env
+grep '^PTASK_DASH_PASS=' ~/puretensor-tasks/.env
 ln -sf ~/ptask/scripts/systemd/ptask-serve.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ptask-serve.service
@@ -290,7 +291,7 @@ systemctl --user enable --now ptask-serve.service
 # it on that address rather than loopback.
 curl http://100.121.42.54:9501/healthz   # → ok
 curl -H "Authorization: Bearer $PTASK_API_TOKEN" \
-  http://100.121.42.54:9501/version       # → {"ptask_core":"1.12.0"}
+  http://100.121.42.54:9501/version       # → {"ptask_core":"<current version>"}
 ```
 
 Fleet clients reach this via Tailscale at `http://100.121.42.54:9501`;

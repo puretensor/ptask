@@ -20,14 +20,19 @@
 ## Auth
 
 Loopback `pt serve` binds keep the original local-dev mode and accept requests
-without an application token. Non-loopback binds fail closed unless
-`PTASK_API_TOKEN` is set; `PTASK_ALLOW_UNAUTHENTICATED=1` is an explicit
-test-only override for isolated deployments.
+without application credentials. Because the machine APIs and the always-
+mounted dashboard use separate auth schemes, non-loopback binds fail closed
+unless both `PTASK_API_TOKEN` and `PTASK_DASH_PASS` are set.
+`PTASK_ALLOW_UNAUTHENTICATED=1` is an explicit test-only override for isolated
+deployments.
 
-`PTASK_API_TOKEN` gates `POST /sync`, `POST /capture`, `POST /email`, and the
-read APIs (`GET /next`, `GET /detail/{uuid}`, `GET /resolve`, `GET /metrics`).
-`/healthz`, `/version`, and HMAC-verified git webhooks do not use this bearer
-token.
+`PTASK_API_TOKEN` gates `POST /sync`, `POST /capture`,
+`POST /capture/resolve`, `POST /email`, `POST /tg/callback`, and the read APIs
+(`GET /next`, `GET /detail/{uuid}`, `GET /resolve`, `GET /list`,
+`GET /metrics`). The `/mcp` mount separately requires a non-revoked named
+`hal` token with write scope; the legacy environment token is not accepted
+there. `/healthz`, `/version`, and HMAC-verified git webhooks do not use the
+machine-API bearer token.
 
 When configured, clients must send one of:
 
