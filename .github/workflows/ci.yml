@@ -64,6 +64,7 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - run: bash scripts/ci-version-check.sh
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
       # The feature-gated native ML stack still has to pass its tests.

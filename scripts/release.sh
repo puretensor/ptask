@@ -25,13 +25,15 @@ if [[ "$BRANCH" != "main" ]]; then
     exit 1
 fi
 
-# 2. Cargo gates.
+# 2. Version + Cargo gates.
+echo "release: version + lockfile coherence"
+PTASK_RELEASE_TAG="$TAG" bash scripts/ci-version-check.sh
 echo "release: cargo fmt --check"
 cargo fmt --all -- --check
 echo "release: cargo clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 echo "release: cargo test"
-cargo test --workspace --quiet
+cargo test --workspace --locked --quiet
 
 # 3. Tag + push to both remotes.
 echo "release: tagging $TAG"

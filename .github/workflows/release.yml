@@ -55,6 +55,11 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
+      - name: verify version and lockfile coherence
+        run: bash scripts/ci-version-check.sh
+        env:
+          PTASK_RELEASE_TAG: ${{ github.ref_name }}
+
       - name: cargo build --release
         run: cargo build --release --bin pt --target ${{ matrix.target }} --locked
         env:
