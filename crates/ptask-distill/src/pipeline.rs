@@ -169,8 +169,15 @@ pub fn run_native<P: LlmProvider>(db: &Db, provider: &P, batch: usize) -> Result
                 continue;
             }
             // Exact-hash temporal dedup: the same candidate text distilled
-            // twice inside 7 days is a re-ingest, not new work.
-            match crate::temporal_dedup::check_and_record(db, "distill-candidate", &cand.title, 7) {
+            // twice inside 7 days is a re-ingest, not new work. Only record
+            // the candidate after task creation succeeds; otherwise a
+            // transient database failure would make the retry disappear.
+            match crate::temporal_dedup::is_temporal_duplicate(
+                db,
+                "distill-candidate",
+                &cand.title,
+                7,
+            ) {
                 Ok(true) => {
                     skipped += 1;
                     info!(target: "ptask::distill", title = %cand.title, "dedup skip (temporal)");
@@ -238,6 +245,14 @@ pub fn run_native<P: LlmProvider>(db: &Db, provider: &P, batch: usize) -> Result
                 ai_reasoning: format!("native distill ({})", provider.name()),
             };
             ptask_core::tasks::create_with_extensions(db, new, Extensions::default(), &ctx)?;
+            if let Err(e) = crate::temporal_dedup::record_seen(db, "distill-candidate", &cand.title)
+            {
+                warn!(
+                    target: "ptask::distill",
+                    error = %e,
+                    "task created but temporal dedup marker could not be recorded"
+                );
+            }
             created += 1;
         }
     }
@@ -502,6 +517,67 @@ mod tests {
         let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
         assert!(ids.contains(&recent.id.as_str()));
         assert!(!ids.contains(&old.id.as_str()));
+    }
+
+    #[test]
+    fn failed_task_creation_does_not_poison_temporal_dedup() {
+        let (_dir, db) = fresh_db();
+        seed_inbox(&db, &["call the supplier about the replacement part"]);
+        let provider = MockProvider {
+            broken: false,
+            emit: vec![Candidate {
+                title: "Call the supplier".into(),
+                priority: 3,
+                description: String::new(),
+            }],
+        };
+
+        db.with_conn(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER reject_distilled_task
+                 BEFORE INSERT ON tasks
+                 WHEN NEW.source_type = 'distilled'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'simulated task insert failure');
+                 END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let error = run_native(&db, &provider, 100).unwrap_err();
+        assert!(error.to_string().contains("simulated task insert failure"));
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+        assert!(
+            !crate::temporal_dedup::is_temporal_duplicate(
+                &db,
+                "distill-candidate",
+                "Call the supplier",
+                7,
+            )
+            .unwrap(),
+            "a failed create must remain eligible for retry"
+        );
+
+        db.with_conn(|c| {
+            c.execute_batch("DROP TRIGGER reject_distilled_task;")?;
+            Ok(())
+        })
+        .unwrap();
+
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert_eq!(report.created, 1);
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 0);
+        assert!(
+            crate::temporal_dedup::is_temporal_duplicate(
+                &db,
+                "distill-candidate",
+                "Call the supplier",
+                7,
+            )
+            .unwrap(),
+            "a successful create should record the temporal marker"
+        );
     }
 
     #[test]
