@@ -82,7 +82,7 @@ pub fn run(db: &Db, dry_run: bool, ctx: &EventCtx) -> Result<ReapReport> {
     let mut errors = 0usize;
     if !dry_run {
         for c in &candidates {
-            let ctx = ctx.with_uuid(format!("reap:{}:{}", c.uuid, &c.updated_at));
+            let ctx = ctx.with_uuid(format!("reap:{}:{}", c.uuid, c.updated_at));
             if let Err(e) = crate::tasks::dismiss(db, &c.uuid, &ctx) {
                 tracing::warn!(target: "ptask::reap", uuid = %c.uuid, error = %e, "dismiss failed");
                 errors += 1;
