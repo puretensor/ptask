@@ -42,6 +42,7 @@
          else 'x86_64-unknown-linux-gnu' }}
     ptask_binary: "{{ ptask_dist_dir }}/pt-{{ ptask_target_triple }}"
     ptask_systemd_dir: "{{ ansible_env.HOME }}/.config/systemd/user"
+    ptask_libexec_dir: "{{ ansible_env.HOME }}/.local/libexec"
     ptask_timer_units:
       - ptask-backup.service
       - ptask-backup.timer
@@ -126,6 +127,18 @@
       ansible.builtin.file:
         path: "{{ ptask_systemd_dir }}"
         state: directory
+        mode: '0755'
+
+    - name: ensure user libexec dir exists
+      ansible.builtin.file:
+        path: "{{ ptask_libexec_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: install credential-safe failure alert helper
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../ptask_failure_alert.py"
+        dest: "{{ ptask_libexec_dir }}/ptask-failure-alert"
         mode: '0755'
 
     - name: install systemd units

@@ -65,6 +65,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: bash scripts/ci-version-check.sh
+      - run: python3 -m unittest discover -s scripts/tests -v
       - run: cargo build --workspace --locked
       - run: bash scripts/ci-production-build-check.sh
       - run: cargo build --release --bin pt --features native-ml --locked

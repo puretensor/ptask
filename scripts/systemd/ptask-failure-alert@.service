@@ -10,9 +10,6 @@ Documentation=https://github.com/puretensor/ptask
 [Service]
 Type=oneshot
 EnvironmentFile=%h/puretensor-tasks/.env
-ExecStart=/usr/bin/curl -sS --max-time 20 \
-    --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-    --data-urlencode "text=🔴 ptask unit FAILED on %H: %i — journalctl --user -u %i -n 30" \
-    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+ExecStart=%h/.local/libexec/ptask-failure-alert %i %H
 StandardOutput=journal
 StandardError=journal

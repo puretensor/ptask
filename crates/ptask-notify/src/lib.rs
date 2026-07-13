@@ -18,6 +18,21 @@ use tracing::warn;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HttpDispatch;
 
+fn log_telegram_send_error(error: &reqwest::Error) {
+    let error_kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else {
+        "other"
+    };
+    // reqwest's Display can include the request URL. Telegram credentials
+    // live in that URL, so only log a safe category.
+    warn!(target: "ptask::notify", error_kind, "telegram send error");
+}
+
 impl Dispatch for HttpDispatch {
     /// Send `text` via the Telegram Bot API. `Ok(true)` on HTTP 2xx,
     /// `Ok(false)` on network failure / non-2xx (logged). Non-empty
@@ -54,7 +69,7 @@ impl Dispatch for HttpDispatch {
                 Ok(false)
             }
             Err(e) => {
-                warn!(target: "ptask::notify", error = %e, "telegram send error");
+                log_telegram_send_error(&e);
                 Ok(false)
             }
         }
@@ -139,6 +154,33 @@ impl Dispatch for HttpDispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct LockedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LockedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedWriter {
+        type Writer = LockedWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LockedWriter(Arc::clone(&self.0))
+        }
+    }
 
     /// Network-level failure surfaces as Ok(false), not Err — the run loop
     /// counts it as a send failure and circuit-breaks. Uses an unroutable
@@ -153,6 +195,29 @@ mod tests {
         };
         let sent = HttpDispatch.send_telegram(&cfg, "x", &[]).await.unwrap();
         assert!(!sent);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn telegram_transport_log_omits_token_and_url() {
+        let token = "sentinel-secret-token";
+        let error = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:1/bot{token}/sendMessage"))
+            .send()
+            .await
+            .unwrap_err();
+        let logs = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            log_telegram_send_error(&error);
+        });
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("error_kind"), "captured logs: {output:?}");
+        assert!(!output.contains(token));
+        assert!(!output.contains("/sendMessage"));
     }
 
     #[tokio::test]
