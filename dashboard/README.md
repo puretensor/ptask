@@ -158,6 +158,13 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.8.0** — the flux chip is now a **range picker**: click it for a dropdown
+  of 30m / 1h / 6h / 24h / 7d. `/api/stats` returns `flux.by_window` (added,
+  added_human, added_machine, done for every window) plus `flux.windows`, so the
+  cockpit switches range as an instant local re-render off the last payload — no
+  refetch. Selection persists in `localStorage`. Both servers changed (Rust `pt
+  serve` 3.3.0 + Python sidecar 0.8.0); the flat `added_24h*` fields are replaced
+  by the windowed object.
 - **v0.7.0** — provenance + flux: every card wears a subtle `PT-xxxx` tag with
   an origin glyph (person = operator-entered `manual`/`voice_memo`/`telegram`,
   bot = machine-generated: `claude_code`, `mcp`, `distilled`, `incident`, …);

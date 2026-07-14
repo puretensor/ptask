@@ -75,7 +75,7 @@ class EventHistoryTests(unittest.TestCase):
 
 
 class StatsFluxTests(unittest.TestCase):
-    def test_q_stats_reports_24h_flux_split_by_origin(self):
+    def test_q_stats_reports_windowed_flux_split_by_origin(self):
         old_db = server.DB_PATH
         with tempfile.NamedTemporaryFile(suffix=".db") as f:
             con = sqlite3.connect(f.name)
@@ -89,17 +89,20 @@ class StatsFluxTests(unittest.TestCase):
                 """
             )
             rows = [
-                # added within 24h: 1 operator (manual) + 2 machine
+                # added just now: 1 operator (manual) + 2 machine
                 ("t1", "manual fresh", 2, "pending", "operational", "manual",
-                 "now", "now"),
+                 "+0 seconds", "+0 seconds"),
                 ("t2", "mcp fresh", 2, "pending", "operational", "mcp",
-                 "now", "now"),
+                 "+0 seconds", "+0 seconds"),
                 ("t3", "distilled fresh done", 2, "done", "operational",
-                 "distilled", "now", "now"),
-                # old task completed within 24h (counts in done_24h only)
+                 "distilled", "+0 seconds", "+0 seconds"),
+                # added 3 days ago (machine): in the 7d window, NOT the 24h one
+                ("t6", "machine 3d ago", 2, "pending", "operational",
+                 "claude_code", "-3 days", "-3 days"),
+                # old task completed just now (counts in done for every window)
                 ("t4", "old but just done", 2, "done", "operational",
-                 "claude_code", "-10 days", "now"),
-                # old and long done: counts in neither
+                 "claude_code", "-10 days", "+0 seconds"),
+                # old and long done: counts in neither add nor recent-done
                 ("t5", "ancient", 2, "done", "operational", "manual",
                  "-10 days", "-9 days"),
             ]
@@ -107,9 +110,7 @@ class StatsFluxTests(unittest.TestCase):
                 con.execute(
                     "INSERT INTO tasks VALUES (?,?,?,?,?,?,"
                     "datetime('now', ?), datetime('now', ?), NULL)",
-                    (tid, title, pri, status, ttype, src,
-                     "+0 seconds" if c_at == "now" else c_at,
-                     "+0 seconds" if u_at == "now" else u_at),
+                    (tid, title, pri, status, ttype, src, c_at, u_at),
                 )
             con.commit()
             con.close()
@@ -118,10 +119,17 @@ class StatsFluxTests(unittest.TestCase):
                 stats = server.q_stats()
             finally:
                 server.DB_PATH = old_db
-        self.assertEqual(stats["added_24h"], 3)
-        self.assertEqual(stats["added_24h_human"], 1)
-        self.assertEqual(stats["added_24h_machine"], 2)
-        self.assertEqual(stats["done_24h"], 2)
+        flux = stats["flux"]
+        self.assertEqual(flux["windows"], ["30m", "1h", "6h", "24h", "7d"])
+        w24 = flux["by_window"]["24h"]
+        self.assertEqual(w24["added"], 3)          # t1,t2,t3 (t6 is 3d old)
+        self.assertEqual(w24["added_human"], 1)    # t1
+        self.assertEqual(w24["added_machine"], 2)  # t2,t3
+        self.assertEqual(w24["done"], 2)           # t3,t4
+        w7 = flux["by_window"]["7d"]
+        self.assertEqual(w7["added"], 4)           # + t6 pulled in by wider window
+        self.assertEqual(w7["added_machine"], 3)   # t2,t3,t6
+        self.assertEqual(w7["done"], 2)            # t5 still older than 7d
 
 
 class BuildAddArgsTests(unittest.TestCase):

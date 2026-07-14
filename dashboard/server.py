@@ -59,12 +59,23 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 # Operator-entered sources; every other source_type (claude_code, mcp,
 # distilled, incident, specola, subtask_promotion, remote-cli, …) is
 # machine-generated. Mirrored in the Rust dashboard route and index.html.
 HUMAN_SOURCES = ("manual", "voice_memo", "telegram")
+
+# Flux windows the cockpit can switch between: (label, SQLite datetime
+# modifier). The backend returns all so switching is a local re-render.
+# Mirrored in the Rust dashboard route (FLUX_WINDOWS) and index.html.
+FLUX_WINDOWS = (
+    ("30m", "-30 minutes"),
+    ("1h", "-1 hour"),
+    ("6h", "-6 hours"),
+    ("24h", "-1 day"),
+    ("7d", "-7 days"),
+)
 MAX_POST_BYTES = 16 * 1024
 MAX_AUDIO_BYTES = 12 * 1024 * 1024  # voice clips (webm/opus) — separate, larger cap
 
@@ -225,21 +236,30 @@ def q_stats():
             "WHERE status='done' AND updated_at>=date('now','-21 days') "
             "GROUP BY d ORDER BY d")]
         pending = sum(by_pri.values())
-        # 24h flux: added (split by origin) vs completed in the last day.
+        # Flux: added (split by origin) vs completed, across several selectable
+        # windows so the cockpit switches range client-side without a refetch.
         # datetime() normalises the mixed T/space ISO forms before comparing.
-        added_human = added_machine = 0
         ph = ",".join("?" * len(HUMAN_SOURCES))
-        for r in con.execute(
-                "SELECT CASE WHEN source_type IN (%s) THEN 'human' ELSE 'machine' END o, "
-                "count(*) FROM tasks WHERE datetime(created_at) >= datetime('now','-1 day') "
-                "GROUP BY o" % ph, HUMAN_SOURCES):
-            if r[0] == "human":
-                added_human = r[1]
-            else:
-                added_machine = r[1]
-        done_24h = con.execute(
-            "SELECT count(*) FROM tasks WHERE status='done' "
-            "AND datetime(updated_at) >= datetime('now','-1 day')").fetchone()[0]
+        flux_by_window = {}
+        for label, modifier in FLUX_WINDOWS:
+            added_human = added_machine = 0
+            for r in con.execute(
+                    "SELECT CASE WHEN source_type IN (%s) THEN 'human' ELSE 'machine' END o, "
+                    "count(*) FROM tasks WHERE datetime(created_at) >= datetime('now', ?) "
+                    "GROUP BY o" % ph, (*HUMAN_SOURCES, modifier)):
+                if r[0] == "human":
+                    added_human = r[1]
+                else:
+                    added_machine = r[1]
+            done = con.execute(
+                "SELECT count(*) FROM tasks WHERE status='done' "
+                "AND datetime(updated_at) >= datetime('now', ?)", (modifier,)).fetchone()[0]
+            flux_by_window[label] = {
+                "added": added_human + added_machine,
+                "added_human": added_human,
+                "added_machine": added_machine,
+                "done": done,
+            }
         # deadlines in the next 7 days (count)
         due_soon = 0
         for r in con.execute("SELECT deadline FROM tasks WHERE status='pending' "
@@ -263,10 +283,10 @@ def q_stats():
             "throughput": thru,
             "due_within_7d": due_soon,
             "overdue": overdue,
-            "added_24h": added_human + added_machine,
-            "added_24h_human": added_human,
-            "added_24h_machine": added_machine,
-            "done_24h": done_24h,
+            "flux": {
+                "windows": [w[0] for w in FLUX_WINDOWS],
+                "by_window": flux_by_window,
+            },
             "version": VERSION,
         }
     finally:

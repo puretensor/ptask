@@ -1554,10 +1554,11 @@ Don't forget the sourdough.\r\n";
         assert!(created["pt_id"].as_str().unwrap().starts_with("PT-"));
     }
 
-    /// /api/stats 24h flux: added tasks split operator/machine by
-    /// source_type, done tasks counted by updated_at recency.
+    /// /api/stats flux: per-window added (split operator/machine by
+    /// source_type) vs done (by updated_at recency). The wider 7d window must
+    /// pull in an older task the 24h window excludes.
     #[tokio::test(flavor = "current_thread")]
-    async fn dashboard_stats_reports_24h_flux() {
+    async fn dashboard_stats_reports_windowed_flux() {
         let db = open_test_db();
         // 1 operator-entered (manual) + 2 machine (mcp, distilled) — all fresh.
         for (title, source) in [
@@ -1569,7 +1570,14 @@ Don't forget the sourdough.\r\n";
             new.source_type = source.into();
             ptask_core::tasks::create(&db, new, &EventCtx::test()).unwrap();
         }
-        // An old task completed just now: done_24h only, not added_24h.
+        // A machine task added 3 days ago: inside the 7d window, not the 24h.
+        let mid = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("machine 3d ago"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        // An old task completed just now: counts in done for every window.
         let old = ptask_core::tasks::create(
             &db,
             ptask_core::NewTask::minimal("old but just done"),
@@ -1577,6 +1585,11 @@ Don't forget the sourdough.\r\n";
         )
         .unwrap();
         db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET created_at = datetime('now','-3 days'),
+                        source_type = 'claude_code' WHERE id = ?1",
+                rusqlite::params![mid.id],
+            )?;
             c.execute(
                 "UPDATE tasks SET created_at = datetime('now','-10 days'),
                         status = 'done' WHERE id = ?1",
@@ -1601,10 +1614,20 @@ Don't forget the sourdough.\r\n";
             .await
             .unwrap();
         let stats: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(stats["added_24h"], 3);
-        assert_eq!(stats["added_24h_human"], 1);
-        assert_eq!(stats["added_24h_machine"], 2);
-        assert_eq!(stats["done_24h"], 1);
+        let flux = &stats["flux"];
+        assert_eq!(
+            flux["windows"],
+            serde_json::json!(["30m", "1h", "6h", "24h", "7d"])
+        );
+        let w24 = &flux["by_window"]["24h"];
+        assert_eq!(w24["added"], 3); // the three fresh tasks (mid is 3d old)
+        assert_eq!(w24["added_human"], 1);
+        assert_eq!(w24["added_machine"], 2);
+        assert_eq!(w24["done"], 1); // only `old`, updated just now
+        let w7 = &flux["by_window"]["7d"];
+        assert_eq!(w7["added"], 4); // + the 3-day-old machine task
+        assert_eq!(w7["added_machine"], 3);
+        assert_eq!(w7["done"], 1);
     }
 
     /// Cross-origin writes must be rejected even with valid Basic creds —
