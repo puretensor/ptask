@@ -65,6 +65,10 @@ enum Command {
     Rm(RmArgs),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
+    /// Advisory day plan: fit the ready queue into calendar free/busy (dry-run
+    /// unless --write). Reads free slots via gcalendar.py; --write adds
+    /// tentative events to our own calendar only.
+    Plan(PlanArgs),
     /// Manage saved views.
     #[command(subcommand)]
     View(ViewCommand),
@@ -500,6 +504,37 @@ struct NextArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct PlanArgs {
+    /// gcalendar.py account (free/busy source).
+    #[arg(long, default_value = "ops")]
+    account: String,
+    /// Planning horizon in days.
+    #[arg(long, default_value_t = 1)]
+    days: i64,
+    /// Working hours HH:MM-HH:MM.
+    #[arg(long, default_value = "09:00-18:00")]
+    work: String,
+    /// Timezone.
+    #[arg(long, default_value = "Europe/London")]
+    tz: String,
+    /// Calendar id.
+    #[arg(long, default_value = "primary")]
+    calendar: String,
+    /// Default minutes for a task with no duration_min.
+    #[arg(long, default_value_t = 30)]
+    slot_default: i64,
+    /// Max ready tasks to consider.
+    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    limit: usize,
+    /// Create tentative calendar events for the plan (our calendar only).
+    #[arg(long)]
+    write: bool,
+    /// Path to gcalendar.py.
+    #[arg(long, default_value = "/home/puretensorai/.config/puretensor/gcalendar.py")]
+    gcal: String,
+}
+
+#[derive(clap::Args, Debug)]
 struct AddArgs {
     /// Task title (parsed as quick-add unless --raw is set).
     /// Inline tokens: @label, #project, p1..p5, ~30m/~2h/~1d, !HH:MM,
@@ -690,6 +725,7 @@ fn main() -> Result<()> {
                 Some(Command::Dismiss(a)) => cmd_dismiss(&db, a),
                 Some(Command::Rm(a)) => cmd_rm(&db, a),
                 Some(Command::Next(a)) => cmd_next(&db, a),
+                Some(Command::Plan(a)) => cmd_plan(&db, a),
                 Some(Command::View(c)) => cmd_view(&db, c),
                 Some(Command::Tui) => ptask_tui::run(db),
                 Some(Command::Serve(a)) => cmd_serve(db, a),
@@ -1117,6 +1153,152 @@ fn cmd_next(db: &Db, a: NextArgs) -> Result<()> {
     }
     println!("\nShowing {} ready task(s).", rows.len());
     Ok(())
+}
+
+fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
+    use ptask_core::jiff;
+    use std::process::Command as Proc;
+
+    #[derive(serde::Deserialize)]
+    struct FreeSlotJson {
+        start: String,
+        minutes: i64,
+    }
+    #[derive(serde::Deserialize)]
+    struct FreeBusy {
+        tz: String,
+        free_slots: Vec<FreeSlotJson>,
+    }
+    #[derive(serde::Serialize)]
+    struct ScheduledItem {
+        pt_id: Option<String>,
+        title: String,
+        start: String,
+        end: String,
+        duration_min: i64,
+        energy: Option<String>,
+    }
+    #[derive(serde::Serialize)]
+    struct UnscheduledItem {
+        pt_id: Option<String>,
+        title: String,
+        duration_min: i64,
+    }
+    #[derive(serde::Serialize)]
+    struct PlanOutput {
+        tz: String,
+        scheduled: Vec<ScheduledItem>,
+        unscheduled: Vec<UnscheduledItem>,
+    }
+
+    // 1. free/busy (Python owns tz/date math)
+    let out = Proc::new("python3")
+        .arg(&a.gcal)
+        .arg(&a.account)
+        .arg("freebusy")
+        .arg("--json")
+        .args(["--days", &a.days.to_string()])
+        .args(["--work", &a.work])
+        .args(["--tz", &a.tz])
+        .args(["--calendar", &a.calendar])
+        .output()
+        .with_context(|| format!("running {} freebusy", a.gcal))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "gcalendar.py freebusy failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let fb: FreeBusy = serde_json::from_slice(&out.stdout).with_context(|| {
+        format!("parsing freebusy json: {}", String::from_utf8_lossy(&out.stdout))
+    })?;
+
+    // 2. ready candidates -> pure first-fit pack over slot capacities
+    let candidates = ptask_core::planner::ready_candidates(db, a.limit, a.slot_default)?;
+    let slot_caps: Vec<i64> = fb.free_slots.iter().map(|s| s.minutes).collect();
+    let plan = ptask_core::planner::pack(&candidates, &slot_caps);
+
+    let tz = jiff::tz::TimeZone::get(&fb.tz).unwrap_or_else(|_| jiff::tz::TimeZone::UTC);
+    let fmt = |ts: jiff::Timestamp| ts.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M").to_string();
+
+    // 3. resolve placements into wall-clock times
+    let mut scheduled = Vec::new();
+    for p in &plan.scheduled {
+        let slot_start: jiff::Timestamp = fb.free_slots[p.slot]
+            .start
+            .parse()
+            .with_context(|| format!("parse slot start {}", fb.free_slots[p.slot].start))?;
+        let start_ts = slot_start.checked_add(jiff::Span::new().minutes(p.offset_min))?;
+        let end_ts = start_ts.checked_add(jiff::Span::new().minutes(p.duration_min))?;
+        let c = &candidates[p.cand];
+        scheduled.push(ScheduledItem {
+            pt_id: c.pt_id.clone(),
+            title: c.title.clone(),
+            start: fmt(start_ts),
+            end: fmt(end_ts),
+            duration_min: p.duration_min,
+            energy: c.energy.clone(),
+        });
+    }
+    let unscheduled: Vec<UnscheduledItem> = plan
+        .unscheduled
+        .iter()
+        .map(|&i| UnscheduledItem {
+            pt_id: candidates[i].pt_id.clone(),
+            title: candidates[i].title.clone(),
+            duration_min: candidates[i].duration_min,
+        })
+        .collect();
+
+    // 4. optional --write: tentative events on OUR calendar only
+    if a.write {
+        for s in &scheduled {
+            let pt = s.pt_id.as_deref().unwrap_or("--");
+            let title = format!("[pt] {} {}", pt, s.title);
+            let status = Proc::new("python3")
+                .arg(&a.gcal)
+                .arg(&a.account)
+                .arg("create")
+                .args(["--title", &title])
+                .args(["--start", &s.start])
+                .args(["--end", &s.end])
+                .args(["--calendar", &a.calendar])
+                .args(["--description", &format!("advisory-plan {}", pt)])
+                .status()
+                .with_context(|| "creating calendar event")?;
+            if !status.success() {
+                eprintln!("warning: failed to create event for {}", pt);
+            }
+        }
+    }
+
+    let output = PlanOutput {
+        tz: fb.tz.clone(),
+        scheduled,
+        unscheduled,
+    };
+    let write = a.write;
+    emit(&output, || {
+        if output.scheduled.is_empty() {
+            println!("No tasks could be scheduled in the available free slots.");
+        } else {
+            println!("Advisory plan ({}):", output.tz);
+            for s in &output.scheduled {
+                let pt = s.pt_id.as_deref().unwrap_or("------");
+                println!("  {}  {:>3}m  {:7}  {}", s.start, s.duration_min, pt, s.title);
+            }
+        }
+        if !output.unscheduled.is_empty() {
+            println!("\nUnscheduled ({} — no free slot fits):", output.unscheduled.len());
+            for u in &output.unscheduled {
+                let pt = u.pt_id.as_deref().unwrap_or("------");
+                println!("  {:7}  {:>3}m  {}", pt, u.duration_min, u.title);
+            }
+        }
+        if !write {
+            println!("\n(advisory only — re-run with --write to add tentative holds)");
+        }
+    })
 }
 
 fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {

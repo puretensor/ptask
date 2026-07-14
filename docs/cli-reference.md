@@ -81,6 +81,16 @@ lost with the row — prefer `pt dismiss` unless you truly want it gone.
 DAG-ready tasks: every `depends_on` predecessor is `done` (or missing).
 Ordered by `priority_score DESC, priority DESC, created_at DESC`.
 
+### `pt plan [--days N] [--work 09:00-18:00] [--tz TZ] [--slot-default 30] [-n LIMIT] [--write]` (v3.2.0)
+
+Advisory day planner: fits the `pt next` ready queue (with each task's
+`duration_min`, defaulting to `--slot-default`) into your calendar's free
+slots. Free slots come from `gcalendar.py freebusy --json` (working-hours
+windows minus busy blocks). Greedy first-fit in priority order; tasks that
+don't fit are listed as unscheduled. **Dry-run by default** (prints the plan,
+touches nothing). `--write` creates tentative `[pt] PT-N ...` events on our own
+`--account` calendar only. `--json` (global) emits `{tz, scheduled[], unscheduled[]}`.
+
 ### `pt branch <query>`
 
 Print a Linear-style branch name for the matched task, e.g.
