@@ -10,7 +10,17 @@
 # a glibc-2.35 floor; both are covered by the release.yml artifacts):
 #
 #   cd ~/ptask
-#   gh release download vX.Y.Z --pattern 'pt-*' -D dist --clobber
+#   # Fetch the per-arch artifacts from the Gitea release. GitHub Actions
+#   # billing is blocked (PT-1215), so releases now publish to Gitea via
+#   # .gitea/workflows/release.yml and `gh release download` no longer works.
+#   GITEA=http://100.92.245.5:3002
+#   TAG=vX.Y.Z
+#   for a in pt-x86_64-unknown-linux-gnu pt-x86_64-unknown-linux-gnu.sha256 \
+#            pt-aarch64-unknown-linux-gnu pt-aarch64-unknown-linux-gnu.sha256; do
+#     curl -fsSL -o "dist/$a" "$GITEA/puretensor/ptask/releases/download/$TAG/$a"
+#   done
+#   # (or, with the tea CLI configured: cd dist && tea release download "$TAG" \
+#   #  --repo puretensor/ptask)
 #   ansible-playbook -i scripts/ansible/inventory.yml scripts/ansible/ptask.yml
 #
 # Each host receives the artifact matching its `ptask_arch_override`
