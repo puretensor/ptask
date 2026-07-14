@@ -1,8 +1,7 @@
 name: release
 
 # Sovereign release mirror — runs on the self-hosted Gitea act_runner
-# (puretensor-act-runner on tensor-core, ubuntu-latest →
-# docker://catthehacker/ubuntu:act-latest). Fires when an operator pushes
+# (puretensor-act-runner on tensor-core). Fires when an operator pushes
 # a `vX.Y.Z` tag.
 #
 # Why this exists: .github/workflows/release.yml is GitHub-only and dead
@@ -14,16 +13,32 @@ name: release
 #   - no softprops/action-gh-release, no actions/upload-artifact
 #   - assets are POSTed straight to the Gitea release API with the
 #     built-in ${{ secrets.GITHUB_TOKEN }} (Gitea injects this into
-#     act_runner jobs; ${{ github.api_url }} resolves to the Gitea API).
+#     act_runner jobs). The API base is hardcoded to 100.92.245.5:3002,
+#     NOT ${{ github.api_url }} — this instance's ROOT_URL is
+#     https://gitea.fox, which does not resolve from inside job
+#     containers (documented gotcha, pureMind topic
+#     gitea_actions_runner; confirmed 2026-07-14: github.api_url would
+#     derive from that same ROOT_URL and fail the same way). The
+#     100.92.245.5:3002 form is the one proven pattern in this fleet
+#     (einherjar's ci.yml package/registry pushes).
 #
 # Each matrix job builds AND publishes its own per-arch asset. The two
 # jobs race to create the release, so creation tolerates a 409 (already
 # exists). Asset names are per-target, so the two jobs never collide on
 # upload.
 #
-# glibc floor: catthehacker/ubuntu:act-latest tracks ubuntu-22.04
-# (glibc 2.35), which covers mon2. If that image is retargeted to a newer
-# Ubuntu, pin a 22.04 image before shipping glibc-linked releases.
+# glibc floor (fixed 2026-07-14 — the original draft of this workflow got
+# this backwards): `catthehacker/ubuntu:act-latest` is genuine Ubuntu
+# 24.04 / glibc 2.39 (verified via `docker run ... cat /etc/os-release`),
+# NOT 22.04/2.35 as an earlier version of this comment claimed. Building
+# x86_64 on that label would silently ship mon2 (glibc 2.35 floor) a
+# binary it can't execute — exactly the failure class
+# .github/workflows/release.yml's own header comment exists to avoid.
+# The x86_64 leg is therefore pinned to the `ubuntu-22.04` runner label
+# (added to puretensor-act-runner's config.yaml 2026-07-14, PT-1216 —
+# genuine catthehacker/ubuntu:act-22.04, spot-checked glibc 2.35).
+# aarch64 stays on `ubuntu-latest` (24.04/glibc 2.39) — mon3 is glibc
+# 2.39, no floor issue on that leg. See matrix.runner_label below.
 
 on:
   push:
@@ -40,17 +55,22 @@ env:
 jobs:
   release:
     name: build + publish ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner_label }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            # glibc 2.35 floor (mon2) — see header comment. Do NOT change
+            # this to ubuntu-latest.
+            runner_label: ubuntu-22.04
             rustflags: "-C target-cpu=x86-64-v3"
             strip: strip
             apt: ""
           - target: aarch64-unknown-linux-gnu
-            # mon3 (arm64): no target-cpu narrowing.
+            # mon3 (arm64): glibc 2.39, no floor issue — ubuntu-latest OK.
+            # Also no target-cpu narrowing.
+            runner_label: ubuntu-latest
             rustflags: ""
             strip: aarch64-linux-gnu-strip
             apt: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu"
@@ -94,7 +114,7 @@ jobs:
       - name: publish assets to gitea release
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          API: ${{ github.api_url }}
+          API: http://100.92.245.5:3002/api/v1
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
