@@ -158,6 +158,13 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.7.0** — provenance + flux: every card wears a subtle `PT-xxxx` tag with
+  an origin glyph (person = operator-entered `manual`/`voice_memo`/`telegram`,
+  bot = machine-generated: `claude_code`, `mcp`, `distilled`, `incident`, …);
+  the drawer spells the origin out. Header gains a **+N/−N 24h flux chip**
+  (tasks added vs completed in the last day, added split operator/machine in
+  the tooltip) backed by new `/api/stats` fields `added_24h`,
+  `added_24h_human`, `added_24h_machine`, `done_24h` in both servers.
 - **v0.6.1** — accessibility polish: interactive task titles in Critical Now and
   Priority Lanes now expose at least a 24px hit target with visible focus rings.
 - **v0.6.0** — **🎤 speak-to-fill voice capture** in the composer. A mic button

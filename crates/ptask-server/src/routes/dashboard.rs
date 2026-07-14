@@ -344,6 +344,34 @@ async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
             let (day, n) = row?;
             thru.push(serde_json::json!({"day": day, "n": n}));
         }
+        // 24h flux: tasks added vs completed in the last day, with the added
+        // side split by origin. Operator-entered sources are `manual`
+        // (dashboard/CLI), `voice_memo` and `telegram`; every other source
+        // (claude_code, mcp, distilled, incident, specola, subtask_promotion,
+        // remote-cli, …) is machine-generated. `datetime()` normalises the
+        // mixed `T`/space ISO forms in created_at before comparing.
+        let mut added_human = 0i64;
+        let mut added_machine = 0i64;
+        let mut stmt = c.prepare(
+            "SELECT CASE WHEN source_type IN ('manual','voice_memo','telegram') \
+                    THEN 'human' ELSE 'machine' END o, count(*) \
+             FROM tasks WHERE datetime(created_at) >= datetime('now','-1 day') \
+             GROUP BY o",
+        )?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+            let (o, n) = row?;
+            if o == "human" {
+                added_human = n;
+            } else {
+                added_machine = n;
+            }
+        }
+        let done_24h: i64 = c.query_row(
+            "SELECT count(*) FROM tasks WHERE status='done' \
+             AND datetime(updated_at) >= datetime('now','-1 day')",
+            [],
+            |r| r.get(0),
+        )?;
         let pending: i64 = by_pri.values().filter_map(|v| v.as_i64()).sum();
         let mut due_soon = 0i64;
         let mut overdue = 0i64;
@@ -372,6 +400,10 @@ async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
             "throughput": thru,
             "due_within_7d": due_soon,
             "overdue": overdue,
+            "added_24h": added_human + added_machine,
+            "added_24h_human": added_human,
+            "added_24h_machine": added_machine,
+            "done_24h": done_24h,
             "version": ptask_core::VERSION,
         }))
     });

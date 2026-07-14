@@ -188,6 +188,16 @@ section{margin-top:22px}
 .pbadge{font-family:var(--font);font-weight:800;font-size:10px;padding:2px 7px;border-radius:6px;color:var(--ink)}
 .p5{background:var(--p5)} .p4{background:var(--p4)} .p3{background:var(--p3)} .p2{background:var(--p2)} .p1{background:var(--p1)}
 
+/* provenance tag — subtle PT-id + origin glyph on every card (v2.4). Machine
+   tasks wear the dim bot glyph, operator-entered ones the accent person. */
+.ptag{display:inline-flex;align-items:center;gap:4px;font-family:var(--font);font-size:9px;
+  font-weight:600;color:var(--dim);letter-spacing:.04em;white-space:nowrap;cursor:default}
+.ptag .ic{width:11px;height:11px;flex:none}
+.ptag.h .ic{color:var(--accent-t)}
+/* 24h flux chip — tasks added (+) vs completed (−) in the last day */
+.chip.flux b.plus{color:var(--live)}
+.chip.flux b.minus{color:var(--p2t)}
+.chip.flux small{font-size:9px;color:var(--hdr-muted);font-weight:600}
 .due{padding:2px 7px;border-radius:6px;background:var(--panel2);font-size:10px;font-weight:600}
 .due.over{background:rgba(255,59,92,.18);color:var(--p5t)}
 .due.soon{background:rgba(255,159,67,.18);color:var(--p4t)}
@@ -506,6 +516,8 @@ body.review #review-sec{display:block}
   <symbol id="i-mic" viewBox="0 0 16 16"><rect x="6" y="1.5" width="4" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 8a4.5 4.5 0 0 0 9 0M8 12.5V15M5.5 15h5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
   <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/></symbol>
   <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2 15 14H1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 6.5v3.2M8 11.8v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-user" viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M2.8 14a5.2 5.2 0 0 1 10.4 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-bot" viewBox="0 0 16 16"><rect x="3" y="5.5" width="10" height="7.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 5.5V3M6.2 3h3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="9.2" r="1.05" fill="currentColor"/><circle cx="10" cy="9.2" r="1.05" fill="currentColor"/></symbol>
 </svg>
 <a href="#main" class="skip">Skip to dashboard</a>
 <header>
@@ -652,6 +664,16 @@ function dueChip(t){
   if(d<0) lbl='⚠ '+Math.abs(Math.round(d))+'d over';
   else if(d<=14) lbl='in '+Math.round(d)+'d';
   return `<span class="due ${cls}">${lbl}</span>`;
+}
+/* provenance: operator-entered sources — everything else is machine-generated.
+   Mirrors HUMAN_SOURCES in server.py / the Rust dashboard route. */
+const HUMAN_SRC=new Set(['manual','voice_memo','telegram']);
+function originTag(t,verbose){
+  const h=HUMAN_SRC.has(t.source_type), src=esc(t.source_type||'unknown');
+  const id=t.pt_id?esc(t.pt_id):'';
+  const lbl=verbose?[id,(h?'operator':'machine')+' · '+src].filter(Boolean).join(' · '):id;
+  return `<span class="ptag${h?' h':''}" title="${h?'operator-entered':'machine-generated'} · source: ${src}">`+
+    `<svg class="ic" aria-hidden="true"><use href="#${h?'i-user':'i-bot'}"/></svg>${lbl}</span>`;
 }
 /* priority chip — click opens the direct severity picker (jump to any P5…P1). */
 function ptrigger(t){
@@ -929,18 +951,24 @@ $('#v-btn').onclick=()=>{ if(_vstate==='idle') startRec(); else if(_vstate==='re
 /* ---- renderers ---- */
 function renderChips(s){
   const c5=s.by_priority[5]||0,c4=s.by_priority[4]||0;
+  /* 24h flux — added (+, split operator/machine in the tooltip) vs completed
+     (−). Hidden when the backend predates the fields. */
+  const flux=(s.added_24h==null)?'':
+    `<span class="chip flux" title="last 24h: ${s.added_24h} added (${s.added_24h_human} operator · ${s.added_24h_machine} machine) · ${s.done_24h} completed">`+
+    `<b class="plus">+${s.added_24h}</b><b class="minus">−${s.done_24h}</b><small>24h</small></span>`;
   $('#chips').innerHTML=`
     <span class="chip crit"><span class="dot"></span><b>${c5}</b> crit</span>
     <span class="chip urg"><b>${c4}</b> urgent</span>
     <span class="chip over"><b>${s.overdue}</b> overdue</span>
     <span class="chip"><b>${s.due_within_7d}</b> due ≤7d</span>
-    <span class="chip"><b>${s.pending_total}</b> open</span>`;
+    <span class="chip"><b>${s.pending_total}</b> open</span>${flux}`;
   /* phone: one compact line instead of five wrapping chips (saved ~2 header
      rows). Only one of #chips / #chips-c is display:'d, so no double SR read. */
   $('#chips-c').innerHTML=
     `<b class="c5">${c5}</b> crit · <b class="c4">${c4}</b> urg`+
     (s.overdue>0?` · <b class="cov">${s.overdue}</b> over`:'')+
-    ` · <b>${s.pending_total}</b> open`;
+    ` · <b>${s.pending_total}</b> open`+
+    (s.added_24h==null?'':` · +${s.added_24h}/−${s.done_24h}`);
   $('#ver').textContent='pt · v'+s.version;
 }
 function renderCritical(tasks){
@@ -959,6 +987,7 @@ function renderCritical(tasks){
         <span class="score">${(t.priority_score).toFixed(2)}</span>${scoreMini(t.priority_score)}
         ${dueChip(t)}
         <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
+        ${originTag(t)}
         <button class="btn-done" title="mark done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button>
       </div></div>`;
   }).join('');
@@ -980,7 +1009,7 @@ function renderLanes(tasks){
       ${n===0?'<div class="ph">none</div>':''}${list.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
         <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
-        ${ptrigger(t)}
+        ${ptrigger(t)}${originTag(t)}
         <button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
         <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
         <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
@@ -1102,8 +1131,8 @@ function renderReview(){
   $('#rv-ct').textContent=stale.length+' tasks, oldest first';
   if(!stale.length){$('#review-list').innerHTML='<div class="ph">nothing pending to review</div>';return;}
   $('#review-list').innerHTML=stale.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}" style="margin-bottom:10px">
-    <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer"><b>${t.pt_id||''}</b> ${esc(t.title)}</div>
-    <div class="tm">${ptrigger(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
+    <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title)}</div>
+    <div class="tm">${ptrigger(t)}${originTag(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
       <span class="score">${(t.priority_score||0).toFixed(2)}</span>
       <button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
       <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
@@ -1118,7 +1147,7 @@ async function openDrawer(uuid){
   const dr=$('#drawer');
   if(!dr.classList.contains('open')) rememberInvoker(`[data-uuid="${uuid}"] [role="button"]`);
   $('#d-title').textContent=(t&&t.title)||uuid;
-  $('#d-meta').innerHTML=t?`${ptrigger(t)}<span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>${dueChip(t)}<span class="score">${(t.priority_score||0).toFixed(2)}</span><span class="age">${esc(t.source_type||'')}</span>`:'';
+  $('#d-meta').innerHTML=t?`${ptrigger(t)}<span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>${dueChip(t)}<span class="score">${(t.priority_score||0).toFixed(2)}</span>${originTag(t,true)}`:'';
   $('#d-desc').textContent=(t&&(t.description||t.ai_reasoning))||'(no description)';
   $('#d-hist').innerHTML='<span class="age">loading…</span>';
   dr.classList.add('open');

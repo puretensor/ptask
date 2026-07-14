@@ -74,6 +74,56 @@ class EventHistoryTests(unittest.TestCase):
         self.assertEqual(events[0]["payload"], {"to": "done"})
 
 
+class StatsFluxTests(unittest.TestCase):
+    def test_q_stats_reports_24h_flux_split_by_origin(self):
+        old_db = server.DB_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute(
+                """
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY, title TEXT, priority INTEGER,
+                    status TEXT, task_type TEXT, source_type TEXT,
+                    created_at TEXT, updated_at TEXT, deadline TEXT
+                )
+                """
+            )
+            rows = [
+                # added within 24h: 1 operator (manual) + 2 machine
+                ("t1", "manual fresh", 2, "pending", "operational", "manual",
+                 "now", "now"),
+                ("t2", "mcp fresh", 2, "pending", "operational", "mcp",
+                 "now", "now"),
+                ("t3", "distilled fresh done", 2, "done", "operational",
+                 "distilled", "now", "now"),
+                # old task completed within 24h (counts in done_24h only)
+                ("t4", "old but just done", 2, "done", "operational",
+                 "claude_code", "-10 days", "now"),
+                # old and long done: counts in neither
+                ("t5", "ancient", 2, "done", "operational", "manual",
+                 "-10 days", "-9 days"),
+            ]
+            for tid, title, pri, status, ttype, src, c_at, u_at in rows:
+                con.execute(
+                    "INSERT INTO tasks VALUES (?,?,?,?,?,?,"
+                    "datetime('now', ?), datetime('now', ?), NULL)",
+                    (tid, title, pri, status, ttype, src,
+                     "+0 seconds" if c_at == "now" else c_at,
+                     "+0 seconds" if u_at == "now" else u_at),
+                )
+            con.commit()
+            con.close()
+            server.DB_PATH = f.name
+            try:
+                stats = server.q_stats()
+            finally:
+                server.DB_PATH = old_db
+        self.assertEqual(stats["added_24h"], 3)
+        self.assertEqual(stats["added_24h_human"], 1)
+        self.assertEqual(stats["added_24h_machine"], 2)
+        self.assertEqual(stats["done_24h"], 2)
+
+
 class BuildAddArgsTests(unittest.TestCase):
     def test_title_only_is_separated(self):
         args, err = server.build_add_args({"title": "ship it"})

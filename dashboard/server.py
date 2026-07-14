@@ -59,7 +59,12 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
+
+# Operator-entered sources; every other source_type (claude_code, mcp,
+# distilled, incident, specola, subtask_promotion, remote-cli, …) is
+# machine-generated. Mirrored in the Rust dashboard route and index.html.
+HUMAN_SOURCES = ("manual", "voice_memo", "telegram")
 MAX_POST_BYTES = 16 * 1024
 MAX_AUDIO_BYTES = 12 * 1024 * 1024  # voice clips (webm/opus) — separate, larger cap
 
@@ -220,6 +225,21 @@ def q_stats():
             "WHERE status='done' AND updated_at>=date('now','-21 days') "
             "GROUP BY d ORDER BY d")]
         pending = sum(by_pri.values())
+        # 24h flux: added (split by origin) vs completed in the last day.
+        # datetime() normalises the mixed T/space ISO forms before comparing.
+        added_human = added_machine = 0
+        ph = ",".join("?" * len(HUMAN_SOURCES))
+        for r in con.execute(
+                "SELECT CASE WHEN source_type IN (%s) THEN 'human' ELSE 'machine' END o, "
+                "count(*) FROM tasks WHERE datetime(created_at) >= datetime('now','-1 day') "
+                "GROUP BY o" % ph, HUMAN_SOURCES):
+            if r[0] == "human":
+                added_human = r[1]
+            else:
+                added_machine = r[1]
+        done_24h = con.execute(
+            "SELECT count(*) FROM tasks WHERE status='done' "
+            "AND datetime(updated_at) >= datetime('now','-1 day')").fetchone()[0]
         # deadlines in the next 7 days (count)
         due_soon = 0
         for r in con.execute("SELECT deadline FROM tasks WHERE status='pending' "
@@ -243,6 +263,10 @@ def q_stats():
             "throughput": thru,
             "due_within_7d": due_soon,
             "overdue": overdue,
+            "added_24h": added_human + added_machine,
+            "added_24h_human": added_human,
+            "added_24h_machine": added_machine,
+            "done_24h": done_24h,
             "version": VERSION,
         }
     finally:

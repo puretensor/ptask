@@ -1554,6 +1554,59 @@ Don't forget the sourdough.\r\n";
         assert!(created["pt_id"].as_str().unwrap().starts_with("PT-"));
     }
 
+    /// /api/stats 24h flux: added tasks split operator/machine by
+    /// source_type, done tasks counted by updated_at recency.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_stats_reports_24h_flux() {
+        let db = open_test_db();
+        // 1 operator-entered (manual) + 2 machine (mcp, distilled) — all fresh.
+        for (title, source) in [
+            ("operator task", "manual"),
+            ("hal task", "mcp"),
+            ("distilled task", "distilled"),
+        ] {
+            let mut new = ptask_core::NewTask::minimal(title);
+            new.source_type = source.into();
+            ptask_core::tasks::create(&db, new, &EventCtx::test()).unwrap();
+        }
+        // An old task completed just now: done_24h only, not added_24h.
+        let old = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("old but just done"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET created_at = datetime('now','-10 days'),
+                        status = 'done' WHERE id = ?1",
+                rusqlite::params![old.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let app = router(AppState::new(db, Default::default(), Default::default()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let stats: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(stats["added_24h"], 3);
+        assert_eq!(stats["added_24h_human"], 1);
+        assert_eq!(stats["added_24h_machine"], 2);
+        assert_eq!(stats["done_24h"], 1);
+    }
+
     /// Cross-origin writes must be rejected even with valid Basic creds —
     /// browsers attach cached credentials cross-origin (CSRF).
     #[tokio::test(flavor = "current_thread")]
