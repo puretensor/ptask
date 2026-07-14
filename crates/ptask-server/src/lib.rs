@@ -1554,26 +1554,28 @@ Don't forget the sourdough.\r\n";
         assert!(created["pt_id"].as_str().unwrap().starts_with("PT-"));
     }
 
-    /// /api/stats flux: per-window added (split operator/machine by
-    /// source_type) vs done (by updated_at recency). The wider 7d window must
-    /// pull in an older task the 24h window excludes.
+    /// /api/stats flux: per-window added split by INTENT — `human` =
+    /// operator-typed OR Claude-Code-on-request (manual/mcp/…); `robot` =
+    /// autonomously generated (distilled/incident/…). Done counted by
+    /// updated_at recency. The wider 7d window must pull in an older task the
+    /// 24h window excludes.
     #[tokio::test(flavor = "current_thread")]
     async fn dashboard_stats_reports_windowed_flux() {
         let db = open_test_db();
-        // 1 operator-entered (manual) + 2 machine (mcp, distilled) — all fresh.
+        // Fresh: 2 human (manual, mcp-on-request) + 1 robot (distilled).
         for (title, source) in [
             ("operator task", "manual"),
-            ("hal task", "mcp"),
-            ("distilled task", "distilled"),
+            ("hal-on-request task", "mcp"),
+            ("distiller task", "distilled"),
         ] {
             let mut new = ptask_core::NewTask::minimal(title);
             new.source_type = source.into();
             ptask_core::tasks::create(&db, new, &EventCtx::test()).unwrap();
         }
-        // A machine task added 3 days ago: inside the 7d window, not the 24h.
+        // A ROBOT task added 3 days ago: inside the 7d window, not the 24h.
         let mid = ptask_core::tasks::create(
             &db,
-            ptask_core::NewTask::minimal("machine 3d ago"),
+            ptask_core::NewTask::minimal("incident 3d ago"),
             &EventCtx::test(),
         )
         .unwrap();
@@ -1587,7 +1589,7 @@ Don't forget the sourdough.\r\n";
         db.with_conn(|c| {
             c.execute(
                 "UPDATE tasks SET created_at = datetime('now','-3 days'),
-                        source_type = 'claude_code' WHERE id = ?1",
+                        source_type = 'incident' WHERE id = ?1",
                 rusqlite::params![mid.id],
             )?;
             c.execute(
@@ -1621,12 +1623,13 @@ Don't forget the sourdough.\r\n";
         );
         let w24 = &flux["by_window"]["24h"];
         assert_eq!(w24["added"], 3); // the three fresh tasks (mid is 3d old)
-        assert_eq!(w24["added_human"], 1);
-        assert_eq!(w24["added_machine"], 2);
+        assert_eq!(w24["added_human"], 2); // manual + mcp
+        assert_eq!(w24["added_robot"], 1); // distilled
         assert_eq!(w24["done"], 1); // only `old`, updated just now
         let w7 = &flux["by_window"]["7d"];
-        assert_eq!(w7["added"], 4); // + the 3-day-old machine task
-        assert_eq!(w7["added_machine"], 3);
+        assert_eq!(w7["added"], 4); // + the 3-day-old incident task
+        assert_eq!(w7["added_human"], 2); // unchanged
+        assert_eq!(w7["added_robot"], 2); // distilled + incident
         assert_eq!(w7["done"], 1);
     }
 

@@ -59,12 +59,15 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
-# Operator-entered sources; every other source_type (claude_code, mcp,
-# distilled, incident, specola, subtask_promotion, remote-cli, …) is
-# machine-generated. Mirrored in the Rust dashboard route and index.html.
-HUMAN_SOURCES = ("manual", "voice_memo", "telegram")
+# Robot (auto-generated) sources: created by autonomous processes with no
+# direct human ask — the distiller, puresentinel incident capture, subtask
+# auto-promotion, the specola worker. Everything else is `human`: the operator
+# typed/dictated it (manual/voice_memo/telegram) OR Claude Code/HAL created it
+# on the operator's request (claude_code/mcp/remote-cli). Unknown → human.
+# Mirrored in the Rust dashboard route (ROBOT_SOURCES) and index.html (AUTO_SRC).
+ROBOT_SOURCES = ("distilled", "incident", "subtask_promotion", "specola")
 
 # Flux windows the cockpit can switch between: (label, SQLite datetime
 # modifier). The backend returns all so switching is a local re-render.
@@ -239,25 +242,25 @@ def q_stats():
         # Flux: added (split by origin) vs completed, across several selectable
         # windows so the cockpit switches range client-side without a refetch.
         # datetime() normalises the mixed T/space ISO forms before comparing.
-        ph = ",".join("?" * len(HUMAN_SOURCES))
+        ph = ",".join("?" * len(ROBOT_SOURCES))
         flux_by_window = {}
         for label, modifier in FLUX_WINDOWS:
-            added_human = added_machine = 0
+            added_human = added_robot = 0
             for r in con.execute(
-                    "SELECT CASE WHEN source_type IN (%s) THEN 'human' ELSE 'machine' END o, "
+                    "SELECT CASE WHEN source_type IN (%s) THEN 'robot' ELSE 'human' END o, "
                     "count(*) FROM tasks WHERE datetime(created_at) >= datetime('now', ?) "
-                    "GROUP BY o" % ph, (*HUMAN_SOURCES, modifier)):
-                if r[0] == "human":
-                    added_human = r[1]
+                    "GROUP BY o" % ph, (*ROBOT_SOURCES, modifier)):
+                if r[0] == "robot":
+                    added_robot = r[1]
                 else:
-                    added_machine = r[1]
+                    added_human = r[1]
             done = con.execute(
                 "SELECT count(*) FROM tasks WHERE status='done' "
                 "AND datetime(updated_at) >= datetime('now', ?)", (modifier,)).fetchone()[0]
             flux_by_window[label] = {
-                "added": added_human + added_machine,
+                "added": added_human + added_robot,
                 "added_human": added_human,
-                "added_machine": added_machine,
+                "added_robot": added_robot,
                 "done": done,
             }
         # deadlines in the next 7 days (count)

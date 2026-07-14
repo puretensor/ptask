@@ -357,18 +357,22 @@ async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
         }
         // Flux: tasks added vs completed, computed across several selectable
         // windows so the cockpit can switch range client-side without a
-        // refetch. The added side is split by origin — operator-entered
-        // sources are `manual` (dashboard/CLI), `voice_memo` and `telegram`;
-        // every other source (claude_code, mcp, distilled, incident, specola,
-        // subtask_promotion, remote-cli, …) is machine-generated. `datetime()`
-        // normalises the mixed `T`/space ISO forms before comparing.
+        // refetch. The added side is split by INTENT, not by which process ran
+        // the INSERT: `robot` = autonomously generated with no human ask (the
+        // distiller, puresentinel incident capture, subtask auto-promotion,
+        // the specola worker — see ROBOT_SOURCES); `human` = everything else,
+        // i.e. the operator typed/dictated it (manual/voice_memo/telegram) OR
+        // Claude Code/HAL created it on the operator's request (claude_code/
+        // mcp/remote-cli). Unknown sources default to human (operator-driven
+        // is the common case). `datetime()` normalises mixed T/space ISO forms.
         let mut flux_by_window = serde_json::Map::new();
         for (label, modifier) in FLUX_WINDOWS {
             let mut added_human = 0i64;
-            let mut added_machine = 0i64;
+            let mut added_robot = 0i64;
             let mut stmt = c.prepare(
-                "SELECT CASE WHEN source_type IN ('manual','voice_memo','telegram') \
-                        THEN 'human' ELSE 'machine' END o, count(*) \
+                "SELECT CASE WHEN source_type IN \
+                          ('distilled','incident','subtask_promotion','specola') \
+                        THEN 'robot' ELSE 'human' END o, count(*) \
                  FROM tasks WHERE datetime(created_at) >= datetime('now', ?1) \
                  GROUP BY o",
             )?;
@@ -376,10 +380,10 @@ async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
                 stmt.query_map([modifier], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
             {
                 let (o, n) = row?;
-                if o == "human" {
-                    added_human = n;
+                if o == "robot" {
+                    added_robot = n;
                 } else {
-                    added_machine = n;
+                    added_human = n;
                 }
             }
             let done: i64 = c.query_row(
@@ -391,9 +395,9 @@ async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
             flux_by_window.insert(
                 label.to_string(),
                 serde_json::json!({
-                    "added": added_human + added_machine,
+                    "added": added_human + added_robot,
                     "added_human": added_human,
-                    "added_machine": added_machine,
+                    "added_robot": added_robot,
                     "done": done,
                 }),
             );

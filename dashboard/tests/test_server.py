@@ -89,16 +89,16 @@ class StatsFluxTests(unittest.TestCase):
                 """
             )
             rows = [
-                # added just now: 1 operator (manual) + 2 machine
+                # added just now: human = operator-typed OR Claude-Code-on-ask.
                 ("t1", "manual fresh", 2, "pending", "operational", "manual",
-                 "+0 seconds", "+0 seconds"),
+                 "+0 seconds", "+0 seconds"),           # human (operator)
                 ("t2", "mcp fresh", 2, "pending", "operational", "mcp",
-                 "+0 seconds", "+0 seconds"),
+                 "+0 seconds", "+0 seconds"),           # human (claude/HAL on ask)
                 ("t3", "distilled fresh done", 2, "done", "operational",
-                 "distilled", "+0 seconds", "+0 seconds"),
-                # added 3 days ago (machine): in the 7d window, NOT the 24h one
-                ("t6", "machine 3d ago", 2, "pending", "operational",
-                 "claude_code", "-3 days", "-3 days"),
+                 "distilled", "+0 seconds", "+0 seconds"),  # ROBOT (auto)
+                # added 3 days ago (robot): in the 7d window, NOT the 24h one
+                ("t6", "incident 3d ago", 2, "pending", "operational",
+                 "incident", "-3 days", "-3 days"),     # ROBOT (auto)
                 # old task completed just now (counts in done for every window)
                 ("t4", "old but just done", 2, "done", "operational",
                  "claude_code", "-10 days", "+0 seconds"),
@@ -123,12 +123,13 @@ class StatsFluxTests(unittest.TestCase):
         self.assertEqual(flux["windows"], ["30m", "1h", "6h", "24h", "7d"])
         w24 = flux["by_window"]["24h"]
         self.assertEqual(w24["added"], 3)          # t1,t2,t3 (t6 is 3d old)
-        self.assertEqual(w24["added_human"], 1)    # t1
-        self.assertEqual(w24["added_machine"], 2)  # t2,t3
+        self.assertEqual(w24["added_human"], 2)    # t1 manual, t2 mcp
+        self.assertEqual(w24["added_robot"], 1)    # t3 distilled
         self.assertEqual(w24["done"], 2)           # t3,t4
         w7 = flux["by_window"]["7d"]
         self.assertEqual(w7["added"], 4)           # + t6 pulled in by wider window
-        self.assertEqual(w7["added_machine"], 3)   # t2,t3,t6
+        self.assertEqual(w7["added_human"], 2)     # still t1,t2
+        self.assertEqual(w7["added_robot"], 2)     # t3 distilled + t6 incident
         self.assertEqual(w7["done"], 2)            # t5 still older than 7d
 
 

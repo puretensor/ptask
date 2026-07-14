@@ -188,8 +188,9 @@ section{margin-top:22px}
 .pbadge{font-family:var(--font);font-weight:800;font-size:10px;padding:2px 7px;border-radius:6px;color:var(--ink)}
 .p5{background:var(--p5)} .p4{background:var(--p4)} .p3{background:var(--p3)} .p2{background:var(--p2)} .p1{background:var(--p1)}
 
-/* provenance tag — subtle PT-id + origin glyph on every card (v2.4). Machine
-   tasks wear the dim bot glyph, operator-entered ones the accent person. */
+/* provenance tag — subtle PT-id + origin glyph on every card (v2.4). Robot
+   (auto-generated) tasks wear the dim bot glyph; operator-directed ones (incl.
+   Claude-Code-on-request) get the accent person via .ptag.h. */
 .ptag{display:inline-flex;align-items:center;gap:4px;font-family:var(--font);font-size:9px;
   font-weight:600;color:var(--dim);letter-spacing:.04em;white-space:nowrap;cursor:default}
 .ptag .ic{width:11px;height:11px;flex:none}
@@ -671,15 +672,17 @@ function dueChip(t){
   else if(d<=14) lbl='in '+Math.round(d)+'d';
   return `<span class="due ${cls}">${lbl}</span>`;
 }
-/* provenance: operator-entered sources — everything else is machine-generated.
-   Mirrors HUMAN_SOURCES in server.py / the Rust dashboard route. */
-const HUMAN_SRC=new Set(['manual','voice_memo','telegram']);
+/* provenance: robot = autonomously generated with no human ask (distiller,
+   incident capture, subtask promotion, specola). Everything else is human —
+   the operator made it, or Claude Code/HAL made it on the operator's request.
+   Mirrors ROBOT_SOURCES in server.py / the Rust dashboard route. */
+const AUTO_SRC=new Set(['distilled','incident','subtask_promotion','specola']);
 function originTag(t,verbose){
-  const h=HUMAN_SRC.has(t.source_type), src=esc(t.source_type||'unknown');
+  const robot=AUTO_SRC.has(t.source_type), src=esc(t.source_type||'unknown');
   const id=t.pt_id?esc(t.pt_id):'';
-  const lbl=verbose?[id,(h?'operator':'machine')+' · '+src].filter(Boolean).join(' · '):id;
-  return `<span class="ptag${h?' h':''}" title="${h?'operator-entered':'machine-generated'} · source: ${src}">`+
-    `<svg class="ic" aria-hidden="true"><use href="#${h?'i-user':'i-bot'}"/></svg>${lbl}</span>`;
+  const lbl=verbose?[id,(robot?'auto-generated':'operator-directed')+' · '+src].filter(Boolean).join(' · '):id;
+  return `<span class="ptag${robot?'':' h'}" title="${robot?'auto-generated (robot)':'operator-directed (human)'} · source: ${src}">`+
+    `<svg class="ic" aria-hidden="true"><use href="#${robot?'i-bot':'i-user'}"/></svg>${lbl}</span>`;
 }
 /* priority chip — click opens the direct severity picker (jump to any P5…P1). */
 function ptrigger(t){
@@ -1009,7 +1012,7 @@ function renderChips(s){
      when the backend predates the flux object. */
   const fd=fluxData(s), win=_fluxWin;
   const flux=!fd?'':
-    `<button class="chip flux" data-act="flux" aria-haspopup="menu" title="last ${FLUX_NAMES[win]||win}: ${fd.added} added (${fd.added_human} operator · ${fd.added_machine} machine) · ${fd.done} completed — click to change range">`+
+    `<button class="chip flux" data-act="flux" aria-haspopup="menu" title="last ${FLUX_NAMES[win]||win}: ${fd.added} added (${fd.added_human} operator · ${fd.added_robot} auto) · ${fd.done} completed — click to change range">`+
     `<b class="plus">+${fd.added}</b><b class="minus">−${fd.done}</b><small>${win} ▾</small></button>`;
   $('#chips').innerHTML=`
     <span class="chip crit"><span class="dot"></span><b>${c5}</b> crit</span>

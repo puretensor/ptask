@@ -158,6 +158,14 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.9.0** — provenance re-classified by **intent, not by which process ran
+  the INSERT**. Two classes: **robot** (auto-generated — `distilled`,
+  `incident`, `subtask_promotion`, `specola`) and **human** (everything else:
+  the operator typed/dictated it, OR Claude Code/HAL created it on the
+  operator's request — `manual`/`voice_memo`/`telegram`/`claude_code`/`mcp`/
+  `remote-cli`; unknown → human). This flips `claude_code`+`mcp`+`remote-cli`
+  from robot to human, so the board is no longer all-bot. Flux `added_machine`
+  renamed `added_robot`; `ROBOT_SOURCES` (Rust/Python) + `AUTO_SRC` (JS).
 - **v0.8.0** — the flux chip is now a **range picker**: click it for a dropdown
   of 30m / 1h / 6h / 24h / 7d. `/api/stats` returns `flux.by_window` (added,
   added_human, added_machine, done for every window) plus `flux.windows`, so the
