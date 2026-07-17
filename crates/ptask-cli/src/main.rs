@@ -1224,7 +1224,7 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
     let slot_caps: Vec<i64> = fb.free_slots.iter().map(|s| s.minutes).collect();
     let plan = ptask_core::planner::pack(&candidates, &slot_caps);
 
-    let tz = jiff::tz::TimeZone::get(&fb.tz).unwrap_or_else(|_| jiff::tz::TimeZone::UTC);
+    let tz = jiff::tz::TimeZone::get(&fb.tz).unwrap_or(jiff::tz::TimeZone::UTC);
     let fmt = |ts: jiff::Timestamp| {
         ts.to_zoned(tz.clone())
             .strftime("%Y-%m-%d %H:%M")

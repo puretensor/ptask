@@ -1,0 +1,4 @@
+self-hosted-runner:
+  # tensor-core = PureTensor self-hosted runner fleet (see tensor-scripts/ci/gh-runner.sh)
+  labels:
+    - tensor-core
