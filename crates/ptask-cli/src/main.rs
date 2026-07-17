@@ -530,7 +530,10 @@ struct PlanArgs {
     #[arg(long)]
     write: bool,
     /// Path to gcalendar.py.
-    #[arg(long, default_value = "/home/puretensorai/.config/puretensor/gcalendar.py")]
+    #[arg(
+        long,
+        default_value = "/home/puretensorai/.config/puretensor/gcalendar.py"
+    )]
     gcal: String,
 }
 
@@ -1210,7 +1213,10 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
         );
     }
     let fb: FreeBusy = serde_json::from_slice(&out.stdout).with_context(|| {
-        format!("parsing freebusy json: {}", String::from_utf8_lossy(&out.stdout))
+        format!(
+            "parsing freebusy json: {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
     })?;
 
     // 2. ready candidates -> pure first-fit pack over slot capacities
@@ -1219,7 +1225,11 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
     let plan = ptask_core::planner::pack(&candidates, &slot_caps);
 
     let tz = jiff::tz::TimeZone::get(&fb.tz).unwrap_or_else(|_| jiff::tz::TimeZone::UTC);
-    let fmt = |ts: jiff::Timestamp| ts.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M").to_string();
+    let fmt = |ts: jiff::Timestamp| {
+        ts.to_zoned(tz.clone())
+            .strftime("%Y-%m-%d %H:%M")
+            .to_string()
+    };
 
     // 3. resolve placements into wall-clock times
     let mut scheduled = Vec::new();
@@ -1285,11 +1295,17 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
             println!("Advisory plan ({}):", output.tz);
             for s in &output.scheduled {
                 let pt = s.pt_id.as_deref().unwrap_or("------");
-                println!("  {}  {:>3}m  {:7}  {}", s.start, s.duration_min, pt, s.title);
+                println!(
+                    "  {}  {:>3}m  {:7}  {}",
+                    s.start, s.duration_min, pt, s.title
+                );
             }
         }
         if !output.unscheduled.is_empty() {
-            println!("\nUnscheduled ({} — no free slot fits):", output.unscheduled.len());
+            println!(
+                "\nUnscheduled ({} — no free slot fits):",
+                output.unscheduled.len()
+            );
             for u in &output.unscheduled {
                 let pt = u.pt_id.as_deref().unwrap_or("------");
                 println!("  {:7}  {:>3}m  {}", pt, u.duration_min, u.title);

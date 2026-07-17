@@ -376,9 +376,9 @@ async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
                  FROM tasks WHERE datetime(created_at) >= datetime('now', ?1) \
                  GROUP BY o",
             )?;
-            for row in
-                stmt.query_map([modifier], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-            {
+            for row in stmt.query_map([modifier], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })? {
                 let (o, n) = row?;
                 if o == "robot" {
                     added_robot = n;

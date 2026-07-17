@@ -22,7 +22,11 @@ pub struct PlanCandidate {
 /// Dependency-met, non-snoozed ready tasks in priority order, each carrying a
 /// duration (NULL/zero durations default to `slot_default_min`). Mirrors
 /// `dag::next_ready`'s filter + ordering.
-pub fn ready_candidates(db: &Db, limit: usize, slot_default_min: i64) -> Result<Vec<PlanCandidate>> {
+pub fn ready_candidates(
+    db: &Db,
+    limit: usize,
+    slot_default_min: i64,
+) -> Result<Vec<PlanCandidate>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
         "SELECT t.pt_id, t.title, t.duration_min, t.energy,
@@ -40,7 +44,15 @@ pub fn ready_candidates(db: &Db, limit: usize, slot_default_min: i64) -> Result<
         let energy: Option<String> = r.get(3)?;
         let unmet: i64 = r.get(4)?;
         let dur = duration_min.filter(|d| *d > 0).unwrap_or(slot_default_min);
-        Ok((PlanCandidate { pt_id, title, duration_min: dur, energy }, unmet))
+        Ok((
+            PlanCandidate {
+                pt_id,
+                title,
+                duration_min: dur,
+                energy,
+            },
+            unmet,
+        ))
     })?;
     let mut out = Vec::new();
     for entry in rows {
@@ -99,7 +111,10 @@ pub fn pack(candidates: &[PlanCandidate], slot_caps: &[i64]) -> PackResult {
             unscheduled.push(ci);
         }
     }
-    PackResult { scheduled, unscheduled }
+    PackResult {
+        scheduled,
+        unscheduled,
+    }
 }
 
 #[cfg(test)]
