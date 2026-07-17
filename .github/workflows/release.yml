@@ -12,6 +12,7 @@ name: release
 # succeeds locally, add the target to the matrix.
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
@@ -26,7 +27,7 @@ env:
 jobs:
   build:
     name: build ${{ matrix.target }}
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, tensor-core]
     strategy:
       fail-fast: false
       matrix:
@@ -87,7 +88,7 @@ jobs:
   release:
     name: github release
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, tensor-core]
     permissions:
       contents: write
     steps:

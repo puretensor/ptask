@@ -53,6 +53,17 @@ const TASK_COLS: [&str; 19] = [
     "ai_reasoning",
 ];
 
+/// Flux windows the cockpit can switch between: (label, SQLite datetime
+/// modifier). The frontend renders one at a time; the backend returns all so
+/// switching is a local re-render, not a refetch.
+const FLUX_WINDOWS: [(&str, &str); 5] = [
+    ("30m", "-30 minutes"),
+    ("1h", "-1 hour"),
+    ("6h", "-6 hours"),
+    ("24h", "-1 day"),
+    ("7d", "-7 days"),
+];
+
 const AGE_BUCKETS: [(f64, f64, &str); 5] = [
     (0.0, 7.0, "0-7d"),
     (7.0, 30.0, "1-4w"),
@@ -344,6 +355,53 @@ async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
             let (day, n) = row?;
             thru.push(serde_json::json!({"day": day, "n": n}));
         }
+        // Flux: tasks added vs completed, computed across several selectable
+        // windows so the cockpit can switch range client-side without a
+        // refetch. The added side is split by INTENT, not by which process ran
+        // the INSERT: `robot` = autonomously generated with no human ask (the
+        // distiller, puresentinel incident capture, subtask auto-promotion,
+        // the specola worker — see ROBOT_SOURCES); `human` = everything else,
+        // i.e. the operator typed/dictated it (manual/voice_memo/telegram) OR
+        // Claude Code/HAL created it on the operator's request (claude_code/
+        // mcp/remote-cli). Unknown sources default to human (operator-driven
+        // is the common case). `datetime()` normalises mixed T/space ISO forms.
+        let mut flux_by_window = serde_json::Map::new();
+        for (label, modifier) in FLUX_WINDOWS {
+            let mut added_human = 0i64;
+            let mut added_robot = 0i64;
+            let mut stmt = c.prepare(
+                "SELECT CASE WHEN source_type IN \
+                          ('distilled','incident','subtask_promotion','specola') \
+                        THEN 'robot' ELSE 'human' END o, count(*) \
+                 FROM tasks WHERE datetime(created_at) >= datetime('now', ?1) \
+                 GROUP BY o",
+            )?;
+            for row in stmt.query_map([modifier], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })? {
+                let (o, n) = row?;
+                if o == "robot" {
+                    added_robot = n;
+                } else {
+                    added_human = n;
+                }
+            }
+            let done: i64 = c.query_row(
+                "SELECT count(*) FROM tasks WHERE status='done' \
+                 AND datetime(updated_at) >= datetime('now', ?1)",
+                [modifier],
+                |r| r.get(0),
+            )?;
+            flux_by_window.insert(
+                label.to_string(),
+                serde_json::json!({
+                    "added": added_human + added_robot,
+                    "added_human": added_human,
+                    "added_robot": added_robot,
+                    "done": done,
+                }),
+            );
+        }
         let pending: i64 = by_pri.values().filter_map(|v| v.as_i64()).sum();
         let mut due_soon = 0i64;
         let mut overdue = 0i64;
@@ -372,6 +430,10 @@ async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
             "throughput": thru,
             "due_within_7d": due_soon,
             "overdue": overdue,
+            "flux": {
+                "windows": FLUX_WINDOWS.iter().map(|(l, _)| *l).collect::<Vec<_>>(),
+                "by_window": flux_by_window,
+            },
             "version": ptask_core::VERSION,
         }))
     });

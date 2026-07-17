@@ -74,6 +74,65 @@ class EventHistoryTests(unittest.TestCase):
         self.assertEqual(events[0]["payload"], {"to": "done"})
 
 
+class StatsFluxTests(unittest.TestCase):
+    def test_q_stats_reports_windowed_flux_split_by_origin(self):
+        old_db = server.DB_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute(
+                """
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY, title TEXT, priority INTEGER,
+                    status TEXT, task_type TEXT, source_type TEXT,
+                    created_at TEXT, updated_at TEXT, deadline TEXT
+                )
+                """
+            )
+            rows = [
+                # added just now: human = operator-typed OR Claude-Code-on-ask.
+                ("t1", "manual fresh", 2, "pending", "operational", "manual",
+                 "+0 seconds", "+0 seconds"),           # human (operator)
+                ("t2", "mcp fresh", 2, "pending", "operational", "mcp",
+                 "+0 seconds", "+0 seconds"),           # human (claude/HAL on ask)
+                ("t3", "distilled fresh done", 2, "done", "operational",
+                 "distilled", "+0 seconds", "+0 seconds"),  # ROBOT (auto)
+                # added 3 days ago (robot): in the 7d window, NOT the 24h one
+                ("t6", "incident 3d ago", 2, "pending", "operational",
+                 "incident", "-3 days", "-3 days"),     # ROBOT (auto)
+                # old task completed just now (counts in done for every window)
+                ("t4", "old but just done", 2, "done", "operational",
+                 "claude_code", "-10 days", "+0 seconds"),
+                # old and long done: counts in neither add nor recent-done
+                ("t5", "ancient", 2, "done", "operational", "manual",
+                 "-10 days", "-9 days"),
+            ]
+            for tid, title, pri, status, ttype, src, c_at, u_at in rows:
+                con.execute(
+                    "INSERT INTO tasks VALUES (?,?,?,?,?,?,"
+                    "datetime('now', ?), datetime('now', ?), NULL)",
+                    (tid, title, pri, status, ttype, src, c_at, u_at),
+                )
+            con.commit()
+            con.close()
+            server.DB_PATH = f.name
+            try:
+                stats = server.q_stats()
+            finally:
+                server.DB_PATH = old_db
+        flux = stats["flux"]
+        self.assertEqual(flux["windows"], ["30m", "1h", "6h", "24h", "7d"])
+        w24 = flux["by_window"]["24h"]
+        self.assertEqual(w24["added"], 3)          # t1,t2,t3 (t6 is 3d old)
+        self.assertEqual(w24["added_human"], 2)    # t1 manual, t2 mcp
+        self.assertEqual(w24["added_robot"], 1)    # t3 distilled
+        self.assertEqual(w24["done"], 2)           # t3,t4
+        w7 = flux["by_window"]["7d"]
+        self.assertEqual(w7["added"], 4)           # + t6 pulled in by wider window
+        self.assertEqual(w7["added_human"], 2)     # still t1,t2
+        self.assertEqual(w7["added_robot"], 2)     # t3 distilled + t6 incident
+        self.assertEqual(w7["done"], 2)            # t5 still older than 7d
+
+
 class BuildAddArgsTests(unittest.TestCase):
     def test_title_only_is_separated(self):
         args, err = server.build_add_args({"title": "ship it"})

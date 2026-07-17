@@ -158,6 +158,28 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.9.0** — provenance re-classified by **intent, not by which process ran
+  the INSERT**. Two classes: **robot** (auto-generated — `distilled`,
+  `incident`, `subtask_promotion`, `specola`) and **human** (everything else:
+  the operator typed/dictated it, OR Claude Code/HAL created it on the
+  operator's request — `manual`/`voice_memo`/`telegram`/`claude_code`/`mcp`/
+  `remote-cli`; unknown → human). This flips `claude_code`+`mcp`+`remote-cli`
+  from robot to human, so the board is no longer all-bot. Flux `added_machine`
+  renamed `added_robot`; `ROBOT_SOURCES` (Rust/Python) + `AUTO_SRC` (JS).
+- **v0.8.0** — the flux chip is now a **range picker**: click it for a dropdown
+  of 30m / 1h / 6h / 24h / 7d. `/api/stats` returns `flux.by_window` (added,
+  added_human, added_machine, done for every window) plus `flux.windows`, so the
+  cockpit switches range as an instant local re-render off the last payload — no
+  refetch. Selection persists in `localStorage`. Both servers changed (Rust `pt
+  serve` 3.3.0 + Python sidecar 0.8.0); the flat `added_24h*` fields are replaced
+  by the windowed object.
+- **v0.7.0** — provenance + flux: every card wears a subtle `PT-xxxx` tag with
+  an origin glyph (person = operator-entered `manual`/`voice_memo`/`telegram`,
+  bot = machine-generated: `claude_code`, `mcp`, `distilled`, `incident`, …);
+  the drawer spells the origin out. Header gains a **+N/−N 24h flux chip**
+  (tasks added vs completed in the last day, added split operator/machine in
+  the tooltip) backed by new `/api/stats` fields `added_24h`,
+  `added_24h_human`, `added_24h_machine`, `done_24h` in both servers.
 - **v0.6.1** — accessibility polish: interactive task titles in Critical Now and
   Priority Lanes now expose at least a 24px hit target with visible focus rings.
 - **v0.6.0** — **🎤 speak-to-fill voice capture** in the composer. A mic button
