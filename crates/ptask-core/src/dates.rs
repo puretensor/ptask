@@ -30,9 +30,27 @@ pub fn now_in_operator_tz() -> Result<Zoned> {
 /// Parse a natural-language date phrase using `now` as the relative anchor.
 /// UK dialect (`Dialect::Uk` — "next friday" means the *following* week's
 /// Friday, "01/04/26" is 1 April 2026, etc.).
+///
+/// Panic-free by contract: `interim` 0.2.1 panics on inputs it should merely
+/// reject — a lowercase assertion in its scanner (types.rs:254, hit by
+/// mixed-case phrases like "Sat 18 Jul") and other parser paths (e.g. a long
+/// identifier after an hour number, parser.rs:459). A date *guess* must never
+/// abort the process: pre-fix this killed `pt add` and silently killed the
+/// MCP server's request task, hanging the client with no response (PT-1270).
+/// Input is lowercased up front (interim's date vocabulary is pure ASCII) and
+/// any residual panic is caught and mapped to an ordinary parse error.
 pub fn parse_at(input: &str, now: Zoned) -> Result<Zoned> {
-    parse_date_string(input.trim(), now, Dialect::Uk)
-        .map_err(|e| Error::Other(format!("date parse failed for {:?}: {}", input, e)))
+    let normalised = input.trim().to_ascii_lowercase();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        parse_date_string(&normalised, now, Dialect::Uk)
+    }))
+    .map_err(|_| {
+        Error::Other(format!(
+            "date parse failed for {:?}: parser panicked",
+            input
+        ))
+    })?
+    .map_err(|e| Error::Other(format!("date parse failed for {:?}: {}", input, e)))
 }
 
 /// Parse a phrase against `now_in_operator_tz()`. Convenience for callers
@@ -218,6 +236,34 @@ mod tests {
     fn garbage_returns_error() {
         let err = parse_at("not a date phrase at all", anchor());
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn mixed_case_phrase_is_normalised_not_a_panic() {
+        // Regression (PT-1270): interim 0.2.1's Lowercase::literal asserts
+        // every identifier byte is ascii-lowercase (types.rs:254), so
+        // "Sat 18 Jul" aborted the whole process. Input is lowercased now —
+        // the mixed-case phrase must behave exactly like its lowercase twin.
+        let mixed = parse_at("Sat 18 Jul", anchor());
+        let lower = parse_at("sat 18 jul", anchor());
+        match (mixed, lower) {
+            (Ok(m), Ok(l)) => assert_eq!(m, l),
+            (Err(_), Err(_)) => {} // same rejection either way is fine
+            (m, l) => panic!("case changed the outcome: {:?} vs {:?}", m, l),
+        }
+        // The plain day-month form must actually parse.
+        let z = parse_at("18 Jul", anchor()).unwrap();
+        assert_eq!(z.date(), date(2026, 7, 18));
+    }
+
+    #[test]
+    fn long_identifier_after_hour_is_error_not_panic() {
+        // Regression (PT-1270): interim's am/pm branch (parser.rs:459) feeds
+        // the identifier after an hour number into Lowercase::literal, which
+        // also asserts len < 16 — a 16+ char word panicked even in lowercase.
+        // catch_unwind must convert that abort into an ordinary Err.
+        let r = parse_at("tomorrow 5 internationalisation", anchor());
+        assert!(r.is_err(), "expected parse error, got {:?}", r);
     }
 
     #[test]

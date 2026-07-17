@@ -476,7 +476,57 @@ fn try_date_match(toks: &[&str], start: usize, now: &Zoned) -> Option<(String, u
             best = Some((phrase, end - start));
         }
     }
+    // A bare month name in prose is far more often a word than a date
+    // ("draft the Jul report") — interim resolves it to the 1st of that
+    // month, silently backdating the task (PT-1267 set deadline=2026-07-01
+    // from a stray "Jul"). Worse, interim tolerates one trailing junk
+    // identifier ("jul board" also parses as 2026-07-01), so rejecting only
+    // single-token matches isn't enough. A phrase starting at a month token
+    // only counts as a date when the month is followed by a digit-led token
+    // inside the match — a day or year ("jul 18", "jul 2027"). "next jul" /
+    // "18 jul" are unaffected (they don't start at the month token).
+    if let Some((_, consumed)) = &best
+        && is_bare_month(toks[start])
+        && (*consumed == 1
+            || !toks[start + 1]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit()))
+    {
+        return None;
+    }
     best
+}
+
+/// Month-name tokens (long + short forms as accepted by interim).
+fn is_bare_month(tok: &str) -> bool {
+    matches!(
+        tok.to_ascii_lowercase().as_str(),
+        "jan"
+            | "january"
+            | "feb"
+            | "february"
+            | "mar"
+            | "march"
+            | "apr"
+            | "april"
+            | "may"
+            | "jun"
+            | "june"
+            | "jul"
+            | "july"
+            | "aug"
+            | "august"
+            | "sep"
+            | "sept"
+            | "september"
+            | "oct"
+            | "october"
+            | "nov"
+            | "november"
+            | "dec"
+            | "december"
+    )
 }
 
 /// Tokens that signal a structural quick-add marker, never a date word.
@@ -612,6 +662,74 @@ mod tests {
                 "past-resolving month must warn; got none"
             );
         }
+    }
+
+    #[test]
+    fn mixed_case_date_phrase_parses_without_panic() {
+        // Regression (PT-1270): `pt add "x Sat 18 Jul"` aborted the process in
+        // interim's ascii-lowercase assert; on the MCP path the panic killed
+        // the request task and the client hung with no response. Anchor is
+        // Wed 2026-05-13, so 18 Jul is in the future.
+        // interim has no weekday-prefixed date grammar ("sat 18 jul" errs),
+        // so the greedy scan settles on "Sat" (= coming Saturday from the
+        // Wed 2026-05-13 anchor) and the rest stays title text. Wrong-ish
+        // semantics but no abort — the crash is the regression under test.
+        let q = parse_at("book flights Sat 18 Jul", anchor()).unwrap();
+        assert_eq!(q.title, "book flights 18 Jul");
+        assert_eq!(q.deadline_phrase.as_deref(), Some("Sat"));
+        assert!(
+            q.deadline.as_deref().unwrap().starts_with("2026-05-16"),
+            "got {:?}",
+            q.deadline
+        );
+    }
+
+    #[test]
+    fn month_day_phrase_still_parses() {
+        // Guard for the bare-month rejection: month + digit-led day is a
+        // genuine date and must keep working.
+        let q = parse_at("pay rent Jul 18", anchor()).unwrap();
+        assert_eq!(q.title, "pay rent");
+        assert!(
+            q.deadline.as_deref().unwrap().starts_with("2026-07-18"),
+            "got {:?}",
+            q.deadline
+        );
+    }
+
+    #[test]
+    fn bare_month_token_is_title_text_not_deadline() {
+        // Regression (PT-1267): prose "Jul" mid-title silently set
+        // deadline=2026-07-01 (the past) while due:2026-08-09 parsed fine.
+        // A single-token bare month is rejected as a date phrase now.
+        let q = parse_at("draft the Jul board report due:2026-08-09", anchor()).unwrap();
+        assert_eq!(q.title, "draft the Jul board report");
+        assert!(
+            q.deadline.is_none(),
+            "bare month must not set a deadline: {:?}",
+            q.deadline
+        );
+        assert!(
+            q.due.as_deref().unwrap().starts_with("2026-08-09"),
+            "got {:?}",
+            q.due
+        );
+    }
+
+    #[test]
+    fn long_word_after_hour_number_no_panic() {
+        // Regression (PT-1270): the greedy scan tries the extension
+        // "tomorrow 5 internationalisation", which panicked inside interim
+        // (identifier len >= 16 after an hour number). The caught panic is
+        // just a failed extension: "tomorrow" stays the deadline and the
+        // rest stays title text.
+        let q = parse_at("standup tomorrow 5 internationalisation", anchor()).unwrap();
+        assert_eq!(q.title, "standup 5 internationalisation");
+        assert!(
+            q.deadline.as_deref().unwrap().starts_with("2026-05-14"),
+            "got {:?}",
+            q.deadline
+        );
     }
 
     #[test]

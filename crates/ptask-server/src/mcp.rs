@@ -241,7 +241,14 @@ impl PtaskMcp {
                 .map_err(domain_err)?;
         }
         self.rescore();
-        json_ok(&task_json(&t))
+        let mut v = task_json(&t);
+        if !q.warnings.is_empty() {
+            // Non-fatal quick-add caveats (e.g. a date phrase that resolved to
+            // the past). PT-1267 backdated a deadline silently because these
+            // were dropped on the MCP path — agents must see them.
+            v["warnings"] = serde_json::json!(q.warnings);
+        }
+        json_ok(&v)
     }
 
     #[tool(description = "Full detail for one task: fields + attributed journal history.")]
