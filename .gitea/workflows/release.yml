@@ -1,0 +1,193 @@
+name: release
+
+# Sovereign release mirror — runs on the self-hosted Gitea act_runner
+# (puretensor-act-runner on tensor-core). Fires when an operator pushes
+# a `vX.Y.Z` tag.
+#
+# Why this exists: .github/workflows/release.yml is GitHub-only and dead
+# while GitHub Actions billing is blocked (PT-1215). This mirror builds
+# the `pt` binary for x86_64-unknown-linux-gnu AND aarch64-unknown-linux-gnu
+# (mon3), generates SHA-256 manifests, and attaches everything to the
+# Gitea Release — with zero GitHub dependency and zero third-party
+# marketplace actions:
+#   - no softprops/action-gh-release, no actions/upload-artifact
+#   - assets are POSTed straight to the Gitea release API with the
+#     built-in ${{ secrets.GITHUB_TOKEN }} (Gitea injects this into
+#     act_runner jobs). The API base is hardcoded to 100.92.245.5:3002,
+#     NOT ${{ github.api_url }} — this instance's ROOT_URL is
+#     https://gitea.fox, which does not resolve from inside job
+#     containers (documented gotcha, pureMind topic
+#     gitea_actions_runner; confirmed 2026-07-14: github.api_url would
+#     derive from that same ROOT_URL and fail the same way). The
+#     100.92.245.5:3002 form is the one proven pattern in this fleet
+#     (einherjar's ci.yml package/registry pushes).
+#
+# Each matrix job builds AND publishes its own per-arch asset. The two
+# jobs race to create the release, so creation tolerates a 409 (already
+# exists). Asset names are per-target, so the two jobs never collide on
+# upload.
+#
+# glibc floor (fixed 2026-07-14 — the original draft of this workflow got
+# this backwards): `catthehacker/ubuntu:act-latest` is genuine Ubuntu
+# 24.04 / glibc 2.39 (verified via `docker run ... cat /etc/os-release`),
+# NOT 22.04/2.35 as an earlier version of this comment claimed. Building
+# x86_64 on that label would silently ship mon2 (glibc 2.35 floor) a
+# binary it can't execute — exactly the failure class
+# .github/workflows/release.yml's own header comment exists to avoid.
+# The x86_64 leg is therefore pinned to the `ubuntu-22.04` runner label
+# (added to puretensor-act-runner's config.yaml 2026-07-14, PT-1216 —
+# genuine catthehacker/ubuntu:act-22.04, spot-checked glibc 2.35).
+# aarch64 stays on `ubuntu-latest` (24.04/glibc 2.39) — mon3 is glibc
+# 2.39, no floor issue on that leg. See matrix.runner_label below.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build + publish ${{ matrix.target }}
+    runs-on: ${{ matrix.runner_label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            # glibc 2.35 floor (mon2) — see header comment. Do NOT change
+            # this to ubuntu-latest.
+            runner_label: ubuntu-22.04
+            rustflags: "-C target-cpu=x86-64-v3"
+            strip: strip
+            apt: ""
+          - target: aarch64-unknown-linux-gnu
+            # mon3 (arm64): glibc 2.39, no floor issue — ubuntu-latest OK.
+            # Also no target-cpu narrowing.
+            runner_label: ubuntu-latest
+            rustflags: ""
+            strip: aarch64-linux-gnu-strip
+            apt: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install build deps + cross toolchain
+        run: |
+          apt-get update
+          apt-get install -y curl file jq build-essential ${{ matrix.apt }}
+
+      - name: install rust (stable, rustup)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: add rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: verify version and lockfile coherence
+        run: bash scripts/ci-version-check.sh
+        env:
+          PTASK_RELEASE_TAG: ${{ github.ref_name }}
+
+      - name: cargo build --release
+        run: cargo build --release --bin pt --features native-ml --target ${{ matrix.target }} --locked
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+
+      - name: strip + checksum
+        run: |
+          ${{ matrix.strip }} target/${{ matrix.target }}/release/pt
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/pt dist/pt-${{ matrix.target }}
+          ( cd dist && sha256sum pt-${{ matrix.target }} > pt-${{ matrix.target }}.sha256 )
+
+      - name: publish assets to gitea release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API: http://100.92.245.5:3002/api/v1
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          auth=(-H "Authorization: token ${TOKEN}")
+
+          prerelease=false
+          case "$TAG" in
+            *-*) prerelease=true ;;
+          esac
+
+          # Create the release. Two matrix jobs race here; 201 (created) and
+          # 409 (already exists) are both success. Any other status is fatal.
+          body=$(printf '{"tag_name":"%s","name":"%s","draft":false,"prerelease":%s}' \
+            "$TAG" "$TAG" "$prerelease")
+          code=$(curl -sS -o /tmp/create.json -w '%{http_code}' \
+            "${auth[@]}" -H "Content-Type: application/json" \
+            -X POST "${API}/repos/${REPO}/releases" -d "$body")
+          if [ "$code" != "201" ] && [ "$code" != "409" ]; then
+            echo "release create failed (HTTP $code):" >&2
+            cat /tmp/create.json >&2
+            exit 1
+          fi
+          echo "release create HTTP $code"
+
+          # Resolve the release id by tag (works whether we created it or the
+          # sibling job did).
+          rid=""
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -sS -o /tmp/rel.json -w '%{http_code}' \
+              "${auth[@]}" "${API}/repos/${REPO}/releases/tags/${TAG}")
+            if [ "$code" = "200" ]; then
+              rid=$(jq -r '.id' /tmp/rel.json)
+              break
+            fi
+            echo "release lookup attempt $attempt got HTTP $code; retrying" >&2
+            sleep 3
+          done
+          if [ -z "$rid" ] || [ "$rid" = "null" ]; then
+            echo "could not resolve release id for ${TAG}" >&2
+            cat /tmp/rel.json >&2
+            exit 1
+          fi
+          echo "release id: $rid"
+
+          upload_asset() {
+            name="$1"
+            file="$2"
+            # Idempotent: delete any same-named asset first so re-runs and
+            # partial retries don't 409 or duplicate.
+            code=$(curl -sS -o /tmp/assets.json -w '%{http_code}' \
+              "${auth[@]}" "${API}/repos/${REPO}/releases/${rid}/assets")
+            if [ "$code" = "200" ]; then
+              for aid in $(jq -r --arg n "$name" '.[] | select(.name==$n) | .id' /tmp/assets.json); do
+                echo "deleting existing asset $name (id $aid)"
+                curl -sS "${auth[@]}" -X DELETE \
+                  "${API}/repos/${REPO}/releases/${rid}/assets/${aid}" >/dev/null
+              done
+            fi
+            echo "uploading $name"
+            code=$(curl -sS -o /tmp/upload.json -w '%{http_code}' \
+              "${auth[@]}" -H "Content-Type: application/octet-stream" \
+              -X POST "${API}/repos/${REPO}/releases/${rid}/assets?name=${name}" \
+              --data-binary @"$file")
+            if [ "$code" != "201" ]; then
+              echo "asset upload failed for $name (HTTP $code):" >&2
+              cat /tmp/upload.json >&2
+              exit 1
+            fi
+          }
+
+          upload_asset "pt-${{ matrix.target }}" "dist/pt-${{ matrix.target }}"
+          upload_asset "pt-${{ matrix.target }}.sha256" "dist/pt-${{ matrix.target }}.sha256"
+
+          echo "published pt-${{ matrix.target }} (+ .sha256) to release ${TAG}"
