@@ -36,13 +36,13 @@ pub struct NativeReport {
     pub duration_ms: u128,
 }
 
-/// Similarity gate: normalized token overlap (Jaccard on lowercase words
-/// ≥ 4 chars). Cheap, deterministic, no model download.
+/// Similarity gate: normalized token overlap (Jaccard on lowercase words).
+/// Cheap, deterministic, no model download.
 fn title_similar(a: &str, b: &str) -> bool {
     let toks = |s: &str| {
         s.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() >= 4)
+            .filter(|w| !w.is_empty())
             .map(|w| w.to_string())
             .collect::<std::collections::HashSet<_>>()
     };
@@ -589,6 +589,15 @@ mod tests {
         assert!(!title_similar(
             "Renew the office lease",
             "Book flights to Reykjavik"
+        ));
+        assert!(!title_similar(
+            "Email Alan about the GPU quote",
+            "Email Alan about the VAT return"
+        ));
+        assert!(title_similar("Pay VAT tax", "pay vat tax"));
+        assert!(!title_similar(
+            "Send the report to the tax team",
+            "Send the invoice to the ops team"
         ));
     }
 }
