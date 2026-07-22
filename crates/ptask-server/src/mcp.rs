@@ -223,18 +223,21 @@ impl PtaskMcp {
             recurrence: q.recurrence.clone(),
             due_at: q.due.clone(),
         };
+        let discovered_parent = discovered_from
+            .as_deref()
+            .map(|parent| ptask_core::tasks::resolve_for_lookup(&self.db, parent, true))
+            .transpose()
+            .map_err(domain_err)?;
         let t = ptask_core::tasks::create_with_extensions(&self.db, new, ext, &self.ctx())
             .map_err(domain_err)?;
-        if let Some(parent) = discovered_from {
-            let p = ptask_core::tasks::resolve_for_lookup(&self.db, &parent, true)
-                .map_err(domain_err)?;
+        if let Some(parent) = discovered_parent {
             self.db
                 .with_conn(|c| {
                     c.execute(
                         "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
                          VALUES (?1, ?2, 'discovered_from',
                                  strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00')",
-                        rusqlite::params![t.id, p.id],
+                        rusqlite::params![t.id, parent.id],
                     )?;
                     Ok(())
                 })
@@ -537,4 +540,67 @@ pub async fn serve_stdio(db: Db, actor: String) -> anyhow::Result<()> {
         .await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn task_add_rejects_invalid_provenance_before_creating() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+
+        let result = mcp
+            .task_add(Parameters(AddArg {
+                text: "task that must not survive".into(),
+                reason: None,
+                discovered_from: Some("PT-999999".into()),
+            }))
+            .await;
+
+        assert!(result.is_err());
+        db.with_conn(|c| {
+            let count: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+            assert_eq!(count, 0);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn task_add_keeps_valid_provenance_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let parent = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("parent task"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+
+        let result = mcp
+            .task_add(Parameters(AddArg {
+                text: "discovered child".into(),
+                reason: None,
+                discovered_from: parent.pt_id.clone(),
+            }))
+            .await;
+
+        assert!(result.is_ok());
+        db.with_conn(|c| {
+            let links: i64 = c.query_row(
+                "SELECT COUNT(*) FROM task_links
+                 WHERE to_uuid = ?1 AND kind = 'discovered_from'",
+                [&parent.id],
+                |r| r.get(0),
+            )?;
+            assert_eq!(links, 1);
+            Ok(())
+        })
+        .unwrap();
+    }
 }
