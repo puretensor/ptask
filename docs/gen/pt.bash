@@ -79,6 +79,9 @@ _pt() {
             pt,next)
                 cmd="pt__subcmd__next"
                 ;;
+            pt,plan)
+                cmd="pt__subcmd__plan"
+                ;;
             pt,priority)
                 cmd="pt__subcmd__priority"
                 ;;
@@ -204,6 +207,9 @@ _pt() {
                 ;;
             pt__subcmd__help,next)
                 cmd="pt__subcmd__help__subcmd__next"
+                ;;
+            pt__subcmd__help,plan)
+                cmd="pt__subcmd__help__subcmd__plan"
                 ;;
             pt__subcmd__help,priority)
                 cmd="pt__subcmd__help__subcmd__priority"
@@ -488,7 +494,7 @@ _pt() {
 
     case "${cmd}" in
         pt)
-            opts="-h -V --db --json --idempotency-key --help --version add list done priority edit reopen show dismiss rm next view tui serve bot mcp digest export delegate branch distill accountability scoring remote start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
+            opts="-h -V --db --json --idempotency-key --help --version add list done priority edit reopen show dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -982,7 +988,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help)
-            opts="add list done priority edit reopen show dismiss rm next view tui serve bot mcp digest export delegate branch distill accountability scoring remote start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
+            opts="add list done priority edit reopen show dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1290,6 +1296,20 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help__subcmd__next)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__plan)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1959,6 +1979,64 @@ _pt() {
                     return 0
                     ;;
                 -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__plan)
+            opts="-n -h --account --days --work --tz --calendar --slot-default --limit --write --gcal --db --json --idempotency-key --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --account)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --days)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --work)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --tz)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --calendar)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --slot-default)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --limit)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --gcal)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

@@ -25,7 +25,7 @@ if [[ "$dependency_count" -ne 6 || "$matching_dependencies" -ne 6 ]]; then
     exit 1
 fi
 
-if ! grep -Fqx ".TH pt 1  \"pt ${version}\"" docs/gen/pt.1; then
+if ! grep -Eq "^\\.TH pt 1  +\\\"pt ${version}\\\"[[:space:]]*$" docs/gen/pt.1; then
     echo "version-check: docs/gen/pt.1 header is not version ${version}" >&2
     exit 1
 fi

@@ -67,6 +67,7 @@ jobs:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: bash scripts/ci-version-check.sh
+      - run: bash scripts/generated-artifacts.sh --check
       - run: python3 -m unittest discover -s scripts/tests -v
       - run: cargo build --workspace --locked
       - run: bash scripts/ci-production-build-check.sh
