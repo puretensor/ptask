@@ -1459,25 +1459,54 @@ fn cmd_export(db: &Db, a: ExportArgs) -> Result<()> {
         nt, nl, nb, out
     );
     if a.git {
-        let run = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(&out)
-                .output()
-        };
         if !out.join(".git").exists() {
-            run(&["init", "-q"]).context("git init")?;
+            run_git_checked(&out, &["init", "-q"])?;
         }
-        run(&["add", "-A"]).context("git add")?;
+        run_git_checked(&out, &["add", "-A"])?;
         let msg = format!("pt export: {} tasks, {} links, {} labels", nt, nl, nb);
-        let c = run(&["commit", "-q", "-m", &msg]).context("git commit")?;
-        if c.status.success() {
+        if git_has_staged_changes(&out)? {
+            run_git_checked(&out, &["commit", "-q", "-m", &msg])?;
             println!("committed: {}", msg);
         } else {
             println!("nothing to commit (no changes since last export)");
         }
     }
     Ok(())
+}
+
+fn run_git(out: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(out)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))
+}
+
+fn run_git_checked(out: &std::path::Path, args: &[&str]) -> Result<std::process::Output> {
+    let output = run_git(out, args)?;
+    if output.status.success() {
+        return Ok(output);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!(
+        "git {} failed ({}): {}",
+        args.first().copied().unwrap_or("command"),
+        output.status,
+        stderr.trim()
+    );
+}
+
+fn git_has_staged_changes(out: &std::path::Path) -> Result<bool> {
+    let args = ["diff", "--cached", "--quiet", "--exit-code"];
+    let output = run_git(out, &args)?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git diff failed ({}): {}", output.status, stderr.trim());
+        }
+    }
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -2481,7 +2510,10 @@ fn cmd_backfill(db: &Db) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{delegation_command, short_id, stale_review_tasks};
+    use super::{
+        ExportArgs, cmd_export, delegation_command, git_has_staged_changes, run_git_checked,
+        short_id, stale_review_tasks,
+    };
 
     #[test]
     fn delegation_command_round_trips_shell_metacharacters() {
@@ -2509,6 +2541,50 @@ mod tests {
             delegation_command("PT-7", "review Alan's quote"),
             "claude -p 'Work the pTask task PT-7: review Alan'\"'\"'s quote. When done: pt done PT-7; if blocked, pt capture a note explaining why.'"
         );
+    }
+
+    #[test]
+    fn export_git_propagates_commit_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("export");
+        std::fs::create_dir(&out).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&out)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", ""]);
+        git(&["config", "user.email", ""]);
+
+        let db = ptask_core::Db::open(dir.path().join("tasks.db")).unwrap();
+        let error = cmd_export(
+            &db,
+            ExportArgs {
+                out: Some(out),
+                git: true,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("git commit failed"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn export_git_distinguishes_no_change_from_staged_content() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git_checked(dir.path(), &["init", "-q"]).unwrap();
+        assert!(!git_has_staged_changes(dir.path()).unwrap());
+
+        std::fs::write(dir.path().join("tasks.jsonl"), "{}\n").unwrap();
+        run_git_checked(dir.path(), &["add", "-A"]).unwrap();
+        assert!(git_has_staged_changes(dir.path()).unwrap());
     }
 
     #[test]
