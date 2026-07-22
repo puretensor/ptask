@@ -596,11 +596,20 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     let now = iso_now();
 
     // Look up the recurrence rule, if any.
-    let rec_row: Option<(String, String)> = tx
+    let rec_row: Option<(String, String, Option<String>)> = tx
         .query_row(
-            "SELECT mode, original_input FROM pt_recurrence WHERE task_uuid = ?1",
+            "SELECT r.mode, r.original_input, t.deadline
+             FROM pt_recurrence AS r
+             JOIN tasks AS t ON t.id = r.task_uuid
+             WHERE r.task_uuid = ?1",
             [&task.id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .map(Some)
         .or_else(|e| match e {
@@ -608,7 +617,7 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             other => Err(other),
         })?;
 
-    if let Some((mode_str, original)) = rec_row {
+    if let Some((mode_str, original, current_deadline)) = rec_row {
         let rec = crate::recurrence::parse(&original)
             .map_err(|e| crate::Error::Other(format!("re-parse recurrence: {}", e)))?;
         let completion_now = crate::dates::now_in_operator_tz()?;
@@ -617,7 +626,7 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         //   Fixed      → from the current deadline (preserves cadence)
         //   Completion → from now (drifts forward with completions)
         let anchor: jiff::Zoned = match mode_str.as_str() {
-            "fixed" => match &task.deadline {
+            "fixed" => match &current_deadline {
                 Some(d) => parse_iso_zoned(d)?,
                 None => completion_now.clone(),
             },
@@ -2132,6 +2141,46 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(n, 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn mark_done_uses_deadline_read_inside_the_transaction() {
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every day").unwrap();
+        let mut new = NewTask::minimal("daily schedule");
+        new.deadline = Some("2099-01-01T09:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec.clone()),
+            ..Default::default()
+        };
+        let stale = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let revised = "2099-02-01T09:00:00+00:00";
+        update_deadline(&db, &stale.id, Some(revised), &EventCtx::test()).unwrap();
+        let expected = crate::dates::format_iso(
+            &crate::recurrence::next_after(&rec, &parse_iso_zoned(revised).unwrap()).unwrap(),
+        );
+
+        let outcome = mark_done(&db, &stale, &EventCtx::test()).unwrap();
+        assert_eq!(
+            outcome,
+            DoneOutcome::Advanced {
+                next_deadline: expected.clone()
+            }
+        );
+        db.with_conn(|c| {
+            let (deadline, next_occurrence): (String, String) = c.query_row(
+                "SELECT t.deadline, r.next_occurrence
+                 FROM tasks AS t
+                 JOIN pt_recurrence AS r ON r.task_uuid = t.id
+                 WHERE t.id = ?1",
+                [&stale.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(deadline, expected);
+            assert_eq!(next_occurrence, expected);
             Ok(())
         })
         .unwrap();
