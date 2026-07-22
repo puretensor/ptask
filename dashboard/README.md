@@ -158,6 +158,10 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.9.1** — state-changing sidecar routes reject browser requests whose
+  `Origin` does not match `Host`, preventing cached Basic credentials from
+  authorizing cross-origin task or voice mutations. Header-free clients such
+  as `curl` remain compatible.
 - **v0.9.0** — provenance re-classified by **intent, not by which process ran
   the INSERT**. Two classes: **robot** (auto-generated — `distilled`,
   `incident`, `subtask_promotion`, `specola`) and **human** (everything else:
