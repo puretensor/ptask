@@ -38,6 +38,9 @@ jobs:
       - name: version + lockfile coherence
         run: bash scripts/ci-version-check.sh
 
+      - name: generated CLI artifacts
+        run: bash scripts/generated-artifacts.sh --check
+
       - name: credential-safe failure alert tests
         run: python3 -m unittest discover -s scripts/tests -v
 

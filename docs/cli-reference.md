@@ -209,11 +209,13 @@ error instead of masquerading as an auth/routing failure.
 ## Codegen
 
 ```
-pt gen-manpage > docs/gen/pt.1
-pt gen-completions bash > docs/gen/pt.bash
-pt gen-completions zsh  > docs/gen/_pt
-pt gen-completions fish > docs/gen/pt.fish
+bash scripts/generated-artifacts.sh --write
+bash scripts/generated-artifacts.sh --check
 ```
+
+The write form refreshes the manpage and all three completion files. The check
+form regenerates them in a temporary directory and fails on any drift; CI and
+the release helper run it automatically.
 
 ## Exit codes
 

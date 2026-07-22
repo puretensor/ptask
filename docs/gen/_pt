@@ -154,6 +154,25 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
+(plan)
+_arguments "${_arguments_options[@]}" : \
+'--account=[gcalendar.py account (free/busy source)]:ACCOUNT:_default' \
+'--days=[Planning horizon in days]:DAYS:_default' \
+'--work=[Working hours HH\:MM-HH\:MM]:WORK:_default' \
+'--tz=[Timezone]:TZ:_default' \
+'--calendar=[Calendar id]:CALENDAR:_default' \
+'--slot-default=[Default minutes for a task with no duration_min]:SLOT_DEFAULT:_default' \
+'-n+[Max ready tasks to consider]:LIMIT:_default' \
+'--limit=[Max ready tasks to consider]:LIMIT:_default' \
+'--gcal=[Path to gcalendar.py]:GCAL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--write[Create tentative calendar events for the plan (our calendar only)]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (view)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
@@ -992,6 +1011,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(plan)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (view)
 _arguments "${_arguments_options[@]}" : \
 ":: :_pt__subcmd__help__subcmd__view_commands" \
@@ -1278,6 +1301,7 @@ _pt_commands() {
 'dismiss:Dismiss a task (soft close, status → dismissed; reversible via reopen)' \
 'rm:Delete a task permanently (hard delete + tombstone)' \
 'next:Show ready-to-start tasks (all dependencies done)' \
+'plan:Advisory day plan\: fit the ready queue into calendar free/busy (dry-run unless --write). Reads free slots via gcalendar.py; --write adds tentative events to our own calendar only' \
 'view:Manage saved views' \
 'tui:Launch the terminal UI (ratatui)' \
 'serve:Run the HTTP server (sync API, capture, webhooks, metrics)' \
@@ -1428,6 +1452,7 @@ _pt__subcmd__help_commands() {
 'dismiss:Dismiss a task (soft close, status → dismissed; reversible via reopen)' \
 'rm:Delete a task permanently (hard delete + tombstone)' \
 'next:Show ready-to-start tasks (all dependencies done)' \
+'plan:Advisory day plan\: fit the ready queue into calendar free/busy (dry-run unless --write). Reads free slots via gcalendar.py; --write adds tentative events to our own calendar only' \
 'view:Manage saved views' \
 'tui:Launch the terminal UI (ratatui)' \
 'serve:Run the HTTP server (sync API, capture, webhooks, metrics)' \
@@ -1570,6 +1595,11 @@ _pt__subcmd__help__subcmd__mcp_commands() {
 _pt__subcmd__help__subcmd__next_commands() {
     local commands; commands=()
     _describe -t commands 'pt help next commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__plan_commands] )) ||
+_pt__subcmd__help__subcmd__plan_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help plan commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__priority_commands] )) ||
 _pt__subcmd__help__subcmd__priority_commands() {
@@ -1811,6 +1841,11 @@ _pt__subcmd__mcp_commands() {
 _pt__subcmd__next_commands() {
     local commands; commands=()
     _describe -t commands 'pt next commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__plan_commands] )) ||
+_pt__subcmd__plan_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt plan commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__priority_commands] )) ||
 _pt__subcmd__priority_commands() {

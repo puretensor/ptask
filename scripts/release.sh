@@ -28,6 +28,8 @@ fi
 # 2. Version + Cargo gates.
 echo "release: version + lockfile coherence"
 PTASK_RELEASE_TAG="$TAG" bash scripts/ci-version-check.sh
+echo "release: generated CLI artifacts"
+bash scripts/generated-artifacts.sh --check
 echo "release: cargo fmt --check"
 cargo fmt --all -- --check
 echo "release: cargo clippy"
