@@ -1,6 +1,9 @@
+import base64
+import http.client
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 
 import server
@@ -24,6 +27,57 @@ class AuthTests(unittest.TestCase):
     def test_compare_digest_auth_helper_importable(self):
         self.assertRegex(server.VERSION, r"^\d+\.\d+\.\d+$")
         self.assertGreater(server.MAX_POST_BYTES, 400)
+
+
+class OriginTests(unittest.TestCase):
+    def test_authenticated_cross_origin_post_is_rejected_before_mutation(self):
+        old_user = server.AUTH_USER
+        old_pass = server.AUTH_PASS
+        old_pt_exec = server.pt_exec
+        calls = []
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server.AUTH_USER = "ops"
+        server.AUTH_PASS = "test-secret"
+        server.pt_exec = lambda args: calls.append(args) or (True, "ok")
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+        credentials = base64.b64encode(b"ops:test-secret").decode()
+        body = b'{"title":"must not be created"}'
+
+        try:
+            connection.request(
+                "POST",
+                "/api/tasks",
+                body=body,
+                headers={
+                    "Authorization": f"Basic {credentials}",
+                    "Content-Type": "application/json",
+                    "Host": f"127.0.0.1:{httpd.server_port}",
+                    "Origin": "https://attacker.invalid",
+                },
+            )
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 403)
+            self.assertEqual(calls, [])
+        finally:
+            connection.close()
+            httpd.shutdown()
+            thread.join(timeout=2)
+            httpd.server_close()
+            server.AUTH_USER = old_user
+            server.AUTH_PASS = old_pass
+            server.pt_exec = old_pt_exec
+
+    def test_origin_guard_allows_non_browser_and_same_origin_requests(self):
+        handler = object.__new__(server.Handler)
+        handler.headers = {"Host": "ptask.example"}
+        self.assertTrue(handler._origin_ok())
+        handler.headers["Origin"] = "https://ptask.example"
+        self.assertTrue(handler._origin_ok())
+        handler.headers["Origin"] = "https://attacker.invalid"
+        self.assertFalse(handler._origin_ok())
 
 
 class QueryLimitTests(unittest.TestCase):

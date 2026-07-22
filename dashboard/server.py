@@ -59,7 +59,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 # Robot (auto-generated) sources: created by autonomous processes with no
 # direct human ask — the distiller, puresentinel incident capture, subtask
@@ -629,6 +629,25 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
+    def _origin_ok(self) -> bool:
+        # Browsers can reuse cached Basic credentials on cross-origin POSTs;
+        # non-browser clients commonly omit Origin and remain compatible.
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return True
+        host = self.headers.get("Host")
+        if not host:
+            return False
+        parsed = urlparse(origin)
+        return (
+            parsed.scheme in ("http", "https")
+            and parsed.netloc == host
+            and parsed.path in ("", "/")
+            and not parsed.params
+            and not parsed.query
+            and not parsed.fragment
+        )
+
     def _read_json_body(self):
         try:
             n = int(self.headers.get("Content-Length", "0") or 0)
@@ -747,6 +766,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._authed():
             return self._need_auth()
+        if not self._origin_ok():
+            return self._json({"error": "cross-origin request rejected"}, 403)
         u = urlparse(self.path)
         if u.path == "/api/voice":          # binary audio body, larger cap — own reader
             return self._handle_voice()
