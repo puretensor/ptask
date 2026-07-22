@@ -1050,6 +1050,69 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn metrics_token_configuration_disables_anonymous_access() {
+        let db = open_test_db();
+        let auth = AuthConfig {
+            metrics_token: Some("scrape-secret".into()),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db, auth, Default::default()));
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header("authorization", "Bearer scrape-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sync_token":"*","commands":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer scrape-secret")
+                    .body(Body::from(r#"{"sync_token":"*","commands":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
     // token set + missing/wrong credential → 401; token set + correct → 200.
     #[tokio::test(flavor = "current_thread")]
     async fn metrics_requires_api_token_when_configured() {
