@@ -1480,6 +1480,17 @@ fn cmd_export(db: &Db, a: ExportArgs) -> Result<()> {
     Ok(())
 }
 
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn delegation_command(handle: &str, title: &str) -> String {
+    let prompt = format!(
+        "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt capture a note explaining why."
+    );
+    format!("claude -p {}", shell_single_quote(&prompt))
+}
+
 /// `pt delegate` — OPERATOR-GATED skeleton. Prints the headless command;
 /// never spawns it. Autonomy is revisited once the loop is proven.
 fn cmd_delegate(db: &Db, a: DelegateArgs) -> Result<()> {
@@ -1490,12 +1501,7 @@ fn cmd_delegate(db: &Db, a: DelegateArgs) -> Result<()> {
         handle
     );
     println!();
-    println!(
-        "  claude -p \"Work the pTask task {}: {}. When done: pt done {}; if blocked, pt capture a note explaining why.\"",
-        handle,
-        t.title.replace('"', "'"),
-        handle
-    );
+    println!("  {}", delegation_command(&handle, &t.title));
     println!();
     println!("(operator-gated by design — pt will not spawn agents autonomously)");
     Ok(())
@@ -2475,7 +2481,35 @@ fn cmd_backfill(db: &Db) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{short_id, stale_review_tasks};
+    use super::{delegation_command, short_id, stale_review_tasks};
+
+    #[test]
+    fn delegation_command_round_trips_shell_metacharacters() {
+        let title =
+            "audit $(printf SUBSTITUTED) `printf BACKTICK` O'Brien \\\nnext; printf INJECTED";
+        let handle = "PT-42";
+        let expected = format!(
+            "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt capture a note explaining why."
+        );
+        let command = delegation_command(handle, title);
+        let script = format!("claude() {{ printf '%s' \"$2\"; }}; {command}");
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    }
+
+    #[test]
+    fn delegation_command_quotes_the_complete_prompt() {
+        assert_eq!(
+            delegation_command("PT-7", "review Alan's quote"),
+            "claude -p 'Work the pTask task PT-7: review Alan'\"'\"'s quote. When done: pt done PT-7; if blocked, pt capture a note explaining why.'"
+        );
+    }
 
     #[test]
     fn short_id_is_char_boundary_safe() {
