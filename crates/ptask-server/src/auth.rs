@@ -30,7 +30,7 @@ const TOKEN_HEADER: &str = "x-ptask-token";
 ///   3. `pt_api_tokens` hash lookup → named identity + its scope
 ///
 /// No credential presented: allowed only in unauthenticated back-compat
-/// mode (no env write token configured) as `anonymous` (Write) — identical
+/// mode (no env token configured) as `anonymous` (Write) — identical
 /// enforcement semantics to the pre-v1.17 single-token gate.
 #[allow(clippy::result_large_err)] // the Err IS the ready-made 401 Response
 pub fn authenticate(
@@ -71,7 +71,7 @@ pub fn authenticate(
             }
         }
         None => {
-            if auth.api_token.is_none() {
+            if auth.api_token.is_none() && auth.metrics_token.is_none() {
                 Identity {
                     client_id: "anonymous".into(),
                     scope: Scope::Write,
@@ -97,8 +97,8 @@ pub fn require_write_token(db: &Db, auth: &AuthConfig, headers: &HeaderMap) -> O
 /// nothing). Accepts `PTASK_METRICS_TOKEN` *or* the write token, so a
 /// Prometheus scraper can hold a read-only credential instead of the
 /// fleet-wide write token. Enforce-if-configured: with neither env set the
-/// scrape stays open (back-compat); with only `PTASK_API_TOKEN` set the
-/// behaviour is unchanged from before.
+/// scrape stays open (back-compat); configuring either token closes anonymous
+/// access to every gated route.
 pub fn require_read_token(db: &Db, auth: &AuthConfig, headers: &HeaderMap) -> Option<Response> {
     authenticate(db, auth, headers, Scope::Read).err()
 }
