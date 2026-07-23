@@ -59,7 +59,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.9.1"
+VERSION = "0.10.0"
 
 # Robot (auto-generated) sources: created by autonomous processes with no
 # direct human ask — the distiller, puresentinel incident capture, subtask

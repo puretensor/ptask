@@ -168,14 +168,41 @@ section{margin-top:22px}
   border:var(--card-border);border-left:4px solid var(--p5);
   border-radius:var(--radius);padding:14px 16px;position:relative;overflow:hidden;
   box-shadow:var(--shadow);transition:transform .2s,box-shadow .2s;
+  /* size each card to its own content so one expanded card never stretches its
+     grid row-mates into tall empty boxes (grid default is align-items:stretch) */
+  align-self:start;
 }
 [data-theme="lcars"] .ccard{border-radius:4px 18px 18px 4px;border-left:10px solid var(--p5)}
 .ccard:hover{transform:translateY(-2px);box-shadow:var(--glow),var(--shadow)}
 .ccard .scorebar{position:absolute;top:0;right:0;height:100%;width:4px;background:var(--grad);opacity:.5}
 .ccard h3{
-  font-size:14px;font-weight:600;margin-bottom:8px;padding-right:8px;line-height:1.3;
-  min-height:24px;display:flex;align-items:center;
+  font-size:14px;font-weight:600;margin-bottom:6px;padding-right:8px;line-height:1.35;
+  /* fixed-height title: floor + ceiling at 3 lines so every collapsed card is the
+     same size; long titles clamp with an ellipsis, short ones pad to match. */
+  display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;
+  min-height:calc(1.35em * 3);
 }
+.ccard.expanded h3{
+  display:block;-webkit-line-clamp:none;min-height:0;
+  /* expand in place but stay bounded — a giant title becomes a scrollable panel
+     instead of a card that dominates the whole board; the ‹less› control below
+     it stays reachable. Full comfortable read is still one click away (drawer). */
+  max-height:min(52vh,360px);overflow-y:auto;overscroll-behavior:contain;padding-right:6px;
+}
+/* per-card expand toggle — only shown (JS adds .clamped) when the title actually
+   overflows 3 lines; toggles .expanded to reveal the full text in place. */
+.ccard .cx{
+  display:none;margin:0 0 8px;padding:2px 0;background:transparent;border:none;cursor:pointer;
+  color:var(--accent-t);font-family:var(--font);font-size:10px;font-weight:700;letter-spacing:.03em;
+  align-items:center;gap:4px;
+}
+.ccard.clamped .cx{display:inline-flex}
+.ccard .cx:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.ccard .cx .car{font-size:9px;transition:transform .15s}
+.ccard.expanded .cx .car{transform:rotate(180deg)}
+.ccard .cx .lbl-less{display:none}
+.ccard.expanded .cx .lbl-more{display:none}
+.ccard.expanded .cx .lbl-less{display:inline}
 .ccard h3:focus-visible,.tcard .tt:focus-visible{
   outline:2px solid var(--accent);outline-offset:2px;border-radius:6px;
 }
@@ -646,6 +673,7 @@ const PCOL={5:'var(--p5)',4:'var(--p4)',3:'var(--p3)',2:'var(--p2)',1:'var(--p1)
 const PTXT={5:'var(--p5t)',4:'var(--p4t)',3:'var(--p3t)',2:'var(--p2t)',1:'var(--p1t)'};
 const PNAME={5:'CRITICAL',4:'URGENT',3:'HIGH',2:'NORMAL',1:'LOW'};
 let seenCrit=new Set(), first=true;
+let _critExpanded=new Set();   // uuids of critical cards expanded in place (survives 15s refresh)
 let _popupOpen=false, _taskTitle={}, _pmId=null, _pmCur=null, _sev=2, _lastHeat=null;
 
 /* ---- theme engine ---- */
@@ -725,6 +753,7 @@ document.addEventListener('click',e=>{
   const el=e.target.closest('[data-act]'); if(!el) return;
   const kind=el.dataset.act, {id,uuid}=_actIds(el);
   if(kind==='drawer'){ if(uuid) openDrawer(uuid); }
+  else if(kind==='expand'){ toggleCritExpand(el); }
   else if(kind==='done'){ if(id) confirmDone(id); }
   else if(kind==='snooze'){ if(id) act(id,'snooze',{days:e.shiftKey?7:3}); }
   else if(kind==='dismiss'){ if(id) act(id,'dismiss'); }
@@ -1037,9 +1066,11 @@ function renderCritical(tasks){
   }
   $('#crit').innerHTML=tasks.map(t=>{
     const isNew=!first&&!seenCrit.has(t.id);
-    return `<div class="ccard${isNew?' new':''}${first?' fade':''}" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
+    const exp=_critExpanded.has(t.id);
+    return `<div class="ccard${isNew?' new':''}${first?' fade':''}${exp?' expanded':''}" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
       <div class="scorebar"></div>
       <h3 style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title)}</h3>
+      <button class="cx" data-act="expand" aria-expanded="${exp}"><span class="car">▾</span><span class="lbl-more">more</span><span class="lbl-less">less</span></button>
       <div class="meta">
         ${ptrigger(t)}
         <span class="score">${(t.priority_score).toFixed(2)}</span>${scoreMini(t.priority_score)}
@@ -1050,6 +1081,23 @@ function renderCritical(tasks){
       </div></div>`;
   }).join('');
   seenCrit=new Set(tasks.map(t=>t.id));
+  markCritClamp();
+}
+/* Reveal the expand toggle only on cards whose title actually overflows the
+   3-line clamp; already-expanded cards keep the toggle so they can collapse. */
+function markCritClamp(){
+  $$('#crit .ccard').forEach(c=>{
+    if(c.classList.contains('expanded')){ c.classList.add('clamped'); return; }
+    const h=c.querySelector('h3');
+    c.classList.toggle('clamped', h && h.scrollHeight - h.clientHeight > 2);
+  });
+}
+function toggleCritExpand(btn){
+  const card=btn.closest('.ccard'); if(!card) return;
+  const now=!card.classList.contains('expanded');
+  card.classList.toggle('expanded', now);
+  btn.setAttribute('aria-expanded', now);
+  if(now) _critExpanded.add(card.dataset.uuid); else _critExpanded.delete(card.dataset.uuid);
 }
 let _laneScroll={};
 function renderLanes(tasks){
