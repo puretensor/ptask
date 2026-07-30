@@ -1696,6 +1696,71 @@ Don't forget the sourdough.\r\n";
         assert_eq!(w7["done"], 1);
     }
 
+    /// The Recently Added rail's contract: order=created returns newest-first
+    /// across ALL statuses (a task generated and closed ten minutes ago is
+    /// still recent activity), and unknown order keys 400 before touching SQL.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_tasks_order_created_newest_first() {
+        let db = open_test_db();
+        let old = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("old and already done"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let fresh = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("fresh arrival"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET created_at = datetime('now','-2 days'),
+                        status = 'done' WHERE id = ?1",
+                rusqlite::params![old.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let app = router(AppState::new(db, Default::default(), Default::default()));
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks?status=all&order=created&limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let ids: Vec<&str> = v["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![fresh.id.as_str(), old.id.as_str()]);
+        assert_eq!(v["tasks"][1]["status"], "done");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tasks?order=neglect")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     /// Cross-origin writes must be rejected even with valid Basic creds —
     /// browsers attach cached credentials cross-origin (CSRF).
     #[tokio::test(flavor = "current_thread")]

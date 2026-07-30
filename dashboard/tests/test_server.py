@@ -187,6 +187,40 @@ class StatsFluxTests(unittest.TestCase):
         self.assertEqual(w7["done"], 2)            # t5 still older than 7d
 
 
+class TaskOrderTests(unittest.TestCase):
+    def test_order_created_returns_newest_first_across_statuses(self):
+        old_db = server.DB_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute("CREATE TABLE tasks (%s)" % ", ".join(server.TASK_COLS))
+            con.execute("CREATE TABLE pt_extensions (task_uuid TEXT, pt_id TEXT)")
+            for tid, created, status in (
+                ("a", "-2 days", "pending"),
+                ("b", "-1 hour", "done"),       # closed tasks stay in the feed
+                ("c", "-5 minutes", "pending"),
+            ):
+                con.execute(
+                    "INSERT INTO tasks(id, title, priority, status, created_at,"
+                    " priority_score) VALUES (?,?,?,?,datetime('now',?),0.5)",
+                    (tid, "task " + tid, 2, status, created),
+                )
+            con.commit()
+            con.close()
+            server.DB_PATH = f.name
+            try:
+                got = server.q_tasks(status="all", limit=10,
+                                     order=server.TASK_ORDERS["created"])
+            finally:
+                server.DB_PATH = old_db
+        self.assertEqual([t["id"] for t in got], ["c", "b", "a"])
+        self.assertEqual(got[1]["status"], "done")
+
+    def test_order_whitelist_is_closed(self):
+        # The route splices TASK_ORDERS values into SQL; anything outside the
+        # whitelist must 400 at the handler, so the map itself is the contract.
+        self.assertEqual(sorted(server.TASK_ORDERS), ["created", "score"])
+
+
 class BuildAddArgsTests(unittest.TestCase):
     def test_title_only_is_separated(self):
         args, err = server.build_add_args({"title": "ship it"})

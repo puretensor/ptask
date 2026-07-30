@@ -10,7 +10,7 @@ Endpoints
   GET  /healthz                 -> "OK"               (no auth; tunnel/systemd probe)
   GET  /                        -> www/index.html     (auth)
   GET  /api/stats               -> counts, throughput, neglect buckets
-  GET  /api/tasks?status=&limit -> task list + scoring fields
+  GET  /api/tasks?status=&limit&order -> task list + scoring fields (order: score|created)
   GET  /api/critical?limit=     -> top pending by priority_score
   GET  /api/timeline            -> pending tasks that have a deadline
   GET  /api/heatmap             -> priority x age-bucket matrix
@@ -59,7 +59,15 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
+
+# /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
+# SQL, so nothing user-supplied may pass through unmapped.
+# Mirrored in the Rust dashboard route (TASK_ORDERS).
+TASK_ORDERS = {
+    "score": "priority_score DESC, priority DESC",
+    "created": "created_at DESC, id DESC",
+}
 
 # Robot (auto-generated) sources: created by autonomous processes with no
 # direct human ask — the distiller, puresentinel incident capture, subtask
@@ -738,7 +746,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/tasks":
                 status = (qs.get("status", ["pending"])[0])
                 limit = parse_limit(qs.get("limit", ["500"])[0], 500, 5000)
-                return self._json({"tasks": q_tasks(status=status, limit=limit)})
+                order_key = (qs.get("order", ["score"])[0])
+                if order_key not in TASK_ORDERS:
+                    raise ValueError("order must be one of: " + ", ".join(sorted(TASK_ORDERS)))
+                return self._json({"tasks": q_tasks(status=status, limit=limit,
+                                                    order=TASK_ORDERS[order_key])})
             if path == "/api/critical":
                 limit = parse_limit(qs.get("limit", ["12"])[0], 12, 100)
                 return self._json({"tasks": q_tasks(status="pending", limit=limit)})

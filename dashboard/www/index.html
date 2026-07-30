@@ -255,6 +255,26 @@ button.chip{font-family:var(--font);cursor:pointer}
 .pchip:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .pchip .car{font-size:8px;opacity:.85;margin-top:1px}
 
+/* recently added — the board's chronological pulse, newest first. Rows for
+   already-closed tasks stay visible (dimmed + status badge) so a task that was
+   generated and finished ten minutes ago still shows up as recent activity. */
+.recent{background:var(--bg2);border:var(--card-border);border-radius:var(--radius);
+  padding:4px 12px;max-height:340px;overflow-y:auto;overscroll-behavior:contain}
+.rrow{display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border);font-size:12px}
+.rrow:last-child{border-bottom:none}
+.rrow .when{flex:none;width:70px;font-family:var(--font);font-weight:700;font-size:10px;
+  color:var(--accent-t);letter-spacing:.03em;cursor:default}
+.rrow.closed .when{color:var(--dim)}
+.rrow .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.rrow.closed .tt{color:var(--dim)}
+.rrow .pbadge{flex:none}
+.rst{flex:none;padding:2px 7px;border-radius:6px;font-size:9px;font-weight:700;
+  background:var(--panel2);color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.rst.done{background:rgba(0,212,170,.16);color:var(--teal)}
+.rst.dismissed{background:rgba(255,59,92,.12);color:var(--p5t)}
+.rst.blocked{background:rgba(255,159,67,.16);color:var(--p4t)}
+@media(max-width:620px){.rrow .when{width:52px}.rrow .ptag{display:none}}
+
 /* lanes */
 .lanes{display:grid;grid-template-columns:repeat(5,1fr);gap:var(--gap);align-items:start}
 @media(max-width:1100px){.lanes{grid-template-columns:repeat(2,1fr)}}
@@ -584,6 +604,11 @@ body.review #review-sec{display:block}
     <div class="crit-strip" id="crit"><div class="ph">loading…</div></div>
   </section>
 
+  <section id="recent-sec">
+    <div class="sec-h"><h2>Recently Added</h2><div class="ln"></div><span class="ct" id="rc-ct"></span></div>
+    <div class="recent" id="recent"><div class="ph">loading…</div></div>
+  </section>
+
   <section>
     <div class="sec-h"><h2>Priority Lanes</h2><div class="ln"></div><span class="ct">ranked by composite score within each level</span></div>
     <div class="lanes" id="lanes"><div class="ph">loading…</div></div>
@@ -711,6 +736,19 @@ function originTag(t,verbose){
   const lbl=verbose?[id,(robot?'auto-generated':'operator-directed')+' · '+src].filter(Boolean).join(' · '):id;
   return `<span class="ptag${robot?'':' h'}" title="${robot?'auto-generated (robot)':'operator-directed (human)'} · source: ${src}">`+
     `<svg class="ic" aria-hidden="true"><use href="#${robot?'i-bot':'i-user'}"/></svg>${lbl}</span>`;
+}
+/* relative creation time for the Recently Added rail — "3m ago" beats an ISO
+   stamp for the question this section answers: how fresh is this task? */
+function relTime(iso){
+  if(!iso) return '';
+  const d=new Date(iso.trim().replace(' ','T'));
+  if(isNaN(d)) return '';
+  const m=(Date.now()-d.getTime())/60000;
+  if(m<1) return 'just now';
+  if(m<60) return Math.round(m)+'m ago';
+  if(m<48*60) return Math.round(m/60)+'h ago';
+  if(m<14*24*60) return Math.round(m/1440)+'d ago';
+  return iso.slice(0,10);
 }
 /* priority chip — click opens the direct severity picker (jump to any P5…P1). */
 function ptrigger(t){
@@ -1099,6 +1137,27 @@ function toggleCritExpand(btn){
   btn.setAttribute('aria-expanded', now);
   if(now) _critExpanded.add(card.dataset.uuid); else _critExpanded.delete(card.dataset.uuid);
 }
+/* recently added — any status, created_at DESC off /api/tasks?order=created.
+   Open rows keep the live priority picker + done button; closed rows dim,
+   swap to a static badge, and wear their status so freshly-finished work
+   still reads as recent activity instead of vanishing from the board. */
+let _recent=[];
+function renderRecent(tasks){
+  _recent=tasks;
+  $('#rc-ct').textContent='newest first · last '+tasks.length;
+  if(!tasks.length){$('#recent').innerHTML='<div class="ph">no tasks yet</div>';return;}
+  $('#recent').innerHTML=tasks.map(t=>{
+    const open=t.status==='pending';
+    return `<div class="rrow${open?'':' closed'}" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
+      <span class="when" title="created ${esc((t.created_at||'').slice(0,16).replace('T',' '))} UTC">${relTime(t.created_at)}</span>
+      ${open?ptrigger(t):`<span class="pbadge p${t.priority}">P${t.priority}</span>`}
+      <span class="tt" role="button" tabindex="0" data-act="drawer">${esc(t.title)}</span>
+      ${originTag(t)}
+      ${open?`<button class="btn-done" title="mark done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button>`
+            :`<span class="rst ${esc(t.status)}">${esc(t.status)}</span>`}
+    </div>`;
+  }).join('');
+}
 let _laneScroll={};
 function renderLanes(tasks){
   const by={5:[],4:[],3:[],2:[],1:[]};
@@ -1249,7 +1308,7 @@ function renderReview(){
 
 /* ---- task detail drawer (description + attributed history) ---- */
 async function openDrawer(uuid){
-  const t=_tasks.find(x=>x.id===uuid);
+  const t=_tasks.find(x=>x.id===uuid)||_recent.find(x=>x.id===uuid);
   const dr=$('#drawer');
   if(!dr.classList.contains('open')) rememberInvoker(`[data-uuid="${uuid}"] [role="button"]`);
   $('#d-title').textContent=(t&&t.title)||uuid;
@@ -1284,7 +1343,8 @@ $('#drawer').addEventListener('keydown',e=>{
 /* ---- edit modal (reuses the composer) ---- */
 let _editId=null;
 function openEdit(id){
-  const t=_tasks.find(x=>(x.pt_id||x.id)===id||x.id===id); if(!t) return;
+  const t=_tasks.find(x=>(x.pt_id||x.id)===id||x.id===id)
+        ||_recent.find(x=>(x.pt_id||x.id)===id||x.id===id); if(!t) return;
   rememberInvoker(`[data-id="${id}"] .pchip`);
   _editId=id; _popupOpen=true;
   $('#compose-h').textContent='Edit '+(t.pt_id||'task');
@@ -1312,11 +1372,13 @@ async function load(force){
   if(_popupOpen&&!force) return;   // don't wipe the board while a picker/confirm popup is open
   try{
     const keepId=selId();
-    const [stats,crit,all,tl,heat]=await Promise.all([
+    const [stats,crit,all,rec,tl,heat]=await Promise.all([
       api('/api/stats'),api('/api/critical?limit=12'),api('/api/tasks?status=pending&limit=600'),
+      api('/api/tasks?status=all&order=created&limit=20'),
       api('/api/timeline'),api('/api/heatmap')]);
     _tasks=all.tasks;
     renderChips(stats); renderCritical(crit.tasks); renderLanes(all.tasks);
+    renderRecent(rec.tasks);
     renderTimeline(tl.items); renderHeat(heat);
     if(_review) renderReview();
     if(keepId){const cs=cards();const ix=cs.findIndex(c=>c.dataset.id===keepId);if(ix>=0)select(ix);}
