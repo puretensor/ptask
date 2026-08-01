@@ -11,7 +11,7 @@
 - **Work in order** — DAG dependencies (`pt next` shows only unblocked tasks), composite priority scoring with explainability (`pt why PT-42`), recurrence (`every` vs `every!`), snooze.
 - **Stay honest** — attributed event log (`pt log`: who did what, via which surface), `pt undo`, accountability escalation state machine with Telegram/SMTP/HAL notifications, staleness reaper for machine-generated tasks.
 - **Feed the agents** — MCP server (11 tools over streamable-HTTP and stdio), atomic `task_claim` so parallel agents can't collide, `discovered_from` provenance links, deterministic `task_digest` session priming, scoped named API tokens.
-- **Distill the noise** — native Rust distillation turns raw fleet signals into deduplicated tasks (Gemini structured-output classify/consolidate, semantic + temporal dedup, close-on-recovery). `pt distill` is canonical; the legacy Python pipeline is archived for reference only.
+- **Distill the noise** — native Rust distillation turns raw fleet signals into deduplicated tasks (Gemini structured-output classify/consolidate, semantic + temporal dedup, close-on-recovery). Chunked with per-chunk failure isolation, so one unprocessable capture is quarantined instead of wedging the queue behind it (`pt_distill_quarantined_captures`). `pt distill` is canonical; the legacy Python pipeline is archived for reference only.
 
 ## Quick start
 

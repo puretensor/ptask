@@ -9,6 +9,7 @@
 //! and `/metrics`.
 
 mod auth;
+mod blocking;
 mod dedup;
 pub mod mcp;
 mod routes;

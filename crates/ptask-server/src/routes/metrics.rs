@@ -192,6 +192,20 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     writeln!(out, "# TYPE pt_distill_failed_total gauge").ok();
     writeln!(out, "pt_distill_failed_total {}", distill_failed).ok();
 
+    // Captures parked out of the distill queue after repeated isolated
+    // failures (V013). Before quarantine existed one such row re-served
+    // forever and wedged everything behind it with no signal at all; the
+    // pipeline now walks past it, so this gauge is what makes it visible.
+    // Any non-zero value wants a human eye — nothing clears it automatically.
+    let quarantined = ptask_core::raw_items::quarantined_count(db).unwrap_or(0);
+    writeln!(
+        out,
+        "# HELP pt_distill_quarantined_captures Unprocessed raw_items parked after repeated distill failures."
+    )
+    .ok();
+    writeln!(out, "# TYPE pt_distill_quarantined_captures gauge").ok();
+    writeln!(out, "pt_distill_quarantined_captures {}", quarantined).ok();
+
     // --- accountability dispatch freshness (per channel) ---
     // Rows land in `notifications` only on successful sends, so channel age
     // is a liveness signal for the dispatch path (the 401ing bot token sat

@@ -1363,10 +1363,20 @@ pub fn modify_labels(
     remove: &[String],
     ctx: &EventCtx,
 ) -> Result<()> {
-    let add: Vec<&str> = add.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
-    let remove: Vec<&str> = remove.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let add: Vec<&str> = add
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let remove: Vec<&str> = remove
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     if add.is_empty() && remove.is_empty() {
-        return Err(crate::Error::Other("modify_labels: nothing to change".into()));
+        return Err(crate::Error::Other(
+            "modify_labels: nothing to change".into(),
+        ));
     }
     let now = iso_now();
     let mut conn = db.get()?;
@@ -1796,7 +1806,14 @@ mod tests {
         assert!(modify_labels(&db, &t.id, &[], &[], &EventCtx::test()).is_err());
         assert!(modify_labels(&db, &t.id, &["  ".into()], &[], &EventCtx::test()).is_err());
         assert!(
-            modify_labels(&db, "nonexistent-uuid", &["x".into()], &[], &EventCtx::test()).is_err()
+            modify_labels(
+                &db,
+                "nonexistent-uuid",
+                &["x".into()],
+                &[],
+                &EventCtx::test()
+            )
+            .is_err()
         );
     }
 
