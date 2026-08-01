@@ -11,16 +11,15 @@
 //! - `~30m` `~2h` `~1d` — duration estimate in minutes
 //! - `!HH:MM`        — reminder time-of-day
 //! - `//rest of line` — everything after the `//` is the description
-//! - Date phrase — `today` / `tomorrow` / `yesterday` / weekday names (with
-//!   optional `this|next|last` prefix), `N days`, month names, ISO dates,
-//!   optionally followed by time.
+//! - Future ISO date — an exact `YYYY-MM-DD` token. Other date-like prose is
+//!   kept as literal title text.
 //! - `"quoted text"` — words inside double quotes are literal title text,
 //!   never interpreted as markers or dates (`add 'Review the "p1 incident"'`).
 //! - Anything else   — title words
 //!
 //! Example:
-//!   `Buy bread tomorrow 10am @home #fleet p1 ~30m //grocery list`
-//!   →  title="Buy bread", deadline=<2026-05-14T10:00 London>, labels=["home"],
+//!   `Buy bread 2099-05-14 @home #fleet p1 ~30m //grocery list`
+//!   →  title="Buy bread", deadline=<2099-05-14T00:00 London>, labels=["home"],
 //!      project="fleet", priority=1, duration_min=30, description="grocery list"
 
 use crate::dates;
@@ -47,59 +46,9 @@ pub struct QuickAdd {
     /// Parsed recurrence rule, if the input contained an `every` / `every!`
     /// clause. The deadline above is the first occurrence.
     pub recurrence: Option<Recurrence>,
-    /// Non-fatal parse caveats the surface should echo to the operator —
-    /// e.g. a date phrase that resolved to a moment already in the past.
+    /// Non-fatal parse caveats the surface should echo to the operator.
     pub warnings: Vec<String>,
 }
-
-/// Words that can start a date phrase. Used to bound the greedy date scan.
-const DATE_STARTERS: &[&str] = &[
-    "today",
-    "tomorrow",
-    "tom",
-    "yesterday",
-    "next",
-    "this",
-    "last",
-    "monday",
-    "mon",
-    "tuesday",
-    "tue",
-    "wednesday",
-    "wed",
-    "thursday",
-    "thu",
-    "friday",
-    "fri",
-    "saturday",
-    "sat",
-    "sunday",
-    "sun",
-    "jan",
-    "january",
-    "feb",
-    "february",
-    "mar",
-    "march",
-    "apr",
-    "april",
-    "may",
-    "jun",
-    "june",
-    "jul",
-    "july",
-    "aug",
-    "august",
-    "sep",
-    "sept",
-    "september",
-    "oct",
-    "october",
-    "nov",
-    "november",
-    "dec",
-    "december",
-];
 
 /// Parse a quick-add string against the operator-tz `now()` anchor.
 pub fn parse(input: &str) -> Result<QuickAdd> {
@@ -215,25 +164,17 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             continue;
         }
 
-        // Date phrase: greedy longest match from this position.
-        if (is_date_starter(tok)
-            || looks_like_iso_date(tok)
-            || looks_like_clock_time(tok)
-            || starts_relative_interval(&raw[..scan_end], idx)
-            || starts_in_relative_interval(&raw[..scan_end], idx))
-            && let Some((phrase, consumed)) = try_date_match(&raw[..scan_end], idx, &now)
+        // Body-text deadline inference is deliberately narrow. Only a full,
+        // standalone ISO date that is strictly in the future is eligible;
+        // ambiguous fragments (`4/5`), natural-language dates, and past ISO
+        // dates remain ordinary title text and never set-then-warn.
+        if is_full_iso_date(tok)
+            && let Ok(parsed) = dates::parse_at(tok, now.clone())
+            && parsed > now
         {
-            let parsed = parse_quickadd_date(&phrase, &now)?;
-            if parsed < now {
-                out.warnings.push(format!(
-                    "deadline '{}' resolved to {} — already in the past",
-                    phrase,
-                    dates::format_iso(&parsed)
-                ));
-            }
-            out.deadline_phrase = Some(phrase);
+            out.deadline_phrase = Some(tok.to_string());
             out.deadline = Some(dates::format_iso(&parsed));
-            idx += consumed;
+            idx += 1;
             continue;
         }
 
@@ -316,60 +257,15 @@ fn parse_duration(s: &str) -> Option<i64> {
     }
 }
 
-fn is_date_starter(tok: &str) -> bool {
-    let lower = tok.to_ascii_lowercase();
-    DATE_STARTERS.iter().any(|&w| w == lower)
-}
-
-/// Tokens like `2026-05-20`, `20/05/2026`, `5/20`.
-fn looks_like_iso_date(tok: &str) -> bool {
-    let bytes = tok.as_bytes();
-    bytes.contains(&b'-') && bytes.iter().filter(|&&b| b == b'-').count() == 2
-        || (bytes.contains(&b'/') && bytes.iter().any(|b| b.is_ascii_digit()))
-}
-
-/// Tokens like `5pm`, `10am`, `09:30`, `17:00`.
-fn looks_like_clock_time(tok: &str) -> bool {
-    let lower = tok.to_ascii_lowercase();
-    lower.ends_with("am") || lower.ends_with("pm") || lower.contains(':')
-}
-
-fn starts_relative_interval(toks: &[&str], start: usize) -> bool {
-    toks.get(start).is_some_and(|tok| is_quantity(tok))
-        && toks.get(start + 1).is_some_and(|tok| is_relative_unit(tok))
-}
-
-fn starts_in_relative_interval(toks: &[&str], start: usize) -> bool {
-    toks.get(start)
-        .is_some_and(|tok| tok.eq_ignore_ascii_case("in"))
-        && toks.get(start + 1).is_some_and(|tok| is_quantity(tok))
-        && toks.get(start + 2).is_some_and(|tok| is_relative_unit(tok))
-}
-
-fn is_quantity(tok: &str) -> bool {
-    !tok.is_empty() && tok.chars().all(|ch| ch.is_ascii_digit())
-}
-
-fn is_relative_unit(tok: &str) -> bool {
+/// Exact ASCII `YYYY-MM-DD`; semantic date validation is left to `dates`.
+fn is_full_iso_date(tok: &str) -> bool {
     matches!(
-        tok.to_ascii_lowercase().as_str(),
-        "minute"
-            | "minutes"
-            | "min"
-            | "mins"
-            | "hour"
-            | "hours"
-            | "day"
-            | "days"
-            | "week"
-            | "weeks"
-            | "month"
-            | "months"
+        tok.as_bytes(),
+        [y0, y1, y2, y3, b'-', m0, m1, b'-', d0, d1]
+            if [y0, y1, y2, y3, m0, m1, d0, d1]
+                .iter()
+                .all(|b| b.is_ascii_digit())
     )
-}
-
-fn parse_quickadd_date(phrase: &str, now: &Zoned) -> Result<Zoned> {
-    dates::parse_at(normalise_date_phrase(phrase), now.clone())
 }
 
 /// Consume tokens starting at `start` (`every` / `every!`) up to the next
@@ -443,92 +339,6 @@ fn combine_date_with_time(date_z: &Zoned, time_z: &Zoned) -> Result<Zoned> {
         .map_err(|e| Error::Other(format!("combine date+time: {}", e)))
 }
 
-fn normalise_date_phrase(phrase: &str) -> &str {
-    let trimmed = phrase.trim();
-    if let Some(after_in) = trimmed
-        .get(..2)
-        .filter(|prefix| prefix.eq_ignore_ascii_case("in"))
-        .and_then(|_| trimmed.get(2..))
-        && after_in.chars().next().is_some_and(|ch| ch.is_whitespace())
-    {
-        after_in.trim_start()
-    } else {
-        trimmed
-    }
-}
-
-/// Greedy longest-match: extend a date phrase by appending subsequent tokens
-/// while `interim::parse_date_string` still accepts the result. Stops at the
-/// first token that is an explicit non-date marker (`@`, `#`, `p[1-4]`, `~`,
-/// `!`, `//`) or after `MAX_DATE_TOKENS`.
-fn try_date_match(toks: &[&str], start: usize, now: &Zoned) -> Option<(String, usize)> {
-    const MAX_DATE_TOKENS: usize = 5;
-    let mut best: Option<(String, usize)> = None;
-    let upper = (start + MAX_DATE_TOKENS).min(toks.len());
-    for end in (start + 1)..=upper {
-        // Stop expanding once we hit an explicit non-date token.
-        let last = toks[end - 1];
-        if end > start + 1 && is_explicit_marker(last) {
-            break;
-        }
-        let phrase = toks[start..end].join(" ");
-        if parse_quickadd_date(&phrase, now).is_ok() {
-            best = Some((phrase, end - start));
-        }
-    }
-    // A bare month name in prose is far more often a word than a date
-    // ("draft the Jul report") — interim resolves it to the 1st of that
-    // month, silently backdating the task (PT-1267 set deadline=2026-07-01
-    // from a stray "Jul"). Worse, interim tolerates one trailing junk
-    // identifier ("jul board" also parses as 2026-07-01), so rejecting only
-    // single-token matches isn't enough. A phrase starting at a month token
-    // only counts as a date when the month is followed by a digit-led token
-    // inside the match — a day or year ("jul 18", "jul 2027"). "next jul" /
-    // "18 jul" are unaffected (they don't start at the month token).
-    if let Some((_, consumed)) = &best
-        && is_bare_month(toks[start])
-        && (*consumed == 1
-            || !toks[start + 1]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit()))
-    {
-        return None;
-    }
-    best
-}
-
-/// Month-name tokens (long + short forms as accepted by interim).
-fn is_bare_month(tok: &str) -> bool {
-    matches!(
-        tok.to_ascii_lowercase().as_str(),
-        "jan"
-            | "january"
-            | "feb"
-            | "february"
-            | "mar"
-            | "march"
-            | "apr"
-            | "april"
-            | "may"
-            | "jun"
-            | "june"
-            | "jul"
-            | "july"
-            | "aug"
-            | "august"
-            | "sep"
-            | "sept"
-            | "september"
-            | "oct"
-            | "october"
-            | "nov"
-            | "november"
-            | "dec"
-            | "december"
-    )
-}
-
 /// Tokens that signal a structural quick-add marker, never a date word.
 fn is_explicit_marker(tok: &str) -> bool {
     if tok.starts_with('@') || tok.starts_with('#') || tok.starts_with('~') || tok.starts_with('!')
@@ -578,6 +388,39 @@ mod tests {
         date(2026, 5, 13).at(12, 0, 0, 0).to_zoned(tz).unwrap()
     }
 
+    fn incident_anchor() -> Zoned {
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        date(2026, 8, 1).at(12, 0, 0, 0).to_zoned(tz).unwrap()
+    }
+
+    #[test]
+    fn task_add_body_iso_provenance_date_does_not_set_deadline() {
+        let input = "...discovered 2026-08-01 during PT-1478 integration...";
+        let q = parse_at(input, incident_anchor()).unwrap();
+
+        assert!(
+            q.deadline.is_none(),
+            "unexpected deadline: {:?}",
+            q.deadline
+        );
+        assert_eq!(q.title, input);
+        assert!(q.warnings.is_empty(), "warnings: {:?}", q.warnings);
+    }
+
+    #[test]
+    fn task_add_body_step_fraction_does_not_set_deadline() {
+        let input = "...so step 4/5 restart+health-poll...";
+        let q = parse_at(input, incident_anchor()).unwrap();
+
+        assert!(
+            q.deadline.is_none(),
+            "unexpected deadline: {:?}",
+            q.deadline
+        );
+        assert_eq!(q.title, input);
+        assert!(q.warnings.is_empty(), "warnings: {:?}", q.warnings);
+    }
+
     #[test]
     fn quoted_tokens_are_literal_title_text() {
         // Verified live failure pre-fix: a bare "p1" inside a sentence silently
@@ -624,13 +467,11 @@ mod tests {
     }
 
     #[test]
-    fn quoted_span_bounds_date_lookahead() {
-        // The greedy date scan must stop at the quote boundary: `tomorrow`
-        // parses, but the quoted `10am` stays title text.
+    fn quoted_span_preserves_natural_language_date_text() {
         let q = parse_at("Ship build tomorrow \"10am demo notes\"", anchor()).unwrap();
-        assert_eq!(q.title, "Ship build 10am demo notes");
-        let d = q.deadline.expect("tomorrow still parses");
-        assert!(d.starts_with("2026-05-14"), "deadline was {}", d);
+        assert_eq!(q.title, "Ship build tomorrow 10am demo notes");
+        assert!(q.deadline.is_none());
+        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -642,59 +483,36 @@ mod tests {
     }
 
     #[test]
-    fn past_deadline_emits_warning() {
+    fn natural_language_past_date_is_literal_without_warning() {
         let q = parse_at("Pay invoice yesterday", anchor()).unwrap();
-        assert!(q.deadline.is_some());
-        assert_eq!(q.warnings.len(), 1, "warnings: {:?}", q.warnings);
-        assert!(q.warnings[0].contains("in the past"));
+        assert_eq!(q.title, "Pay invoice yesterday");
+        assert!(q.deadline.is_none());
+        assert!(q.warnings.is_empty());
     }
 
     #[test]
-    fn bare_month_in_past_warns_instead_of_silently_backdating() {
-        // Anchor June: "May" resolves to May 1 of the current year — in the
-        // past. Verified live pre-fix: silent past deadline, no signal.
+    fn bare_month_in_past_is_literal_without_warning() {
         let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
         let june = date(2026, 6, 10).at(12, 0, 0, 0).to_zoned(tz).unwrap();
         let q = parse_at("Plan May offsite", june).unwrap();
-        if q.deadline.is_some() {
-            assert!(
-                !q.warnings.is_empty(),
-                "past-resolving month must warn; got none"
-            );
-        }
+        assert_eq!(q.title, "Plan May offsite");
+        assert!(q.deadline.is_none());
+        assert!(q.warnings.is_empty());
     }
 
     #[test]
-    fn mixed_case_date_phrase_parses_without_panic() {
-        // Regression (PT-1270): `pt add "x Sat 18 Jul"` aborted the process in
-        // interim's ascii-lowercase assert; on the MCP path the panic killed
-        // the request task and the client hung with no response. Anchor is
-        // Wed 2026-05-13, so 18 Jul is in the future.
-        // interim has no weekday-prefixed date grammar ("sat 18 jul" errs),
-        // so the greedy scan settles on "Sat" (= coming Saturday from the
-        // Wed 2026-05-13 anchor) and the rest stays title text. Wrong-ish
-        // semantics but no abort — the crash is the regression under test.
+    fn mixed_case_date_phrase_is_literal_without_panic() {
         let q = parse_at("book flights Sat 18 Jul", anchor()).unwrap();
-        assert_eq!(q.title, "book flights 18 Jul");
-        assert_eq!(q.deadline_phrase.as_deref(), Some("Sat"));
-        assert!(
-            q.deadline.as_deref().unwrap().starts_with("2026-05-16"),
-            "got {:?}",
-            q.deadline
-        );
+        assert_eq!(q.title, "book flights Sat 18 Jul");
+        assert!(q.deadline.is_none());
+        assert!(q.warnings.is_empty());
     }
 
     #[test]
-    fn month_day_phrase_still_parses() {
-        // Guard for the bare-month rejection: month + digit-led day is a
-        // genuine date and must keep working.
+    fn month_day_phrase_is_literal() {
         let q = parse_at("pay rent Jul 18", anchor()).unwrap();
-        assert_eq!(q.title, "pay rent");
-        assert!(
-            q.deadline.as_deref().unwrap().starts_with("2026-07-18"),
-            "got {:?}",
-            q.deadline
-        );
+        assert_eq!(q.title, "pay rent Jul 18");
+        assert!(q.deadline.is_none());
     }
 
     #[test]
@@ -717,26 +535,18 @@ mod tests {
     }
 
     #[test]
-    fn long_word_after_hour_number_no_panic() {
-        // Regression (PT-1270): the greedy scan tries the extension
-        // "tomorrow 5 internationalisation", which panicked inside interim
-        // (identifier len >= 16 after an hour number). The caught panic is
-        // just a failed extension: "tomorrow" stays the deadline and the
-        // rest stays title text.
+    fn long_date_like_phrase_is_literal_without_panic() {
         let q = parse_at("standup tomorrow 5 internationalisation", anchor()).unwrap();
-        assert_eq!(q.title, "standup 5 internationalisation");
-        assert!(
-            q.deadline.as_deref().unwrap().starts_with("2026-05-14"),
-            "got {:?}",
-            q.deadline
-        );
+        assert_eq!(q.title, "standup tomorrow 5 internationalisation");
+        assert!(q.deadline.is_none());
     }
 
     #[test]
-    fn future_deadline_no_warning() {
+    fn natural_language_future_date_is_literal_without_warning() {
         let q = parse_at("Pay invoice tomorrow 10am", anchor()).unwrap();
-        assert!(q.deadline.is_some());
-        assert!(q.warnings.is_empty(), "warnings: {:?}", q.warnings);
+        assert_eq!(q.title, "Pay invoice tomorrow 10am");
+        assert!(q.deadline.is_none());
+        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -762,41 +572,26 @@ mod tests {
     }
 
     #[test]
-    fn date_phrase_tomorrow_extracted() {
+    fn date_phrase_tomorrow_is_literal() {
         let q = parse_at("Buy bread tomorrow", anchor()).unwrap();
-        assert_eq!(q.title, "Buy bread");
-        assert!(q.deadline.is_some());
-        assert!(
-            q.deadline.as_deref().unwrap().starts_with("2026-05-14"),
-            "got {:?}",
-            q.deadline
-        );
+        assert_eq!(q.title, "Buy bread tomorrow");
+        assert!(q.deadline.is_none());
     }
 
     #[test]
-    fn date_phrase_with_time_extracted() {
+    fn date_phrase_with_time_is_literal() {
         let q = parse_at("Buy bread tomorrow 10am @home", anchor()).unwrap();
-        assert_eq!(q.title, "Buy bread");
+        assert_eq!(q.title, "Buy bread tomorrow 10am");
         assert_eq!(q.labels, vec!["home"]);
-        // Tomorrow at 10am: should start with 2026-05-14T10
-        assert!(
-            q.deadline.as_deref().unwrap().starts_with("2026-05-14T10"),
-            "got {:?}",
-            q.deadline
-        );
+        assert!(q.deadline.is_none());
     }
 
     #[test]
-    fn next_friday_8pm() {
+    fn weekday_with_time_is_literal() {
         let q = parse_at("Meet Joshua next friday 8pm @sf", anchor()).unwrap();
-        assert_eq!(q.title, "Meet Joshua");
+        assert_eq!(q.title, "Meet Joshua next friday 8pm");
         assert_eq!(q.labels, vec!["sf"]);
-        // Next Friday (UK dialect) from Wed 2026-05-13 = 2026-05-22 at 20:00.
-        assert!(
-            q.deadline.as_deref().unwrap().starts_with("2026-05-22T20"),
-            "got {:?}",
-            q.deadline
-        );
+        assert!(q.deadline.is_none());
     }
 
     #[test]
@@ -807,15 +602,11 @@ mod tests {
     }
 
     #[test]
-    fn relative_interval_extracted() {
+    fn relative_interval_is_literal() {
         let q = parse_at("Water plants 5 days", anchor()).unwrap();
-        assert_eq!(q.title, "Water plants");
-        assert_eq!(q.deadline_phrase.as_deref(), Some("5 days"));
-        assert!(
-            q.deadline.as_deref().unwrap().starts_with("2026-05-18"),
-            "got {:?}",
-            q.deadline
-        );
+        assert_eq!(q.title, "Water plants 5 days");
+        assert!(q.deadline_phrase.is_none());
+        assert!(q.deadline.is_none());
     }
 
     #[test]
@@ -895,15 +686,11 @@ mod tests {
     }
 
     #[test]
-    fn in_relative_interval_extracted() {
+    fn in_relative_interval_is_literal() {
         let q = parse_at("Water plants in 5 days", anchor()).unwrap();
-        assert_eq!(q.title, "Water plants");
-        assert_eq!(q.deadline_phrase.as_deref(), Some("in 5 days"));
-        assert!(
-            q.deadline.as_deref().unwrap().starts_with("2026-05-18"),
-            "got {:?}",
-            q.deadline
-        );
+        assert_eq!(q.title, "Water plants in 5 days");
+        assert!(q.deadline_phrase.is_none());
+        assert!(q.deadline.is_none());
     }
 
     #[test]
