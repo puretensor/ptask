@@ -596,11 +596,20 @@ fn ok_json(pt_id: Option<&str>, message: &str) -> Response {
         .into_response()
 }
 
+// Every mutating handler below is a fully blocking body: it takes a pooled
+// connection and then SQLite's single write lock, either of which can park
+// the calling thread for up to 30s under contention. They run on tokio's
+// blocking pool so a burst of dashboard writers cannot starve the async
+// workers that serve everything else.
 async fn act_done(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    crate::blocking::db_response(move || act_done_blocking(state, headers, id)).await
+}
+
+fn act_done_blocking(state: AppState, headers: HeaderMap, id: String) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -625,6 +634,10 @@ async fn act_dismiss(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    crate::blocking::db_response(move || act_dismiss_blocking(state, headers, id)).await
+}
+
+fn act_dismiss_blocking(state: AppState, headers: HeaderMap, id: String) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -649,6 +662,10 @@ async fn act_reopen(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    crate::blocking::db_response(move || act_reopen_blocking(state, headers, id)).await
+}
+
+fn act_reopen_blocking(state: AppState, headers: HeaderMap, id: String) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -678,6 +695,15 @@ async fn act_priority(
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<PriorityBody>,
+) -> Response {
+    crate::blocking::db_response(move || act_priority_blocking(state, headers, id, body)).await
+}
+
+fn act_priority_blocking(
+    state: AppState,
+    headers: HeaderMap,
+    id: String,
+    body: PriorityBody,
 ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
@@ -712,6 +738,15 @@ async fn act_snooze(
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<SnoozeBody>,
+) -> Response {
+    crate::blocking::db_response(move || act_snooze_blocking(state, headers, id, body)).await
+}
+
+fn act_snooze_blocking(
+    state: AppState,
+    headers: HeaderMap,
+    id: String,
+    body: SnoozeBody,
 ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
@@ -771,6 +806,10 @@ async fn act_edit(
     Path(id): Path<String>,
     Json(body): Json<EditBody>,
 ) -> Response {
+    crate::blocking::db_response(move || act_edit_blocking(state, headers, id, body)).await
+}
+
+fn act_edit_blocking(state: AppState, headers: HeaderMap, id: String, body: EditBody) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -843,6 +882,10 @@ async fn api_create(
     headers: HeaderMap,
     Json(body): Json<CreateBody>,
 ) -> Response {
+    crate::blocking::db_response(move || api_create_blocking(state, headers, body)).await
+}
+
+fn api_create_blocking(state: AppState, headers: HeaderMap, body: CreateBody) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -1073,7 +1116,65 @@ pub async fn root(State(state): State<AppState>, headers: HeaderMap) -> Response
 
 #[cfg(test)]
 mod tests {
-    use super::parse_deadline;
+    use super::{AppState, HeaderMap, Path, State, act_done, parse_deadline};
+    use std::time::{Duration, Instant};
+
+    /// Regression (#39.2): the mutating dashboard handlers were plain
+    /// synchronous bodies on an async fn, so a handler that had to wait for a
+    /// pooled connection (r2d2 `connection_timeout` 30s) or for SQLite's write
+    /// lock (`busy_timeout` 30s) parked a tokio worker for the whole wait.
+    /// With one worker — a small node, or this current-thread test runtime —
+    /// nothing else on the runtime made progress.
+    ///
+    /// Every pooled connection is checked out from a plain OS thread here, so
+    /// `act_done`'s first `db.get()` must wait `HOLD`. A 50ms timer racing it
+    /// has to fire on time; before the fix it could not be polled at all until
+    /// the handler returned.
+    #[tokio::test]
+    async fn dashboard_write_does_not_park_the_async_executor() {
+        const HOLD: Duration = Duration::from_millis(600);
+        // Db::open's pool is max_size(8).
+        const POOL_SIZE: usize = 8;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("t.db")).unwrap();
+        let task = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("hold the write lock"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        let state = AppState::new(
+            db.clone(),
+            ptask_core::config::AuthConfig::default(),
+            ptask_core::config::WebhookConfig::default(),
+        );
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let hold_db = db.clone();
+        let holder = std::thread::spawn(move || {
+            let held: Vec<_> = (0..POOL_SIZE).map(|_| hold_db.get().unwrap()).collect();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(HOLD);
+            drop(held);
+        });
+        ready_rx.recv().unwrap();
+
+        let started = Instant::now();
+        let handler = act_done(State(state), HeaderMap::new(), Path(task.id.clone()));
+        let timer = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            started.elapsed()
+        };
+        let (_resp, timer_elapsed) = tokio::join!(handler, timer);
+        holder.join().unwrap();
+
+        assert!(
+            timer_elapsed < HOLD / 2,
+            "unrelated runtime work was starved for {timer_elapsed:?} \
+             while the dashboard write waited for a connection"
+        );
+    }
 
     #[test]
     fn parse_deadline_is_char_boundary_safe() {

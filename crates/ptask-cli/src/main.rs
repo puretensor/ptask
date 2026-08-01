@@ -2495,13 +2495,39 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
     match ptask_distill::pipeline::run_native(db, &provider, batch) {
         Ok(r) => {
             println!(
-                "distill native ok — consumed={} kept={} created={} deduped={} ({}ms)",
-                r.consumed, r.kept, r.created, r.skipped_dedup, r.duration_ms
+                "distill native ok — consumed={} kept={} created={} deduped={} failed={} ({}ms)",
+                r.consumed, r.kept, r.created, r.skipped_dedup, r.failed, r.duration_ms
             );
+            if r.quarantined > 0 {
+                println!(
+                    "  {} capture(s) quarantined after {} failed attempts — \
+                     inspect: SELECT id, distill_error FROM raw_items \
+                     WHERE processed=0 AND distill_attempts>={}",
+                    r.quarantined,
+                    ptask_core::raw_items::MAX_DISTILL_ATTEMPTS,
+                    ptask_core::raw_items::MAX_DISTILL_ATTEMPTS
+                );
+            }
             Ok(())
         }
         Err(e) => {
             ptask_distill::pipeline::record_failure(db, "gemini", &e.to_string());
+            // The fail-closed run is precisely the one on which rows cross the
+            // ceiling, so the quarantine count matters MORE here than on the Ok
+            // path. run_native returns Err without a report, so read the count
+            // from the database directly. A failure to read it must not mask
+            // the real error, hence the silent fallback.
+            match ptask_core::raw_items::quarantined_count(db) {
+                Ok(n) if n > 0 => eprintln!(
+                    "  {} capture(s) quarantined after {} failed attempts — \
+                     inspect: SELECT id, distill_error FROM raw_items \
+                     WHERE processed=0 AND distill_attempts>={}",
+                    n,
+                    ptask_core::raw_items::MAX_DISTILL_ATTEMPTS,
+                    ptask_core::raw_items::MAX_DISTILL_ATTEMPTS
+                ),
+                _ => {}
+            }
             anyhow::bail!("distill native FAILED (fail closed): {e:#}")
         }
     }

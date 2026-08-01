@@ -124,6 +124,70 @@ alert pipeline (or any HMAC webhook subscriber) can scrape `pt_event_log`
 for `distill.failed` events. A missing `GOOGLE_API_KEY` exits 3 before any
 raw item is consumed.
 
+### Poison captures and quarantine (v3.8.0)
+
+The batch is sent to the provider in chunks of 25, not in one call. A chunk
+the provider cannot classify is halved until the offending row is alone, so
+one unprocessable capture no longer takes its whole batch down — every other
+chunk still lands and is marked processed.
+
+The isolated row is charged one `raw_items.distill_attempts`, with the reason
+in `raw_items.distill_error`. After 3 charges it is **quarantined**: no longer
+served by `fetch_unprocessed`, so it cannot sit at the head of the
+oldest-first queue and block newer captures. A *database* failure (as opposed
+to a provider/classification failure) is never charged — a local outage must
+not push a good capture toward quarantine.
+
+Quarantine is visible, never silent:
+
+- `pt_distill_quarantined_captures` (Prometheus gauge on `/metrics`) — alert
+  on `> 0`; nothing clears it automatically. Add the rule; the gauge existing
+  is not the same as anyone being told.
+- a `distill.quarantined` event per row in `pt_event_log`.
+- `pt distill` prints the count and the triage query on **both** the success
+  and the failure path. The fail-closed run is the one on which rows actually
+  cross the ceiling, so reporting it only on success would hide it exactly
+  when it matters.
+
+#### Known exposure: a total provider outage still charges attempts
+
+An attempt is charged whether or not anything else succeeded in the same run.
+This is a deliberate simplification, and it has a cost worth stating rather
+than discovering: a *total* provider failure — a bad model deploy, a schema
+regression in the structured output, an expired key — charges every row the
+bisection reaches, not just genuinely-unprocessable ones.
+
+Measured at the current `CHUNK = 25` / `MAX_PROVIDER_CALLS = 64` settings, a
+fully-failing run charges roughly **31 captures**. Three consecutive fully
+failing runs (about three hours on the hourly timer) can therefore quarantine
+~31 good captures that had nothing wrong with them.
+
+That is bounded and fully recoverable — the rows are retained, counted, and
+re-armed by resetting `distill_attempts` as below — but it means
+**`pt_distill_quarantined_captures` rising sharply is a signal to check the
+provider, not the captures.** A slow trickle indicates genuinely poison rows;
+a jump of ~30 after a deploy indicates the provider broke and good rows were
+charged for it.
+
+The narrower fix (skip charging when zero provider calls succeeded this run)
+was considered and not taken, because it re-opens the original wedge in the
+case where the isolated row was the only row served. If this exposure ever
+bites in practice, the cheaper mitigation is to make `GeminiProvider::preflight`
+exercise the same array/structured-output schema that `classify_batch` uses, so
+a schema regression fails preflight and consumes nothing.
+
+Inspect and, once the underlying problem is fixed, release them:
+
+```bash
+sqlite3 ~/puretensor-tasks/tasks.db \
+  "SELECT id, distill_attempts, distill_error, substr(text,1,80)
+     FROM raw_items WHERE processed=0 AND distill_attempts>=3;"
+
+# Re-arm a row for the next run (or set processed=1 to drop it):
+sqlite3 ~/puretensor-tasks/tasks.db \
+  "UPDATE raw_items SET distill_attempts=0, distill_error=NULL WHERE id=<id>;"
+```
+
 ## Accountability (v0.7.0)
 
 `pt accountability run` is the Rust port of the Python `accountability/engine.py`.
