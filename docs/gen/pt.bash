@@ -884,7 +884,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__edit)
-            opts="-h --deadline --clear-deadline --title --desc --db --json --idempotency-key --help <QUERY>"
+            opts="-h --deadline --clear-deadline --title --desc --label --unlabel --db --json --idempotency-key --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -899,6 +899,14 @@ _pt() {
                     return 0
                     ;;
                 --desc)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --label)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --unlabel)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

@@ -194,6 +194,7 @@ class TaskOrderTests(unittest.TestCase):
             con = sqlite3.connect(f.name)
             con.execute("CREATE TABLE tasks (%s)" % ", ".join(server.TASK_COLS))
             con.execute("CREATE TABLE pt_extensions (task_uuid TEXT, pt_id TEXT)")
+            con.execute("CREATE TABLE task_labels (task_uuid TEXT, label TEXT)")
             for tid, created, status in (
                 ("a", "-2 days", "pending"),
                 ("b", "-1 hour", "done"),       # closed tasks stay in the feed
@@ -204,6 +205,8 @@ class TaskOrderTests(unittest.TestCase):
                     " priority_score) VALUES (?,?,?,?,datetime('now',?),0.5)",
                     (tid, "task " + tid, 2, status, created),
                 )
+            con.execute("INSERT INTO task_labels VALUES ('c', 'domain:mgmt')")
+            con.execute("INSERT INTO task_labels VALUES ('c', 'finance')")
             con.commit()
             con.close()
             server.DB_PATH = f.name
@@ -214,11 +217,57 @@ class TaskOrderTests(unittest.TestCase):
                 server.DB_PATH = old_db
         self.assertEqual([t["id"] for t in got], ["c", "b", "a"])
         self.assertEqual(got[1]["status"], "done")
+        # labels arrive as a real array (json_group_array unpacked), and a
+        # task with no label rows gets [] rather than null.
+        self.assertEqual(sorted(got[0]["labels"]), ["domain:mgmt", "finance"])
+        self.assertEqual(got[2]["labels"], [])
 
     def test_order_whitelist_is_closed(self):
         # The route splices TASK_ORDERS values into SQL; anything outside the
         # whitelist must 400 at the handler, so the map itself is the contract.
         self.assertEqual(sorted(server.TASK_ORDERS), ["created", "score"])
+
+
+class BuildEditArgsTests(unittest.TestCase):
+    def test_full_field_set_builds_pt_edit_argv(self):
+        args, err = server.build_edit_args("PT-9", {
+            "title": "new title",
+            "description": "new body",
+            "deadline": "2026-08-15",
+            "labels_add": ["domain:mgmt"],
+            "labels_remove": ["domain:eng"],
+        })
+        self.assertIsNone(err)
+        self.assertEqual(args, [
+            "edit", "PT-9", "--title=new title", "--desc=new body",
+            "--deadline=2026-08-15", "--label=domain:mgmt",
+            "--unlabel=domain:eng",
+        ])
+
+    def test_null_deadline_clears_absent_leaves_untouched(self):
+        args, _ = server.build_edit_args("PT-9", {"deadline": None})
+        self.assertEqual(args, ["edit", "PT-9", "--clear-deadline"])
+        args, err = server.build_edit_args("PT-9", {"title": "just a title"})
+        self.assertIsNone(err)
+        self.assertNotIn("--clear-deadline", args)
+
+    def test_priority_only_body_returns_no_args_no_error(self):
+        # priority is delegated to `pt priority` by the route, not this builder
+        args, err = server.build_edit_args("PT-9", {"priority": 4})
+        self.assertIsNone(args)
+        self.assertIsNone(err)
+
+    def test_bad_labels_rejected(self):
+        for bad in (["has space"], [""], ["x" * 65], "notalist", [42],
+                    ["ok"] * 17):
+            args, err = server.build_edit_args("PT-9", {"labels_add": bad})
+            self.assertIsNone(args, f"labels_add={bad!r} should fail")
+            self.assertIn("labels_add", err)
+
+    def test_invalid_deadline_rejected(self):
+        args, err = server.build_edit_args("PT-9", {"deadline": "tomorrow"})
+        self.assertIsNone(args)
+        self.assertIn("deadline", err)
 
 
 class BuildAddArgsTests(unittest.TestCase):

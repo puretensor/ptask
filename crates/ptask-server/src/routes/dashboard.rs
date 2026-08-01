@@ -29,7 +29,7 @@ const MAX_AUDIO_BYTES: usize = 12 * 1024 * 1024;
 
 /// Columns exposed to the cockpit. Explicit so a schema change can't leak
 /// surprises — byte-for-byte the sidecar's TASK_COLS.
-const TASK_COLS: [&str; 19] = [
+const TASK_COLS: [&str; 20] = [
     "id",
     "title",
     "description",
@@ -51,6 +51,9 @@ const TASK_COLS: [&str; 19] = [
     // v2.3 addition (backwards-compatible new key): the detail drawer shows
     // WHY the distiller/HAL created a task.
     "ai_reasoning",
+    // v3.6 addition: the ENG/MGMT domain classifier reads project (+ the
+    // labels aggregate q_tasks appends after pt_id).
+    "project",
 ];
 
 /// Flux windows the cockpit can switch between: (label, SQLite datetime
@@ -230,6 +233,12 @@ fn row_to_task(r: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {
     }
     let pt_id: Option<String> = r.get(TASK_COLS.len())?;
     m.insert("pt_id".into(), serde_json::json!(pt_id));
+    // Positional contract: labels is the json_group_array aggregate q_tasks
+    // appends after pt_id. Delivered as a real JSON array, not a string.
+    let labels_raw: String = r.get(TASK_COLS.len() + 1)?;
+    let labels: serde_json::Value =
+        serde_json::from_str(&labels_raw).unwrap_or_else(|_| serde_json::json!([]));
+    m.insert("labels".into(), labels);
     Ok(serde_json::Value::Object(m))
 }
 
@@ -267,7 +276,10 @@ fn q_tasks(
         .collect::<Vec<_>>()
         .join(",");
     let base = format!(
-        "SELECT {cols}, t.pt_id FROM tasks t {where_clause} \
+        "SELECT {cols}, t.pt_id, \
+         COALESCE((SELECT json_group_array(l.label) FROM task_labels l \
+                   WHERE l.task_uuid = t.id), '[]') AS labels \
+         FROM tasks t {where_clause} \
          ORDER BY {order_sql} LIMIT ?1",
         where_clause = if status == "all" {
             ""
@@ -740,6 +752,10 @@ struct EditBody {
     /// Present-as-string sets, present-as-null clears, absent = untouched.
     #[serde(default, deserialize_with = "deserialize_maybe_null")]
     deadline: Option<Option<String>>,
+    #[serde(default)]
+    labels_add: Vec<String>,
+    #[serde(default)]
+    labels_remove: Vec<String>,
 }
 
 fn deserialize_maybe_null<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
@@ -770,6 +786,8 @@ async fn act_edit(
         && body.description.is_none()
         && body.priority.is_none()
         && body.deadline.is_none()
+        && body.labels_add.is_empty()
+        && body.labels_remove.is_empty()
     {
         return jerr(StatusCode::BAD_REQUEST, "no fields to edit");
     }
@@ -794,6 +812,17 @@ async fn act_edit(
     }
     if let Some(dl) = &body.deadline
         && let Err(e) = ptask_core::tasks::update_deadline(&state.db, &task.id, dl.as_deref(), &ctx)
+    {
+        return jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string());
+    }
+    if (!body.labels_add.is_empty() || !body.labels_remove.is_empty())
+        && let Err(e) = ptask_core::tasks::modify_labels(
+            &state.db,
+            &task.id,
+            &body.labels_add,
+            &body.labels_remove,
+            &ctx,
+        )
     {
         return jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string());
     }

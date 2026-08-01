@@ -24,7 +24,18 @@
   --p5t:var(--p5); --p4t:var(--p4); --p3t:var(--p3); --p2t:var(--p2); --p1t:var(--p1);
   --accent-t:var(--accent); --hdr-muted:var(--muted); --live:var(--teal);
   --heat-base:#13131f;
+  /* domain identity (v3.6 ENG/MGMT split): Engineering wears the teal→blue
+     brand gradient; Management gets a warm gold→coral one. --dgrad/--daccent
+     follow the ACTIVE domain (data-domain on <html>) and drive the accentline,
+     the switch fill, and the per-card domain chips. --mgmt-at is the text-safe
+     variant (light themes override it like the --pNt family). */
+  --mgmt-a:#ffb020; --mgmt-a2:#ff875e; --mgmt-at:var(--mgmt-a);
+  --dgrad:var(--grad); --daccent:var(--accent-t);
   color-scheme:dark;
+}
+[data-domain="mgmt"]{
+  --dgrad:linear-gradient(90deg,var(--mgmt-a),var(--mgmt-a2));
+  --daccent:var(--mgmt-at);
 }
 /* ---- Mission Control (dark telemetry) ---- */
 [data-theme="mission"]{
@@ -74,6 +85,8 @@
   --backdrop:none; --card-border:none;
   --uppercase:uppercase; --letter:.06em;
   --heat-base:#0d0d12;
+  /* keep the MGMT identity inside the LCARS palette (yellow → lavender) */
+  --mgmt-a:#ffcc66; --mgmt-a2:#cc88ff;
 }
 /* ---- Executive (light minimal) ---- */
 [data-theme="exec"]{
@@ -90,6 +103,7 @@
   /* light surfaces need darkened text variants — the raw fills sit at 1.3-3.5:1 */
   --p5t:#be123c; --p4t:#a34808; --p3t:#9a6700; --p2t:#1864ab; --p1t:#5f6b7c;
   --accent-t:#0067d6; --hdr-muted:#9fb3c8; --live:#047857;
+  --mgmt-at:#8a5a00;
   --heat-base:#ffffff;
   color-scheme:light;
 }
@@ -122,7 +136,7 @@ header{
 .brandtxt{display:flex;flex-direction:column;line-height:1.05}
 .brandtxt b{font-family:var(--font-head);font-size:18px;letter-spacing:.14em;color:#fff;font-weight:800}
 .brandtxt small{font-size:10px;letter-spacing:.3em;color:var(--teal);text-transform:uppercase}
-.accentline{height:3px;background:var(--grad);width:100%}
+.accentline{height:3px;background:var(--dgrad);width:100%;transition:background var(--speed)}
 
 .clock{margin-left:6px;font-size:12px;color:var(--hdr-muted);font-variant-numeric:tabular-nums}
 .spacer{flex:1}
@@ -143,16 +157,23 @@ header{
 .chip.over{color:var(--p5t)}
 .dot{width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}
 
-/* theme switcher */
-.themes{display:flex;gap:4px;background:var(--panel);border:var(--card-border);border-radius:var(--chip-radius);padding:3px}
-.themes button{
+/* theme switcher + domain switcher — same segmented-control bones */
+.themes,.domains{display:flex;gap:4px;background:var(--panel);border:var(--card-border);border-radius:var(--chip-radius);padding:3px}
+.themes button,.domains button{
   font-family:var(--font);font-size:11px;font-weight:600;cursor:pointer;
   background:transparent;color:var(--muted);border:none;border-radius:calc(var(--chip-radius) - 2px);
   padding:7px 8px;text-transform:var(--uppercase);letter-spacing:var(--letter);transition:all .2s;
   min-height:24px;
 }
-.themes button:hover{color:var(--text)}
+.themes button:hover,.domains button:hover{color:var(--text)}
 .themes button.on{background:var(--grad);color:var(--ink);box-shadow:var(--glow)}
+.themes button:focus-visible,.domains button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+/* the ENG/MGMT/ALL view switch — selection wears the ACTIVE domain's gradient
+   (aria-checked carries the state; the fill is reinforcement, not the signal) */
+.domains button{font-weight:700}
+.domains button.on{background:var(--dgrad);color:var(--ink);box-shadow:var(--glow)}
+.domains button .dn{opacity:.8;font-weight:800;font-variant-numeric:tabular-nums;margin-left:3px}
+@media(max-width:640px){.domains button{padding:6px 6px;font-size:10px}}
 
 /* ------------------------------------------------------------------ layout */
 section{margin-top:22px}
@@ -222,6 +243,18 @@ section{margin-top:22px}
   font-weight:600;color:var(--dim);letter-spacing:.04em;white-space:nowrap;cursor:default}
 .ptag .ic{width:11px;height:11px;flex:none}
 .ptag.h .ic{color:var(--accent-t)}
+/* domain chip — every card wears its hemisphere (ENG gear / MGMT case); click
+   moves the task to the other side by persisting an explicit domain: label */
+.dtag{display:inline-flex;align-items:center;gap:4px;font-family:var(--font);font-size:10px;
+  font-weight:700;letter-spacing:.04em;white-space:nowrap;cursor:pointer;
+  background:transparent;border:1px solid var(--border);border-radius:6px;
+  padding:1px 6px;min-height:20px;transition:all .15s}
+.dtag .ic{width:11px;height:11px;flex:none}
+.dtag.eng{color:var(--accent-t)}
+.dtag.mgmt{color:var(--mgmt-at)}
+.dtag:hover{border-color:currentColor}
+.dtag:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+[data-theme="lcars"] .dtag{border-radius:0 8px 8px 0}
 /* flux chip — tasks added (+) vs completed (−) over a selectable window.
    It's a <button> (opens the range picker), so reset the native chrome. */
 button.chip{font-family:var(--font);cursor:pointer}
@@ -273,7 +306,7 @@ button.chip{font-family:var(--font);cursor:pointer}
 .rst.done{background:rgba(0,212,170,.16);color:var(--teal)}
 .rst.dismissed{background:rgba(255,59,92,.12);color:var(--p5t)}
 .rst.blocked{background:rgba(255,159,67,.16);color:var(--p4t)}
-@media(max-width:620px){.rrow .when{width:52px}.rrow .ptag{display:none}}
+@media(max-width:620px){.rrow .when{width:52px}.rrow .ptag,.rrow .dtag{display:none}}
 
 /* lanes */
 .lanes{display:grid;grid-template-columns:repeat(5,1fr);gap:var(--gap);align-items:start}
@@ -572,6 +605,8 @@ body.review #review-sec{display:block}
   <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2 15 14H1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 6.5v3.2M8 11.8v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
   <symbol id="i-user" viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M2.8 14a5.2 5.2 0 0 1 10.4 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
   <symbol id="i-bot" viewBox="0 0 16 16"><rect x="3" y="5.5" width="10" height="7.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 5.5V3M6.2 3h3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="9.2" r="1.05" fill="currentColor"/><circle cx="10" cy="9.2" r="1.05" fill="currentColor"/></symbol>
+  <symbol id="i-eng" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.6v2.1M8 12.3v2.1M14.4 8h-2.1M3.7 8H1.6M12.5 3.5 11 5M5 11l-1.5 1.5M12.5 12.5 11 11M5 5 3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="i-mgmt" viewBox="0 0 16 16"><rect x="1.8" y="4.8" width="12.4" height="8.4" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.8 4.8V3.6a1.1 1.1 0 0 1 1.1-1.1h2.2a1.1 1.1 0 0 1 1.1 1.1v1.2M1.8 8.6h12.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
 </svg>
 <a href="#main" class="skip">Skip to dashboard</a>
 <header>
@@ -581,6 +616,11 @@ body.review #review-sec{display:block}
       <div class="brandtxt"><b>PTASK</b><small>Intelligence Distilled</small></div>
     </div>
     <span class="clock" id="clock">--:--:-- UTC</span>
+    <div class="domains" id="domains" role="radiogroup" aria-label="Task domain — engineering, management, or all">
+      <button data-act="pick-domain" data-d="all" role="radio" aria-checked="false" tabindex="-1">ALL</button>
+      <button data-act="pick-domain" data-d="eng" role="radio" aria-checked="false" tabindex="-1">ENG</button>
+      <button data-act="pick-domain" data-d="mgmt" role="radio" aria-checked="false" tabindex="-1">MGMT</button>
+    </div>
     <div class="spacer"></div>
     <div class="chips" id="chips"></div>
     <div class="chips-c" id="chips-c" aria-label="task counts"></div>
@@ -681,6 +721,10 @@ body.review #review-sec{display:block}
         <div class="sev" id="c-sev" role="radiogroup" aria-labelledby="c-sev-lbl"></div>
       </div>
       <div class="fld">
+        <label id="c-dom-lbl">Domain</label>
+        <div class="sev" id="c-dom" role="radiogroup" aria-labelledby="c-dom-lbl"></div>
+      </div>
+      <div class="fld">
         <label for="c-deadline">Deadline <span class="opt">— optional</span></label>
         <input type="date" id="c-deadline">
       </div>
@@ -711,6 +755,64 @@ function setTheme(t){
 $$('#themes button').forEach(b=>b.onclick=()=>setTheme(b.dataset.t));
 setTheme(localStorage.getItem('ptask-theme')||'mission');
 
+/* ---- domain engine (v3.6): every task belongs to ENG (fleet/software work)
+   or MGMT (corporate/finance/people work). The header switch filters every
+   panel client-side — switching is a pure re-render, zero refetch (same
+   pattern as the flux range picker). Classification is deterministic:
+   explicit domain: label > project map > label map > title keywords > ENG. */
+const DNAME={all:'All',eng:'Engineering',mgmt:'Management'};
+const inDom=()=>_domain==='all'?'':' in '+DNAME[_domain];   // empty-state suffix
+const DOMAIN_LABEL_RE=/^domain:(eng|mgmt)$/;
+const ENG_PROJECTS=new Set(['infra','ptve','specola','puresentinel','nexus','immune','vulcan',
+  'scriptorium','habla','pureprospect','instance08-hardening','ptask','puremind','warroom']);
+const MGMT_PROJECTS=new Set(['corp-tax','bizdev','citizenship','amax','azure','supermicro',
+  'finance','legal','hiring','travel']);
+const ENG_LABEL_SET=new Set(['infra','k3s','k8s','security','monitoring','fleet','ceph','backup',
+  'bug','ci','git','bmc','aws','dr','fox-n0','nexus','alert-pipeline','docs','dispatch','email',
+  'channels','web','gpu']);
+const MGMT_LABEL_SET=new Set(['finance','legal','registration','finops','identity','wise',
+  'workspace','er','tax','banking']);
+const MGMT_TITLE_RE=/\b(vat|itin|w-?7|1040|1042|5472|filings?|invoice|bank|refund|reclaim|register(ed|ing)?|registration|duns|d&b|interview|hire|hiring|tender|hmrc|visa|citizenship|trip|flight|hotel|payroll|dividend|accountant|xeinadin|barclays?|starling|companies house|nda|contract|partnership|board|recruit)\b/i;
+const ENG_TITLE_RE=/\b(kubectl|k[38]s|pods?|deploy(ment)?s?|gpu|cuda|vllm|ceph|dns|tls|ssl|webhooks?|prometheus|grafana|nodes?|systemd|docker|containers?|nginx|ssh|bmc|ipmi|kernel|nvme|zfs|vlan|tailscale|api|endpoint|crash-?loops?|restarts?|exporters?|backups?|pvc|ingress|cron(jobs?)?|timers?|repos?|builds?|pipelines?|migrations?|database|sqlite|postgres|servers?|daemons?|scripts?|dashboards?|probes?|liveness|monitoring|hardening|firmware)\b/i;
+function domainOf(t){
+  for(const l of (t.labels||[])){const m=DOMAIN_LABEL_RE.exec(l); if(m) return m[1];}
+  const pj=(t.project||'').toLowerCase();
+  if(ENG_PROJECTS.has(pj)) return 'eng';
+  if(MGMT_PROJECTS.has(pj)) return 'mgmt';
+  for(const l of (t.labels||[])){const s=l.toLowerCase();
+    if(ENG_LABEL_SET.has(s)) return 'eng';
+    if(MGMT_LABEL_SET.has(s)) return 'mgmt';}
+  const hay=(t.title||'')+' '+pj;
+  /* both-match reads as "technical work on a corporate thing" → ENG */
+  if(MGMT_TITLE_RE.test(hay)&&!ENG_TITLE_RE.test(hay)) return 'mgmt';
+  return 'eng';
+}
+let _domain=localStorage.getItem('ptask-domain')||'all';
+function setDomain(d){
+  if(!(d in DNAME)) d='all';
+  _domain=d;
+  document.documentElement.dataset.domain=d;
+  localStorage.setItem('ptask-domain',d);
+  $$('#domains button').forEach(b=>{const on=b.dataset.d===d;
+    b.classList.toggle('on',on); b.setAttribute('aria-checked',on?'true':'false');
+    b.tabIndex=on?0:-1;});
+  /* suppress false "new critical" flashes — the other domain's cards are not
+     news, they were just filtered out a moment ago */
+  if(_pendingAll.length) seenCrit=new Set(_pendingAll.map(t=>t.id));
+  renderAll();
+}
+/* radiogroup keyboard pattern, same as the severity picker */
+$('#domains').addEventListener('keydown',e=>{
+  const order=['all','eng','mgmt'], i=order.indexOf(_domain);
+  let n=null;
+  if(e.key==='ArrowRight'||e.key==='ArrowDown') n=order[(i+1)%3];
+  else if(e.key==='ArrowLeft'||e.key==='ArrowUp') n=order[(i+2)%3];
+  else if(e.key==='Home') n='all'; else if(e.key==='End') n='mgmt';
+  if(n==null) return;
+  e.preventDefault(); setDomain(n);
+  const b=$(`#domains [data-d="${n}"]`); if(b) b.focus();
+});
+
 /* ---- clock ---- */
 setInterval(()=>{$('#clock').textContent=new Date().toISOString().slice(11,19)+' UTC';},1000);
 
@@ -736,6 +838,18 @@ function originTag(t,verbose){
   const lbl=verbose?[id,(robot?'auto-generated':'operator-directed')+' · '+src].filter(Boolean).join(' · '):id;
   return `<span class="ptag${robot?'':' h'}" title="${robot?'auto-generated (robot)':'operator-directed (human)'} · source: ${src}">`+
     `<svg class="ic" aria-hidden="true"><use href="#${robot?'i-bot':'i-user'}"/></svg>${lbl}</span>`;
+}
+/* domain chip — which hemisphere the task lives in. Click moves it to the
+   other side by writing an explicit domain: label through the pt edit path,
+   so the reassignment outlives every heuristic re-classification. */
+function domainTag(t){
+  const d=domainOf(t), eng=d==='eng';
+  const explicit=(t.labels||[]).some(l=>DOMAIN_LABEL_RE.test(l));
+  const cur=eng?'Engineering':'Management', other=eng?'Management':'Engineering';
+  return `<button class="dtag ${d}" data-act="domain" data-d="${d}" `+
+    `title="${cur}${explicit?'':' (auto-classified)'} — click to move to ${other}" `+
+    `aria-label="domain ${cur} — move to ${other}">`+
+    `<svg class="ic" aria-hidden="true"><use href="#${eng?'i-eng':'i-mgmt'}"/></svg>${eng?'ENG':'MGMT'}</button>`;
 }
 /* relative creation time for the Recently Added rail — "3m ago" beats an ISO
    stamp for the question this section answers: how fresh is this task? */
@@ -779,6 +893,25 @@ async function setPriority(id,level,ev){
     const j=await r.json(); toast(j.ok?('⇅ '+id+' → P'+level+' '+PNAME[level]):('✗ '+(j.message||'failed'))); if(j.ok) load();
   }catch(e){toast('✗ '+e.message);}
 }
+/* domain reassignment — swaps the explicit domain: label via the edit
+   endpoint (canonical pt write path), then patches the local caches so the
+   card jumps sides instantly instead of waiting for the next refetch. */
+async function setDomainLabel(id,uuid,to){
+  const from=to==='eng'?'mgmt':'eng';
+  try{
+    const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/edit',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({labels_add:['domain:'+to],labels_remove:['domain:'+from]})});
+    const j=await r.json();
+    if(!j.ok){ toast('✗ '+(j.error||j.message||'failed')); return; }
+    toast('⇄ '+(j.pt_id||id)+' → '+DNAME[to]);
+    const upd=t=>{ if(t.id===uuid){
+      t.labels=(t.labels||[]).filter(l=>!DOMAIN_LABEL_RE.test(l));
+      t.labels.push('domain:'+to); } };
+    _pendingAll.forEach(upd); _recentAll.forEach(upd);
+    renderAll();
+  }catch(e){toast('✗ '+e.message);}
+}
 /* ---- event delegation: one click + one keydown handler for all card/menu
    controls. No inline on* attributes anywhere (CSP-clean, and the DOM stops
    carrying ~560 handler strings). Ids/uuids ride on data-* attributes; the
@@ -798,6 +931,9 @@ document.addEventListener('click',e=>{
   else if(kind==='prio'){ openPriorityMenu(e,el,el.dataset.id,+el.dataset.p); }
   else if(kind==='pick-prio'){ pickPriority(+el.dataset.n); }
   else if(kind==='pick-sev'){ pickSev(+el.dataset.n); }
+  else if(kind==='pick-dom'){ pickDom(el.dataset.v); }
+  else if(kind==='pick-domain'){ setDomain(el.dataset.d); }
+  else if(kind==='domain'){ if(id) setDomainLabel(id,uuid,el.dataset.d==='eng'?'mgmt':'eng'); }
   else if(kind==='flux'){ openFluxMenu(e,el); }
   else if(kind==='pick-flux'){ pickFlux(el.dataset.w); }
 });
@@ -959,12 +1095,41 @@ $('#c-sev').addEventListener('keydown',e=>{
   e.preventDefault(); pickSev(n);
   const b=$(`#c-sev [data-lvl="${n}"]`); if(b) b.focus();
 });
+/* composer domain picker — AUTO means "classify for me" on create and
+   "leave as is" on edit; ENG/MGMT persist an explicit domain: label. */
+let _cdom='auto';
+const CDOM_OPTS=[['auto','AUTO','var(--muted)'],['eng','ENG','var(--teal)'],['mgmt','MGMT','var(--mgmt-a)']];
+function buildDom(sel){
+  _cdom=sel;
+  $('#c-dom').innerHTML=CDOM_OPTS.map(([v,lbl,c])=>
+    `<button type="button" class="sv${v===sel?' on':''}" role="radio" data-v="${v}"`+
+    ` aria-checked="${v===sel?'true':'false'}" tabindex="${v===sel?0:-1}"`+
+    ` style="--sc:${c}" data-act="pick-dom">`+
+    `<span class="sd"></span>${lbl}</button>`).join('');
+}
+function pickDom(v){
+  _cdom=v;
+  $$('#c-dom .sv').forEach(b=>{const on=b.dataset.v===v;
+    b.classList.toggle('on',on); b.setAttribute('aria-checked',on?'true':'false');
+    b.tabIndex=on?0:-1;});
+}
+$('#c-dom').addEventListener('keydown',e=>{
+  const order=['auto','eng','mgmt'], i=order.indexOf(_cdom);
+  let n=null;
+  if(e.key==='ArrowRight'||e.key==='ArrowDown') n=order[(i+1)%3];
+  else if(e.key==='ArrowLeft'||e.key==='ArrowUp') n=order[(i+2)%3];
+  else if(e.key==='Home') n='auto'; else if(e.key==='End') n='mgmt';
+  if(n==null) return;
+  e.preventDefault(); pickDom(n);
+  const b=$(`#c-dom [data-v="${n}"]`); if(b) b.focus();
+});
 function openCompose(seed){
   rememberInvoker('#qabtn');
   _popupOpen=true;
   const s=(seed||'').slice(0,400);
   $('#c-title').value=s; $('#c-desc').value=''; $('#c-deadline').value='';
   buildSev(2);
+  buildDom(_domain==='all'?'auto':_domain);   // a filtered view seeds its own domain
   // voice control: ready when the browser allows mic (secure context), else guide to HTTPS
   if(voiceSupported()){ setVoiceState('idle'); voiceMsg('dictate to fill every field'); }
   else { setVoiceState('off'); voiceMsg('open https://ptask.puretensor.ai to dictate — the mic needs a secure (HTTPS) connection','warn'); }
@@ -983,12 +1148,19 @@ async function submitCompose(ev){
     let r,j;
     if(_editId){
       const payload={title,priority:_sev,description,deadline:deadline||null};
+      if(_cdom!=='auto'){   // AUTO on edit = leave the domain untouched
+        payload.labels_add=['domain:'+_cdom];
+        payload.labels_remove=['domain:'+(_cdom==='eng'?'mgmt':'eng')];
+      }
       r=await fetch('/api/tasks/'+encodeURIComponent(_editId)+'/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       j=await r.json();
       if(j.ok){ closePopups(); toast('✎ '+(j.pt_id||_editId)+' updated'); load(true); }
       else { toast('✗ '+(j.error||j.message||'failed')); }
     }else{
-      const payload={title,priority:_sev};
+      /* explicit domain rides as an inline @domain: token — both backends
+         parse quick-add labels at create, no extra request needed */
+      const tok=_cdom==='auto'?'':' @domain:'+_cdom;
+      const payload={title:(tok&&title.length+tok.length<=400)?title+tok:title,priority:_sev};
       if(description) payload.description=description;
       if(deadline) payload.deadline=deadline;
       r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -1073,33 +1245,50 @@ function fluxData(s){
 }
 function renderChips(s){
   _lastStats=s;
-  const c5=s.by_priority[5]||0,c4=s.by_priority[4]||0;
-  /* flux — added (+, split operator/machine in the tooltip) vs completed (−)
-     over the selected window. A button: click opens the range picker. Hidden
-     when the backend predates the flux object. */
+  /* counts derive from the domain-filtered pending set (_tasks), matching the
+     server's semantics exactly: overdue = days<0, due≤7d = 0..7 (else-if).
+     Only flux + version still come from /api/stats — flux is windowed across
+     all statuses and can't be rebuilt from the pending array. */
+  let c5=0,c4=0,over=0,due7=0;
+  _tasks.forEach(t=>{
+    if(t.priority===5)c5++; else if(t.priority===4)c4++;
+    if(t.days_until!=null){ if(t.days_until<0) over++; else if(t.days_until<=7) due7++; }
+  });
+  const openN=_tasks.length;
   const fd=fluxData(s), win=_fluxWin;
   const flux=!fd?'':
-    `<button class="chip flux" data-act="flux" aria-haspopup="menu" title="last ${FLUX_NAMES[win]||win}: ${fd.added} added (${fd.added_human} operator · ${fd.added_robot} auto) · ${fd.done} completed — click to change range">`+
+    `<button class="chip flux" data-act="flux" aria-haspopup="menu" title="last ${FLUX_NAMES[win]||win}, all domains: ${fd.added} added (${fd.added_human} operator · ${fd.added_robot} auto) · ${fd.done} completed — click to change range">`+
     `<b class="plus">+${fd.added}</b><b class="minus">−${fd.done}</b><small>${win} ▾</small></button>`;
   $('#chips').innerHTML=`
     <span class="chip crit"><span class="dot"></span><b>${c5}</b> crit</span>
     <span class="chip urg"><b>${c4}</b> urgent</span>
-    <span class="chip over"><b>${s.overdue}</b> overdue</span>
-    <span class="chip"><b>${s.due_within_7d}</b> due ≤7d</span>
-    <span class="chip"><b>${s.pending_total}</b> open</span>${flux}`;
+    <span class="chip over"><b>${over}</b> overdue</span>
+    <span class="chip"><b>${due7}</b> due ≤7d</span>
+    <span class="chip"><b>${openN}</b> open</span>${flux}`;
   /* phone: one compact line instead of five wrapping chips (saved ~2 header
      rows). Only one of #chips / #chips-c is display:'d, so no double SR read. */
   $('#chips-c').innerHTML=
     `<b class="c5">${c5}</b> crit · <b class="c4">${c4}</b> urg`+
-    (s.overdue>0?` · <b class="cov">${s.overdue}</b> over`:'')+
-    ` · <b>${s.pending_total}</b> open`+
+    (over>0?` · <b class="cov">${over}</b> over`:'')+
+    ` · <b>${openN}</b> open`+
     (!fd?'':` · <span data-act="flux" role="button" tabindex="0">+${fd.added}/−${fd.done} ${win}▾</span>`);
   $('#ver').textContent='pt · v'+s.version;
 }
+/* live per-domain counts on the header switch */
+function renderDomainCounts(){
+  let e=0,m=0;
+  _pendingAll.forEach(t=>{ if(domainOf(t)==='eng') e++; else m++; });
+  const set=(d,n)=>{
+    const b=$(`#domains [data-d="${d}"]`); if(!b) return;
+    b.innerHTML=`${d.toUpperCase()} <span class="dn">${n}</span>`;
+    b.setAttribute('aria-label',`${DNAME[d]} — ${n} pending task${n===1?'':'s'}`);
+  };
+  set('all',e+m); set('eng',e); set('mgmt',m);
+}
 function renderCritical(tasks){
-  $('#crit-ct').textContent=tasks.length+' highest composite score';
+  $('#crit-ct').textContent=tasks.length+' highest composite score'+(_domain==='all'?'':' · '+DNAME[_domain].toLowerCase());
   if(!tasks.length){
-    $('#crit').innerHTML='<div class="ph">nothing critical — the board is clear</div>';
+    $('#crit').innerHTML='<div class="ph">nothing critical'+inDom()+' — the board is clear</div>';
     seenCrit=new Set(); return;
   }
   $('#crit').innerHTML=tasks.map(t=>{
@@ -1114,7 +1303,7 @@ function renderCritical(tasks){
         <span class="score">${(t.priority_score).toFixed(2)}</span>${scoreMini(t.priority_score)}
         ${dueChip(t)}
         <span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>
-        ${originTag(t)}
+        ${originTag(t)}${domainTag(t)}
         <button class="btn-done" title="mark done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button>
       </div></div>`;
   }).join('');
@@ -1141,18 +1330,16 @@ function toggleCritExpand(btn){
    Open rows keep the live priority picker + done button; closed rows dim,
    swap to a static badge, and wear their status so freshly-finished work
    still reads as recent activity instead of vanishing from the board. */
-let _recent=[];
 function renderRecent(tasks){
-  _recent=tasks;
-  $('#rc-ct').textContent='newest first · last '+tasks.length;
-  if(!tasks.length){$('#recent').innerHTML='<div class="ph">no tasks yet</div>';return;}
+  $('#rc-ct').textContent='newest first · last '+tasks.length+(_domain==='all'?'':' · '+DNAME[_domain].toLowerCase());
+  if(!tasks.length){$('#recent').innerHTML='<div class="ph">no recent tasks'+inDom()+'</div>';return;}
   $('#recent').innerHTML=tasks.map(t=>{
     const open=t.status==='pending';
     return `<div class="rrow${open?'':' closed'}" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
       <span class="when" title="created ${esc((t.created_at||'').slice(0,16).replace('T',' '))} UTC">${relTime(t.created_at)}</span>
       ${open?ptrigger(t):`<span class="pbadge p${t.priority}">P${t.priority}</span>`}
       <span class="tt" role="button" tabindex="0" data-act="drawer">${esc(t.title)}</span>
-      ${originTag(t)}
+      ${originTag(t)}${open?domainTag(t):''}
       ${open?`<button class="btn-done" title="mark done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button>`
             :`<span class="rst ${esc(t.status)}">${esc(t.status)}</span>`}
     </div>`;
@@ -1174,7 +1361,7 @@ function renderLanes(tasks){
       ${n===0?'<div class="ph">none</div>':''}${list.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
         <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
-        ${ptrigger(t)}${originTag(t)}
+        ${ptrigger(t)}${originTag(t)}${domainTag(t)}
         <button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
         <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
         <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
@@ -1200,8 +1387,8 @@ function wireLaneBody(b){
   b.onscroll=refresh;
 }
 function renderTimeline(items){
-  $('#tl-ct').textContent=items.length+' dated tasks';
-  if(!items.length){$('#tltrack').innerHTML='<div class="tl-lab" style="left:50%;top:-8px">no dated tasks</div>';return;}
+  $('#tl-ct').textContent=items.length+' dated tasks'+(_domain==='all'?'':' · '+DNAME[_domain].toLowerCase());
+  if(!items.length){$('#tltrack').innerHTML='<div class="tl-lab" style="left:50%;top:-8px">no dated tasks'+inDom()+'</div>';return;}
   const days=items.map(i=>i.days_until);
   let lo=Math.min(...days,0), hi=Math.max(...days,1); if(hi-lo<1)hi=lo+1;
   const pad=(hi-lo)*0.06; lo-=pad; hi+=pad;
@@ -1245,7 +1432,7 @@ function heatColor(v,max){
 }
 function renderHeat(h){
   _lastHeat=h;
-  if(!h.rows.length){$('#heat').innerHTML='<div class="ph">no pending tasks</div>';return;}
+  if(!h.rows.length){$('#heat').innerHTML='<div class="ph">no pending tasks'+inDom()+'</div>';return;}
   let max=0; h.rows.forEach(r=>Object.values(r.cells).forEach(v=>{if(v>max)max=v;}));
   let html='<table><tr><th></th>'+h.buckets.map(b=>`<th>${b}</th>`).join('')+'</tr>';
   h.rows.forEach(r=>{
@@ -1258,7 +1445,9 @@ function renderHeat(h){
 }
 
 /* ---- v2.3: task cache + selection model + keyboard triage ---- */
-let _tasks=[], _sel=-1, _review=false;
+/* _pendingAll/_recentAll are the raw payloads; _tasks is the domain-filtered
+   pending view every panel renders from. */
+let _tasks=[], _pendingAll=[], _recentAll=[], _sel=-1, _review=false;
 function cards(){return $$(_review?'#review-list .tcard':'.tcard,.ccard');}
 function select(i){
   const cs=cards(); if(!cs.length){_sel=-1;return;}
@@ -1294,10 +1483,10 @@ function renderReview(){
   const stale=[..._tasks].filter(t=>t.age_days!=null).sort((a,b)=>b.age_days-a.age_days).slice(0,12);
   $('#rv-banner').textContent='REVIEW MODE — '+stale.length+' stalest · j/k move · x done · d dismiss · s snooze · e edit · r exit';
   $('#rv-ct').textContent=stale.length+' tasks, oldest first';
-  if(!stale.length){$('#review-list').innerHTML='<div class="ph">nothing pending to review</div>';return;}
+  if(!stale.length){$('#review-list').innerHTML='<div class="ph">nothing pending to review'+inDom()+'</div>';return;}
   $('#review-list').innerHTML=stale.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}" style="margin-bottom:10px">
     <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title)}</div>
-    <div class="tm">${ptrigger(t)}${originTag(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
+    <div class="tm">${ptrigger(t)}${originTag(t)}${domainTag(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
       <span class="score">${(t.priority_score||0).toFixed(2)}</span>
       <button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
       <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
@@ -1308,11 +1497,13 @@ function renderReview(){
 
 /* ---- task detail drawer (description + attributed history) ---- */
 async function openDrawer(uuid){
-  const t=_tasks.find(x=>x.id===uuid)||_recent.find(x=>x.id===uuid);
+  /* look up in the UNFILTERED caches — a card can open from a domain it was
+     just moved out of, or from the all-statuses recent rail */
+  const t=_pendingAll.find(x=>x.id===uuid)||_recentAll.find(x=>x.id===uuid);
   const dr=$('#drawer');
   if(!dr.classList.contains('open')) rememberInvoker(`[data-uuid="${uuid}"] [role="button"]`);
   $('#d-title').textContent=(t&&t.title)||uuid;
-  $('#d-meta').innerHTML=t?`${ptrigger(t)}<span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>${dueChip(t)}<span class="score">${(t.priority_score||0).toFixed(2)}</span>${originTag(t,true)}`:'';
+  $('#d-meta').innerHTML=t?`${ptrigger(t)}<span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>${dueChip(t)}<span class="score">${(t.priority_score||0).toFixed(2)}</span>${originTag(t,true)}${domainTag(t)}`:'';
   $('#d-desc').textContent=(t&&(t.description||t.ai_reasoning))||'(no description)';
   $('#d-hist').innerHTML='<span class="age">loading…</span>';
   dr.classList.add('open');
@@ -1343,14 +1534,15 @@ $('#drawer').addEventListener('keydown',e=>{
 /* ---- edit modal (reuses the composer) ---- */
 let _editId=null;
 function openEdit(id){
-  const t=_tasks.find(x=>(x.pt_id||x.id)===id||x.id===id)
-        ||_recent.find(x=>(x.pt_id||x.id)===id||x.id===id); if(!t) return;
+  const t=_pendingAll.find(x=>(x.pt_id||x.id)===id||x.id===id)
+        ||_recentAll.find(x=>(x.pt_id||x.id)===id||x.id===id); if(!t) return;
   rememberInvoker(`[data-id="${id}"] .pchip`);
   _editId=id; _popupOpen=true;
   $('#compose-h').textContent='Edit '+(t.pt_id||'task');
   $('#c-title').value=t.title; $('#c-desc').value=t.description||'';
   $('#c-deadline').value=(t.deadline_date||'');
   buildSev(t.priority);
+  buildDom('auto');   // AUTO on edit = leave the domain untouched
   $('#compose').hidden=false;
   $('#c-title').focus({preventScroll:true});
 }
@@ -1366,25 +1558,67 @@ function startSSE(){
   _es.onerror=()=>{startPoll();};
 }
 
-/* ---- load loop ---- */
+/* ---- load loop ----
+   v3.6 collapsed the fetch from 6 endpoints to 3: critical, timeline, and
+   heatmap all derive from the one pending payload (identical semantics —
+   critical = the score-ordered head, timeline = the dated subset, heatmap =
+   priority × age-bucket counts), which is what lets the ENG/MGMT switch
+   re-filter every panel locally with zero refetch. */
+const AGE_BUCKETS=[[0,7,'0-7d'],[7,30,'1-4w'],[30,60,'1-2m'],[60,90,'2-3m'],[90,1e9,'90d+']];
+function buildHeat(tasks){
+  const buckets=AGE_BUCKETS.map(b=>b[2]);
+  if(!tasks.length) return {buckets,rows:[]};
+  const byP={};
+  const rows=[5,4,3,2,1].map(p=>{
+    const cells={}; buckets.forEach(b=>cells[b]=0);
+    return byP[p]={priority:p,cells};
+  });
+  tasks.forEach(t=>{
+    const r=byP[t.priority]; if(!r) return;
+    const a=t.age_days==null?0:t.age_days;
+    for(const [lo,hi,lbl] of AGE_BUCKETS){ if(a>=lo&&a<hi){ r.cells[lbl]++; break; } }
+  });
+  return {buckets,rows};
+}
+function filterDomain(list){
+  return _domain==='all'?list:list.filter(t=>domainOf(t)===_domain);
+}
+function statusLine(){
+  if(!_lastGood||$('#sbar').classList.contains('err')) return;
+  $('#status').textContent='updated '+_lastGood+' · '+_tasks.length+' pending'
+    +(_domain==='all'?'':' · '+DNAME[_domain].toLowerCase());
+}
+/* one render pass over the cached payloads — called on load AND on every
+   domain switch (the switch is a pure local re-render, like the flux picker) */
+function renderAll(){
+  if(!_lastStats) return;   // nothing fetched yet (boot-time setDomain)
+  const keepId=selId();
+  const pending=filterDomain(_pendingAll);
+  _tasks=pending;
+  renderChips(_lastStats);
+  renderDomainCounts();
+  renderCritical(pending.slice(0,12));   // payload arrives score-ordered
+  renderLanes(pending);
+  renderRecent(filterDomain(_recentAll));
+  renderTimeline(pending.filter(t=>t.deadline_date)
+    .slice().sort((a,b)=>a.deadline_date<b.deadline_date?-1:a.deadline_date>b.deadline_date?1:0));
+  renderHeat(buildHeat(pending));
+  if(_review) renderReview();
+  if(keepId){const cs=cards();const ix=cs.findIndex(c=>c.dataset.id===keepId);if(ix>=0)select(ix);}
+  statusLine();
+}
 let _lastGood=null;
 async function load(force){
   if(_popupOpen&&!force) return;   // don't wipe the board while a picker/confirm popup is open
   try{
-    const keepId=selId();
-    const [stats,crit,all,rec,tl,heat]=await Promise.all([
-      api('/api/stats'),api('/api/critical?limit=12'),api('/api/tasks?status=pending&limit=600'),
-      api('/api/tasks?status=all&order=created&limit=20'),
-      api('/api/timeline'),api('/api/heatmap')]);
-    _tasks=all.tasks;
-    renderChips(stats); renderCritical(crit.tasks); renderLanes(all.tasks);
-    renderRecent(rec.tasks);
-    renderTimeline(tl.items); renderHeat(heat);
-    if(_review) renderReview();
-    if(keepId){const cs=cards();const ix=cs.findIndex(c=>c.dataset.id===keepId);if(ix>=0)select(ix);}
+    const [stats,all,rec]=await Promise.all([
+      api('/api/stats'),
+      api('/api/tasks?status=pending&limit=5000'),
+      api('/api/tasks?status=all&order=created&limit=20')]);
+    _lastStats=stats; _pendingAll=all.tasks; _recentAll=rec.tasks;
     _lastGood=new Date().toLocaleTimeString();
     $('#sbar').classList.remove('err'); $('#live-lbl').textContent='LIVE';
-    $('#status').textContent='updated '+_lastGood+' · '+stats.pending_total+' pending';
+    renderAll();
     first=false;
   }catch(e){
     /* the board keeps showing the last good data — say so, loudly enough */
@@ -1392,6 +1626,7 @@ async function load(force){
     $('#status').textContent='⚠ connection lost ('+e.message+')'+(_lastGood?' — showing data from '+_lastGood:'')+' · retrying';
   }
 }
+setDomain(_domain);   // paints the switch + data-domain before first data
 load(); startPoll(); startSSE();
 </script>
 </body>

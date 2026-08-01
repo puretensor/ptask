@@ -93,6 +93,12 @@ pub struct EditArg {
     /// ISO date to set; empty string clears.
     #[serde(default)]
     pub deadline: Option<String>,
+    /// Labels to add, e.g. ["domain:mgmt"].
+    #[serde(default)]
+    pub labels_add: Vec<String>,
+    /// Labels to remove.
+    #[serde(default)]
+    pub labels_remove: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -297,7 +303,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Edit task fields (title/description/priority/deadline; empty-string deadline clears)."
+        description = "Edit task fields (title/description/priority/deadline; empty-string deadline clears; labels_add/labels_remove edit labels, e.g. domain:eng / domain:mgmt)."
     )]
     async fn task_edit(
         &self,
@@ -307,11 +313,19 @@ impl PtaskMcp {
             description,
             priority,
             deadline,
+            labels_add,
+            labels_remove,
         }): Parameters<EditArg>,
     ) -> Result<CallToolResult, McpError> {
         let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, true).map_err(domain_err)?;
         let ctx = self.ctx();
-        if title.is_none() && description.is_none() && priority.is_none() && deadline.is_none() {
+        if title.is_none()
+            && description.is_none()
+            && priority.is_none()
+            && deadline.is_none()
+            && labels_add.is_empty()
+            && labels_remove.is_empty()
+        {
             return Err(McpError::invalid_params("no fields to edit", None));
         }
         if title.is_some() || description.is_some() {
@@ -337,6 +351,10 @@ impl PtaskMcp {
                 Some(dl.as_str())
             };
             ptask_core::tasks::update_deadline(&self.db, &t.id, val, &ctx).map_err(domain_err)?;
+        }
+        if !labels_add.is_empty() || !labels_remove.is_empty() {
+            ptask_core::tasks::modify_labels(&self.db, &t.id, &labels_add, &labels_remove, &ctx)
+                .map_err(domain_err)?;
         }
         self.rescore();
         json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id}))

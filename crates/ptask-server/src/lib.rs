@@ -1720,8 +1720,20 @@ Don't forget the sourdough.\r\n";
                         status = 'done' WHERE id = ?1",
                 rusqlite::params![old.id],
             )?;
+            c.execute(
+                "UPDATE tasks SET project = 'corp-tax' WHERE id = ?1",
+                rusqlite::params![fresh.id],
+            )?;
             Ok(())
         })
+        .unwrap();
+        ptask_core::tasks::modify_labels(
+            &db,
+            &fresh.id,
+            &["domain:mgmt".into(), "finance".into()],
+            &[],
+            &EventCtx::test(),
+        )
         .unwrap();
 
         let app = router(AppState::new(db, Default::default(), Default::default()));
@@ -1748,6 +1760,18 @@ Don't forget the sourdough.\r\n";
             .collect();
         assert_eq!(ids, vec![fresh.id.as_str(), old.id.as_str()]);
         assert_eq!(v["tasks"][1]["status"], "done");
+        // v3.6 domain-classifier fields: project on the wire, labels as a
+        // real JSON array ([] when the task has no label rows).
+        assert_eq!(v["tasks"][0]["project"], "corp-tax");
+        let mut labels: Vec<&str> = v["tasks"][0]["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap())
+            .collect();
+        labels.sort_unstable();
+        assert_eq!(labels, vec!["domain:mgmt", "finance"]);
+        assert_eq!(v["tasks"][1]["labels"], serde_json::json!([]));
 
         let resp = app
             .oneshot(

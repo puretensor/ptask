@@ -25,6 +25,20 @@ self-contained `index.html`, vanilla JS + CSS custom properties).
 | **LCARS** | Star-Trek ops console, blocky amber/orange/lavender (rail collapses <700px) |
 | **Executive** | Light, minimal, whitespace |
 
+## Domain split (v0.12 / pt 3.6)
+
+The header carries an **ALL / ENG / MGMT** switch (localStorage `ptask-domain`)
+that splits the board into its two hemispheres — Engineering (fleet/software
+work, teal→blue identity) and Management (corporate/finance/people work, warm
+gold→coral identity). Switching is a pure client-side re-render: critical,
+lanes, recent, timeline, heatmap, review, and the header counts all derive
+from one score-ordered pending payload. Classification is deterministic
+(`domainOf` in index.html): explicit `domain:eng`/`domain:mgmt` label >
+project map > label map > title keywords > ENG. Every card wears a clickable
+domain chip that moves the task to the other side by persisting an explicit
+`domain:` label through `pt edit --label/--unlabel`; the composer offers
+AUTO/ENG/MGMT (create rides an inline `@domain:` token).
+
 ## Design tokens (v2.6.8 design pass — see DESIGN_BASELINE.md)
 
 Rules the 2026-07-06 audit added after measuring 276 contrast failures across
@@ -85,11 +99,15 @@ counts at 1.3:1; Mission statusbar/ages at 2.6-2.9:1):
 |--------|------|-------|
 | GET | `/healthz` | no auth (tunnel/systemd probe) |
 | GET | `/api/stats` | counts, throughput, overdue, due≤7d |
-| GET | `/api/tasks?status=&limit=` | tasks + scoring fields |
+| GET | `/api/tasks?status=&limit=` | tasks + scoring fields + `project` + `labels` (v0.12) |
 | GET | `/api/critical?limit=` | top pending by `priority_score` |
 | GET | `/api/timeline` | pending tasks with a deadline |
 | GET | `/api/heatmap` | priority × age-bucket matrix |
 | POST | `/api/tasks/<id>/done` | shells `pt done <id>` |
+| POST | `/api/tasks/<id>/snooze` `{days?}` | shells `pt snooze <id> "<days> days"` (v0.12) |
+| POST | `/api/tasks/<id>/dismiss` | shells `pt dismiss <id>` (v0.12) |
+| POST | `/api/tasks/<id>/reopen` | shells `pt reopen <id>` (v0.12) |
+| POST | `/api/tasks/<id>/edit` `{title?, description?, priority?, deadline?, labels_add?, labels_remove?}` | shells `pt edit` (+ `pt priority` for level); null deadline clears (v0.12) |
 | POST | `/api/tasks` `{title, description?, priority?, deadline?}` | shells `pt add [--priority=] [--description=] [--deadline=] -- "<title>"` |
 | POST | `/api/voice` (raw audio body) | Whisper STT → Bedrock Claude draft → `{transcript, fields:{title,description,priority,deadline,labels}}` to pre-fill the composer |
 

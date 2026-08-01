@@ -59,7 +59,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.11.0"
+VERSION = "0.12.0"
 
 # /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
 # SQL, so nothing user-supplied may pass through unmapped.
@@ -103,11 +103,14 @@ VOICE_FALLBACK_URL = os.environ.get("PTASK_VOICE_FALLBACK_URL", "http://127.0.0.
 VOICE_FALLBACK_MODEL = os.environ.get("PTASK_VOICE_FALLBACK_MODEL", "mistral-medium-3.5")
 
 # Columns we expose. Kept explicit so a schema change can't leak surprises.
+# Byte-for-byte the Rust dashboard route's TASK_COLS (ai_reasoning had drifted
+# Rust-only until v0.12.0; project is the v3.6 ENG/MGMT domain-classifier key).
 TASK_COLS = [
     "id", "title", "description", "priority", "status",
     "created_at", "updated_at", "deadline", "source_type", "task_type",
     "priority_score", "score_urgency", "score_dependency", "score_neglect",
     "escalation_level", "dismissal_count", "last_reminded", "cluster_keywords",
+    "ai_reasoning", "project",
 ]
 
 _ID_RE = re.compile(r"^(PT-\d+|[0-9a-fA-F-]{8,36})$")
@@ -198,6 +201,12 @@ def _parse_deadline(s: str):
 
 def _row_to_task(r: sqlite3.Row) -> dict:
     d = {k: r[k] for k in r.keys()}
+    # labels arrives as json_group_array's string; the API contract is an array.
+    if isinstance(d.get("labels"), str):
+        try:
+            d["labels"] = json.loads(d["labels"])
+        except ValueError:
+            d["labels"] = []
     age = _age_days(d.get("created_at"))
     d["age_days"] = round(age, 1) if age is not None else None
     dl = _parse_deadline(d.get("deadline"))
@@ -219,7 +228,9 @@ def q_tasks(status="pending", limit=500, order="priority_score DESC, priority DE
         # extension row still returns the task.
         cols = ",".join("t." + c for c in TASK_COLS)
         order_q = ", ".join("t." + o.strip() for o in order.split(","))
-        base = (f"SELECT {cols}, e.pt_id AS pt_id "
+        base = (f"SELECT {cols}, e.pt_id AS pt_id, "
+                "COALESCE((SELECT json_group_array(l.label) FROM task_labels l "
+                "WHERE l.task_uuid = t.id), '[]') AS labels "
                 "FROM tasks t LEFT JOIN pt_extensions e ON e.task_uuid = t.id ")
         if status == "all":
             sql = base + f"ORDER BY {order_q} LIMIT ?"
@@ -412,6 +423,67 @@ def build_add_args(body: dict) -> tuple[list[str] | None, str | None]:
         args.append(f"--deadline={dl}")
     args += ["--", title]
     return args, None
+
+
+_UNSET = object()  # distinguishes "field absent" from an explicit null
+
+
+def _check_labels(v, what: str) -> tuple[list[str] | None, str | None]:
+    """Validate a labels_add/labels_remove list: ≤16 token-safe strings."""
+    if not isinstance(v, list) or len(v) > 16:
+        return None, f"{what} must be a list of at most 16 labels"
+    out = []
+    for l in v:
+        if not isinstance(l, str):
+            return None, f"{what} entries must be strings"
+        l = l.strip()
+        if not (1 <= len(l) <= 64) or any(c.isspace() for c in l):
+            return None, f"{what} entries must be 1-64 chars with no whitespace"
+        out.append(l)
+    return out, None
+
+
+def build_edit_args(tid: str, body: dict) -> tuple[list[str] | None, str | None]:
+    """Translate an edit request body into `pt edit` argv (or an error).
+
+    Mirrors the Rust route's EditBody contract: title/description replace,
+    deadline present-as-string sets / present-as-null clears / absent leaves
+    untouched, labels_add/labels_remove edit the label set. `priority` is NOT
+    handled here — `pt edit` has no priority flag, the route delegates it to
+    `pt priority` separately. Returns (None, None) when the body carries no
+    field this builder owns.
+    """
+    args = ["edit", tid]
+    title = body.get("title")
+    if title is not None:
+        if not isinstance(title, str) or not (3 <= len(title.strip()) <= 400):
+            return None, "title 3-400 chars"
+        args.append(f"--title={title.strip()}")
+    desc = body.get("description")
+    if desc is not None:
+        if not isinstance(desc, str) or len(desc) > 4000:
+            return None, "description must be a string (max 4000)"
+        args.append(f"--desc={desc.strip()}")
+    dl = body.get("deadline", _UNSET)
+    if dl is None:
+        args.append("--clear-deadline")
+    elif dl is not _UNSET:
+        dl = str(dl).strip()
+        if not _DATE_RE.match(dl):
+            return None, "deadline must be ISO date YYYY-MM-DD"
+        try:
+            datetime.strptime(dl, "%Y-%m-%d")
+        except ValueError:
+            return None, "deadline is not a valid date"
+        args.append(f"--deadline={dl}")
+    for key, flag in (("labels_add", "--label"), ("labels_remove", "--unlabel")):
+        v = body.get(key)
+        if v is not None:
+            labels, err = _check_labels(v, key)
+            if err:
+                return None, err
+            args += [f"{flag}={l}" for l in labels]
+    return (args, None) if len(args) > 2 else (None, None)
 
 
 def pt_exec(args: list[str]) -> tuple[bool, str]:
@@ -805,6 +877,47 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "level must be an integer 1..5"}, 400)
             ok, msg = pt_exec(["priority", tid, str(level)])
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+
+        # Triage verbs the cockpit sends that previously existed only on the
+        # Rust dashboard route (mirror gap closed in v0.12.0).
+        m = re.match(r"^/api/tasks/([^/]+)/(snooze|dismiss|reopen)$", u.path)
+        if m:
+            tid, verb = m.group(1), m.group(2)
+            if not _ID_RE.match(tid):
+                return self._json({"error": "bad id"}, 400)
+            if verb == "snooze":
+                days = body.get("days", 3)
+                if not isinstance(days, int) or isinstance(days, bool):
+                    return self._json({"error": "days must be an integer"}, 400)
+                days = max(1, min(90, days))
+                ok, msg = pt_exec(["snooze", tid, f"{days} days"])
+            else:
+                ok, msg = pt_exec([verb, tid])
+            return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+
+        m = re.match(r"^/api/tasks/([^/]+)/edit$", u.path)
+        if m:
+            tid = m.group(1)
+            if not _ID_RE.match(tid):
+                return self._json({"error": "bad id"}, 400)
+            args, err = build_edit_args(tid, body)
+            if err:
+                return self._json({"error": err}, 400)
+            level = body.get("priority")
+            if level is not None and (not isinstance(level, int) or isinstance(level, bool)
+                                      or not (1 <= level <= 5)):
+                return self._json({"error": "priority must be an integer 1..5"}, 400)
+            if args is None and level is None:
+                return self._json({"error": "no fields to edit"}, 400)
+            ok, msgs = True, []
+            if args is not None:
+                ok1, msg1 = pt_exec(args)
+                ok, msgs = ok and ok1, msgs + [msg1]
+            if level is not None:
+                ok2, msg2 = pt_exec(["priority", tid, str(level)])
+                ok, msgs = ok and ok2, msgs + [msg2]
+            return self._json({"ok": ok, "message": " · ".join(m for m in msgs if m)},
+                              200 if ok else 500)
 
         if u.path == "/api/tasks":
             args, err = build_add_args(body)

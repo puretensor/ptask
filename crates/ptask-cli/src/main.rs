@@ -614,6 +614,12 @@ struct EditArgs {
     /// Replace the description.
     #[arg(long = "desc")]
     desc: Option<String>,
+    /// Add a label (repeatable), e.g. --label domain:mgmt.
+    #[arg(long = "label")]
+    label: Vec<String>,
+    /// Remove a label (repeatable).
+    #[arg(long = "unlabel")]
+    unlabel: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -974,9 +980,10 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     }
     let has_deadline = a.deadline.is_some() || a.clear_deadline;
     let has_text = a.title.is_some() || a.desc.is_some();
-    if !has_deadline && !has_text {
+    let has_labels = !a.label.is_empty() || !a.unlabel.is_empty();
+    if !has_deadline && !has_text && !has_labels {
         anyhow::bail!(
-            "nothing to edit; use --deadline DATE | --clear-deadline | --title T | --desc D"
+            "nothing to edit; use --deadline DATE | --clear-deadline | --title T | --desc D | --label L | --unlabel L"
         );
     }
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
@@ -996,6 +1003,9 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
             a.deadline.as_deref()
         };
         tasks::update_deadline(db, &task.id, new_deadline, &cli_ctx())?;
+    }
+    if has_labels {
+        tasks::modify_labels(db, &task.id, &a.label, &a.unlabel, &cli_ctx())?;
     }
     // Only the deadline feeds a score (urgency); a text-only edit needs no rescore.
     let note = if has_deadline {
@@ -1025,6 +1035,12 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     }
     if a.desc.is_some() {
         parts.push("description".into());
+    }
+    if !a.label.is_empty() {
+        parts.push(format!("+{}", a.label.join(" +")));
+    }
+    if !a.unlabel.is_empty() {
+        parts.push(format!("-{}", a.unlabel.join(" -")));
     }
     println!(
         "{} {} · edited {}{}",

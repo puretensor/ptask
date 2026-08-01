@@ -92,6 +92,8 @@ _arguments "${_arguments_options[@]}" : \
 '--deadline=[Set deadline to an ISO date/datetime, e.g. 2026-06-16]:DEADLINE:_default' \
 '--title=[Replace the title]:TITLE:_default' \
 '--desc=[Replace the description]:DESC:_default' \
+'*--label=[Add a label (repeatable), e.g. --label domain\:mgmt]:LABEL:_default' \
+'*--unlabel=[Remove a label (repeatable)]:UNLABEL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--clear-deadline[Clear the deadline]' \

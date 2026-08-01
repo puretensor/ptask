@@ -1352,6 +1352,64 @@ pub fn update_text(
     Ok(())
 }
 
+/// Add/remove labels on an existing task (`task_labels` side table).
+/// Labels don't feed the composite score, so callers skip the rescore that
+/// priority/deadline edits trigger. Adds are INSERT OR IGNORE and removes of
+/// absent labels are no-ops, so a retried command converges on the same state.
+pub fn modify_labels(
+    db: &Db,
+    task_uuid: &str,
+    add: &[String],
+    remove: &[String],
+    ctx: &EventCtx,
+) -> Result<()> {
+    let add: Vec<&str> = add.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let remove: Vec<&str> = remove.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    if add.is_empty() && remove.is_empty() {
+        return Err(crate::Error::Other("modify_labels: nothing to change".into()));
+    }
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let exists = tx
+        .query_row("SELECT 1 FROM tasks WHERE id=?1", [task_uuid], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(crate::Error::Other("task not found".into()));
+    }
+    for l in &add {
+        tx.execute(
+            "INSERT OR IGNORE INTO task_labels (task_uuid, label) VALUES (?1, ?2)",
+            params![task_uuid, l],
+        )?;
+    }
+    for l in &remove {
+        tx.execute(
+            "DELETE FROM task_labels WHERE task_uuid=?1 AND label=?2",
+            params![task_uuid, l],
+        )?;
+    }
+    tx.execute(
+        "UPDATE tasks SET updated_at=?1 WHERE id=?2",
+        params![now, task_uuid],
+    )?;
+    let what = format!("labels edited (+{} -{})", add.len(), remove.len());
+    tx.execute(
+        "INSERT INTO interactions (task_id, action, ts, details) VALUES (?1, 'edit', ?2, ?3)",
+        params![task_uuid, now, what],
+    )?;
+    record_event_tx(
+        &tx,
+        ctx,
+        task_uuid,
+        "task.updated",
+        &serde_json::json!({ "task_uuid": task_uuid, "labels_add": add, "labels_remove": remove }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Extension fields for a single task, loaded on demand. Used by the TUI
 /// detail pane and any other surface that wants the full row + side-table
 /// state without paying the cost for every list query.
@@ -1689,6 +1747,57 @@ mod tests {
         // Nothing-to-change and missing-task are both errors.
         assert!(update_text(&db, &t.id, None, None, &EventCtx::test()).is_err());
         assert!(update_text(&db, "nonexistent-uuid", Some("x"), None, &EventCtx::test()).is_err());
+    }
+
+    #[test]
+    fn modify_labels_adds_removes_and_records_updated_event() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("label me"), &EventCtx::test()).unwrap();
+
+        let labels_of = |db: &Db| -> Vec<String> {
+            db.with_conn(|c| {
+                let mut st =
+                    c.prepare("SELECT label FROM task_labels WHERE task_uuid=?1 ORDER BY label")?;
+                let v = st
+                    .query_map([&t.id], |r| r.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(v)
+            })
+            .unwrap()
+        };
+
+        modify_labels(
+            &db,
+            &t.id,
+            &["domain:mgmt".into(), "finance".into()],
+            &[],
+            &EventCtx::test(),
+        )
+        .unwrap();
+        assert_eq!(labels_of(&db), vec!["domain:mgmt", "finance"]);
+        assert_eq!(event_count(&db, "task.updated"), 1);
+
+        // Re-adding an existing label is idempotent; a swap add+remove works in one call.
+        modify_labels(
+            &db,
+            &t.id,
+            &["domain:eng".into(), "finance".into()],
+            &["domain:mgmt".into()],
+            &EventCtx::test(),
+        )
+        .unwrap();
+        assert_eq!(labels_of(&db), vec!["domain:eng", "finance"]);
+
+        // Removing an absent label is a no-op, not an error.
+        modify_labels(&db, &t.id, &[], &["ghost".into()], &EventCtx::test()).unwrap();
+        assert_eq!(labels_of(&db), vec!["domain:eng", "finance"]);
+
+        // Nothing-to-change (incl. whitespace-only), and missing task, are errors.
+        assert!(modify_labels(&db, &t.id, &[], &[], &EventCtx::test()).is_err());
+        assert!(modify_labels(&db, &t.id, &["  ".into()], &[], &EventCtx::test()).is_err());
+        assert!(
+            modify_labels(&db, "nonexistent-uuid", &["x".into()], &[], &EventCtx::test()).is_err()
+        );
     }
 
     #[test]

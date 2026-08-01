@@ -96,6 +96,8 @@ complete -c pt -n "__fish_pt_using_subcommand priority" -s h -l help -d 'Print h
 complete -c pt -n "__fish_pt_using_subcommand edit" -l deadline -d 'Set deadline to an ISO date/datetime, e.g. 2026-06-16' -r
 complete -c pt -n "__fish_pt_using_subcommand edit" -l title -d 'Replace the title' -r
 complete -c pt -n "__fish_pt_using_subcommand edit" -l desc -d 'Replace the description' -r
+complete -c pt -n "__fish_pt_using_subcommand edit" -l label -d 'Add a label (repeatable), e.g. --label domain:mgmt' -r
+complete -c pt -n "__fish_pt_using_subcommand edit" -l unlabel -d 'Remove a label (repeatable)' -r
 complete -c pt -n "__fish_pt_using_subcommand edit" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand edit" -l idempotency-key -d 'Idempotency key recorded with the mutation\'s event — a retried command with the same key returns ok without re-applying' -r
 complete -c pt -n "__fish_pt_using_subcommand edit" -l clear-deadline -d 'Clear the deadline'
