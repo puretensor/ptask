@@ -59,7 +59,7 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 
 # /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
 # SQL, so nothing user-supplied may pass through unmapped.
