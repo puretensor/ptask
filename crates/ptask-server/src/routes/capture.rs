@@ -55,6 +55,14 @@ async fn resolve(
     headers: HeaderMap,
     Json(req): Json<ResolveReq>,
 ) -> impl IntoResponse {
+    crate::blocking::db_response(move || resolve_blocking(state, headers, req)).await
+}
+
+fn resolve_blocking(
+    state: AppState,
+    headers: HeaderMap,
+    req: ResolveReq,
+) -> axum::response::Response {
     let identity = match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Capture)
     {
         Ok(id) => id,
@@ -193,6 +201,14 @@ async fn capture(
     headers: HeaderMap,
     Json(req): Json<CaptureReq>,
 ) -> impl IntoResponse {
+    crate::blocking::db_response(move || capture_blocking(state, headers, req)).await
+}
+
+fn capture_blocking(
+    state: AppState,
+    headers: HeaderMap,
+    req: CaptureReq,
+) -> axum::response::Response {
     let identity = match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Capture)
     {
         Ok(id) => id,
@@ -302,13 +318,8 @@ async fn capture(
                 .iter()
                 .map(|(u, t, _)| (u.clone(), t.clone()))
                 .collect();
-            tokio::task::spawn_blocking(move || {
-                crate::dedup::best_match(&title_owned, &cands, crate::dedup::CAPTURE_THRESHOLD)
-            })
-            .await
-            .ok()
-            .flatten()
-            .map(|(u, s)| (u, s, "semantic"))
+            crate::dedup::best_match(&title_owned, &cands, crate::dedup::CAPTURE_THRESHOLD)
+                .map(|(u, s)| (u, s, "semantic"))
         };
 
         if let Some((existing_uuid, score, how)) = matched {

@@ -35,6 +35,10 @@ async fn email(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    crate::blocking::db_response(move || email_blocking(state, headers, body)).await
+}
+
+fn email_blocking(state: AppState, headers: HeaderMap, body: Bytes) -> axum::response::Response {
     if let Some(resp) = crate::auth::require_write_token(&state.db, &state.auth, &headers) {
         return resp;
     }
