@@ -44,6 +44,10 @@ pub const INCIDENT_TTL_DAYS: i64 = 7;
 pub const DISTILLED_TTL_DAYS: i64 = 30;
 
 /// One reap pass. `dry_run` lists candidates without dismissing.
+///
+/// The `julianday(updated_at)` guards below stay fail-*closed* on purpose:
+/// unlike the read paths, reaping auto-dismisses, so an unparseable timestamp
+/// must exclude a task from reaping rather than silently discard it.
 pub fn run(db: &Db, dry_run: bool, ctx: &EventCtx) -> Result<ReapReport> {
     let candidates: Vec<Reaped> = {
         let conn = db.get()?;

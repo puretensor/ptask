@@ -1174,14 +1174,19 @@ pub fn snooze(db: &Db, task_uuid: &str, until_iso: &str, ctx: &EventCtx) -> Resu
 /// Wake every snoozed task whose `snoozed_until` has passed (→ todo).
 /// Invoked by the hourly scoring run so snoozes expire without their own
 /// timer. Returns the number woken; each wake is an attributed event.
+///
+/// An unparseable `snoozed_until` wakes immediately: `julianday()` returns
+/// NULL on junk and a NULL comparison is never true, so such a row would
+/// otherwise stay `snoozed` forever with no timer that could ever fire it.
 pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<usize> {
     let expired: Vec<String> = {
         let conn = db.get()?;
         let mut stmt = conn.prepare(
             "SELECT id FROM tasks
              WHERE status_v2='snoozed' AND snoozed_until IS NOT NULL
-               AND ((length(snoozed_until) = 10
-                     AND snoozed_until <= substr(?1, 1, 10))
+               AND (julianday(snoozed_until) IS NULL
+                    OR (length(snoozed_until) = 10
+                        AND snoozed_until <= substr(?1, 1, 10))
                     OR (length(snoozed_until) > 10
                         AND julianday(snoozed_until) <= julianday(?1)))",
         )?;
@@ -1197,8 +1202,9 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
                               snoozed_until=NULL, updated_at=?1
               WHERE id=?2 AND status_v2='snoozed'
                 AND snoozed_until IS NOT NULL
-                AND ((length(snoozed_until) = 10
-                      AND snoozed_until <= substr(?1, 1, 10))
+                AND (julianday(snoozed_until) IS NULL
+                     OR (length(snoozed_until) = 10
+                         AND snoozed_until <= substr(?1, 1, 10))
                      OR (length(snoozed_until) > 10
                          AND julianday(snoozed_until) <= julianday(?1)))",
             params![now_iso, uuid],
@@ -2596,6 +2602,53 @@ mod tests {
             1,
             "date-only snooze expires at operator-local midnight"
         );
+    }
+
+    #[test]
+    fn wake_expired_snoozes_wakes_unparseable_snooze() {
+        // Regression: `julianday('someday')` is NULL, every comparison against
+        // it is NULL, so the row matched neither branch and stayed `snoozed`
+        // forever — with no timer left that could ever fire it. A snooze we
+        // cannot read is a snooze we cannot honour: wake it.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let junk = create(&db, NewTask::minimal("unreadable snooze"), &ctx).unwrap();
+        let future = create(&db, NewTask::minimal("real snooze"), &ctx).unwrap();
+        snooze(&db, &junk.id, "2026-07-01T07:00:00Z", &ctx).unwrap();
+        snooze(&db, &future.id, "2026-07-01T08:00:00Z", &ctx).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET snoozed_until='someday soon' WHERE id=?1",
+                [&junk.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            wake_expired_snoozes(&db, "2026-07-01T07:30:00Z", &EventCtx::system("wake-test"))
+                .unwrap(),
+            1,
+            "the unparseable snooze must wake"
+        );
+        db.with_conn(|c| {
+            let junk_status: String =
+                c.query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&junk.id], |r| {
+                    r.get(0)
+                })?;
+            let future_status: String = c.query_row(
+                "SELECT status_v2 FROM tasks WHERE id=?1",
+                [&future.id],
+                |r| r.get(0),
+            )?;
+            assert_eq!(junk_status, "todo");
+            assert_eq!(
+                future_status, "snoozed",
+                "a valid future snooze still holds"
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]

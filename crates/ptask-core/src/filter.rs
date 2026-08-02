@@ -124,9 +124,15 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             let today = params.len();
             params.push(Value::Text(dates::format_iso(now)));
             let now_iso = params.len();
+            // `julianday()` yields NULL on anything it cannot parse, and a
+            // NULL comparison is never true — so an unparseable deadline
+            // ("in two weeks", "90 days (for evaluation)") used to drop out
+            // of `overdue` silently. Surface it instead: a deadline we can't
+            // read is a deadline we can't prove is in the future.
             format!(
                 "(t.deadline IS NOT NULL AND t.status != 'done' AND \
-                 ((length(t.deadline) = 10 AND substr(t.deadline,1,10) < ?{today}) OR \
+                 (julianday(t.deadline) IS NULL OR \
+                  (length(t.deadline) = 10 AND substr(t.deadline,1,10) < ?{today}) OR \
                   (length(t.deadline) > 10 \
                    AND julianday(t.deadline) < julianday(?{now_iso}))))"
             )
@@ -650,6 +656,43 @@ mod tests {
                 "past mixed offset",
                 "yesterday date-only"
             ]
+        );
+    }
+
+    #[test]
+    fn overdue_surfaces_unparseable_deadline() {
+        // Regression: `julianday()` returns NULL on anything it can't read, so
+        // a free-text deadline fell out of `overdue` entirely and the task was
+        // invisible. Six such rows exist in the live store ("in two weeks",
+        // "90 days (for evaluation)"). A deadline we can't read must surface.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (title TEXT, deadline TEXT, status TEXT);
+             CREATE TABLE pt_extensions (task_uuid TEXT, labels TEXT);
+             INSERT INTO tasks (title, deadline, status) VALUES
+               ('free text long', 'in two weeks', 'pending'),
+               ('free text ten', 'tomorrow!!', 'pending'),
+               ('done free text', '90 days (for evaluation)', 'done'),
+               ('future date-only', '2026-05-20', 'pending');",
+        )
+        .unwrap();
+        let sql = to_sql(&ast("overdue"), &anchor()).unwrap();
+        let query = format!(
+            "SELECT title FROM tasks t LEFT JOIN pt_extensions x ON 1=0 WHERE {} ORDER BY title",
+            sql.where_clause
+        );
+        let params = bind_refs(&sql.params);
+        let rows: Vec<String> = conn
+            .prepare(&query)
+            .unwrap()
+            .query_map(params.as_slice(), |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec!["free text long", "free text ten"],
+            "unparseable deadlines must surface as overdue, and only those"
         );
     }
 

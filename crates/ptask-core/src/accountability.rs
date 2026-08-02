@@ -128,6 +128,12 @@ pub fn increment_daily_budget(db: &Db, date_utc: &str) -> Result<i64> {
     Ok(n)
 }
 
+/// Tasks the reminder ladder may act on right now.
+///
+/// Both timestamp guards below fail *visible*: `julianday()` returns NULL on
+/// an unparseable value, so a malformed `snoozed_until` must not be allowed to
+/// suppress the row and a malformed `next_reminder` counts as due. Otherwise a
+/// single bad timestamp silences a task permanently.
 fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
@@ -138,12 +144,14 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
          WHERE status IN ('pending', 'delayed')
            AND NOT (COALESCE(status_v2,'') = 'snoozed'
                     AND snoozed_until IS NOT NULL
+                    AND julianday(snoozed_until) IS NOT NULL
                     AND ((length(snoozed_until) = 10
                           AND snoozed_until > substr(?1, 1, 10))
                          OR (length(snoozed_until) > 10
                              AND julianday(snoozed_until) > julianday(?1))))
            AND COALESCE(task_type,'operational') != 'idea'
            AND (next_reminder IS NULL
+                OR julianday(next_reminder) IS NULL
                 OR julianday(next_reminder) <= julianday(?1))
            AND COALESCE(escalation_level, 0) < 5
          ORDER BY (last_reminded IS NOT NULL), last_reminded ASC,
@@ -747,6 +755,55 @@ mod tests {
         assert!(
             eligible.is_empty(),
             "unexpected eligible tasks: {eligible:?}"
+        );
+    }
+
+    #[test]
+    fn eligibility_not_suppressed_by_unparseable_timestamps() {
+        // Regression: `NOT (… julianday(junk) > julianday(now))` evaluates to
+        // NULL, not TRUE, so a malformed `snoozed_until` silently dropped the
+        // task out of the reminder ladder — and a malformed `next_reminder`
+        // did the same. Both must fail visible.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let junk_snooze = create_with_extensions(
+            &db,
+            NewTask::minimal("unreadable snooze"),
+            Extensions::default(),
+            &ctx,
+        )
+        .unwrap();
+        let junk_reminder = create_with_extensions(
+            &db,
+            NewTask::minimal("unreadable reminder"),
+            Extensions::default(),
+            &ctx,
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET status='delayed', status_v2='snoozed',
+                                  snoozed_until='when the rack is quiet'
+                  WHERE id=?1",
+                [&junk_snooze.id],
+            )?;
+            c.execute(
+                "UPDATE tasks SET next_reminder='later' WHERE id=?1",
+                [&junk_reminder.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let eligible = fetch_eligible(&db, "2026-05-13T13:00:00+01:00").unwrap();
+        let ids: Vec<&str> = eligible.iter().map(|t| t.id.as_str()).collect();
+        assert!(
+            ids.contains(&junk_snooze.id.as_str()),
+            "unreadable snooze suppressed the task: {ids:?}"
+        );
+        assert!(
+            ids.contains(&junk_reminder.id.as_str()),
+            "unreadable next_reminder suppressed the task: {ids:?}"
         );
     }
 

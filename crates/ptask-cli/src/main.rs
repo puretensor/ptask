@@ -1840,11 +1840,14 @@ type ReviewRow = (String, Option<String>, String, String, String);
 
 fn stale_review_tasks(db: &Db, cutoff_iso: &str) -> Result<Vec<ReviewRow>> {
     let conn = db.get()?;
+    // An unreadable `updated_at` counts as stale: `julianday()` is NULL on
+    // junk, so without the guard the row would never reach review at all.
     let mut stmt = conn.prepare(
         "SELECT t.id, t.pt_id, t.title, t.status_v2, t.updated_at
          FROM tasks t
          WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
-           AND julianday(t.updated_at) < julianday(?1)
+           AND (julianday(t.updated_at) IS NULL
+                OR julianday(t.updated_at) < julianday(?1))
          ORDER BY t.updated_at ASC",
     )?;
     Ok(stmt
