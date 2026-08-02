@@ -40,6 +40,14 @@ async fn callback(
     headers: HeaderMap,
     Json(req): Json<CallbackReq>,
 ) -> impl IntoResponse {
+    crate::blocking::db_response(move || callback_blocking(state, headers, req)).await
+}
+
+fn callback_blocking(
+    state: AppState,
+    headers: HeaderMap,
+    req: CallbackReq,
+) -> axum::response::Response {
     if let Err(resp) = crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Write) {
         return resp;
     }

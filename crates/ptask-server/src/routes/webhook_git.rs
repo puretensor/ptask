@@ -84,7 +84,7 @@ async fn github(
 }
 
 async fn handle(
-    source: &str,
+    source: &'static str,
     state: &AppState,
     body: &[u8],
     secret: &str,
@@ -99,17 +99,25 @@ async fn handle(
             "error": "signature verification failed",
             "body_bytes": body.len(),
         });
-        let _ = log_webhook(&state.db, Direction::In, source, &stub, false);
-        warn!(target: "ptask::webhook", source, "signature verification failed");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "invalid signature"})),
-        )
-            .into_response();
+        let log_state = state.clone();
+        return crate::blocking::db_response(move || {
+            let _ = log_webhook(&log_state.db, Direction::In, source, &stub, false);
+            warn!(target: "ptask::webhook", source, "signature verification failed");
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid signature"})),
+            )
+                .into_response()
+        })
+        .await;
     }
     let envelope_json: serde_json::Value =
         serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
-    let _ = log_webhook(&state.db, Direction::In, source, &envelope_json, true);
+    let log_state = state.clone();
+    let _ = crate::blocking::db_value(move || {
+        log_webhook(&log_state.db, Direction::In, source, &envelope_json, true)
+    })
+    .await;
 
     let event: PushEvent = match serde_json::from_slice(body) {
         Ok(e) => e,
@@ -142,8 +150,22 @@ async fn handle(
                 continue;
             }
             let event_uuid = close_event_uuid(source, commit, &pt_id);
-            match event_log::get_by_uuid(&state.db, &event_uuid) {
-                Ok(Some(_)) => {
+            let close_state = state.clone();
+            let close_pt_id = pt_id.clone();
+            let close_source = source.to_string();
+            let commit_id = commit.id.clone();
+            match crate::blocking::db_value(move || {
+                apply_close(
+                    &close_state,
+                    &close_source,
+                    &commit_id,
+                    &close_pt_id,
+                    &event_uuid,
+                )
+            })
+            .await
+            {
+                Ok(CloseOutcome::Duplicate) => {
                     info!(
                         target: "ptask::webhook",
                         source,
@@ -153,54 +175,24 @@ async fn handle(
                     );
                     continue;
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    errors.push(format!("{}: idempotency lookup: {}", pt_id, e));
+                Ok(CloseOutcome::Failed(e)) => {
+                    errors.push(e);
                     continue;
                 }
-            }
-            // mark_done_with_event records the sync event atomically with
-            // the status flip, keyed on the deterministic git event uuid —
-            // the pre-check above plus the UNIQUE constraint keep replayed
-            // deliveries idempotent. The richer source/commit context still
-            // travels in the outbound webhook envelope.
-            match tasks::resolve(&state.db, &pt_id) {
-                Ok(t) => match tasks::mark_done(
-                    &state.db,
-                    &t,
-                    &EventCtx::webhook(source, event_uuid.clone()),
-                ) {
-                    Ok(DoneOutcome::Completed) => {
-                        let payload = serde_json::json!({
-                            "task_uuid": t.id,
-                            "pt_id": t.pt_id,
-                            "source": source,
-                            "commit_id": commit.id,
-                        });
-                        crate::webhooks::dispatch(state, "task.completed", Some(&t.id), &payload)
-                            .await;
-                        closed.push(format!("{}=done", pt_id));
-                    }
-                    Ok(DoneOutcome::Advanced { next_deadline }) => {
-                        let payload = serde_json::json!({
-                            "task_uuid": t.id,
-                            "pt_id": t.pt_id,
-                            "source": source,
-                            "commit_id": commit.id,
-                            "next_deadline": next_deadline,
-                        });
-                        crate::webhooks::dispatch(
-                            state,
-                            "task.recurrence_advanced",
-                            Some(&t.id),
-                            &payload,
-                        )
-                        .await;
-                        closed.push(format!("{}=advanced→{}", pt_id, next_deadline));
-                    }
-                    Err(e) => errors.push(format!("{}: {}", pt_id, e)),
-                },
-                Err(e) => errors.push(format!("{}: {}", pt_id, e)),
+                Err(e) => {
+                    warn!(target: "ptask::webhook", source, error = %e, "blocking close task aborted");
+                    errors.push(format!("{}: internal error", pt_id));
+                    continue;
+                }
+                Ok(CloseOutcome::Applied {
+                    event_type,
+                    task_uuid,
+                    payload,
+                    result,
+                }) => {
+                    crate::webhooks::dispatch(state, event_type, Some(&task_uuid), &payload).await;
+                    closed.push(result);
+                }
             }
         }
         info!(
@@ -220,6 +212,73 @@ async fn handle(
         })),
     )
         .into_response()
+}
+
+enum CloseOutcome {
+    Duplicate,
+    Applied {
+        event_type: &'static str,
+        task_uuid: String,
+        payload: serde_json::Value,
+        result: String,
+    },
+    Failed(String),
+}
+
+/// Idempotency lookup, task lookup, and mutation stay together on the
+/// blocking pool. The async caller only performs outbound webhook I/O.
+fn apply_close(
+    state: &AppState,
+    source: &str,
+    commit_id: &str,
+    pt_id: &str,
+    event_uuid: &str,
+) -> CloseOutcome {
+    match event_log::get_by_uuid(&state.db, event_uuid) {
+        Ok(Some(_)) => return CloseOutcome::Duplicate,
+        Ok(None) => {}
+        Err(e) => {
+            return CloseOutcome::Failed(format!("{}: idempotency lookup: {}", pt_id, e));
+        }
+    }
+
+    // mark_done records the event atomically with the status flip, keyed on
+    // the deterministic git event uuid. The pre-check plus the UNIQUE
+    // constraint keep replayed deliveries idempotent.
+    let task = match tasks::resolve(&state.db, pt_id) {
+        Ok(task) => task,
+        Err(e) => return CloseOutcome::Failed(format!("{}: {}", pt_id, e)),
+    };
+    match tasks::mark_done(
+        &state.db,
+        &task,
+        &EventCtx::webhook(source, event_uuid.to_string()),
+    ) {
+        Ok(DoneOutcome::Completed) => CloseOutcome::Applied {
+            event_type: "task.completed",
+            task_uuid: task.id.clone(),
+            payload: serde_json::json!({
+                "task_uuid": task.id,
+                "pt_id": task.pt_id,
+                "source": source,
+                "commit_id": commit_id,
+            }),
+            result: format!("{}=done", pt_id),
+        },
+        Ok(DoneOutcome::Advanced { next_deadline }) => CloseOutcome::Applied {
+            event_type: "task.recurrence_advanced",
+            task_uuid: task.id.clone(),
+            payload: serde_json::json!({
+                "task_uuid": task.id,
+                "pt_id": task.pt_id,
+                "source": source,
+                "commit_id": commit_id,
+                "next_deadline": next_deadline,
+            }),
+            result: format!("{}=advanced→{}", pt_id, next_deadline),
+        },
+        Err(e) => CloseOutcome::Failed(format!("{}: {}", pt_id, e)),
+    }
 }
 
 fn close_event_uuid(source: &str, commit: &PushCommit, pt_id: &str) -> String {
