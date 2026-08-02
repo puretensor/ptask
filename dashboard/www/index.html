@@ -773,13 +773,13 @@ const DOMAIN_LABEL_RE=/^domain:(eng|mgmt)$/;
 const ENG_PROJECTS=new Set(['infra','ptve','specola','puresentinel','nexus','immune','vulcan',
   'scriptorium','habla','pureprospect','instance08-hardening','ptask','puremind','warroom']);
 const MGMT_PROJECTS=new Set(['corp-tax','bizdev','citizenship','amax','azure','supermicro',
-  'finance','legal','hiring','travel']);
+  'finance','legal','hiring','travel','personal','ba']);
 const ENG_LABEL_SET=new Set(['infra','k3s','k8s','security','monitoring','fleet','ceph','backup',
   'bug','ci','git','bmc','aws','dr','fox-n0','nexus','alert-pipeline','docs','dispatch','email',
   'channels','web','gpu']);
 const MGMT_LABEL_SET=new Set(['finance','legal','registration','finops','identity','wise',
   'workspace','er','tax','banking']);
-const MGMT_TITLE_RE=/\b(vat|itin|w-?7|1040|1042|5472|filings?|invoice|bank|refund|reclaim|register(ed|ing)?|registration|duns|d&b|interview|hire|hiring|tender|hmrc|visa|citizenship|trip|flight|hotel|payroll|dividend|accountant|xeinadin|barclays?|starling|companies house|nda|contract|partnership|board|recruit)\b/i;
+const MGMT_TITLE_RE=/\b(vat|itin|w-?7|w-?8ben(-?e)?|o-?1a|irs|1040|1042|5472|filings?|filed|invoice|bank|refund|reclaim|register(ed|ing)?|registration|duns|d&b|interview|hire|hiring|tender|hmrc|visa|citizenship|trip|flight|hotel|payroll|dividend|accountant|xeinadin|barclays?|starling|companies house|nda|contract|partnership|board|recruit|tariff|edf)\b/i;
 const ENG_TITLE_RE=/\b(kubectl|k[38]s|pods?|deploy(ment)?s?|gpu|cuda|vllm|ceph|dns|tls|ssl|webhooks?|prometheus|grafana|nodes?|systemd|docker|containers?|nginx|ssh|bmc|ipmi|kernel|nvme|zfs|vlan|tailscale|api|endpoint|crash-?loops?|restarts?|exporters?|backups?|pvc|ingress|cron(jobs?)?|timers?|repos?|builds?|pipelines?|migrations?|database|sqlite|postgres|servers?|daemons?|scripts?|dashboards?|probes?|liveness|monitoring|hardening|firmware)\b/i;
 function domainOf(t){
   for(const l of (t.labels||[])){const m=DOMAIN_LABEL_RE.exec(l); if(m) return m[1];}
