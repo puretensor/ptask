@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct Bot {
@@ -62,14 +63,15 @@ impl Bot {
             .client
             .get(&url)
             .query(&params)
+            .timeout(Duration::from_secs(timeout_secs.saturating_add(10).max(15)))
             .send()
             .await
-            .context("telegram GET getUpdates")?;
+            .map_err(|e| request_error("telegram GET getUpdates", &e))?;
         let status = resp.status();
         let body = resp
             .text()
             .await
-            .context("telegram read getUpdates response")?;
+            .map_err(|e| request_error("telegram read getUpdates response", &e))?;
         if !status.is_success() {
             bail!("telegram getUpdates {status}: {body}");
         }
@@ -99,14 +101,15 @@ impl Bot {
                 "text": text.into(),
                 "disable_web_page_preview": true,
             }))
+            .timeout(Duration::from_secs(30))
             .send()
             .await
-            .context("telegram POST sendMessage")?;
+            .map_err(|e| request_error("telegram POST sendMessage", &e))?;
         let status = resp.status();
         let body = resp
             .text()
             .await
-            .context("telegram read sendMessage response")?;
+            .map_err(|e| request_error("telegram read sendMessage response", &e))?;
         if !status.is_success() {
             bail!("telegram sendMessage {status}: {body}");
         }
@@ -124,6 +127,22 @@ impl Bot {
     fn api_url(&self, method: &str) -> String {
         format!("https://api.telegram.org/bot{}/{}", self.token, method)
     }
+}
+
+/// reqwest errors can include the request URL, and Telegram embeds the bot
+/// token in that URL. Preserve the useful failure class without exposing the
+/// credential through logs or an error response.
+fn request_error(operation: &str, error: &reqwest::Error) -> anyhow::Error {
+    let kind = if error.is_timeout() {
+        "timed out"
+    } else if error.is_connect() {
+        "connection failed"
+    } else if error.is_decode() {
+        "response decode failed"
+    } else {
+        "request failed"
+    };
+    anyhow::anyhow!("{operation}: {kind}")
 }
 
 #[derive(Debug, Deserialize)]

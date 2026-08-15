@@ -62,7 +62,13 @@ impl Dispatch for HttpDispatch {
             body["reply_markup"] = serde_json::json!({"inline_keyboard": [row]});
         }
         let client = reqwest::Client::new();
-        match client.post(url).json(&body).send().await {
+        match client
+            .post(url)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => Ok(true),
             Ok(r) => {
                 warn!(target: "ptask::notify", status = %r.status(), "telegram send failed");

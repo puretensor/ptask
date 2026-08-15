@@ -368,45 +368,7 @@ impl PtaskMcp {
         Parameters(IdArg { id }): Parameters<IdArg>,
     ) -> Result<CallToolResult, McpError> {
         let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, false).map_err(domain_err)?;
-        // Atomic check-and-set: the WHERE clause is the lease guard.
-        let won: bool = self
-            .db
-            .with_conn(|c| {
-                let n = c.execute(
-                    "UPDATE tasks SET status_v2 = 'in_progress', status = 'pending',
-                            updated_at = strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00'
-                     WHERE id = ?1 AND status_v2 IN ('triage','backlog','todo')",
-                    [&t.id],
-                )?;
-                Ok(n == 1)
-            })
-            .map_err(domain_err)?;
-        if !won {
-            return Err(McpError::invalid_params(
-                format!(
-                    "{} is not claimable (status: {})",
-                    t.pt_id.as_deref().unwrap_or(&t.id),
-                    t.status
-                ),
-                None,
-            ));
-        }
-        ptask_core::event_log::record(
-            &self.db,
-            &format!(
-                "mcp-claim:{}:{}",
-                t.id,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            ),
-            Some(&t.id),
-            "task.claimed",
-            &serde_json::json!({"task_uuid": t.id, "by": self.actor}),
-            &self.ctx(),
-        )
-        .map_err(domain_err)?;
+        ptask_core::tasks::claim(&self.db, &t.id, &self.ctx()).map_err(domain_err)?;
         json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "claimed_by": self.actor}))
     }
 
