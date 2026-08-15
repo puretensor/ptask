@@ -1134,6 +1134,34 @@ pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     Ok(())
 }
 
+/// Atomically claim a task for agent work. The guarded status transition and
+/// its sync-visible event are one transaction, so a successful claim can
+/// never be committed without its audit record.
+pub fn claim(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
+        "UPDATE tasks SET status_v2='in_progress', status='pending', updated_at=?1
+         WHERE id=?2 AND status_v2 IN ('triage','backlog','todo')",
+        params![now, task_uuid],
+    )?;
+    if changed == 0 {
+        return Err(crate::Error::Other(
+            "task not found or not claimable".into(),
+        ));
+    }
+    record_event_tx(
+        &tx,
+        ctx,
+        task_uuid,
+        "task.claimed",
+        &serde_json::json!({ "task_uuid": task_uuid, "by": ctx.actor }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Snooze until `until_iso` (status_v2 `snoozed`; legacy `delayed`). The
 /// task leaves `pt next` and accountability until the wake time passes,
 /// when [`wake_expired_snoozes`] flips it back to todo.
@@ -1231,32 +1259,12 @@ pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -
     if from_uuid == to_uuid {
         return Err(crate::Error::Other("a task cannot depend on itself".into()));
     }
-    // Cycle check: is `from` reachable FROM `to` via depends_on edges?
-    {
-        let conn = db.get()?;
-        let mut frontier = vec![to_uuid.to_string()];
-        let mut seen = std::collections::HashSet::new();
-        while let Some(cur) = frontier.pop() {
-            if cur == from_uuid {
-                return Err(crate::Error::Other(
-                    "dependency would create a cycle".into(),
-                ));
-            }
-            if !seen.insert(cur.clone()) || seen.len() > 10_000 {
-                continue;
-            }
-            let mut stmt = conn.prepare(
-                "SELECT to_uuid FROM task_links WHERE from_uuid=?1 AND kind='depends_on'",
-            )?;
-            let next: Vec<String> = stmt
-                .query_map([&cur], |r| r.get::<_, String>(0))?
-                .collect::<std::result::Result<_, _>>()?;
-            frontier.extend(next);
-        }
-    }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    // Acquire SQLite's single-writer reservation before reading the graph.
+    // Without it, two callers can both validate against the old graph and
+    // then serially insert opposite edges, creating a cycle.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let exists: i64 = tx.query_row(
         "SELECT COUNT(*) FROM tasks WHERE id IN (?1, ?2)",
         params![from_uuid, to_uuid],
@@ -1264,6 +1272,25 @@ pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -
     )?;
     if exists != 2 {
         return Err(crate::Error::Other("both tasks must exist".into()));
+    }
+    // Cycle check: is `from` reachable FROM `to` via depends_on edges?
+    let mut frontier = vec![to_uuid.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(cur) = frontier.pop() {
+        if cur == from_uuid {
+            return Err(crate::Error::Other(
+                "dependency would create a cycle".into(),
+            ));
+        }
+        if !seen.insert(cur.clone()) || seen.len() > 10_000 {
+            continue;
+        }
+        let mut stmt =
+            tx.prepare("SELECT to_uuid FROM task_links WHERE from_uuid=?1 AND kind='depends_on'")?;
+        let next: Vec<String> = stmt
+            .query_map([&cur], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        frontier.extend(next);
     }
     tx.execute(
         "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
