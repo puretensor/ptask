@@ -394,7 +394,7 @@ impl PtaskMcp {
             .unwrap_or_else(|| format!("mcp://{}", self.actor));
         let (row, duplicate) =
             ptask_core::raw_items::insert_idempotent(&self.db, &text, &source, &source_file)
-            .map_err(domain_err)?;
+                .map_err(domain_err)?;
         let mut out = serde_json::json!({"id": row.id, "duplicate": duplicate});
         if !duplicate && severity.is_some_and(|s| s >= 3) {
             let sev = severity.unwrap();
@@ -475,7 +475,6 @@ impl PtaskMcp {
         json_ok(&v)
     }
 }
-
 
 #[tool_handler]
 impl ServerHandler for PtaskMcp {
