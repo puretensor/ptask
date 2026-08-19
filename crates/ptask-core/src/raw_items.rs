@@ -57,6 +57,47 @@ pub fn insert(db: &Db, text: &str, source_type: &str, source_file: &str) -> Resu
     })
 }
 
+/// Insert a captured item exactly once for the `(source_file, text)` identity.
+/// Returns the original row and whether this call found an existing capture.
+pub fn insert_idempotent(
+    db: &Db,
+    text: &str,
+    source_type: &str,
+    source_file: &str,
+) -> Result<(RawItem, bool)> {
+    let now = dates::format_iso(&dates::now_in_operator_tz()?);
+    let conn = db.get()?;
+    let inserted = conn.execute(
+        "INSERT INTO raw_items
+            (text, source_type, source_file, source_date,
+             commitment_score, processed, created_at)
+         VALUES (?1, ?2, ?3, ?4, 0.0, 0, ?5)
+         ON CONFLICT(source_file, text) DO NOTHING",
+        params![text, source_type, source_file, now, now],
+    )?;
+    let row = conn.query_row(
+        "SELECT id, text, source_type, source_file, source_date,
+                commitment_score, processed, created_at, distill_attempts
+         FROM raw_items
+         WHERE source_file = ?1 AND text = ?2",
+        params![source_file, text],
+        |r| {
+            Ok(RawItem {
+                id: r.get(0)?,
+                text: r.get(1)?,
+                source_type: r.get(2)?,
+                source_file: r.get(3)?,
+                source_date: r.get(4)?,
+                commitment_score: r.get(5)?,
+                processed: r.get::<_, i64>(6)? != 0,
+                created_at: r.get(7)?,
+                distill_attempts: r.get(8)?,
+            })
+        },
+    )?;
+    Ok((row, inserted == 0))
+}
+
 /// Count of unprocessed raw items. Used by the TUI inbox badge (later phase).
 pub fn unprocessed_count(db: &Db) -> Result<i64> {
     let conn = db.get()?;
