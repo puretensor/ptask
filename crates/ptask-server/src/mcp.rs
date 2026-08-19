@@ -583,4 +583,78 @@ mod tests {
         })
         .unwrap();
     }
+
+    // -----------------------------------------------------------------------
+    // PT-1687 HAL CONTRACT — FROZEN, round 2. Added after review of the first
+    // implementation, which fixed the raw_items race and opened a new one a
+    // layer up.
+    //
+    // The old handler RETURNED EARLY on a duplicate, so the severity>=3
+    // fast-lane never ran twice. Replacing that early return with a `duplicate`
+    // flag removed the guard: a retried sev3 capture now re-enters the fast lane
+    // and creates ANOTHER task every time. That is the same defect this ticket
+    // exists to close, moved from raw_items to tasks — and worse, because a task
+    // is operator-visible.
+    //
+    // Idempotency has to hold for the WHOLE capture, not just its first table.
+    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn pt1687_repeated_severity_capture_does_not_create_a_second_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+
+        let arg = || {
+            Parameters(CaptureArg {
+                text: "[puresentinel sev3] ceph reports HEALTH_ERR".into(),
+                source: Some("mcp".into()),
+                severity: Some(3),
+                client_key: Some("mcp://sentinel/incident-1".into()),
+            })
+        };
+
+        mcp.task_capture(arg()).await.expect("first capture");
+        mcp.task_capture(arg()).await.expect("retried capture");
+        mcp.task_capture(arg()).await.expect("second retry");
+
+        db.with_conn(|c| {
+            let raws: i64 = c.query_row("SELECT COUNT(*) FROM raw_items", [], |r| r.get(0))?;
+            let tasks: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+            assert_eq!(raws, 1, "three identical captures must leave one raw_item");
+            assert_eq!(
+                tasks, 1,
+                "three identical sev3 captures must leave ONE task — a retry that \
+                 re-enters the severity fast-lane recreates the incident the \
+                 operator already has"
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pt1687_a_first_severity_capture_still_creates_its_task() {
+        // The guard must not overshoot: a genuine first capture keeps its fast lane.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+
+        let result = mcp
+            .task_capture(Parameters(CaptureArg {
+                text: "[puresentinel sev4] arx2 osd down".into(),
+                source: Some("mcp".into()),
+                severity: Some(4),
+                client_key: Some("mcp://sentinel/incident-2".into()),
+            }))
+            .await
+            .expect("capture");
+
+        db.with_conn(|c| {
+            let tasks: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+            assert_eq!(tasks, 1, "a first sev4 capture must still fast-lane a task");
+            Ok(())
+        })
+        .unwrap();
+        let _ = result;
+    }
 }
