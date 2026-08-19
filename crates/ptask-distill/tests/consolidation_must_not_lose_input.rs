@@ -32,7 +32,7 @@
 //!
 //! Pure decision logic — no database, no provider, no network.
 
-use ptask_distill::pipeline::{chunk_disposition, ChunkDisposition};
+use ptask_distill::pipeline::{ChunkDisposition, chunk_disposition};
 
 // ── the defect ─────────────────────────────────────────────────────────────
 
