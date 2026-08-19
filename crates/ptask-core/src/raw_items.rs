@@ -216,4 +216,119 @@ mod tests {
         insert(&db, "y", "http", "src").unwrap();
         assert_eq!(unprocessed_count(&db).unwrap(), 2);
     }
+
+// ---------------------------------------------------------------------------
+// PT-1687 HAL CONTRACT — FROZEN. Committed red by the orchestrator; the
+// implementation worker makes it green by editing raw_items.rs and adding a
+// migration. Editing THIS block to pass is a build failure, not a fix.
+//
+// WHY: `task_capture` in ptask-server dedupes like this —
+//
+//     SELECT id FROM raw_items WHERE source_file = ?1 AND text = ?2   -- check
+//     ...                                                             -- gap
+//     raw_items::insert(...)                                          -- insert
+//
+// with no transaction spanning the two and NO UNIQUE constraint underneath. It
+// is a textbook check-then-insert race: two retries of the same capture — which
+// is exactly what a retrying MCP client, a redelivered Telegram update or a
+// re-polled email produces — can both read "no duplicate" and both insert. The
+// dedupe is also skipped entirely when client_key is absent, so the common path
+// has no idempotency at all.
+//
+// THE CONTRACT: idempotency is a property of the DATABASE, not of application
+// timing. A UNIQUE index on the identity columns plus an upsert makes a
+// duplicate impossible rather than unlikely.
+//
+// Required seam (ptask_core::raw_items):
+//     insert_idempotent(&Db, text, source_type, source_file) -> Result<(RawItem, bool)>
+// where the bool is `duplicate`: false on first write, true on every repeat,
+// and the returned RawItem is the ORIGINAL row both times.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pt1687_repeat_capture_returns_the_same_row_and_flags_duplicate() {
+    let (_dir, db) = fresh_db();
+    let (first, dup1) = insert_idempotent(&db, "deploy the thing", "mcp", "mcp://hal/k1").unwrap();
+    let (second, dup2) = insert_idempotent(&db, "deploy the thing", "mcp", "mcp://hal/k1").unwrap();
+
+    assert!(!dup1, "first capture must not be reported as a duplicate");
+    assert!(dup2, "second identical capture must be reported as a duplicate");
+    assert_eq!(first.id, second.id, "a repeat must return the ORIGINAL row");
+    assert_eq!(unprocessed_count(&db).unwrap(), 1, "exactly one row may exist");
+}
+
+#[test]
+fn pt1687_distinct_text_on_the_same_source_is_not_a_duplicate() {
+    let (_dir, db) = fresh_db();
+    let (a, _) = insert_idempotent(&db, "first", "mcp", "mcp://hal/k1").unwrap();
+    let (b, dup) = insert_idempotent(&db, "second", "mcp", "mcp://hal/k1").unwrap();
+    assert!(!dup);
+    assert_ne!(a.id, b.id);
+    assert_eq!(unprocessed_count(&db).unwrap(), 2);
+}
+
+#[test]
+fn pt1687_same_text_from_a_different_source_is_not_a_duplicate() {
+    let (_dir, db) = fresh_db();
+    let (a, _) = insert_idempotent(&db, "same words", "mcp", "mcp://hal/k1").unwrap();
+    let (b, dup) = insert_idempotent(&db, "same words", "telegram", "telegram:msg/9").unwrap();
+    assert!(!dup, "identity is (source_file, text) — a different source is a different fact");
+    assert_ne!(a.id, b.id);
+    assert_eq!(unprocessed_count(&db).unwrap(), 2);
+}
+
+#[test]
+fn pt1687_uniqueness_is_enforced_by_the_database_not_by_application_logic() {
+    // The point of the whole ticket: a bare INSERT that bypasses the helper must
+    // STILL be refused. If this passes only because insert_idempotent is careful,
+    // the race is still there for anything that does not go through it.
+    let (_dir, db) = fresh_db();
+    insert_idempotent(&db, "guarded", "mcp", "mcp://hal/k1").unwrap();
+
+    let conn = db.get().unwrap();
+    let raw = conn.execute(
+        "INSERT INTO raw_items (text, source_type, source_file, source_date,
+                                commitment_score, processed, created_at)
+         VALUES ('guarded', 'mcp', 'mcp://hal/k1', '2026-01-01', 0.0, 0, '2026-01-01')",
+        [],
+    );
+    assert!(
+        raw.is_err(),
+        "the database must refuse a duplicate (source_file, text) — \
+         without a UNIQUE constraint the check-then-insert race is still open"
+    );
+}
+
+#[test]
+fn pt1687_concurrent_captures_of_the_same_fact_produce_exactly_one_row() {
+    use std::sync::Arc;
+    let (_dir, db) = fresh_db();
+    let db = Arc::new(db);
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let db = Arc::clone(&db);
+        handles.push(std::thread::spawn(move || {
+            insert_idempotent(&db, "racy capture", "mcp", "mcp://hal/race").map(|(r, d)| (r.id, d))
+        }));
+    }
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let ok: Vec<_> = results.into_iter().filter_map(|r| r.ok()).collect();
+    assert!(!ok.is_empty(), "at least one concurrent capture must succeed");
+
+    assert_eq!(
+        unprocessed_count(&db).unwrap(),
+        1,
+        "eight concurrent captures of one fact must leave exactly one row"
+    );
+    let first_id = ok[0].0;
+    assert!(
+        ok.iter().all(|(id, _)| *id == first_id),
+        "every concurrent caller must be handed the same row id"
+    );
+    assert_eq!(
+        ok.iter().filter(|(_, dup)| !*dup).count(),
+        1,
+        "exactly one caller may be told it was the first writer"
+    );
+}
 }
