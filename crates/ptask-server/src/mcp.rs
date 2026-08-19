@@ -392,28 +392,11 @@ impl PtaskMcp {
         let source_file = client_key
             .clone()
             .unwrap_or_else(|| format!("mcp://{}", self.actor));
-        // Idempotent federation: same client_key + text = the same fact.
-        if client_key.is_some() {
-            let dup: Option<i64> = self
-                .db
-                .with_conn(|c| {
-                    Ok(c.query_row(
-                        "SELECT id FROM raw_items WHERE source_file = ?1 AND text = ?2
-                         ORDER BY id DESC LIMIT 1",
-                        rusqlite::params![source_file, text],
-                        |r| r.get(0),
-                    )
-                    .optional()?)
-                })
-                .map_err(domain_err)?;
-            if let Some(id) = dup {
-                return json_ok(&serde_json::json!({"id": id, "duplicate": true}));
-            }
-        }
-        let row = ptask_core::raw_items::insert(&self.db, &text, &source, &source_file)
+        let (row, duplicate) =
+            ptask_core::raw_items::insert_idempotent(&self.db, &text, &source, &source_file)
             .map_err(domain_err)?;
-        let mut out = serde_json::json!({"id": row.id, "duplicate": false});
-        if severity.is_some_and(|s| s >= 3) {
+        let mut out = serde_json::json!({"id": row.id, "duplicate": duplicate});
+        if !duplicate && severity.is_some_and(|s| s >= 3) {
             let sev = severity.unwrap();
             let new = ptask_core::NewTask {
                 title: text
@@ -493,7 +476,6 @@ impl PtaskMcp {
     }
 }
 
-use rusqlite::OptionalExtension;
 
 #[tool_handler]
 impl ServerHandler for PtaskMcp {
