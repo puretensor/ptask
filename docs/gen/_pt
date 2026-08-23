@@ -166,7 +166,7 @@ _arguments "${_arguments_options[@]}" : \
 '--slot-default=[Default minutes for a task with no duration_min]:SLOT_DEFAULT:_default' \
 '-n+[Max ready tasks to consider]:LIMIT:_default' \
 '--limit=[Max ready tasks to consider]:LIMIT:_default' \
-'--gcal=[Path to gcalendar.py]:GCAL:_default' \
+'--gcal=[Path to gcalendar.py]:GCAL:_files' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--write[Create tentative calendar events for the plan (our calendar only)]' \
