@@ -221,7 +221,7 @@ impl ChunkError {
 
 /// Classify one chunk, consolidate what it kept, and create the survivors.
 /// Any error here is the chunk's error: the caller isolates it.
-fn process_chunk<P: LlmProvider>(
+fn process_chunk<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
     items: &[ptask_core::raw_items::RawItem],
@@ -249,7 +249,7 @@ fn process_chunk<P: LlmProvider>(
 
 /// Walk a chunk, halving it on failure so a single unprocessable row is
 /// isolated instead of taking its neighbours down with it.
-fn walk_chunk<P: LlmProvider>(
+fn walk_chunk<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
     items: &[ptask_core::raw_items::RawItem],
@@ -298,7 +298,7 @@ fn walk_chunk<P: LlmProvider>(
 
 /// Create the survivors of one chunk's consolidation, running every dedup
 /// gate against the shared run universe.
-fn create_candidates<P: LlmProvider>(
+fn create_candidates<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
     candidates: Vec<crate::providers::Candidate>,
@@ -433,7 +433,11 @@ fn create_candidates<P: LlmProvider>(
 /// bounded and recoverable rather than prevented — quarantined rows are
 /// retained and countable via `pt_distill_quarantined_captures`. See the
 /// "Poison captures and quarantine" section of docs/operations.md.
-pub fn run_native<P: LlmProvider>(db: &Db, provider: &P, batch: usize) -> Result<NativeReport> {
+pub fn run_native<P: LlmProvider + ?Sized>(
+    db: &Db,
+    provider: &P,
+    batch: usize,
+) -> Result<NativeReport> {
     let start = std::time::Instant::now();
     let ctx = EventCtx::system("distill");
 

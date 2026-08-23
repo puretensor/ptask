@@ -334,6 +334,231 @@ impl LlmProvider for GeminiProvider {
     }
 }
 
+/// OpenAI-compatible provider (for example, the local vLLM Lightning seat).
+pub struct OpenAiCompatProvider {
+    pub model: String,
+    base_url: String,
+    client: reqwest::blocking::Client,
+}
+
+impl OpenAiCompatProvider {
+    pub fn new(base_url: String, model: String) -> Result<Self> {
+        Self::with_base_url(base_url, model)
+    }
+
+    fn with_base_url(base_url: String, model: String) -> Result<Self> {
+        if base_url.trim().is_empty() {
+            bail!("LOCAL_LLM_URL is empty — refusing to start the distill pipeline (fail closed)");
+        }
+        if model.trim().is_empty() {
+            bail!(
+                "LOCAL_LLM_MODEL is empty — refusing to start the distill pipeline (fail closed)"
+            );
+        }
+        Ok(Self {
+            model,
+            base_url,
+            client: reqwest::blocking::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .context("build local llm client")?,
+        })
+    }
+
+    fn endpoint(&self) -> String {
+        format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+    }
+
+    fn generate(&self, prompt: &str) -> Result<serde_json::Value> {
+        let body = openai_request_body(&self.model, prompt);
+        let mut attempt_errors = Vec::new();
+        for attempt in 1..=GEMINI_MAX_ATTEMPTS {
+            match self.generate_once(&body) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    let retryable = e.retryable;
+                    attempt_errors.push(format!("attempt {attempt}: {e}"));
+                    if retryable && attempt < GEMINI_MAX_ATTEMPTS {
+                        warn!(
+                            target: "ptask::distill",
+                            attempt,
+                            max_attempts = GEMINI_MAX_ATTEMPTS,
+                            error = %e,
+                            "local llm request failed; retrying"
+                        );
+                        std::thread::sleep(gemini_backoff(attempt));
+                        continue;
+                    }
+                    bail!(
+                        "local llm request failed after {} attempt(s): {}",
+                        attempt,
+                        attempt_errors.join(" | ")
+                    );
+                }
+            }
+        }
+        unreachable!("local llm retry loop always returns or bails")
+    }
+
+    fn generate_once(
+        &self,
+        body: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, OpenAiCallError> {
+        let resp = self
+            .client
+            .post(self.endpoint())
+            .json(body)
+            .send()
+            .map_err(|e| {
+                let retryable = e.is_timeout() || e.is_connect() || e.is_request();
+                OpenAiCallError::new(format!("transport error: {}", e.without_url()), retryable)
+            })?;
+        let status = resp.status();
+        let text = resp.text().map_err(|e| {
+            let retryable = e.is_timeout() || e.is_connect() || e.is_request();
+            OpenAiCallError::new(
+                format!("response body read failed: {}", e.without_url()),
+                retryable,
+            )
+        })?;
+        if !status.is_success() {
+            return Err(OpenAiCallError::new(
+                format!("http {status}: {}", snippet(&text)),
+                is_retryable_status(status),
+            ));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            OpenAiCallError::new(
+                format!("response JSON decode failed: {e}; body={}", snippet(&text)),
+                false,
+            )
+        })?;
+        let content = v["choices"][0]["message"]["content"]
+            .as_str()
+            .ok_or_else(|| {
+                OpenAiCallError::new(
+                    format!(
+                        "no message content in response: {}",
+                        snippet(&v.to_string())
+                    ),
+                    false,
+                )
+            })?;
+        serde_json::from_str(content).map_err(|e| {
+            OpenAiCallError::new(
+                format!(
+                    "structured JSON parse failed: {e}; text={}",
+                    snippet(content)
+                ),
+                false,
+            )
+        })
+    }
+}
+
+fn openai_request_body(model: &str, prompt: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "reasoning_effort": "none"
+    })
+}
+
+#[derive(Debug)]
+struct OpenAiCallError {
+    message: String,
+    retryable: bool,
+}
+
+impl OpenAiCallError {
+    fn new(message: String, retryable: bool) -> Self {
+        Self { message, retryable }
+    }
+}
+
+impl fmt::Display for OpenAiCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for OpenAiCallError {}
+
+impl LlmProvider for OpenAiCompatProvider {
+    fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+        let mut block = String::new();
+        for (i, t) in texts.iter().enumerate() {
+            block.push_str(&format!("{i}. {}\n", t.replace('\n', " ")));
+        }
+        let prompt = format!(
+            "You classify captured action items for a solo technical founder.\n\
+             Keep ONLY first-person, future-oriented commitments to concrete\n\
+             real-world or engineering action. Drop: instructions to AI agents,\n\
+             transient status checks, vague musings, past-tense/already-done\n\
+             notes, and monitoring noise that self-resolves.\n\n{FENCE_HEADER}\n\n\
+             -----BEGIN UNTRUSTED ITEMS-----\n{block}-----END UNTRUSTED ITEMS-----\n\n\
+             Return a JSON array with EXACTLY one object per numbered item."
+        );
+        let _schema = serde_json::json!({
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "idx": {"type": "INTEGER"},
+                    "keep": {"type": "BOOLEAN"},
+                    "confidence": {"type": "NUMBER"},
+                    "reason": {"type": "STRING"}
+                },
+                "required": ["idx", "keep"]
+            }
+        });
+        let v = self.generate(&prompt)?;
+        let out: Vec<Classification> =
+            serde_json::from_value(v).context("classification array shape")?;
+        if out.len() != texts.len() {
+            bail!(
+                "local llm returned {} verdicts for {} items — failing closed",
+                out.len(),
+                texts.len()
+            );
+        }
+        Ok(out)
+    }
+
+    fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+        let mut block = String::new();
+        for t in items {
+            block.push_str(&format!("- {}\n", t.replace('\n', " ")));
+        }
+        let prompt = format!(
+            "Convert these kept action items into 0-4 concrete, actionable\n\
+             tasks for a solo technical founder. Each title names a concrete\n\
+             action and object — never a vague theme. Priority conservatively:\n\
+             5=hard external deadline/revenue-blocking, 4=external dependency,\n\
+             3=this week, 2=normal (DEFAULT), 1=nice-to-have. Merge duplicates.\n\
+             An empty array is valid.\n\n{FENCE_HEADER}\n\n\
+             -----BEGIN UNTRUSTED ITEMS-----\n{block}-----END UNTRUSTED ITEMS-----"
+        );
+        let v = self.generate(&prompt)?;
+        let out: Vec<Candidate> = serde_json::from_value(v).context("candidate array shape")?;
+        Ok(out.into_iter().take(8).collect())
+    }
+
+    fn preflight(&self) -> Result<()> {
+        let v = self.generate("Reply with the JSON true.")?;
+        if v.as_bool() != Some(true) {
+            bail!("local llm preflight returned unexpected payload: {v}");
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "local"
+    }
+}
+
 /// Deterministic in-memory provider for tests.
 pub struct MockProvider {
     /// Titles the consolidate step should emit.
@@ -464,5 +689,104 @@ mod tests {
             !lower.contains("?key="),
             "credential remained in URI: {request}"
         );
+    }
+
+    fn mock_openai_server(
+        response: &'static str,
+        inspect: impl FnOnce(&str) + Send + 'static,
+    ) -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let header_end = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .unwrap()
+                        + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let lower = line.to_ascii_lowercase();
+                            lower
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + length {
+                        break;
+                    }
+                }
+            }
+            let request = String::from_utf8_lossy(&request).into_owned();
+            inspect(&request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            )
+            .unwrap();
+        });
+        format!("http://{addr}/v1")
+    }
+
+    #[test]
+    fn openai_request_has_reasoning_effort_and_no_min_p() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let url = mock_openai_server(
+            r#"{"choices":[{"message":{"content":"[{\"idx\":0,\"keep\":true}]"}}]}"#,
+            move |request| tx.send(request.to_string()).unwrap(),
+        );
+        let provider =
+            OpenAiCompatProvider::with_base_url(url, "nemotron-lightning".into()).unwrap();
+        let out = provider.classify_batch(&["I will ship it".into()]).unwrap();
+        assert!(out[0].keep);
+        let request = rx.recv().unwrap();
+        let body = request.split("\r\n\r\n").nth(1).unwrap();
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(body["model"], "nemotron-lightning");
+        assert_eq!(body["reasoning_effort"], "none");
+        assert!(
+            body.get("min_p").is_none(),
+            "request unexpectedly included min_p"
+        );
+        assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn openai_response_parse_error_fails_closed() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body = r#"{"choices":[{"message":{"content":null}}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let provider =
+            OpenAiCompatProvider::with_base_url(format!("http://{addr}/v1"), "test-model".into())
+                .unwrap();
+        assert!(provider.preflight().is_err());
+        server.join().unwrap();
     }
 }

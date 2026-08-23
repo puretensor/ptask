@@ -73,10 +73,16 @@ pub struct WebhookConfig {
 /// Native distillation configuration.
 #[derive(Debug, Clone, Default)]
 pub struct DistillConfig {
+    /// LLM backend (`$PTASK_LLM_BACKEND`, default "local").
+    pub llm_backend: String,
     /// Gemini API key for the native pipeline ($GOOGLE_API_KEY).
     pub gemini_api_key: Option<String>,
     /// Gemini model id ($GEMINI_CONSOLIDATE_MODEL, default gemini-3.5-flash).
     pub gemini_model: String,
+    /// OpenAI-compatible local endpoint (`$LOCAL_LLM_URL`).
+    pub local_llm_url: String,
+    /// OpenAI-compatible local model id (`$LOCAL_LLM_MODEL`).
+    pub local_llm_model: String,
 }
 
 /// Configuration the accountability dispatcher needs. Plain data — the
@@ -165,9 +171,14 @@ impl Config {
                 github_secret: std::env::var("PTASK_GITHUB_WEBHOOK_SECRET").unwrap_or_default(),
             },
             distill: DistillConfig {
+                llm_backend: env_nonempty("PTASK_LLM_BACKEND").unwrap_or_else(|| "local".into()),
                 gemini_api_key: env_nonempty("GOOGLE_API_KEY"),
                 gemini_model: env_nonempty("GEMINI_CONSOLIDATE_MODEL")
                     .unwrap_or_else(|| "gemini-3.5-flash".into()),
+                local_llm_url: env_nonempty("LOCAL_LLM_URL")
+                    .unwrap_or_else(|| "http://192.168.4.253:8600/v1".into()),
+                local_llm_model: env_nonempty("LOCAL_LLM_MODEL")
+                    .unwrap_or_else(|| "nemotron-lightning".into()),
             },
             dash: DashConfig {
                 user: env_nonempty("PTASK_DASH_USER").unwrap_or_else(|| "ops".into()),
@@ -224,6 +235,8 @@ fn env_first(names: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
     #[test]
     fn dispatch_cfg_configured_helpers() {
         let mut cfg = DispatchCfg {
@@ -247,5 +260,27 @@ mod tests {
         assert!(cfg.auth.api_token.is_none());
         assert!(!cfg.notify.telegram_configured());
         assert!(cfg.webhooks.outbound_urls.is_empty());
+    }
+
+    #[test]
+    fn distill_backend_selection_reads_env() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        unsafe {
+            std::env::set_var("PTASK_LLM_BACKEND", "gemini");
+            std::env::set_var("LOCAL_LLM_URL", "http://test/v1");
+            std::env::set_var("LOCAL_LLM_MODEL", "test-model");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(cfg.distill.llm_backend, "gemini");
+        assert_eq!(cfg.distill.local_llm_url, "http://test/v1");
+        assert_eq!(cfg.distill.local_llm_model, "test-model");
+        unsafe {
+            std::env::remove_var("PTASK_LLM_BACKEND");
+            std::env::remove_var("LOCAL_LLM_URL");
+            std::env::remove_var("LOCAL_LLM_MODEL");
+        }
     }
 }

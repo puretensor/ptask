@@ -2488,14 +2488,26 @@ fn print_rank_diff(db: &Db) -> Result<()> {
 }
 
 fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
-    use ptask_distill::providers::GeminiProvider;
+    use ptask_distill::providers::{GeminiProvider, LlmProvider, OpenAiCompatProvider};
     let cfg = ptask_core::Config::from_env().distill;
-    let Some(key) = cfg.gemini_api_key else {
-        eprintln!("distill: GOOGLE_API_KEY is not set — failing closed (exit 3)");
-        std::process::exit(3);
+    let provider: Box<dyn LlmProvider> = match cfg.llm_backend.as_str() {
+        "local" => Box::new(OpenAiCompatProvider::new(
+            cfg.local_llm_url,
+            cfg.local_llm_model,
+        )?),
+        "gemini" => {
+            let Some(key) = cfg.gemini_api_key else {
+                eprintln!("distill: GOOGLE_API_KEY is not set — failing closed (exit 3)");
+                std::process::exit(3);
+            };
+            Box::new(GeminiProvider::new(key, cfg.gemini_model)?)
+        }
+        other => anyhow::bail!(
+            "unsupported PTASK_LLM_BACKEND={other:?} — expected \"local\" or \"gemini\""
+        ),
     };
-    let provider = GeminiProvider::new(key, cfg.gemini_model)?;
-    match ptask_distill::pipeline::run_native(db, &provider, batch) {
+    let provider_name = provider.name();
+    match ptask_distill::pipeline::run_native(db, provider.as_ref(), batch) {
         Ok(r) => {
             println!(
                 "distill native ok — consumed={} kept={} created={} deduped={} failed={} ({}ms)",
@@ -2514,7 +2526,7 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            ptask_distill::pipeline::record_failure(db, "gemini", &e.to_string());
+            ptask_distill::pipeline::record_failure(db, provider_name, &e.to_string());
             // The fail-closed run is precisely the one on which rows cross the
             // ceiling, so the quarantine count matters MORE here than on the Ok
             // path. run_native returns Err without a report, so read the count
