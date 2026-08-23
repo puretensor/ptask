@@ -779,7 +779,10 @@ mod tests {
     #[test]
     fn strip_markdown_fence_variants() {
         assert_eq!(strip_markdown_fence("```json\ntrue\n```"), "true");
-        assert_eq!(strip_markdown_fence("```\n{\"ok\":true}\n```"), "{\"ok\":true}");
+        assert_eq!(
+            strip_markdown_fence("```\n{\"ok\":true}\n```"),
+            "{\"ok\":true}"
+        );
         assert_eq!(strip_markdown_fence("  true "), "true");
         assert_eq!(strip_markdown_fence("[1,2]"), "[1,2]");
     }
