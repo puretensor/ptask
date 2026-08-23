@@ -41,6 +41,25 @@ pub struct NativeReport {
     pub duration_ms: u128,
 }
 
+/// Whether a completed chunk's raw rows can be marked processed.
+#[derive(Debug, PartialEq)]
+pub enum ChunkDisposition {
+    Consume,
+    Retain,
+}
+
+/// Keep signal-bearing input when consolidation unexpectedly produces no
+/// candidates; consuming it would silently destroy work while reporting it as
+/// successfully kept. Noise is still consumed, and any non-empty output
+/// means the kept input has been handled.
+pub fn chunk_disposition(kept_len: usize, candidates_len: usize) -> ChunkDisposition {
+    if kept_len > 0 && candidates_len == 0 {
+        ChunkDisposition::Retain
+    } else {
+        ChunkDisposition::Consume
+    }
+}
+
 /// Similarity gate: normalized token overlap (Jaccard on lowercase words).
 /// Cheap, deterministic, no model download.
 fn title_similar(a: &str, b: &str) -> bool {
@@ -235,15 +254,46 @@ fn process_chunk<P: LlmProvider + ?Sized>(
         .classify_batch(&texts)
         .map_err(ChunkError::provider)?;
     let kept = select_kept_texts(&texts, &verdicts).map_err(ChunkError::provider)?;
-    if !kept.is_empty() {
+    let candidates = if !kept.is_empty() {
         st.calls += 1;
-        let candidates = provider.consolidate(&kept).map_err(ChunkError::provider)?;
-        create_candidates(db, provider, candidates, dedup, st, ctx).map_err(ChunkError::local)?;
+        Some(provider.consolidate(&kept).map_err(ChunkError::provider)?)
+    } else {
+        None
+    };
+    let candidates_len = candidates.as_ref().map_or(0, Vec::len);
+    match chunk_disposition(kept.len(), candidates_len) {
+        ChunkDisposition::Consume => {
+            if let Some(candidates) = candidates {
+                create_candidates(db, provider, candidates, dedup, st, ctx)
+                    .map_err(ChunkError::local)?;
+            }
+            // Chunk complete — kept items became candidates, or every item
+            // was judged noise. Either way the input was deliberately handled.
+            st.kept += kept.len();
+            st.consumed_ids.extend(items.iter().map(|i| i.id));
+        }
+        ChunkDisposition::Retain => {
+            let kept_ids: Vec<i64> = verdicts
+                .iter()
+                .filter(|verdict| verdict.keep)
+                .map(|verdict| items[verdict.idx].id)
+                .collect();
+            warn!(
+                target: "ptask::distill",
+                kept = kept.len(),
+                raw_items = ?kept_ids,
+                "empty consolidation — retaining kept captures for the next run"
+            );
+            // The kept captures produced no task and must remain available;
+            // dropped captures were deliberately judged noise and can drain.
+            st.consumed_ids.extend(
+                items
+                    .iter()
+                    .filter(|item| !kept_ids.contains(&item.id))
+                    .map(|item| item.id),
+            );
+        }
     }
-    // Chunk complete — kept items became candidates; dropped items were
-    // judged noise. Either way they're handled.
-    st.kept += kept.len();
-    st.consumed_ids.extend(items.iter().map(|i| i.id));
     Ok(())
 }
 
