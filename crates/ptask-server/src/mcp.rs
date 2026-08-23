@@ -23,7 +23,7 @@ use serde::Serialize;
 fn json_ok<T: Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     let payload = serde_json::to_string(value)
         .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-    Ok(CallToolResult::success(vec![Content::text(payload)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(payload)]))
 }
 
 fn domain_err(e: impl std::fmt::Display) -> McpError {
