@@ -10,7 +10,6 @@ rust-version.workspace = true
 
 [dependencies]
 ptask-core = { workspace = true }
-tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
@@ -56,6 +55,5 @@ name = "cluster_probe"
 required-features = ["native-ml"]
 
 [dev-dependencies]
-axum = { workspace = true }
 tempfile = "3"
 jiff = { workspace = true }
