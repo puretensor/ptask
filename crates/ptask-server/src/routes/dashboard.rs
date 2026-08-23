@@ -809,7 +809,12 @@ async fn act_edit(
     crate::blocking::db_response(move || act_edit_blocking(state, headers, id, body)).await
 }
 
-fn act_edit_blocking(state: AppState, headers: HeaderMap, id: String, body: EditBody) -> Response {
+fn act_edit_blocking(
+    state: AppState,
+    headers: HeaderMap,
+    id: String,
+    mut body: EditBody,
+) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -829,6 +834,12 @@ fn act_edit_blocking(state: AppState, headers: HeaderMap, id: String, body: Edit
         && body.labels_remove.is_empty()
     {
         return jerr(StatusCode::BAD_REQUEST, "no fields to edit");
+    }
+    if let Some(title) = body.title.as_mut() {
+        *title = title.trim().to_string();
+        if !(3..=400).contains(&title.len()) {
+            return jerr(StatusCode::BAD_REQUEST, "title 3-400 chars");
+        }
     }
     if (body.title.is_some() || body.description.is_some())
         && let Err(e) = ptask_core::tasks::update_text(
