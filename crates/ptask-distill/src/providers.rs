@@ -445,6 +445,7 @@ impl OpenAiCompatProvider {
                     false,
                 )
             })?;
+        let content = strip_markdown_fence(content);
         serde_json::from_str(content).map_err(|e| {
             OpenAiCallError::new(
                 format!(
@@ -455,6 +456,18 @@ impl OpenAiCompatProvider {
             )
         })
     }
+}
+
+/// nemotron-lightning intermittently wraps its JSON in a ```json fence even at
+/// reasoning_effort none (observed live 2026-08-23, failing distill closed for
+/// hours). The payload inside is valid — unwrap a single surrounding fence.
+fn strip_markdown_fence(content: &str) -> &str {
+    let trimmed = content.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let rest = rest.strip_prefix("json").unwrap_or(rest);
+    rest.strip_suffix("```").unwrap_or(rest).trim()
 }
 
 fn openai_request_body(model: &str, prompt: &str) -> serde_json::Value {
@@ -547,11 +560,17 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 
     fn preflight(&self) -> Result<()> {
-        let v = self.generate("Reply with the JSON true.")?;
-        if v.as_bool() != Some(true) {
-            bail!("local llm preflight returned unexpected payload: {v}");
+        // Ask for an object, not a bare scalar: JSON-tuned local models render
+        // a lone `true` unreliably (observed: `{"true": true}`, fenced output).
+        let v = self.generate("Reply with exactly this JSON object: {\"ok\": true}")?;
+        if v["ok"].as_bool() == Some(true) {
+            return Ok(());
         }
-        Ok(())
+        // Tolerate the bare-scalar shape the old prompt asked for.
+        if v.as_bool() == Some(true) {
+            return Ok(());
+        }
+        bail!("local llm preflight returned unexpected payload: {v}");
     }
 
     fn name(&self) -> &'static str {
@@ -741,6 +760,28 @@ mod tests {
             .unwrap();
         });
         format!("http://{addr}/v1")
+    }
+
+    #[test]
+    fn fenced_json_content_still_parses() {
+        let fenced = "```json\n[{\"idx\":0,\"keep\":true}]\n```";
+        let body = serde_json::json!({
+            "choices": [{"message": {"content": fenced}}]
+        })
+        .to_string();
+        let url = mock_openai_server(Box::leak(body.into_boxed_str()), |_| {});
+        let provider =
+            OpenAiCompatProvider::with_base_url(url, "nemotron-lightning".into()).unwrap();
+        let out = provider.classify_batch(&["I will ship it".into()]).unwrap();
+        assert!(out[0].keep);
+    }
+
+    #[test]
+    fn strip_markdown_fence_variants() {
+        assert_eq!(strip_markdown_fence("```json\ntrue\n```"), "true");
+        assert_eq!(strip_markdown_fence("```\n{\"ok\":true}\n```"), "{\"ok\":true}");
+        assert_eq!(strip_markdown_fence("  true "), "true");
+        assert_eq!(strip_markdown_fence("[1,2]"), "[1,2]");
     }
 
     #[test]
