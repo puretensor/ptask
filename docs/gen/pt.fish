@@ -132,7 +132,7 @@ complete -c pt -n "__fish_pt_using_subcommand plan" -l tz -d 'Timezone' -r
 complete -c pt -n "__fish_pt_using_subcommand plan" -l calendar -d 'Calendar id' -r
 complete -c pt -n "__fish_pt_using_subcommand plan" -l slot-default -d 'Default minutes for a task with no duration_min' -r
 complete -c pt -n "__fish_pt_using_subcommand plan" -s n -l limit -d 'Max ready tasks to consider' -r
-complete -c pt -n "__fish_pt_using_subcommand plan" -l gcal -d 'Path to gcalendar.py' -r
+complete -c pt -n "__fish_pt_using_subcommand plan" -l gcal -d 'Path to gcalendar.py' -r -F
 complete -c pt -n "__fish_pt_using_subcommand plan" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand plan" -l idempotency-key -d 'Idempotency key recorded with the mutation\'s event — a retried command with the same key returns ok without re-applying' -r
 complete -c pt -n "__fish_pt_using_subcommand plan" -l write -d 'Create tentative calendar events for the plan (our calendar only)'
