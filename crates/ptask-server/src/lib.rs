@@ -334,6 +334,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_resolve_reports_database_failures() {
+        let db = open_test_db();
+        db.with_conn(|conn| {
+            conn.execute("ALTER TABLE tasks RENAME TO unavailable_tasks", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let app = router(AppState::new(db, Default::default(), Default::default()));
+        let body = serde_json::json!({"client_key": "incident-123"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/capture/resolve")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
     async fn sync_round_trip_create_then_done() {
         let db = open_test_db();
         let app = router(AppState::new(
