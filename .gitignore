@@ -21,6 +21,8 @@ Cargo.lock.bak
 # Build artefacts
 /dist/
 /release/
+__pycache__/
+*.py[cod]
 
 # Test fixtures with secrets
 fixtures/private/
