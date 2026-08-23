@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ptask_core::{Db, Extensions, NewTask, dag, priority, pt_id, quickadd, tasks, views};
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 
 mod remote;
 
@@ -530,11 +531,8 @@ struct PlanArgs {
     #[arg(long)]
     write: bool,
     /// Path to gcalendar.py.
-    #[arg(
-        long,
-        default_value = "/home/puretensorai/.config/puretensor/gcalendar.py"
-    )]
-    gcal: String,
+    #[arg(long, env = "PTASK_GCAL")]
+    gcal: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1174,9 +1172,22 @@ fn cmd_next(db: &Db, a: NextArgs) -> Result<()> {
     Ok(())
 }
 
+fn gcalendar_path(explicit: Option<&Path>, home: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    let home = home
+        .filter(|value| !value.is_empty())
+        .context("HOME is unset; pass --gcal or set PTASK_GCAL")?;
+    Ok(PathBuf::from(home).join(".config/puretensor/gcalendar.py"))
+}
+
 fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
     use ptask_core::jiff;
     use std::process::Command as Proc;
+
+    let home = std::env::var_os("HOME");
+    let gcal = gcalendar_path(a.gcal.as_deref(), home.as_deref())?;
 
     #[derive(serde::Deserialize)]
     struct FreeSlotJson {
@@ -1212,7 +1223,7 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
 
     // 1. free/busy (Python owns tz/date math)
     let out = Proc::new("python3")
-        .arg(&a.gcal)
+        .arg(&gcal)
         .arg(&a.account)
         .arg("freebusy")
         .arg("--json")
@@ -1221,7 +1232,7 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
         .args(["--tz", &a.tz])
         .args(["--calendar", &a.calendar])
         .output()
-        .with_context(|| format!("running {} freebusy", a.gcal))?;
+        .with_context(|| format!("running {} freebusy", gcal.display()))?;
     if !out.status.success() {
         anyhow::bail!(
             "gcalendar.py freebusy failed: {}",
@@ -1282,7 +1293,7 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
             let pt = s.pt_id.as_deref().unwrap_or("--");
             let title = format!("[pt] {} {}", pt, s.title);
             let status = Proc::new("python3")
-                .arg(&a.gcal)
+                .arg(&gcal)
                 .arg(&a.account)
                 .arg("create")
                 .args(["--title", &title])
@@ -2568,9 +2579,24 @@ fn cmd_backfill(db: &Db) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportArgs, cmd_export, delegation_command, git_has_staged_changes, run_git_checked,
-        short_id, stale_review_tasks,
+        ExportArgs, cmd_export, delegation_command, gcalendar_path, git_has_staged_changes,
+        run_git_checked, short_id, stale_review_tasks,
     };
+
+    #[test]
+    fn gcalendar_default_follows_the_current_home() {
+        let home = std::ffi::OsStr::new("/srv/ptask-user");
+        assert_eq!(
+            gcalendar_path(None, Some(home)).unwrap(),
+            std::path::Path::new("/srv/ptask-user/.config/puretensor/gcalendar.py")
+        );
+    }
+
+    #[test]
+    fn gcalendar_explicit_path_does_not_require_home() {
+        let explicit = std::path::Path::new("/opt/calendar/gcalendar.py");
+        assert_eq!(gcalendar_path(Some(explicit), None).unwrap(), explicit);
+    }
 
     #[test]
     fn delegation_command_round_trips_shell_metacharacters() {
