@@ -192,6 +192,38 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     writeln!(out, "# TYPE pt_distill_failed_total gauge").ok();
     writeln!(out, "pt_distill_failed_total {}", distill_failed).ok();
 
+    // Current-state health: did the MOST RECENT distill run succeed? Alerts
+    // must describe now, not history (operator doctrine 2026-08-23) — the old
+    // increase(pt_distill_failed_total[2h]) rule kept a WARNING latched for
+    // two hours after full recovery. 1 = latest outcome ok (or never failed),
+    // 0 = latest outcome failed. Epoch comparison sidesteps the mixed
+    // +01:00/UTC offsets these rows carry.
+    let distill_last_ok: i64 = db
+        .with_conn(|c| {
+            let n: i64 = c.query_row(
+                "SELECT CASE
+                    WHEN f.t IS NULL THEN 1
+                    WHEN s.t IS NULL THEN 0
+                    WHEN s.t >= f.t THEN 1
+                    ELSE 0 END
+                 FROM (SELECT MAX(CAST(strftime('%s', ts) AS INTEGER)) AS t
+                       FROM pt_event_log WHERE event_type = 'distill.run') s,
+                      (SELECT MAX(CAST(strftime('%s', ts) AS INTEGER)) AS t
+                       FROM pt_event_log WHERE event_type = 'distill.failed') f",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n)
+        })
+        .unwrap_or(1);
+    writeln!(
+        out,
+        "# HELP pt_distill_last_run_ok Whether the most recent distill run succeeded (1) or failed (0)."
+    )
+    .ok();
+    writeln!(out, "# TYPE pt_distill_last_run_ok gauge").ok();
+    writeln!(out, "pt_distill_last_run_ok {}", distill_last_ok).ok();
+
     // Captures parked out of the distill queue after repeated isolated
     // failures (V013). Before quarantine existed one such row re-served
     // forever and wedged everything behind it with no signal at all; the
