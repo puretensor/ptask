@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "3.10.2"
+version = "3.11.0"
 edition = "2024"
 license = "MIT"
 authors = ["PureTensor, Inc. <hal@puretensor.ai>"]
@@ -44,16 +44,16 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 axum = "0.8"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 base64 = "0.22"
-rmcp = { version = "1.4", features = ["server", "macros", "schemars", "transport-streamable-http-server", "transport-streamable-http-server-session", "transport-io", "tower"] }
+rmcp = { version = "3.1.4", features = ["server", "macros", "schemars", "transport-streamable-http-server", "transport-streamable-http-server-session", "transport-io", "tower"] }
 futures-util = { version = "0.3", default-features = false }
 
 # Internal crates
-ptask-core    = { path = "crates/ptask-core",    version = "3.10.0" }
-ptask-tui     = { path = "crates/ptask-tui",     version = "3.10.0" }
-ptask-server  = { path = "crates/ptask-server",  version = "3.10.0" }
-ptask-bot     = { path = "crates/ptask-bot",     version = "3.10.0" }
-ptask-distill = { path = "crates/ptask-distill", version = "3.10.0" }
-ptask-notify  = { path = "crates/ptask-notify",  version = "3.10.0" }
+ptask-core    = { path = "crates/ptask-core",    version = "3.11.0" }
+ptask-tui     = { path = "crates/ptask-tui",     version = "3.11.0" }
+ptask-server  = { path = "crates/ptask-server",  version = "3.11.0" }
+ptask-bot     = { path = "crates/ptask-bot",     version = "3.11.0" }
+ptask-distill = { path = "crates/ptask-distill", version = "3.11.0" }
+ptask-notify  = { path = "crates/ptask-notify",  version = "3.11.0" }
 
 # HMAC for outbound webhook signing (v0.3.5).
 sha2 = "0.10"
