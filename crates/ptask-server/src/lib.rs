@@ -1019,6 +1019,28 @@ mod tests {
         assert!(s.contains("pt_views_total "));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn metrics_reports_render_failures_as_server_errors() {
+        let db = open_test_db();
+        db.with_conn(|conn| {
+            conn.execute("ALTER TABLE tasks RENAME TO unavailable_tasks", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let app = router(AppState::new(db, Default::default(), Default::default()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     // PTASK_METRICS_TOKEN: read-only credential for /metrics. Accepted on
     // the read path, rejected on the write path; the write token still
     // covers reads (write ⊇ read).
