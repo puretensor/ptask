@@ -1486,6 +1486,38 @@ Don't forget the sourdough.\r\n";
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_edit_rejects_a_blank_title_without_mutating_the_task() {
+        let db = open_test_db();
+        let task = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("keep this title"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let body = serde_json::json!({"title": "   "});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{}/edit", task.id))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let stored = ptask_core::tasks::resolve_for_lookup(&db, &task.id, false).unwrap();
+        assert_eq!(stored.title, "keep this title");
+    }
+
     /// PHASE-7 GATE (server side): the absorbed cockpit surface. Basic auth
     /// gates every /api route (401 without, 200 with); the task list carries
     /// the sidecar's derived fields; and a full browser triage loop
