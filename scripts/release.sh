@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tag + push helper. Runs the standard release verification then tags the
-# current commit and pushes the tag to both remotes. The remote tag push
-# triggers `.github/workflows/release.yml` which builds the binary and
-# attaches it to the GitHub Release.
+# current commit and pushes the tag to the canonical GitHub remote. The tag
+# push triggers `.github/workflows/release.yml` which builds the binary and
+# attaches it to the GitHub Release; the Gitea mirror syncs automatically.
 #
 # Usage: scripts/release.sh v0.10.0
 set -euo pipefail
@@ -45,15 +45,11 @@ bash scripts/ci-production-build-check.sh
 echo "release: production binary build"
 cargo build --release --bin pt --features native-ml --locked
 
-# 3. Tag + push to both remotes.
+# 3. Tag + push to the canonical forge. The mirror syncs from GitHub.
 echo "release: tagging $TAG"
 git tag -a "$TAG" -m "Release $TAG"
 echo "release: push origin"
 git push origin "$TAG"
-if git remote get-url gitea >/dev/null 2>&1; then
-    echo "release: push gitea"
-    git push gitea "$TAG"
-fi
 
 cat <<EOF
 
