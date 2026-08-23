@@ -8,7 +8,7 @@
 use crate::AppState;
 use axum::Router;
 use axum::extract::State;
-use axum::http::{HeaderMap, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use ptask_core::Db;
@@ -25,13 +25,18 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> impl Into
     if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
-    let body = render(&state.db).unwrap_or_else(|e| {
-        format!(
-            "# pt_metrics_render_error: {}\n",
-            e.to_string().replace('\n', " ")
-        )
-    });
+    let (status, body) = match render(&state.db) {
+        Ok(body) => (StatusCode::OK, body),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "# pt_metrics_render_error: {}\n",
+                e.to_string().replace('\n', " ")
+            ),
+        ),
+    };
     (
+        status,
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
