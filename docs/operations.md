@@ -347,6 +347,9 @@ in `~/puretensor-tasks/.env` before the service will start:
 ```bash
 grep '^PTASK_API_TOKEN=' ~/puretensor-tasks/.env
 grep '^PTASK_DASH_PASS=' ~/puretensor-tasks/.env
+# Optional: allow only the Command Center to frame the cockpit. Without this
+# exact HTTPS origin, dashboard documents retain X-Frame-Options: DENY.
+grep '^PTASK_DASH_FRAME_ANCESTOR=' ~/puretensor-tasks/.env || true
 ln -sf ~/ptask/scripts/systemd/ptask-serve.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ptask-serve.service

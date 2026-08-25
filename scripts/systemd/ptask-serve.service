@@ -11,6 +11,8 @@ Wants=network-online.target
 # auth is required for this non-loopback bind: set both PTASK_API_TOKEN and
 # PTASK_DASH_PASS in the EnvironmentFile. Only set
 # PTASK_ALLOW_UNAUTHENTICATED=1 for isolated tests.
+# To embed the authenticated dashboard in one trusted HTTPS parent, set
+# PTASK_DASH_FRAME_ANCESTOR to that exact origin. The default remains DENY.
 [Service]
 Type=simple
 EnvironmentFile=%h/puretensor-tasks/.env

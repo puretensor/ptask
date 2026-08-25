@@ -15,7 +15,7 @@
 use crate::AppState;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -1055,19 +1055,69 @@ pub fn serve_www_file(state: &AppState, headers: &HeaderMap, name: &str, ctype: 
     }
     let path = state.dash.www_dir.join(name);
     match std::fs::read(&path) {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, ctype.to_string()),
-                (header::CACHE_CONTROL, "no-store".to_string()),
-                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
-                (header::X_FRAME_OPTIONS, "DENY".to_string()),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => {
+            let mut response = (StatusCode::OK, bytes).into_response();
+            let response_headers = response.headers_mut();
+            response_headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(ctype)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
+            response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response_headers.insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+
+            if let Some(origin) = state
+                .dash
+                .frame_ancestor
+                .as_deref()
+                .and_then(valid_frame_ancestor)
+            {
+                let policy = format!("frame-ancestors {origin}");
+                // `valid_frame_ancestor` excludes whitespace/control bytes, so
+                // this conversion cannot smuggle a second header value.
+                if let Ok(value) = HeaderValue::from_str(&policy) {
+                    response_headers.insert(header::CONTENT_SECURITY_POLICY, value);
+                } else {
+                    response_headers
+                        .insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+                }
+            } else {
+                response_headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+            }
+            response
+        }
         Err(_) => jerr(StatusCode::NOT_FOUND, "not found"),
     }
+}
+
+/// Accept one exact HTTPS origin for CSP `frame-ancestors`. Paths, queries,
+/// fragments, userinfo, whitespace, and wildcard sources are rejected. An
+/// invalid operator value therefore fails closed to `X-Frame-Options: DENY`.
+fn valid_frame_ancestor(value: &str) -> Option<&str> {
+    if value
+        .bytes()
+        .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+    {
+        return None;
+    }
+    let uri: Uri = value.parse().ok()?;
+    if uri.scheme_str() != Some("https") || uri.query().is_some() {
+        return None;
+    }
+    let authority = uri.authority()?;
+    if authority.as_str().contains('@')
+        || authority.as_str().contains('*')
+        || authority.host().is_empty()
+    {
+        return None;
+    }
+    if uri.path() != "/" && !uri.path().is_empty() {
+        return None;
+    }
+    Some(value.trim_end_matches('/'))
 }
 
 /// Voice passthrough: STT + field extraction stay in the Python shim.
@@ -1127,7 +1177,11 @@ pub async fn root(State(state): State<AppState>, headers: HeaderMap) -> Response
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, HeaderMap, Path, State, act_done, parse_deadline};
+    use super::{
+        AppState, HeaderMap, Path, State, act_done, parse_deadline, serve_www_file,
+        valid_frame_ancestor,
+    };
+    use ptask_core::config::DashConfig;
     use std::time::{Duration, Instant};
 
     /// Regression (#39.2): the mutating dashboard handlers were plain
@@ -1200,5 +1254,89 @@ mod tests {
         // Empty / junk resolve cleanly to None.
         assert_eq!(parse_deadline(""), None);
         assert_eq!(parse_deadline("not-a-date"), None);
+    }
+
+    #[test]
+    fn dashboard_framing_is_denied_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "ok").unwrap();
+        let state = AppState::new(
+            ptask_core::Db::open(dir.path().join("test.db")).unwrap(),
+            Default::default(),
+            Default::default(),
+        )
+        .with_dash(DashConfig {
+            www_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        });
+
+        let response = serve_www_file(
+            &state,
+            &HeaderMap::new(),
+            "index.html",
+            "text/html; charset=utf-8",
+        );
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+        assert!(!response.headers().contains_key("content-security-policy"));
+    }
+
+    #[test]
+    fn dashboard_allows_only_the_configured_https_frame_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "ok").unwrap();
+        let db = ptask_core::Db::open(dir.path().join("test.db")).unwrap();
+        let state = AppState::new(db.clone(), Default::default(), Default::default()).with_dash(
+            DashConfig {
+                www_dir: dir.path().to_path_buf(),
+                frame_ancestor: Some("https://cc.puretensor.ai".into()),
+                ..Default::default()
+            },
+        );
+
+        let response = serve_www_file(
+            &state,
+            &HeaderMap::new(),
+            "index.html",
+            "text/html; charset=utf-8",
+        );
+        assert!(!response.headers().contains_key("x-frame-options"));
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            "frame-ancestors https://cc.puretensor.ai"
+        );
+
+        let invalid =
+            AppState::new(db, Default::default(), Default::default()).with_dash(DashConfig {
+                www_dir: dir.path().to_path_buf(),
+                frame_ancestor: Some("https://cc.puretensor.ai https://evil.example".into()),
+                ..Default::default()
+            });
+        let response = serve_www_file(
+            &invalid,
+            &HeaderMap::new(),
+            "index.html",
+            "text/html; charset=utf-8",
+        );
+        assert_eq!(response.headers()["x-frame-options"], "DENY");
+        assert!(!response.headers().contains_key("content-security-policy"));
+    }
+
+    #[test]
+    fn frame_ancestor_parser_accepts_only_an_exact_https_origin() {
+        assert_eq!(
+            valid_frame_ancestor("https://cc.puretensor.ai/"),
+            Some("https://cc.puretensor.ai")
+        );
+        for invalid in [
+            "http://cc.puretensor.ai",
+            "https://cc.puretensor.ai/path",
+            "https://cc.puretensor.ai?next=evil",
+            "https://user@cc.puretensor.ai",
+            "https://*.puretensor.ai",
+            "https://cc.puretensor.ai https://evil.example",
+            "https://cc.puretensor.ai\r\nx-frame-options: ALLOWALL",
+        ] {
+            assert_eq!(valid_frame_ancestor(invalid), None, "accepted {invalid:?}");
+        }
     }
 }
