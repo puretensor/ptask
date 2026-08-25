@@ -104,6 +104,7 @@ carries no HTTP/TLS/executor dependencies.
 | `PTASK_SYNC_URL` | `pt remote` (clients) | `http://100.121.42.54:9501`. Set fleet-wide by `/etc/profile.d/ptask.sh`. |
 | `PTASK_API_TOKEN` | `pt serve`, `pt remote` | Machine-API bearer credential; required together with `PTASK_DASH_PASS` for non-loopback `pt serve` binds. |
 | `PTASK_DASH_USER`, `PTASK_DASH_PASS` | `pt serve` cockpit | Dashboard Basic auth. The password is required together with `PTASK_API_TOKEN` for non-loopback binds. |
+| `PTASK_DASH_FRAME_ANCESTOR` | `pt serve` cockpit | Optional single HTTPS origin allowed to frame dashboard documents through CSP. Unset or invalid values fail closed with `X-Frame-Options: DENY`. |
 | `PTASK_ALLOW_UNAUTHENTICATED` | `pt serve` | Emergency/test override for unauthenticated non-loopback binds. Do not set in production. |
 | `GOOGLE_API_KEY`, `GEMINI_CONSOLIDATE_MODEL` | `pt distill` | Gemini structured-output credentials/model for native classify+consolidate. Missing key = preflight exit 3, fail closed. |
 | `PTASK_TELEGRAM_BOT_TOKEN`, `PTASK_ACCOUNTABILITY_CHAT_ID`, `PTASK_SMTP_*` | accountability | Existing v0.7 surface. |

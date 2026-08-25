@@ -42,6 +42,10 @@ pub struct DashConfig {
     /// Voice shim passthrough (`$PTASK_VOICE_SHIM_URL`, default
     /// http://127.0.0.1:9510) — /api/voice proxies here (STT stays Python).
     pub voice_shim_url: String,
+    /// Optional HTTPS origin allowed to embed the dashboard
+    /// (`$PTASK_DASH_FRAME_ANCESTOR`). When unset or invalid, dashboard
+    /// documents retain the fail-closed `X-Frame-Options: DENY` policy.
+    pub frame_ancestor: Option<String>,
 }
 
 /// API-token material for `pt serve` (enforce-if-configured).
@@ -188,6 +192,7 @@ impl Config {
                     .unwrap_or_else(|_| home_dir().join("ptask").join("dashboard").join("www")),
                 voice_shim_url: env_nonempty("PTASK_VOICE_SHIM_URL")
                     .unwrap_or_else(|| "http://127.0.0.1:9510".into()),
+                frame_ancestor: env_nonempty("PTASK_DASH_FRAME_ANCESTOR"),
             },
         }
     }
