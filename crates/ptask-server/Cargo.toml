@@ -2,8 +2,8 @@
 name = "ptask-server"
 description = "pTask HTTP server — sync API, capture endpoint, outbound webhooks, Prometheus metrics."
 version.workspace = true
+publish = false
 edition.workspace = true
-license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true

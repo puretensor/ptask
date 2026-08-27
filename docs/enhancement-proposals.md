@@ -2,7 +2,7 @@
 
 > Origin: operator friction during 2026-06-22 session. Creating PT-653 with `p4`
 > (intending "urgent") silently landed it at **low**, then required an SSH into
-> tensor-core + absolute-path binary call to fix. This doc grounds "why pTask
+> the canonical host + absolute-path binary call to fix. This doc grounds "why pTask
 > feels spartan / always has issues" in the actual code and proposes fixes,
 > prioritized by operator pain.
 
@@ -45,7 +45,7 @@ That inversion is exactly why `pt remote add "...p4"` produced a **low** task. A
 ## P1 — Thin remote surface (the daily friction)
 
 `pt remote` exposes only **add / list / done**. Every other mutation forces an SSH
-into the canonical host (tensor-core) and an absolute-path call
+into the canonical host (the canonical host) and an absolute-path call
 (`~/.cargo/bin/pt …`, because `pt` isn't even on the non-interactive PATH there).
 That round-trip is the single biggest "pTask is painful" complaint.
 
@@ -58,7 +58,7 @@ The sync protocol already carries arbitrary mutations; the client just doesn't e
 - `pt remote next` (DAG-ready list from anywhere)
 
 ### 4. Put `pt` on PATH on the canonical host
-Non-interactive `ssh tensor-core 'pt …'` fails (`command not found`). Symlink
+Non-interactive `ssh the canonical host 'pt …'` fails (`command not found`). Symlink
 `~/.cargo/bin/pt` → `/usr/local/bin/pt` (or ship via the same profile.d that sets
 `PTASK_SYNC_URL`) so the SSH fallback path actually works without absolute paths.
 

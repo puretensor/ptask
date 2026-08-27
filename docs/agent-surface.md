@@ -9,11 +9,10 @@ Two transports, one handler, 11 tools (`task_next / task_list / task_add /
 task_show / task_done / task_dismiss / task_edit / task_claim / task_capture /
 task_search / task_digest`):
 
-- **streamable-HTTP** at `http://100.121.42.54:9501/mcp`, bearer-gated to the
-  **hal** named token (write scope). This mount IS HAL's surface — per-request
-  identity can't reach rmcp tool handlers, so attribution is pinned
-  `actor=hal, source=mcp` and the gate only admits hal's credential. Other
-  agents use the scoped REST API with their own named tokens.
+- **streamable-HTTP** at `http://127.0.0.1:9501/mcp` (or your `PTASK_SYNC_URL`),
+  bearer-gated to a named write token. Per-request identity cannot reach rmcp
+  tool handlers, so attribution is pinned `actor=<token-name>, source=mcp`.
+  Other agents use the scoped REST API with their own named tokens.
 - **stdio** via `pt mcp` — local registration without a network hop; actor
   from `$PTASK_ACTOR`.
 
@@ -22,8 +21,8 @@ Registration (`~/.claude.json` → `mcpServers`):
 ```json
 "ptask": {
   "type": "http",
-  "url": "http://100.121.42.54:9501/mcp",
-  "headers": { "Authorization": "Bearer $(cat ~/.config/ptask/hal.token)" }
+  "url": "http://127.0.0.1:9501/mcp",
+  "headers": { "Authorization": "Bearer $(cat ~/.config/ptask/agent.token)" }
 }
 ```
 
@@ -50,17 +49,17 @@ of the same key + text returns `{"duplicate": true}` instead of a new inbox
 row, which is what stops re-nag loops. severity ≥ 3 fast-lanes into a task.
 
 ```bash
-# fleet-sentry escalation → task (idempotent per escalation id)
-curl -s -X POST http://100.121.42.54:9501/capture \
+# monitoring escalation → task (idempotent per escalation id)
+curl -s -X POST http://127.0.0.1:9501/capture \
   -H "Authorization: Bearer $PTASK_API_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"text":"[fleet-sentry] ceph HEALTH_WARN: 3 pgs degraded",
-       "source":"fleet-sentry", "severity":3,
-       "client_key":"fleet-sentry:esc-1234"}'
+  -d '{"text":"[monitor] disk usage above 90% on db-1",
+       "source":"monitor", "severity":3,
+       "client_key":"monitor:esc-1234"}'
 
-# pureMind heartbeat attention item (no severity — goes through distill)
-curl -s -X POST http://100.121.42.54:9501/capture \
+# heartbeat attention item (no severity — goes through distill)
+curl -s -X POST http://127.0.0.1:9501/capture \
   -H "Authorization: Bearer $PTASK_API_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"text":"PureClaw PR #50 needs operator review (open 38h)",
+  -d '{"text":"PR #50 needs operator review (open 38h)",
        "source":"heartbeat", "client_key":"heartbeat:pr50-review"}'
 ```
 

@@ -4,11 +4,8 @@ Documentation=https://github.com/puretensor/ptask
 After=network-online.target
 Wants=network-online.target
 
-# Bind the API to tensor-core's Tailscale interface IP, NOT 0.0.0.0.
-# Fleet clients reach the canonical host at this exact address (it is the
-# value of PTASK_SYNC_URL fleet-wide). Listening only here keeps the
-# /sync,/capture,/email surface off the public/LAN NICs. Application-level
-# auth is required for this non-loopback bind: set both PTASK_API_TOKEN and
+# Example unit binds loopback. For LAN/VPN clients, change --bind to a
+# private interface address (not 0.0.0.0) and set both PTASK_API_TOKEN and
 # PTASK_DASH_PASS in the EnvironmentFile. Only set
 # PTASK_ALLOW_UNAUTHENTICATED=1 for isolated tests.
 # To embed the authenticated dashboard in one trusted HTTPS parent, set
@@ -16,7 +13,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=%h/puretensor-tasks/.env
-ExecStart=%h/.cargo/bin/pt serve --bind 100.121.42.54:9501
+ExecStart=%h/.cargo/bin/pt serve --bind 127.0.0.1:9501
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

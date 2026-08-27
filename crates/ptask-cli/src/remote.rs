@@ -1,11 +1,9 @@
 //! Remote `pt` client — speaks the v0.4.2 `/sync` wire protocol against
-//! the canonical-host `pt serve` (tensor-core post-v1.0.3 activation).
+//! the canonical-host `pt serve`.
 //!
-//! Lets every fleet node `pt remote add "..."`, `pt remote list`,
+//! Lets every client host `pt remote add "..."`, `pt remote list`,
 //! `pt remote done PT-42` without owning its own copy of `tasks.db`.
-//! Fleet shell profile (`/etc/profile.d/ptask.sh`) sets `PTASK_SYNC_URL`;
-//! callers that don't go through the env fall through to the hard-coded
-//! Tailscale-IP default in `default_url`.
+//! Set `PTASK_SYNC_URL` for a non-loopback canonical host.
 
 use anyhow::{Context, Result, anyhow};
 use ptask_core::Task;
@@ -14,15 +12,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-/// Endpoint URL — `${PTASK_SYNC_URL}` if set, else the canonical-host
-/// fallback. Tests inject via `RemoteClient::with_url`.
-///
-/// The fallback is tensor-core's Tailscale IP + `:9501` (live as of
-/// v1.0.3 activation). Operator profile (`/etc/profile.d/ptask.sh`) sets
-/// `PTASK_SYNC_URL` fleet-wide; the env var is the authoritative source
-/// of truth and this constant is only consulted when it's missing.
+/// Endpoint URL — `${PTASK_SYNC_URL}` if set, else loopback.
+/// Tests inject via `RemoteClient::with_url`.
 pub fn default_url() -> String {
-    std::env::var("PTASK_SYNC_URL").unwrap_or_else(|_| "http://100.121.42.54:9501".to_string())
+    std::env::var("PTASK_SYNC_URL").unwrap_or_else(|_| "http://127.0.0.1:9501".to_string())
 }
 
 #[derive(Debug, Clone)]

@@ -1616,7 +1616,7 @@ _pt__subcmd__help__subcmd__reap_commands() {
 (( $+functions[_pt__subcmd__help__subcmd__remote_commands] )) ||
 _pt__subcmd__help__subcmd__remote_commands() {
     local commands; commands=(
-'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http\://100.121.42.54\:9501)' \
+'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http\://127.0.0.1\:9501)' \
 'list:\`pt remote list\` — fetch the live task set from the canonical host' \
 'done:\`pt remote done <query>\` — mark a task done by PT-N or title substring' \
 'priority:\`pt remote priority <query> <level>\` — set priority on the canonical host' \
@@ -1862,7 +1862,7 @@ _pt__subcmd__reap_commands() {
 (( $+functions[_pt__subcmd__remote_commands] )) ||
 _pt__subcmd__remote_commands() {
     local commands; commands=(
-'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http\://100.121.42.54\:9501)' \
+'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http\://127.0.0.1\:9501)' \
 'list:\`pt remote list\` — fetch the live task set from the canonical host' \
 'done:\`pt remote done <query>\` — mark a task done by PT-N or title substring' \
 'priority:\`pt remote priority <query> <level>\` — set priority on the canonical host' \
@@ -1908,7 +1908,7 @@ _pt__subcmd__remote__subcmd__edit_commands() {
 (( $+functions[_pt__subcmd__remote__subcmd__help_commands] )) ||
 _pt__subcmd__remote__subcmd__help_commands() {
     local commands; commands=(
-'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http\://100.121.42.54\:9501)' \
+'add:\`pt remote add "..."\` — create a task on the canonical host without opening a local DB. Uses PTASK_SYNC_URL (default http\://127.0.0.1\:9501)' \
 'list:\`pt remote list\` — fetch the live task set from the canonical host' \
 'done:\`pt remote done <query>\` — mark a task done by PT-N or title substring' \
 'priority:\`pt remote priority <query> <level>\` — set priority on the canonical host' \

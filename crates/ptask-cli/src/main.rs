@@ -289,7 +289,7 @@ enum ScoringCommand {
 enum RemoteCommand {
     /// `pt remote add "..."` — create a task on the canonical host
     /// without opening a local DB. Uses PTASK_SYNC_URL (default
-    /// http://100.121.42.54:9501).
+    /// http://127.0.0.1:9501).
     Add(RemoteAddArgs),
     /// `pt remote list` — fetch the live task set from the canonical host.
     #[command(alias = "ls")]

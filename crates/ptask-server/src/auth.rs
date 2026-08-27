@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn validate_bind_auth_rejects_non_loopback_without_token() {
-        let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
+        let addr: SocketAddr = "10.0.0.10:9501".parse().unwrap();
         let err = validate_bind_auth_state(&addr, false, false, false).unwrap_err();
         assert!(err.contains(API_TOKEN_ENV));
         assert!(err.contains(DASH_PASS_ENV));
@@ -226,19 +226,19 @@ mod tests {
 
     #[test]
     fn validate_bind_auth_rejects_non_loopback_with_only_api_token() {
-        let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
+        let addr: SocketAddr = "10.0.0.10:9501".parse().unwrap();
         assert!(validate_bind_auth_state(&addr, true, false, false).is_err());
     }
 
     #[test]
     fn validate_bind_auth_rejects_non_loopback_with_only_dashboard_password() {
-        let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
+        let addr: SocketAddr = "10.0.0.10:9501".parse().unwrap();
         assert!(validate_bind_auth_state(&addr, false, true, false).is_err());
     }
 
     #[test]
     fn validate_bind_auth_allows_non_loopback_with_both_credentials() {
-        let addr: SocketAddr = "100.121.42.54:9501".parse().unwrap();
+        let addr: SocketAddr = "10.0.0.10:9501".parse().unwrap();
         assert!(validate_bind_auth_state(&addr, true, true, false).is_ok());
     }
 

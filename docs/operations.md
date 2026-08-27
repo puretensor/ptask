@@ -9,7 +9,7 @@ up nightly to Ceph via mon1.
 
 `scripts/ptask-backup.sh` runs the SQLite online backup against the live
 file (safe with WAL — readers and writers continue concurrently), copies
-the resulting snapshot to `mon1:/mnt/cephfs/ptask-backups/`, and prunes
+the resulting snapshot to `backup-host:/var/backups/ptask/`, and prunes
 files older than 30 days.
 
 ### Deployment (workstation that owns `tasks.db`)
@@ -49,7 +49,7 @@ systemctl --user start ptask-backup.service
 ### Verifying a backup
 
 ```bash
-scp mon1:/mnt/cephfs/ptask-backups/ptask-tasks-$(date -u +%Y-%m-%d).db /tmp/
+scp backup-host:/var/backups/ptask/ptask-tasks-$(date -u +%Y-%m-%d).db /tmp/
 sqlite3 /tmp/ptask-tasks-*.db 'SELECT COUNT(*) FROM tasks, COUNT(*) FROM pt_extensions'
 ```
 
@@ -273,7 +273,7 @@ systemctl --user disable --now ptask-scoring.timer
 sudo systemctl enable --now puretensor-tasks-scoring.timer
 ```
 
-## Litestream WAL replication (v0.9.4 / v1.0.3 — tensor-core canonical)
+## Litestream WAL replication (v0.9.4 / v1.0.3 — the canonical host canonical)
 
 `tasks.db` is continuously replicated. Target recovery-point objective:
 < 1 minute. Litestream owns the SQLite WAL checkpoint cadence — anything
@@ -281,7 +281,7 @@ else doing `PRAGMA wal_checkpoint(...)` on the live DB races the
 replicator.
 
 **Active replica (v1.0.3): CephFS file** at
-`/mnt/ceph-backup/ptask-litestream/tasks.db`. The original v0.9.4 plan
+`/var/backups/ptask-litestream/tasks.db`. The original v0.9.4 plan
 was an S3 rados-gateway replica, but no RGW endpoint was live at
 activation. The config still documents the RGW path as the alternate
 config — see `scripts/litestream/litestream.yml`.
@@ -296,8 +296,8 @@ config — see `scripts/litestream/litestream.yml`.
    # /usr/bin/litestream → symlink /usr/local/bin/litestream if needed
    sudo ln -sf /usr/bin/litestream /usr/local/bin/litestream
    ```
-2. CephFS mounted at `/mnt/ceph-backup` on the canonical host (already
-   in place on tensor-core).
+2. CephFS mounted at `/var/backups` on the canonical host (already
+   in place on the canonical host).
 3. `~/.config/litestream/.env` exists (can be empty — required by the
    service's `ConditionPathExists=` gate, but the CephFS replica has no
    env-driven knobs):
@@ -307,7 +307,7 @@ config — see `scripts/litestream/litestream.yml`.
    ```
    For the alternate RGW config, populate with:
    ```ini
-   PTASK_LITESTREAM_ENDPOINT=https://ceph-rgw.ts.puretensor.local
+   PTASK_LITESTREAM_ENDPOINT=https://s3.example
    PTASK_LITESTREAM_BUCKET=ptask-wal
    LITESTREAM_ACCESS_KEY_ID=...
    LITESTREAM_SECRET_ACCESS_KEY=...
@@ -327,8 +327,8 @@ SQL
 
 ```bash
 mkdir -p ~/.config/litestream ~/.config/systemd/user
-sudo mkdir -p /mnt/ceph-backup/ptask-litestream  # CephFS replica root
-sudo chown puretensorai:puretensorai /mnt/ceph-backup/ptask-litestream
+sudo mkdir -p /var/backups/ptask-litestream  # CephFS replica root
+sudo chown ptask:ptask /var/backups/ptask-litestream
 ln -sf ~/ptask/scripts/litestream/litestream.yml ~/.config/litestream/litestream.yml
 ln -sf ~/ptask/scripts/systemd/ptask-litestream.service ~/.config/systemd/user/
 
@@ -354,14 +354,14 @@ ln -sf ~/ptask/scripts/systemd/ptask-serve.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ptask-serve.service
 
-# The shipped unit binds tensor-core's Tailscale IP (not 0.0.0.0), so probe
+# The shipped unit binds the canonical host's Tailscale IP (not 0.0.0.0), so probe
 # it on that address rather than loopback.
-curl http://100.121.42.54:9501/healthz   # → ok
+curl http://127.0.0.1:9501/healthz   # → ok
 curl -H "Authorization: Bearer $PTASK_API_TOKEN" \
-  http://100.121.42.54:9501/version       # → {"ptask_core":"<current version>"}
+  http://127.0.0.1:9501/version       # → {"ptask_core":"<current version>"}
 ```
 
-Fleet clients reach this via Tailscale at `http://100.121.42.54:9501`;
+Fleet clients reach this via Tailscale at `http://127.0.0.1:9501`;
 `/etc/profile.d/ptask.sh` sets `PTASK_SYNC_URL` everywhere. The unit binds
 that interface IP directly, keeping the API off the public/LAN NICs.
 Application-level auth is now fail-closed for non-loopback binds. Only use

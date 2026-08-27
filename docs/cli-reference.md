@@ -202,7 +202,7 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote list --filter '<DSL>'` | SERVER-side filtered list via `GET /list` |
 | `pt remote version` | compare client vs server `GET /version`; exits non-zero on skew |
 
-`--url` defaults to `$PTASK_SYNC_URL` then `http://100.121.42.54:9501`.
+`--url` defaults to `$PTASK_SYNC_URL` then `http://127.0.0.1:9501`.
 
 Every remote error also runs the version handshake: a 401/404 from a
 mismatched deploy appends `version skew: client vX vs server vY` to the

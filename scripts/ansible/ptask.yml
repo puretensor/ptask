@@ -33,7 +33,7 @@
 #
 #   ansible-playbook ... -e ptask_binary=/path/to/pt
 #
-# Targets: tier-0 (mon, arx, fox-n, tensor-core). Spore tier excluded
+# Targets: tier-0 (mon, arx, fox-n, the canonical host). Spore tier excluded
 # at the inventory level — these are GCP/Azure ephemeral nodes that
 # don't host pt state.
 

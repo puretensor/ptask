@@ -7,21 +7,21 @@
 # Three checks, all must pass (exit non-zero otherwise → OnFailure alert):
 #   1. Litestream replica restores to a scratch path, passes
 #      PRAGMA integrity_check, and its task count is sane vs live.
-#   2. The newest mon1 nightly is <48h old and passes integrity_check.
-#   3. The newest coldIRON off-site nightly is <48h old (existence+age
-#      only — pulling it back over the WAN weekly is unnecessary).
+#   2. The newest nearby nightly is <48h old and passes integrity_check.
+#   3. The newest off-site nightly is <48h old (existence+age only —
+#      pulling it back over the WAN weekly is unnecessary).
 #
 # Env overrides:
 #   PTASK_DB                — live DB (default ~/puretensor-tasks/tasks.db)
 #   PTASK_LITESTREAM_CONFIG — (default ~/.config/litestream/litestream.yml)
-#   PTASK_BACKUP_REMOTE     — mon1 target (default mon1:/mnt/cephfs/ptask-backups)
-#   PTASK_BACKUP_OFFSITE    — off-site target (default baron@100.97.90.25:dr-backup/ptask)
+#   PTASK_BACKUP_REMOTE     — nearby backup target (default backup-host:/var/backups/ptask)
+#   PTASK_BACKUP_OFFSITE    — off-site target (default dr-host:dr-backup/ptask)
 set -euo pipefail
 
 DB="${PTASK_DB:-$HOME/puretensor-tasks/tasks.db}"
 LS_CONFIG="${PTASK_LITESTREAM_CONFIG:-$HOME/.config/litestream/litestream.yml}"
-REMOTE="${PTASK_BACKUP_REMOTE:-mon1:/mnt/cephfs/ptask-backups}"
-OFFSITE="${PTASK_BACKUP_OFFSITE:-baron@100.97.90.25:dr-backup/ptask}"
+REMOTE="${PTASK_BACKUP_REMOTE:-backup-host:/var/backups/ptask}"
+OFFSITE="${PTASK_BACKUP_OFFSITE:-dr-host:dr-backup/ptask}"
 
 SCRATCH=$(mktemp -d -t ptask-restore-verify-XXXXXX)
 cleanup() { rm -rf "$SCRATCH"; }

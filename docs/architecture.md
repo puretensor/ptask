@@ -1,81 +1,53 @@
-# pTask Fleet Architecture
+# pTask Architecture
+
+pTask is designed for a single canonical SQLite store plus optional
+read/write clients. One host owns `tasks.db` and runs `pt serve`; other
+hosts install the same `pt` binary, keep background timers disabled, and
+talk to the canonical API through `pt remote`.
 
 ## Topology
 
 ```
-                                ┌─────────────────────────────────────┐
-                                │  ┌──────────────────────────────┐   │
-       Tailscale (HTTP /sync)──►│  │  tensor-core  (canonical)    │   │
-                                │  │  100.121.42.54:9501          │   │
-                                │  │  ~/puretensor-tasks/         │   │
-                                │  │       tasks.db (204 rows)    │   │
-                                │  └──────────┬───────────────────┘   │
-                                │             │ Litestream WAL        │
-                                │             ▼                       │
-                                │  /mnt/ceph-backup/                  │
-                                │    ptask-litestream/tasks.db        │
-                                │  (CephFS file replica, RPO < 1 min) │
-                                └─────────────────────────────────────┘
-                                              ▲
-                                              │ HTTP /sync
-                                              │ (PTASK_SYNC_URL)
-            ┌──────────────────────────────────┴───────────────────────────────────┐
-            │           │           │           │           │           │
-        ┌───┴────┐  ┌───┴────┐  ┌───┴────┐  ┌───┴────┐  ┌───┴────┐  ┌───┴────┐
-        │  mon1  │  │  mon2  │  │  mon3  │  │ arx1-4 │  │ fox-n0 │  │ fox-n1 │
-        │ client │  │ client │  │ client │  │ client │  │ client │  │ client │
-        └────────┘  └────────┘  └────────┘  └────────┘  └────────┘  └────────┘
-            (binary installed; timers DISABLED; pt remote → tensor-core:9501)
+                    ┌─────────────────────────────────┐
+   HTTP /sync  ───► │  canonical host                 │
+                    │  pt serve  (PTASK_SYNC_URL)     │
+                    │  ~/puretensor-tasks/tasks.db    │
+                    │           │                     │
+                    │           ▼ Litestream WAL      │
+                    │  replica path (local FS or S3)  │
+                    └─────────────────────────────────┘
+                                   ▲
+                                   │ HTTP /sync
+                    ┌──────────────┴──────────────┐
+                    │  client hosts               │
+                    │  same `pt` binary           │
+                    │  timers disabled            │
+                    │  PTASK_SYNC_URL → canonical │
+                    └─────────────────────────────┘
 ```
 
-## Canonical-store election
+## Canonical store
 
-**tensor-core owns `tasks.db`.** Locked at the v1.0 activation
-(2026-05-14). The pre-v1.0 plan nominated mon1, but the live DB and
-the active timer set always ran on tensor-core; the docs were ahead of
-reality. Drivers for keeping it there:
+Pick one always-on host as canonical. That host:
 
-- tensor-core is the bridge node hosting the 2× RTX PRO 6000 Blackwell
-  GPUs — it's the de-facto compute centre of the fleet and already runs
-  the heaviest distill workloads.
-- The four user-mode timers (`ptask-backup`, `ptask-distill`,
-  `ptask-accountability`, `ptask-scoring`) plus the new `ptask-serve`
-  and `ptask-litestream` services were already there at v1.0
-  activation; no migration was needed.
-- CephFS is mounted at `/mnt/ceph-backup` on tensor-core, so the
-  Litestream replica path is local-filesystem-fast without a network
-  hop.
-- 24/7 uptime targets — arx nodes run thermal-aware power cycling and
-  aren't appropriate for a write canonical.
+- Keeps `tasks.db` on local disk (NVMe preferred).
+- Runs `ptask-serve`, backup, distill, accountability, scoring, and Litestream.
+- Replicates WAL to a durable replica (filesystem or S3-compatible) with RPO under one minute.
 
-Re-audit gate: if read pressure on tensor-core ever justifies an
-NVMe-headroom move to arx2, the migration is `pt serve` host swap +
-DB copy + Tailscale-route flip. Inventory edit + one ansible run
-completes the rest of the fleet's reconfiguration.
+Clients never own the write database. Ephemeral cloud nodes should stay out of
+the inventory so they do not hold task state.
 
-## Roles
+### Multi-arch builds
 
-| Role | Where | What's enabled |
-|---|---|---|
-| **canonical** | `tensor-core` | `tasks.db` + WAL on local NVMe; `ptask-serve` on tensor-core Tailscale `100.121.42.54:9501`; Litestream → CephFS; all four user-mode timers active |
-| **client** | `mon1-3`, `arx1-4`, `fox-n0/1` | Same `pt` binary; timers **disabled**; reads/writes route through `pt remote` → `PTASK_SYNC_URL=http://100.121.42.54:9501` |
-| **excluded** | `coldiron`, `spore-azure-1`, `spore-gcp-1` | No `pt` install — these are GCP/Azure-ephemeral and shouldn't carry task state. The Ansible inventory deliberately omits them. |
-| **retired** | k3s `puretensor-tasks` namespace on mon1 | Was a long-running Python deployment behind `https://tasks.fox/` with its own k3s-PVC-backed DB. Discovered post-v1.0.3 activation; merged into tensor-core via UUID union (132 overlap, 306 mon1-only, 72 tc-only → 510 final). Namespace + IngressRoutes deleted at v1.0.4. |
+Ansible accepts a per-host `ptask_arch_override` when glibc or CPU
+architecture differs from the controller. Override the artifact with
+`-e ptask_binary=/path/to/per-host/build`. Example triples:
 
-### Arch / glibc heterogeneity
-
-The fleet isn't uniform — Ansible has per-host overrides:
-
-| Host | Arch / glibc | Binary source |
-|---|---|---|
-| tensor-core | x86_64, glibc 2.39 (Ubuntu 24.04) | `cargo build --release --bin pt --features native-ml --locked` on controller |
-| mon1, arx1-4, fox-n0/1 | x86_64, glibc 2.39 | Same as controller |
-| **mon2** | x86_64, **glibc 2.35** | Build in `ubuntu:22.04` container |
-| **mon3** | **aarch64** | Add `--target aarch64-unknown-linux-gnu` to the production build command |
-
-Use `-e ptask_binary=/path/to/per-host/build` on the per-host Ansible
-invocation to override the default per-arch `dist/pt-<target-triple>`
-artifact.
+| Target | Typical build |
+|---|---|
+| controller (x86_64, current glibc) | `cargo build --release --bin pt --features native-ml --locked` |
+| older glibc | build inside an `ubuntu:22.04` container |
+| aarch64 | add `--target aarch64-unknown-linux-gnu` |
 
 ## Schema v2 (v2.0.0)
 
@@ -101,32 +73,27 @@ carries no HTTP/TLS/executor dependencies.
 | Variable | Used by | Purpose |
 |---|---|---|
 | `PTASK_DB` | `pt` (canonical) | Override the SQLite path. Defaults to `~/puretensor-tasks/tasks.db`. |
-| `PTASK_SYNC_URL` | `pt remote` (clients) | `http://100.121.42.54:9501`. Set fleet-wide by `/etc/profile.d/ptask.sh`. |
+| `PTASK_SYNC_URL` | `pt remote` (clients) | Canonical `pt serve` URL, for example `http://ptask.example:9501`. |
 | `PTASK_API_TOKEN` | `pt serve`, `pt remote` | Machine-API bearer credential; required together with `PTASK_DASH_PASS` for non-loopback `pt serve` binds. |
 | `PTASK_DASH_USER`, `PTASK_DASH_PASS` | `pt serve` cockpit | Dashboard Basic auth. The password is required together with `PTASK_API_TOKEN` for non-loopback binds. |
 | `PTASK_DASH_FRAME_ANCESTOR` | `pt serve` cockpit | Optional single HTTPS origin allowed to frame dashboard documents through CSP. Unset or invalid values fail closed with `X-Frame-Options: DENY`. |
 | `PTASK_ALLOW_UNAUTHENTICATED` | `pt serve` | Emergency/test override for unauthenticated non-loopback binds. Do not set in production. |
 | `GOOGLE_API_KEY`, `GEMINI_CONSOLIDATE_MODEL` | `pt distill` | Gemini structured-output credentials/model for native classify+consolidate. Missing key = preflight exit 3, fail closed. |
 | `PTASK_TELEGRAM_BOT_TOKEN`, `PTASK_ACCOUNTABILITY_CHAT_ID`, `PTASK_SMTP_*` | accountability | Existing v0.7 surface. |
-| `PTASK_LITESTREAM_*` | `litestream` | Only consulted by the alternate S3 replica config — unused while the CephFS replica is active. |
+| `PTASK_LITESTREAM_*` | `litestream` | Used only by the optional S3 replica config. |
 
 ## Recovery
 
-- **Lose tensor-core disk, DB intact in CephFS replica:** stop
-  `ptask-serve.service` and `ptask-litestream.service` on tensor-core,
-  run `litestream restore -config ~/.config/litestream/litestream.yml
-  -o ~/puretensor-tasks/tasks.db.restored
-  ~/puretensor-tasks/tasks.db`, swap atomically, restart services.
-  RPO ≤ 1 min.
-- **Lose tensor-core entirely:** promote a different node by editing
-  inventory + running ansible, fresh `litestream restore` from the
-  CephFS replica into the new host's `~/puretensor-tasks/tasks.db`,
-  update `PTASK_SYNC_URL` in `/etc/profile.d/ptask.sh` fleet-wide.
-- **Lose CephFS:** nightly Ceph snapshot via `ptask-backup.timer`
-  keeps a 30-day file backup independent of Litestream — last-resort
-  recovery path.
-- **Lose a client node:** no data loss; `pt` config points at the
-  canonical URL, local cache is rebuildable on next sync.
+- **Lose canonical disk, replica intact:** stop `ptask-serve` and
+  `ptask-litestream`, `litestream restore` into a new `tasks.db`, swap
+  atomically, restart. RPO is the Litestream interval (default under one
+  minute).
+- **Lose the canonical host:** promote a client: restore from the replica,
+  update inventory, point `PTASK_SYNC_URL` at the new host.
+- **Lose the replica:** the nightly `ptask-backup.timer` snapshot is the
+  last-resort path (default 30-day retention).
+- **Lose a client node:** no data loss; clients rebuild from the canonical
+  URL.
 
 ## What ships when
 
@@ -141,5 +108,5 @@ carries no HTTP/TLS/executor dependencies.
 | v0.10.0 | Phase 10 close — fleet kit | 10 close |
 | v1.0.0 | Phase 1.0 close — polish | 1.0 close |
 | v1.0.2 | DB-free client dispatch + temp_id + lint fix | post-1.0 |
-| v1.0.3 | Doc reality reconciliation (canonical = tensor-core) | post-1.0 |
-| **v1.0.4** | **k3s puretensor-tasks namespace retired (DB merged into tensor-core)** | post-1.0 |
+| v1.0.3 | Canonical-store documentation | post-1.0 |
+| **v1.0.4** | Retired the parallel k3s task deployment; single canonical DB | post-1.0 |

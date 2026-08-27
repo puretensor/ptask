@@ -1,50 +1,31 @@
-# pTask Litestream replication config — tensor-core canonical.
+# Example Litestream config for the canonical pTask host.
 #
-# Drop into ~/.config/litestream/litestream.yml (operator HOME) on the
-# canonical host. As of the v1.0 activation we use a CephFS *file*
-# replica at /mnt/ceph-backup/ptask-litestream/tasks.db — no rados
-# gateway / S3 endpoint required. The RGW path remains documented
-# below as the alternate config if/when the operator stands one up.
+# Copy to ~/.config/litestream/litestream.yml and edit paths.
+# The pTask DB should open with journal_mode=WAL and wal_autocheckpoint=0
+# so Litestream owns the checkpoint cadence.
 #
-# The pTask DB at ~/puretensor-tasks/tasks.db opens with
-# journal_mode=WAL and wal_autocheckpoint=0 — Litestream owns the
-# checkpoint cadence. Don't run `sqlite3 ... 'PRAGMA wal_checkpoint(...)'`
-# while replication is active.
-#
-# RPO target: < 1 minute. Litestream defaults are aligned to that.
+# RPO target: under one minute.
 
 dbs:
-  - path: /home/puretensorai/puretensor-tasks/tasks.db
+  - path: /home/ptask/puretensor-tasks/tasks.db
 
-    # SQLite tunings Litestream needs / enforces.
-    checkpoint-interval: 1m         # Periodic checkpoint so the WAL doesn't grow unbounded.
-    min-checkpoint-page-count: 1000 # Don't bother before 1k pages of WAL accumulate.
+    checkpoint-interval: 1m
+    min-checkpoint-page-count: 1000
     max-checkpoint-page-count: 50000
 
     replicas:
-      # ---- Active: CephFS file replica (v1.0.3) -----------------------
-      # CephFS is mounted at /mnt/ceph-backup; Litestream writes the WAL
-      # segment tree to a regular filesystem path. No creds or endpoint
-      # configuration needed beyond an operator HOME on the canonical
-      # host that can read+write the mount.
-      - name: cephfs
-        path: /mnt/ceph-backup/ptask-litestream/tasks.db
+      - name: local-fs
+        path: /var/backups/ptask-litestream/tasks.db
         snapshot-interval: 24h
-        retention: 720h        # 30 days
+        retention: 720h
         retention-check-interval: 1h
 
-      # ---- Alternate: Ceph rados-gateway / S3 replica -----------------
-      # Uncomment + populate ~/.config/litestream/.env if/when an RGW
-      # endpoint exists. Commenting out keeps the cephfs replica as the
-      # sole active target — Litestream supports multiple replicas per
-      # db, you can run both for belt-and-braces if a bucket is ever set
-      # up.
-      #
-      # - name: ceph-s3
+      # Optional S3-compatible replica:
+      # - name: object-store
       #   type: s3
       #   endpoint: ${PTASK_LITESTREAM_ENDPOINT}
       #   bucket: ${PTASK_LITESTREAM_BUCKET}
-      #   path: ptask/tensor-core/tasks.db
+      #   path: ptask/canonical/tasks.db
       #   region: us-east-1
       #   force-path-style: true
       #   snapshot-interval: 24h

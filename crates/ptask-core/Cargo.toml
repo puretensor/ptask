@@ -2,8 +2,8 @@
 name = "ptask-core"
 description = "Core domain logic for pTask: storage, parsing, scoring, accountability"
 version.workspace = true
+publish = false
 edition.workspace = true
-license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true

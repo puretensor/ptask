@@ -1,64 +1,33 @@
 ---
-# pTask deploy inventory.
+# Example pTask deploy inventory. Copy and replace hostnames with your own.
 #
-# Tier 0 = nodes that host pt state and run the user-mode timers.
-# Tier 1 = nodes that run pt as a read-only client (post v0.9.5).
-# Spore (GCP/Azure ephemeral) deliberately excluded — they don't own
-# task state and the systemd timers would conflict.
-#
-# Canonical-store election locked to **tensor-core** at the v1.0
-# activation (2026-05-14). Pre-v1.0 docs nominated mon1, but the live
-# DB lives on tensor-core and that's where the timers run. Reachable
-# fleet-wide as 100.121.42.54:9501 over Tailscale. Other tier-0 nodes
-# install the binary but keep timers disabled and proxy writes via
-# `pt remote` (PTASK_SYNC_URL set by /etc/profile.d/ptask.sh).
-#
-# Fleet is heterogeneous — see `ptask_arch_override` per-host:
-#   - mon2 glibc 2.35 (build x86_64 against ubuntu 22.04)
-#   - mon3 aarch64
-# everything else: stock x86_64 against ubuntu 24.04 (controller default).
+# Canonical host owns tasks.db and runs serve/backup/distill timers.
+# Client hosts install the binary, keep timers disabled, and proxy via
+# `pt remote` (PTASK_SYNC_URL).
 
 all:
   vars:
-    # Fleet nodes are provisioned/accessed as root; only the canonical
-    # workstation runs as the operator user.
     ansible_user: root
-    ptask_canonical_host: tensor-core
-    ptask_serve_url: http://100.121.42.54:9501
+    ptask_canonical_host: ptask-canonical
+    ptask_serve_url: http://ptask.example:9501
 
   children:
     ptask:
       children:
         ptask_canonical:
           hosts:
-            tensor-core:
-              ansible_host: tensor-core
-              ansible_user: puretensorai
+            ptask-canonical:
+              ansible_host: ptask.example
+              ansible_user: ptask
 
         ptask_tier0:
           hosts:
-            mon1:
-              ansible_host: mon1
-            mon2:
-              ansible_host: mon2
-              # glibc 2.35 — inside an ubuntu:22.04 container, run:
-              # `cargo build --release --bin pt --features native-ml --locked`
-              # Override via -e ptask_binary=...
+            ptask-client-a:
+              ansible_host: client-a.example
+            ptask-client-b:
+              ansible_host: client-b.example
+              # Older glibc example — build inside ubuntu:22.04
               ptask_arch_override: x86_64-ubuntu22
-            mon3:
-              ansible_host: mon3
-              # aarch64 — natively or in an arm64 container, run:
-              # `cargo build --release --bin pt --features native-ml --target aarch64-unknown-linux-gnu --locked`
+            ptask-client-arm:
+              ansible_host: client-arm.example
               ptask_arch_override: aarch64
-            arx1:
-              ansible_host: arx1
-            arx2:
-              ansible_host: arx2
-            arx3:
-              ansible_host: arx3
-            arx4:
-              ansible_host: arx4
-            fox-n0:
-              ansible_host: fox-n0
-            fox-n1:
-              ansible_host: fox-n1

@@ -25,3 +25,5 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.8
+# Workspace crates use `license-file = "LICENSE"` (no SPDX expression).
+private = { ignore = true }

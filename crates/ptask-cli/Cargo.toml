@@ -2,8 +2,8 @@
 name = "ptask-cli"
 description = "pt — the pTask command-line interface"
 version.workspace = true
+publish = false
 edition.workspace = true
-license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true

@@ -35,7 +35,7 @@ pt mcp                                            # MCP server over stdio
 |---|---|---|
 | CLI | `pt <verb>` | `--json` for machine output, `--idempotency-key` for safe retries |
 | TUI | `pt` / `pt tui` | ratatui |
-| Sync API | `pt serve` | axum; canonical store on tensor-core, clients use `pt remote` |
+| Sync API | `pt serve` | axum; canonical store on one host, clients use `pt remote` |
 | Telegram | `pt bot` | Bot API long-poll |
 | MCP (agents) | `pt mcp` (stdio) or `/mcp` mount on the server | 11 tools; bearer-gated HTTP for HAL, scoped REST tokens for other agents — [`docs/agent-surface.md`](docs/agent-surface.md) |
 | Web | [`dashboard/`](dashboard/) | **PTASK Triage Cockpit** — read-only Python sidecar over the same DB; writes delegate to the `pt` binary |
@@ -63,14 +63,16 @@ Fleet topology (canonical store, Litestream WAL replication to CephFS, per-node 
 - [`docs/recurrence.md`](docs/recurrence.md) — recurrence semantics (`every` vs `every!`)
 - [`docs/sync-api.md`](docs/sync-api.md) — HTTP API
 - [`docs/agent-surface.md`](docs/agent-surface.md) — MCP tools, claim/lease mechanics, provenance
-- [`docs/architecture.md`](docs/architecture.md) — fleet topology and canonical-store election
+- [`docs/architecture.md`](docs/architecture.md) — self-hosted topology and canonical-store election
 - [`docs/operations.md`](docs/operations.md) — backups, timers, runbooks
 - [`docs/master-plan.md`](docs/master-plan.md) — the historical 12-phase build plan (complete) and design lineage
 
 ## Design lineage
 
-Linear's data model (fixed status categories, `<TEAM>-<N>` IDs, cycles), Todoist's quick-add + filter DSL + recurrence, dstask's git-diffable export, HAL-grade triage. pTask replaced the Python `puretensor-tasks` system (retired from active duty at v1.0; kept for reference). Built phase-by-phase by Claude on `main` with separate Codex review passes, merged by the operator — see `docs/master-plan.md` § "Workflow Contract".
+Linear's data model (fixed status categories, `<TEAM>-<N>` IDs, cycles), Todoist's quick-add + filter DSL + recurrence, dstask's git-diffable export. pTask replaced an earlier Python task store (retired at v1.0). See `docs/master-plan.md` for the design lineage.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Proprietary. Copyright (c) 2026 PureTensor, Inc. All rights reserved.
+See [LICENSE](LICENSE). Source is published for review; use, copying, and
+distribution require a written commercial license from PureTensor.

@@ -218,7 +218,7 @@ Each phase below is a separable deliverable. End state: shippable binary, Python
 - ✅ **0.1.7 — CLI `pt done <PT-N | substring>`** (v0.0.4). Accepts `PT-N`, bare integer, or title substring. Multi-match prints choices and exits non-zero. Logs `status_change` interaction.
 - ✅ **0.1.8 — Skill update.** `~/.claude/skills/ptask/SKILL.md` rewritten to call `pt` with `python3 ~/puretensor-tasks/cli.py` as fallback.
 - ✅ **0.1.9 — CI** (v0.0.5). `.github/workflows/ci.yml`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `scripts/ci-schema-check.sh` (asserts all six pt_* tables exist after migration). cargo-deny deferred — not blocking.
-- ✅ **0.1.10 — Nightly backup** (v0.0.6). `scripts/ptask-backup.sh` (Python `sqlite3.backup()` → scp to `mon1:/mnt/cephfs/ptask-backups/`, 30-day retention). User-mode systemd unit at `scripts/systemd/ptask-backup.{service,timer}`, OnCalendar=`*-*-* 03:17`, RandomizedDelaySec=300. Installed + enabled + linger on. First snapshot verified at `mon1:/mnt/cephfs/ptask-backups/ptask-tasks-2026-05-13.db` (5.35 MB).
+- ✅ **0.1.10 — Nightly backup** (v0.0.6). `scripts/ptask-backup.sh` (Python `sqlite3.backup()` → scp to `backup-host:/var/backups/ptask/`, 30-day retention). User-mode systemd unit at `scripts/systemd/ptask-backup.{service,timer}`, OnCalendar=`*-*-* 03:17`, RandomizedDelaySec=300. Installed + enabled + linger on. First snapshot verified at `backup-host:/var/backups/ptask/ptask-tasks-2026-05-13.db` (5.35 MB).
 
 **Exit criteria — all met:** Binary `pt` deployed to `~/.cargo/bin/pt`. Backfill minted PT-1..PT-204 against the live DB. `pt add` / `pt list` / `pt done` round-trip works on live data (test row PT-205 created + completed during smoke). 15/15 unit tests green; rustfmt / clippy clean. First backup landed in Ceph.
 
@@ -385,9 +385,9 @@ timeouts, transient retry, and detailed `distill.failed` payloads.
 - ✅ **0.10.2 — Ansible playbook** (v0.9.2). `scripts/ansible/ptask.yml` + `scripts/ansible/inventory.yml`. Idempotent install of `pt` binary + four user-mode systemd timers (`ptask-backup`, `ptask-distill`, `ptask-accountability`, `ptask-scoring`) to every tier-0 node. On non-canonical hosts the binary is installed but timers stay disabled — they'll proxy through `pt serve` after v0.9.5. `loginctl enable-linger` keeps timers alive across operator logout. `ansible-playbook --syntax-check` passes.
 - ✅ **0.10.3 — Canonical-store election** (v0.9.3). Locked to mon1. `docs/architecture.md` captures the topology, role split (canonical / client / excluded), env-var matrix, and recovery procedure. Re-audit gate at v0.10 if read pressure on mon1 justifies arx2.
 - ✅ **0.10.4 — Litestream replication** (v0.9.4). `scripts/litestream/litestream.yml` + `scripts/systemd/ptask-litestream.service` stream the WAL to a Ceph rados gateway. `PTASK_LITESTREAM_*` env from `~/.config/litestream/.env`. RPO < 1 min, snapshot daily, retention 30 days. `wal_autocheckpoint = 0` pinned so Litestream owns checkpoints. Full deploy + restore + rollback runbook in `docs/operations.md`. Live deploy gated on operator: Ceph creds + bucket creation.
-- ✅ **0.10.5 — Fleet read-only clients** (v0.9.5). `pt remote {add,list,done}` subcommands speak the v0.4.2 `/sync` wire protocol against `PTASK_SYNC_URL` (default `http://100.121.42.54:9501`). `ptask_core::Task` gains `Deserialize` for client-side rehydration. Quick-add grammar reused so `pt remote add` matches the local `pt add` UX. Mock-/sync tests cover the three verbs end-to-end.
+- ✅ **0.10.5 — Fleet read-only clients** (v0.9.5). `pt remote {add,list,done}` subcommands speak the v0.4.2 `/sync` wire protocol against `PTASK_SYNC_URL` (default `http://127.0.0.1:9501`). `ptask_core::Task` gains `Deserialize` for client-side rehydration. Quick-add grammar reused so `pt remote add` matches the local `pt add` UX. Mock-/sync tests cover the three verbs end-to-end.
 
-**Exit criteria — met (v1.0.3):** all deployment artefacts ship. Live fleet activation completed 2026-05-14 on **tensor-core** (not mon1; pre-v1.0 docs were ahead of reality). Multi-arch handling on mon2 (glibc 2.35) + mon3 (aarch64) documented in `scripts/ansible/inventory.yml` and `docs/architecture.md`.
+**Exit criteria — met (v1.0.3):** all deployment artefacts ship. Live fleet activation completed 2026-05-14 on **the canonical host** (not mon1; pre-v1.0 docs were ahead of reality). Multi-arch handling on mon2 (glibc 2.35) + mon3 (aarch64) documented in `scripts/ansible/inventory.yml` and `docs/architecture.md`.
 
 ---
 
@@ -397,11 +397,11 @@ timeouts, transient retry, and detailed `distill.failed` payloads.
 
 **Sub-sections:**
 - 🟡 **1.0.1 — Performance pass** (v0.10.1). `criterion` bench scaffold at `crates/ptask-cli/benches/pt_bench.rs` covering `add quickadd-parse`, `add insert-then-list-100`, `list-1000-pending-top20`, `next-500-no-deps`. p99 < 50ms on 10k-task DB and the CI gate stay v1.0.x re-attack — current benches run at 100/500/1000-task populations, enough to catch regressions but not yet enforced.
-- ✅ **1.0.2 — Documentation** (v0.10.2). `docs/cli-reference.md`, `docs/dsl.md`, `docs/recurrence.md`, `docs/sync-api.md`, `docs/migration.md` shipped. `docs/operations.md` covers backup / distill / accountability / scoring / litestream / pt serve. `docs/architecture.md` covers fleet topology (canonical = tensor-core post-v1.0.3). `docs/master-plan.md` stays the rolling source of truth.
+- ✅ **1.0.2 — Documentation** (v0.10.2). `docs/cli-reference.md`, `docs/dsl.md`, `docs/recurrence.md`, `docs/sync-api.md`, `docs/migration.md` shipped. `docs/operations.md` covers backup / distill / accountability / scoring / litestream / pt serve. `docs/architecture.md` covers fleet topology (canonical = the canonical host post-v1.0.3). `docs/master-plan.md` stays the rolling source of truth.
 - ✅ **1.0.3 — Manpage** (v0.10.1). `pt gen-manpage` via `clap_mangen` 0.3. Pre-rendered at `docs/gen/pt.1`.
 - ✅ **1.0.4 — Shell completions** (v0.10.1). `pt gen-completions {bash|zsh|fish}` via `clap_complete`. Pre-rendered at `docs/gen/{pt.bash, _pt, pt.fish}`.
 - ❌ **1.0.5 — Bretalon post.** Withdrawn (category error). Bretalon is a separate UK Ltd with its own editorial surface for external subjects; cross-publishing a PureTensor internal-tool announcement there doesn't make sense. The launch is internal — repo + the activation report at `~/reports/cc/2026-05-14_04-41_ptask-v1-final-activation-handover.md` are the artefacts.
-- ✅ **1.0.6 — Tag and release.** v1.0.0 tagged on both remotes 2026-05-14; v1.0.2 fix-up landed via PR #11. `~/puretensor-tasks/` archived to `~/puretensor-tasks-legacy/` read-only on tensor-core during the activation pass, with live `.env` + `tasks.db` carved out so timers keep firing.
+- ✅ **1.0.6 — Tag and release.** v1.0.0 tagged on both remotes 2026-05-14; v1.0.2 fix-up landed via PR #11. `~/puretensor-tasks/` archived to `~/puretensor-tasks-legacy/` read-only on the canonical host during the activation pass, with live `.env` + `tasks.db` carved out so timers keep firing.
 
 **Exit criteria — met:** `pt --help` covers every verb, docs cover every config flag, the binary is live fleet-wide, the Python tree is archived, the skills no longer reference Python fallbacks.
 
@@ -409,35 +409,35 @@ timeouts, transient retry, and detailed `distill.failed` payloads.
 
 ### v1.0.4 — k3s puretensor-tasks namespace retired ✅ shipped
 
-Discovered during v1.0.3 verification that a second pTask deployment had been running in k3s the entire time (namespace `puretensor-tasks` on mon1, image `100.92.245.5:3002/puretensor/puretensor-tasks:v2.0.4`, behind `https://tasks.fox/`). Up 63 days, last redeployed 15 days ago. The operator's day-to-day surface was this k3s pod, not tensor-core's Rust binary; v1.0.3's "canonical = tensor-core" was correct after the activation but missed the live shadow deployment.
+Discovered during v1.0.3 verification that a second pTask deployment had been running in k3s the entire time (namespace `puretensor-tasks` on mon1, image `100.92.245.5:3002/puretensor/puretensor-tasks:v2.0.4`, behind `the previous HTTP task service`). Up 63 days, last redeployed 15 days ago. The operator's day-to-day surface was this k3s pod, not the canonical host's Rust binary; v1.0.3's "canonical = the canonical host" was correct after the activation but missed the live shadow deployment.
 
-UUID union: 132 overlap, 306 mon1-only, 72 tc-only → **510 tasks** on the consolidated tensor-core DB. Soft-merge preserves both histories — neither side's recent work was lost.
+UUID union: 132 overlap, 306 mon1-only, 72 tc-only → **510 tasks** on the consolidated the canonical host DB. Soft-merge preserves both histories — neither side's recent work was lost.
 
 Post-merge cleanup:
 - k3s cronjobs `tasks-distill` / `tasks-scoring` / `tasks-accountability` suspended.
 - Deployment scaled to 0; pod terminated.
 - `kubectl delete namespace puretensor-tasks` — namespace + IngressRoutes (`tasks-ingress`, `tasks-ingress-tls`) + PVCs (`tasks-data-rwm`, `tasks-data-rwo`) gone.
-- `https://tasks.fox/` now returns 404 from Traefik (host unrecognised).
+- `the previous HTTP task service` now returns 404 from Traefik (host unrecognised).
 - Litestream replica restarted with a fresh generation `6aa7408a...` reflecting the merged DB.
 
 Tangential: mon1's `k3s.service` unit had a malformed `ExecStart` (`/usr/local/bin/k3s \ --nodeport-addresses primary`) from a prior hand-edit, crash-looping. Restored to baseline `ExecStart=/usr/local/bin/k3s server`; broken unit preserved at `/etc/systemd/system/k3s.service.bak-malformed-20260514T041017`. The `--nodeport-addresses` intent is operator's to re-introduce correctly (`--kube-proxy-arg=nodeport-addresses=...`).
 
 Rollback artefacts at `/tmp/ptask-migration/`:
-- `tensor-core-pre-merge.db` (the prior 204-task DB).
+- `the canonical host-pre-merge.db` (the prior 204-task DB).
 - `from-mon1.db` (the 438-task snapshot pulled out of k3s).
-- `tc-only-tasks.json` (the 72 tensor-core-only rows the soft-merge re-injected).
-- Old Litestream replica at `/mnt/ceph-backup/ptask-litestream/tasks.db.pre-mon1-merge-20260514T035601`.
+- `tc-only-tasks.json` (the 72 the canonical host-only rows the soft-merge re-injected).
+- Old Litestream replica at `/var/backups/ptask-litestream/tasks.db.pre-mon1-merge-20260514T035601`.
 
 ### v1.0.3 — Doc reality reconciliation ✅ shipped
 
-Post-activation patch. The pre-1.0 docs nominated mon1 as the canonical host and an S3 rados-gateway as the Litestream backend; the actual activation runs on tensor-core with a CephFS file replica. v1.0.3 brings the repo in line with reality:
+Post-activation patch. The pre-1.0 docs nominated mon1 as the canonical host and an S3 rados-gateway as the Litestream backend; the actual activation runs on the canonical host with a CephFS file replica. v1.0.3 brings the repo in line with reality:
 
-- `docs/architecture.md` rewritten — canonical = tensor-core, Litestream = CephFS, multi-arch handling, recovery procedures keyed off the live setup.
-- `scripts/ansible/inventory.yml` — tensor-core canonical, per-host `ptask_arch_override` for mon2 (glibc 2.35) + mon3 (aarch64).
+- `docs/architecture.md` rewritten — canonical = the canonical host, Litestream = CephFS, multi-arch handling, recovery procedures keyed off the live setup.
+- `scripts/ansible/inventory.yml` — the canonical host canonical, per-host `ptask_arch_override` for mon2 (glibc 2.35) + mon3 (aarch64).
 - `scripts/litestream/litestream.yml` — CephFS replica active, S3 path retained as documented alternate.
-- `crates/ptask-cli/src/remote.rs` — `default_url` falls back to tensor-core's Tailscale IP `http://100.121.42.54:9501` instead of the unresolving `ptask.ts.puretensor.local`.
+- `crates/ptask-cli/src/remote.rs` — `default_url` falls back to the canonical host's Tailscale IP `http://127.0.0.1:9501` instead of the unresolving `ptask.ts.puretensor.local`.
 - `docs/operations.md` — Litestream section rewritten; `ptask-serve.service` documented.
-- `scripts/systemd/ptask-serve.service` — new, mirrors the live unit on tensor-core.
+- `scripts/systemd/ptask-serve.service` — new, mirrors the live unit on the canonical host.
 - `docs/WAKE_HANDOFF.md` — all gates marked complete with execution log.
 - `docs/announcement.md` — removed (1.0.5 category error).
 
@@ -520,7 +520,7 @@ Operator policy (must adhere):
 
 ## What "Done" Looks Like at v1.0.0
 
-- Single binary `pt` deployed to mon1, mon2, mon3, arx1–4, fox-n0, fox-n1, tensor-core.
+- Single binary `pt` deployed to the canonical host and client nodes.
 - `~/puretensor-tasks/` exists only as `puretensor-tasks-legacy/` for historical reference.
 - The operator captures, finds, finishes, and reviews tasks exclusively through `pt` (CLI, TUI, Telegram, or HAL).
 - The `/ptask` skill calls `pt`; no fallback path remains.

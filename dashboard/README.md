@@ -8,8 +8,8 @@ server's composite `priority_score`, with four runtime-switchable themes.
 
 ## What it is
 
-A **read-only Python stdlib sidecar** that runs alongside the canonical `pt serve`
-on tensor-core. It reads the same `~/puretensor-tasks/tasks.db` **read-only**
+A **read-only Python stdlib sidecar** that runs alongside the canonical `pt serve`.
+It reads the same `~/puretensor-tasks/tasks.db` **read-only**
 (WAL ⇒ safe concurrent reads — zero risk to the canonical server) and **delegates
 all writes to the `pt` binary**, so the canonical mutation path is never bypassed.
 
@@ -136,7 +136,7 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_VOICE_FALLBACK_URL` | `http://127.0.0.1:8772/v1/chat/completions` | local vLLM fallback if Bedrock errors |
 | `PTASK_VOICE_FALLBACK_MODEL` | `mistral-medium-3.5` | fallback model id |
 
-## Deploy (tensor-core)
+## Deploy
 
 ```bash
 # secrets (not in git)
