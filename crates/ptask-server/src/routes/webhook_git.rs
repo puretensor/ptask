@@ -43,7 +43,6 @@ struct PushEvent {
     pub commits: Vec<PushCommit>,
     /// PR-style payloads put the title elsewhere; v0.5.x scans commits only.
     #[serde(default, rename = "ref")]
-    #[allow(dead_code)]
     pub git_ref: Option<String>,
 }
 
@@ -130,6 +129,27 @@ async fn handle(
                 .into_response();
         }
     };
+
+    // Magic-word Closes/Fixes apply on merge to the default branch, not on
+    // every feature-branch push. The payload already carries `ref`; it was
+    // deserialized and then ignored.
+    if !closes_from_git_ref(event.git_ref.as_deref()) {
+        info!(
+            target: "ptask::webhook",
+            source,
+            git_ref = event.git_ref.as_deref().unwrap_or(""),
+            "ignoring close directives off the default branch"
+        );
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "closed": [],
+                "errors": [],
+                "skipped_ref": event.git_ref,
+            })),
+        )
+            .into_response();
+    }
 
     let mut closed: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -292,6 +312,11 @@ fn close_event_uuid(source: &str, commit: &PushCommit, pt_id: &str) -> String {
     format!("git:{}:{}:{}:close", source, commit_key, pt_id)
 }
 
+/// True when this push landed on a default branch (`main` or `master`).
+fn closes_from_git_ref(git_ref: Option<&str>) -> bool {
+    matches!(git_ref, Some("refs/heads/main" | "refs/heads/master"))
+}
+
 /// HMAC-SHA256(body, secret) compared in constant time to `signature_hex`.
 /// Empty secret → reject all signatures (we don't want a misconfigured
 /// install to silently accept everything).
@@ -314,6 +339,15 @@ fn verify_hmac(body: &[u8], secret: &str, signature_hex: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closes_only_on_default_branch_refs() {
+        assert!(closes_from_git_ref(Some("refs/heads/main")));
+        assert!(closes_from_git_ref(Some("refs/heads/master")));
+        assert!(!closes_from_git_ref(Some("refs/heads/feature/fixes-pt-42")));
+        assert!(!closes_from_git_ref(Some("refs/tags/v3.13.1")));
+        assert!(!closes_from_git_ref(None));
+    }
 
     #[test]
     fn verify_rejects_empty_secret() {
