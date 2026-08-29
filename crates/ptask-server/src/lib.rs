@@ -1327,6 +1327,64 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn gitea_webhook_ignores_fixes_on_a_feature_branch() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let db = open_test_db();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("do not close from a feature branch"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let pt = t.pt_id.clone().unwrap();
+        let body = serde_json::json!({
+            "ref": "refs/heads/feature/fixes-it",
+            "commits": [
+                { "id": "abc123", "message": format!("Fixes {}: ship it", pt) }
+            ]
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-secret").unwrap();
+        mac.update(&body_bytes);
+        let sig = hex::encode(mac.finalize().into_bytes());
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), Default::default(), hooks));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/webhook/gitea")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("X-Gitea-Signature", &sig)
+                    .body(Body::from(body_bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["closed"], serde_json::json!([]));
+        assert_eq!(v["skipped_ref"], "refs/heads/feature/fixes-it");
+        db.with_conn(|c| {
+            let status: String = c
+                .query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "pending");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn gitea_webhook_rejects_bad_signature() {
         let db = open_test_db();
         let hooks = WebhookConfig {
