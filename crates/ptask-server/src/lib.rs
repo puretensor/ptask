@@ -1576,6 +1576,67 @@ Don't forget the sourdough.\r\n";
         assert_eq!(stored.title, "keep this title");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_done_reports_advanced_for_a_recurring_task() {
+        let db = open_test_db();
+        let rec = ptask_core::recurrence::parse("every monday").unwrap();
+        let now = ptask_core::dates::now_in_operator_tz().unwrap();
+        let mut deadline = now.clone();
+        while deadline.weekday() != ptask_core::jiff::civil::Weekday::Monday {
+            deadline = deadline
+                .checked_add(ptask_core::jiff::Span::new().days(1))
+                .unwrap();
+        }
+        let mut new = ptask_core::NewTask::minimal("standup");
+        new.deadline = Some(ptask_core::dates::format_iso(&deadline));
+        let task = ptask_core::tasks::create_with_extensions(
+            &db,
+            new,
+            ptask_core::Extensions {
+                recurrence: Some(rec),
+                ..Default::default()
+            },
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{}/done", task.id))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let message = v["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("advanced to "),
+            "dashboard claimed {message:?} for a recurring task"
+        );
+        db.with_conn(|c| {
+            let status: String = c
+                .query_row("SELECT status FROM tasks WHERE id=?1", [&task.id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "pending");
+            Ok(())
+        })
+        .unwrap();
+    }
+
     /// PHASE-7 GATE (server side): the absorbed cockpit surface. Basic auth
     /// gates every /api route (401 without, 200 with); the task list carries
     /// the sidecar's derived fields; and a full browser triage loop

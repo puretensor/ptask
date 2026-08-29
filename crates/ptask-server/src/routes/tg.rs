@@ -96,25 +96,36 @@ fn callback_blocking(
         event_uuid: Some(event_uuid),
     };
     let result = match verb {
-        "ptdone" => ptask_core::tasks::mark_done(&state.db, &task, &ctx).map(|_| ()),
-        "ptdismiss" => ptask_core::tasks::dismiss(&state.db, &task.id, &ctx),
+        "ptdone" => {
+            ptask_core::tasks::mark_done(&state.db, &task, &ctx).map(|outcome| match outcome {
+                ptask_core::tasks::DoneOutcome::Completed => "done".to_string(),
+                ptask_core::tasks::DoneOutcome::Advanced { next_deadline } => {
+                    format!("advanced:{next_deadline}")
+                }
+            })
+        }
+        "ptdismiss" => {
+            ptask_core::tasks::dismiss(&state.db, &task.id, &ctx).map(|_| "dismissed".to_string())
+        }
         "ptsnooze" => match snooze_until_3d() {
-            Ok(until) => ptask_core::tasks::snooze(&state.db, &task.id, &until, &ctx),
+            Ok(until) => ptask_core::tasks::snooze(&state.db, &task.id, &until, &ctx)
+                .map(|_| "snoozed".to_string()),
             Err(e) => Err(e),
         },
         _ => unreachable!(),
     };
     match result {
-        Ok(()) => {
+        Ok(outcome) => {
             tracing::info!(
                 target: "ptask::tg",
-                verb, pt_id = %pt_id,
+                verb, pt_id = %pt_id, outcome = %outcome,
                 "inline-button action executed"
             );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "ok": true, "verb": verb, "pt_id": pt_id,
+                    "outcome": outcome,
                     "title": task.title.chars().take(80).collect::<String>(),
                 })),
             )
