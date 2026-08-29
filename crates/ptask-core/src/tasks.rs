@@ -691,8 +691,8 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     )?;
     tx.execute(
         "INSERT INTO interactions (task_id, action, ts, details)
-         VALUES (?1, 'status_change', ?2, 'Completed via Claude Code')",
-        params![task.id, now],
+         VALUES (?1, 'status_change', ?2, ?3)",
+        params![task.id, now, format!("Completed via {}", ctx.source),],
     )?;
     record_event_tx(
         &tx,
@@ -2444,7 +2444,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(details, "Completed via Claude Code");
+            assert_eq!(details, "Completed via test");
             Ok(())
         })
         .unwrap();

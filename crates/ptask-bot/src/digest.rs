@@ -75,7 +75,7 @@ fn render_evening_at(db: &Db, now: &jiff::Zoned) -> Result<String> {
     db.with_conn(|c| {
         let n_done: i64 = c.query_row(
             "SELECT COUNT(*) FROM interactions
-             WHERE action='status_change' AND details='Completed via Claude Code'
+             WHERE action='status_change' AND details LIKE 'Completed via %'
                AND ts >= ?1 AND ts < ?2",
             [&day_start_utc, &next_day_start_utc],
             |r| r.get(0),
