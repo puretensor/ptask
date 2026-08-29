@@ -280,15 +280,30 @@ impl PtaskMcp {
         json_ok(&v)
     }
 
-    #[tool(description = "Mark a task done.")]
+    #[tool(
+        description = "Mark a task done. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline."
+    )]
     async fn task_done(
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
     ) -> Result<CallToolResult, McpError> {
         let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, false).map_err(domain_err)?;
-        ptask_core::tasks::mark_done(&self.db, &t, &self.ctx()).map_err(domain_err)?;
+        let outcome =
+            ptask_core::tasks::mark_done(&self.db, &t, &self.ctx()).map_err(domain_err)?;
         self.rescore();
-        json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "status": "done"}))
+        match outcome {
+            ptask_core::tasks::DoneOutcome::Completed => json_ok(&serde_json::json!({
+                "ok": true, "pt_id": t.pt_id, "status": "done"
+            })),
+            ptask_core::tasks::DoneOutcome::Advanced { next_deadline } => {
+                json_ok(&serde_json::json!({
+                    "ok": true,
+                    "pt_id": t.pt_id,
+                    "status": "advanced",
+                    "next_deadline": next_deadline,
+                }))
+            }
+        }
     }
 
     #[tool(description = "Dismiss a task (won't-do; distill won't resurrect it).")]
@@ -529,6 +544,57 @@ mod tests {
         })
         .unwrap();
         assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn task_done_reports_advanced_for_a_recurring_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let rec = ptask_core::recurrence::parse("every monday").unwrap();
+        let now = ptask_core::dates::now_in_operator_tz().unwrap();
+        let mut deadline = now.clone();
+        while deadline.weekday() != ptask_core::jiff::civil::Weekday::Monday {
+            deadline = deadline
+                .checked_add(ptask_core::jiff::Span::new().days(1))
+                .unwrap();
+        }
+        let mut new = ptask_core::NewTask::minimal("standup");
+        new.deadline = Some(ptask_core::dates::format_iso(&deadline));
+        let t = ptask_core::tasks::create_with_extensions(
+            &db,
+            new,
+            ptask_core::Extensions {
+                recurrence: Some(rec),
+                ..Default::default()
+            },
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+        let result = mcp
+            .task_done(Parameters(IdArg {
+                id: t.pt_id.clone().unwrap(),
+            }))
+            .await
+            .unwrap();
+        let payload = serde_json::to_value(&result).unwrap();
+        let text = payload
+            .pointer("/content/0/text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("unexpected CallToolResult shape: {payload}"));
+        let body: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["status"], "advanced", "got {body}");
+        assert!(body["next_deadline"].as_str().unwrap().len() > 8);
+        db.with_conn(|c| {
+            let status: String = c
+                .query_row("SELECT status FROM tasks WHERE id=?1", [&t.id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(status, "pending", "recurring task must stay open");
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[tokio::test]

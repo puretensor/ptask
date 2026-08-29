@@ -621,9 +621,16 @@ fn act_done_blocking(state: AppState, headers: HeaderMap, id: String) -> Respons
         Err(r) => return r,
     };
     match ptask_core::tasks::mark_done(&state.db, &task, &dash_ctx()) {
-        Ok(_) => {
+        Ok(ptask_core::tasks::DoneOutcome::Completed) => {
             rescore(&state);
             ok_json(task.pt_id.as_deref(), "done")
+        }
+        Ok(ptask_core::tasks::DoneOutcome::Advanced { next_deadline }) => {
+            rescore(&state);
+            ok_json(
+                task.pt_id.as_deref(),
+                &format!("advanced to {next_deadline}"),
+            )
         }
         Err(e) => jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     }

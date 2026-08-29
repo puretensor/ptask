@@ -1835,7 +1835,16 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
             let level = priority::parse(prio).map_err(anyhow::Error::msg)?;
             tasks::update_priority(db, &t.id, level, &ctx)?;
         } else if a.done {
-            tasks::mark_done(db, t, &ctx)?;
+            match tasks::mark_done(db, t, &ctx)? {
+                tasks::DoneOutcome::Completed => {}
+                tasks::DoneOutcome::Advanced { next_deadline } => {
+                    println!(
+                        "  {} advanced to {}",
+                        t.pt_id.as_deref().unwrap_or("-"),
+                        next_deadline
+                    );
+                }
+            }
         } else if a.dismiss {
             tasks::dismiss(db, &t.id, &ctx)?;
         }
@@ -1922,8 +1931,12 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
         match line.trim() {
             "d" => {
                 let t = tasks::resolve_for_lookup(db, uuid, true).map_err(anyhow::Error::msg)?;
-                tasks::mark_done(db, &t, &ctx)?;
-                println!("  done.");
+                match tasks::mark_done(db, &t, &ctx)? {
+                    tasks::DoneOutcome::Completed => println!("  done."),
+                    tasks::DoneOutcome::Advanced { next_deadline } => {
+                        println!("  advanced to {next_deadline}.")
+                    }
+                }
             }
             "x" => {
                 tasks::dismiss(db, uuid, &ctx)?;
