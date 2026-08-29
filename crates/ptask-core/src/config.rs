@@ -180,7 +180,7 @@ impl Config {
                 gemini_model: env_nonempty("GEMINI_CONSOLIDATE_MODEL")
                     .unwrap_or_else(|| "gemini-3.5-flash".into()),
                 local_llm_url: env_nonempty("LOCAL_LLM_URL")
-                    .unwrap_or_else(|| "http://192.168.4.253:8600/v1".into()),
+                    .unwrap_or_else(|| "http://127.0.0.1:8600/v1".into()),
                 local_llm_model: env_nonempty("LOCAL_LLM_MODEL")
                     .unwrap_or_else(|| "nemotron-lightning".into()),
             },
@@ -287,5 +287,22 @@ mod tests {
             std::env::remove_var("LOCAL_LLM_URL");
             std::env::remove_var("LOCAL_LLM_MODEL");
         }
+    }
+
+    #[test]
+    fn local_llm_url_defaults_to_loopback_not_a_fleet_address() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        unsafe {
+            std::env::remove_var("LOCAL_LLM_URL");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(cfg.distill.local_llm_url, "http://127.0.0.1:8600/v1");
+        assert!(
+            !cfg.distill.local_llm_url.contains("192.168."),
+            "default must not encode a machine-local LAN address"
+        );
     }
 }
