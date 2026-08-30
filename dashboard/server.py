@@ -59,7 +59,8 @@ BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 
-VERSION = "0.12.1"
+VERSION = "0.13.0"
+PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png", "/manifest.webmanifest"})
 
 # /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
 # SQL, so nothing user-supplied may pass through unmapped.
@@ -809,6 +810,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/healthz":
             return self._text("OK")
+        # home-screen app assets: iOS fetches the touch icon / manifest outside
+        # the page's credentialed session, so they are public (branding only)
+        if path in PUBLIC_ASSETS:
+            return self._serve_static(path)
         if not self._authed():
             return self._need_auth()
 

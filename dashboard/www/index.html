@@ -2,8 +2,15 @@
 <html lang="en" data-theme="mission">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0a0a0f">
+<!-- home-screen app (Safari "Add to Home Screen"): full-bleed under the status
+     bar / Dynamic Island, our own safe-area padding, own title + icon -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PTASK">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <title>PTASK · Triage Cockpit</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMTAwIDEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9InB0ZyIgeDE9IjAlIiB5MT0iMCUiIHgyPSIxMDAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzAwRDRBQSIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzAwODBGRiIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHg9IjIiIHk9IjIiIHdpZHRoPSI5NiIgaGVpZ2h0PSI5NiIgcng9IjIyIiBmaWxsPSIjMGQxNjIyIiBzdHJva2U9IiMxZDJjM2QiIHN0cm9rZS13aWR0aD0iMiIvPjxwYXRoIGQ9Ik0yMCAyNCBIODAgTDU3IDU0IFY3OCBMNDMgNzAgVjU0IFoiIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNwdGcpIiBzdHJva2Utd2lkdGg9IjUuNSIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjUwIiBjeT0iMjQiIHI9IjAiIGZpbGw9InVybCgjcHRnKSIvPjwvc3ZnPg==">
@@ -127,6 +134,8 @@ header{
   border-bottom:1px solid var(--border);
   position:sticky; top:0; z-index:50;
   transition:background var(--speed);
+  /* standalone iOS: the header paints under the status bar / Dynamic Island */
+  padding-top:env(safe-area-inset-top,0px);
 }
 [data-theme="lcars"] header{border-bottom:4px solid #ff9f43}
 .hdr{display:flex;align-items:center;gap:12px;padding:12px 18px 8px;max-width:1500px;margin:0 auto;flex-wrap:wrap}
@@ -356,6 +365,9 @@ button.chip{font-family:var(--font);cursor:pointer}
 @media(pointer:coarse){.tcard .btn-act,.tcard .btn-done{opacity:1}}
 .tcard .tt{line-height:1.3;margin-bottom:6px;min-height:24px;display:flex;align-items:center}
 .tcard .tm{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+/* snooze · dismiss · done as one unbreakable group at the row's right end */
+.tcard .acts{display:inline-flex;gap:6px;align-items:center;margin-left:auto;flex:none}
+.tcard .acts .btn-done{margin-left:0}
 
 /* timeline */
 .timeline{background:var(--card-bg);border:var(--card-border);border-radius:var(--radius);padding:18px 16px;backdrop-filter:var(--backdrop);box-shadow:var(--shadow);overflow-x:auto}
@@ -598,6 +610,157 @@ body.review #review-sec{display:block}
 .ic{width:1em;height:1em;display:inline-block;vertical-align:-.12em;pointer-events:none}
 .sec-h h2 .ic{margin-right:2px}
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}}
+
+/* ===================================================================== TOUCH
+   Hover styles stick after a tap on touch screens — a card stays "lifted"
+   until you tap something else. Neutralise them where hover doesn't exist. */
+html{-webkit-text-size-adjust:100%}
+body{-webkit-tap-highlight-color:transparent}
+button,[role="button"]{touch-action:manipulation}
+@media(hover:none){
+  .tcard:hover{transform:none;box-shadow:none}
+  .ccard:hover{transform:none;box-shadow:var(--shadow)}
+  .heat td:hover{transform:none}
+  .tl-pt:hover{transform:translate(-50%,-50%)}
+  .dtag{min-height:28px;padding:2px 8px}
+}
+.skip{top:calc(14px + env(safe-area-inset-top,0px))}
+.drawer{padding-top:calc(20px + env(safe-area-inset-top,0px))}
+/* phone-only chrome, hidden everywhere else */
+.tabbar,.phone-only,.lane-tabs{display:none}
+
+/* ===================================================================== PHONE
+   ≤640px is the home-screen app (iPhone 17 Pro Max: 440×956 CSS px, safe
+   areas 59 top / 34 bottom). The board stops being one long page and becomes
+   an app: a two-row header, ONE pane at a time behind a fixed bottom tab bar
+   (Critical · Lanes · Recent · Review · More), lanes shown one at a time via
+   a sticky priority picker so nothing scrolls inside anything else, and the
+   detail drawer / composer become sheets. Desktop is untouched — every rule
+   here is gated on the width and (for the panes) on body.phone, which JS
+   toggles from the same media query. */
+@media(max-width:640px){
+  .wrap{padding:0 12px}
+  section{margin-top:14px}
+  body{padding-bottom:calc(74px + env(safe-area-inset-bottom,0px))}
+  /* header row 1: brand · counts · [+]   row 2: full-width domain switch */
+  .hdr{padding:8px 12px 6px;gap:8px;flex-wrap:nowrap}
+  .cube{width:28px;height:28px}
+  .brandtxt b{font-size:16px}
+  .brandtxt small{display:none}
+  .chips-c{font-size:11px;text-align:right;white-space:normal;line-height:1.35;flex:0 1 auto;min-width:0}
+  .chips-c .cc-open{display:none}
+  .quickadd{flex:none}
+  .quickadd input{display:none}
+  .quickadd button{width:40px;height:36px;padding:0;font-size:22px;line-height:1;border-radius:10px;display:flex;align-items:center;justify-content:center}
+  .quickadd button .lbl{display:none}
+  .hdr-sub{padding:0 12px 8px;gap:8px}
+  .domains{flex:1}
+  .domains button{flex:1;padding:7px 4px;font-size:11px;min-height:34px;text-align:center;justify-content:center}
+  .phone .hdr-sub .themes{display:none}
+  /* panes */
+  body.phone main>section{display:none}
+  body.phone[data-view="crit"] #critical-sec,
+  body.phone[data-view="lanes"] #lanes-sec,
+  body.phone[data-view="recent"] #recent-sec,
+  body.phone[data-view="more"] #timeline-sec,
+  body.phone[data-view="more"] #heat-sec,
+  body.phone[data-view="more"] #more-sec{display:block}
+  .sec-h{margin-bottom:10px}
+  .sec-h .ct{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+  /* critical: size cards to their content — the 3-line floor was for grid rows */
+  .crit-strip{grid-template-columns:1fr;gap:10px}
+  .ccard{padding:12px 14px}
+  .ccard h3{min-height:0;font-size:14px;padding-right:46px}
+  /* done sits in the card's top-right corner instead of wrapping the meta row */
+  .ccard .btn-done{position:absolute;top:10px;right:10px;margin-left:0}
+  .ccard.expanded h3{padding-right:46px}
+  .sec-h h2{white-space:nowrap}
+  #lanes-sec .sec-h .ct,#heat-sec .sec-h .ct,body.phone #review-sec .sec-h{display:none}
+  /* card action buttons travel as one group to the right of the last meta row */
+  .tcard .acts{margin-left:auto}
+  .drawer .dmeta{align-items:center}
+  /* lanes: one lane at a time behind a sticky picker; page scroll, never inner */
+  .lanes{display:block}
+  .lane-tabs{display:flex;gap:3px;background:var(--panel);border:var(--card-border);border-radius:var(--chip-radius);
+    padding:3px;margin-bottom:10px;position:sticky;top:var(--hdr-h,0px);z-index:40;backdrop-filter:var(--backdrop)}
+  .lane-tabs button{flex:1;display:flex;flex-direction:column;align-items:center;gap:1px;min-height:44px;padding:5px 0;
+    background:transparent;border:none;border-radius:calc(var(--chip-radius) - 2px);color:var(--muted);
+    font-family:var(--font);font-weight:800;cursor:pointer;transition:background .15s}
+  .lane-tabs button b{font-size:13px;letter-spacing:.04em}
+  .lane-tabs button b i{font-style:normal;font-weight:700;font-size:11px;color:var(--dim);margin-left:4px;font-variant-numeric:tabular-nums}
+  .lane-tabs button small{font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+  .lane-tabs button.on{background:var(--panel2);box-shadow:inset 0 -2px 0 var(--accent)}
+  .lane-tabs button.on small{color:var(--muted)}
+  .lane-tabs button.p5 b{color:var(--p5t)} .lane-tabs button.p4 b{color:var(--p4t)} .lane-tabs button.p3 b{color:var(--p3t)}
+  .lane-tabs button.p2 b{color:var(--p2t)} .lane-tabs button.p1 b{color:var(--p1t)}
+  .lane-tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  [data-theme="lcars"] .lane-tabs{border-radius:0 14px 14px 0}
+  .lane{display:none;max-height:none;overflow:visible;background:transparent;border:none;padding:0;min-height:0;box-shadow:none}
+  body.phone[data-lane="5"] .lane.l5,body.phone[data-lane="4"] .lane.l4,body.phone[data-lane="3"] .lane.l3,
+  body.phone[data-lane="2"] .lane.l2,body.phone[data-lane="1"] .lane.l1{display:flex}
+  .lane-h{display:none}
+  [data-theme="lcars"] .lane{background:transparent;border-radius:0;padding:0}
+  .lane-body{overflow:visible;max-height:none;-webkit-mask-image:none;mask-image:none}
+  .tcard{padding:11px 12px;font-size:13px;margin-bottom:8px}
+  .tcard .tt{font-size:13px;line-height:1.35}
+  .tcard .tm{gap:6px 8px}
+  /* recent: page scroll + 2-line titles instead of a nested 340px box */
+  .recent{max-height:none;overflow:visible;padding:2px 10px}
+  .rrow{padding:10px 0;font-size:13px}
+  .rrow .tt{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3}
+  .heat{padding:12px 8px}
+  .heat td{padding:10px 2px;font-size:12px}
+  .timeline{padding:16px 12px}
+  /* More pane: appearance switch lives here on the phone */
+  #more-sec .more-card{background:var(--bg2);border:var(--card-border);border-radius:var(--radius);padding:12px 14px}
+  #more-sec .more-card h4{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-bottom:10px}
+  #more-themes .themes{display:flex}
+  #more-themes .themes button{flex:1;min-height:40px;font-size:12px}
+  .statusbar{margin-top:14px;padding:8px 12px;font-size:10px;gap:8px}
+  .review-banner{margin-top:12px;padding:8px 12px;font-size:11px}
+  /* bottom tab bar */
+  .tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:60;
+    background:var(--header-bg);border-top:1px solid var(--border);
+    padding:6px 6px calc(6px + env(safe-area-inset-bottom,0px));backdrop-filter:blur(14px)}
+  [data-theme="crystal"] .tabbar{background:rgba(11,22,34,.82)}
+  [data-theme="exec"] .tabbar{background:rgba(244,246,249,.92)}
+  [data-theme="lcars"] .tabbar{border-top:4px solid #ff9f43}
+  .tabbar button{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+    background:transparent;border:none;color:var(--hdr-muted);font-family:var(--font);font-size:9px;font-weight:700;
+    letter-spacing:.06em;text-transform:uppercase;padding:5px 0 3px;min-height:48px;border-radius:10px;position:relative;cursor:pointer}
+  .tabbar button .ic{width:21px;height:21px;vertical-align:0}
+  .tabbar button.on{color:var(--accent-t)}
+  [data-theme="exec"] .tabbar button{color:var(--dim)}
+  [data-theme="exec"] .tabbar button.on{color:var(--accent-t)}
+  .tabbar button .bd{position:absolute;top:2px;left:calc(50% + 6px);min-width:16px;height:16px;padding:0 4px;border-radius:8px;
+    background:var(--p5);color:var(--ink);font-size:9px;font-weight:800;font-style:normal;line-height:16px;text-align:center}
+  .tabbar button .bd:empty{display:none}
+  .tabbar button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .toast{bottom:calc(70px + env(safe-area-inset-bottom,0px));max-width:calc(100vw - 24px);text-align:center}
+  /* detail drawer → bottom sheet */
+  .drawer{top:auto;left:0;right:0;bottom:0;width:100%;max-height:88dvh;border-left:none;border-top:var(--card-border);
+    border-radius:18px 18px 0 0;transform:translateY(105%);padding:22px 16px calc(18px + env(safe-area-inset-bottom,0px))}
+  .drawer::before{content:"";position:absolute;top:8px;left:50%;width:36px;height:4px;border-radius:2px;background:var(--border);transform:translateX(-50%)}
+  .drawer.open{transform:none}
+  .drawer h3{font-size:16px;line-height:1.35;overflow-wrap:anywhere}
+  .drawer .ddesc{font-size:13px;overflow-wrap:anywhere}
+  .ccard h3,.tcard .tt,.modal-body{overflow-wrap:anywhere}
+  .drawer .devt{font-size:12px}
+  .dclose{top:12px;right:12px;width:32px;height:32px}
+  /* composer: top-anchored so Title/Description sit above the keyboard;
+     16px inputs so iOS Safari stops auto-zooming on focus */
+  #compose.modal{align-items:flex-start;padding:calc(10px + env(safe-area-inset-top,0px)) 10px 10px}
+  #compose .modal-card{max-height:calc(100dvh - env(safe-area-inset-top,0px) - 20px);padding:18px 16px}
+  .modal-card.compose{max-width:none}
+  .cform input[type=text],.cform textarea,.cform input[type=date],.quickadd input{font-size:16px}
+  .cform{gap:12px}
+  .sev button{min-width:0;flex:1 1 30%;padding:10px 4px}
+  .modal-actions{gap:8px}
+  .modal-actions .mbtn{flex:1;padding:12px 10px;font-size:13px}
+  .vbtn{padding:12px 14px}
+  .pmi{padding:11px 12px;font-size:13px}
+  .popover{min-width:180px}
+}
 </style>
 </head>
 <body>
@@ -612,6 +775,11 @@ body.review #review-sec{display:block}
   <symbol id="i-bot" viewBox="0 0 16 16"><rect x="3" y="5.5" width="10" height="7.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 5.5V3M6.2 3h3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="9.2" r="1.05" fill="currentColor"/><circle cx="10" cy="9.2" r="1.05" fill="currentColor"/></symbol>
   <symbol id="i-eng" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.6v2.1M8 12.3v2.1M14.4 8h-2.1M3.7 8H1.6M12.5 3.5 11 5M5 11l-1.5 1.5M12.5 12.5 11 11M5 5 3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
   <symbol id="i-mgmt" viewBox="0 0 16 16"><rect x="1.8" y="4.8" width="12.4" height="8.4" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.8 4.8V3.6a1.1 1.1 0 0 1 1.1-1.1h2.2a1.1 1.1 0 0 1 1.1 1.1v1.2M1.8 8.6h12.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <!-- phone tab bar glyphs -->
+  <symbol id="i-lanes" viewBox="0 0 16 16"><path d="M2 3.5h12M2 8h12M2 12.5h8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.5V8l2.6 1.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-hourglass" viewBox="0 0 16 16"><path d="M4 2h8M4 14h8M5 2c0 3.5 3 4.5 3 6s-3 2.5-3 6M11 2c0 3.5-3 4.5-3 6s3 2.5 3 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="12.5" cy="8" r="1.5" fill="currentColor"/></symbol>
 </svg>
 <a href="#main" class="skip">Skip to dashboard</a>
 <header>
@@ -626,7 +794,7 @@ body.review #review-sec{display:block}
     <div class="chips-c" id="chips-c" aria-label="task counts"></div>
     <div class="quickadd">
       <input id="qa" placeholder="new task…" maxlength="400" aria-label="New task title — opens the composer">
-      <button id="qabtn">+ Add</button>
+      <button id="qabtn" aria-label="New task"><span class="plus">+</span><span class="lbl"> Add</span></button>
     </div>
   </div>
   <div class="hdr-sub">
@@ -656,19 +824,25 @@ body.review #review-sec{display:block}
     <div class="recent" id="recent"><div class="ph">loading…</div></div>
   </section>
 
-  <section>
+  <section id="lanes-sec">
     <div class="sec-h"><h2>Priority Lanes</h2><div class="ln"></div><span class="ct">ranked by composite score within each level</span></div>
     <div class="lanes" id="lanes"><div class="ph">loading…</div></div>
   </section>
 
-  <section>
+  <section id="timeline-sec">
     <div class="sec-h"><h2>Deadline Timeline</h2><div class="ln"></div><span class="ct" id="tl-ct"></span></div>
     <div class="timeline"><div class="tl-track" id="tltrack"><div class="tl-lab" style="left:50%;top:-8px">loading…</div></div></div>
   </section>
 
-  <section>
+  <section id="heat-sec">
     <div class="sec-h"><h2>Neglect Heatmap</h2><div class="ln"></div><span class="ct">pending tasks · priority × age</span></div>
     <div class="heat" id="heat"><div class="ph">loading…</div></div>
+  </section>
+
+  <!-- phone only: the theme switch moves here (JS) so the header stays two rows -->
+  <section id="more-sec" class="phone-only">
+    <div class="sec-h"><h2>Appearance</h2><div class="ln"></div></div>
+    <div class="more-card"><div id="more-themes"></div></div>
   </section>
 
   <div class="review-banner" id="rv-banner"></div>
@@ -685,6 +859,14 @@ body.review #review-sec{display:block}
     <span id="ver"></span>
   </div>
 </main>
+<!-- phone tab bar (display:none above 640px) -->
+<nav class="tabbar" id="tabbar" aria-label="Sections">
+  <button type="button" data-act="pick-view" data-v="crit" aria-label="Critical now"><svg class="ic" aria-hidden="true"><use href="#i-warn"/></svg>Critical<i class="bd" id="tab-crit-bd"></i></button>
+  <button type="button" data-act="pick-view" data-v="lanes" aria-label="Priority lanes"><svg class="ic" aria-hidden="true"><use href="#i-lanes"/></svg>Lanes</button>
+  <button type="button" data-act="pick-view" data-v="recent" aria-label="Recently added"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>Recent</button>
+  <button type="button" data-act="pick-view" data-v="review" aria-label="Review — stalest first"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"/></svg>Review</button>
+  <button type="button" data-act="pick-view" data-v="more" aria-label="Timeline, heatmap and appearance"><svg class="ic" aria-hidden="true"><use href="#i-dots"/></svg>More</button>
+</nav>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="drawer-scrim" id="drawer-scrim"></div>
 <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="Task detail" tabindex="-1">
@@ -758,6 +940,9 @@ function setTheme(t){
   localStorage.setItem('ptask-theme',t);
   $$('#themes button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));
   if(_lastHeat) renderHeat(_lastHeat);   // heat cell inks are computed against the theme base
+  /* status bar / browser chrome colour follows the theme's page background */
+  const bg=getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+  const m=document.querySelector('meta[name="theme-color"]'); if(m&&bg) m.setAttribute('content',bg);
 }
 $$('#themes button').forEach(b=>b.onclick=()=>setTheme(b.dataset.t));
 setTheme(localStorage.getItem('ptask-theme')||'mission');
@@ -943,6 +1128,52 @@ document.addEventListener('click',e=>{
   else if(kind==='domain'){ if(id) setDomainLabel(id,uuid,el.dataset.d==='eng'?'mgmt':'eng'); }
   else if(kind==='flux'){ openFluxMenu(e,el); }
   else if(kind==='pick-flux'){ pickFlux(el.dataset.w); }
+  else if(kind==='pick-view'){ setView(el.dataset.v); }
+  else if(kind==='pick-lane'){ setLane(el.dataset.p); }
+});
+
+/* ---- phone app shell (≤640px): one pane at a time behind the bottom tab
+   bar, one lane at a time behind the lane picker. Both persist. The theme
+   switch physically moves into the More pane on the phone (listeners travel
+   with the node) and back into the header when the viewport widens. ---- */
+const PHONE_MQ=matchMedia('(max-width:640px)');
+const VIEWS=['crit','lanes','recent','review','more'];
+let _view=localStorage.getItem('ptask-view')||'crit', _lane=localStorage.getItem('ptask-lane')||'5';
+const isPhone=()=>document.body.classList.contains('phone');
+function setView(v){
+  if(!VIEWS.includes(v)) v='crit';
+  _view=v; localStorage.setItem('ptask-view',v);
+  document.body.dataset.view=v;
+  $$('#tabbar button').forEach(b=>{const on=b.dataset.v===v; b.classList.toggle('on',on); b.setAttribute('aria-current',on?'page':'false');});
+  if(isPhone()){
+    if(v==='review'&&!_review) toggleReview();
+    else if(v!=='review'&&_review) toggleReview();
+    if(drawerOpen()) closeDrawer();
+    scrollTo({top:0,behavior:'instant'});
+  }
+}
+function setLane(p){
+  p=String(p); if(!'12345'.includes(p)) p='5';
+  _lane=p; localStorage.setItem('ptask-lane',p);
+  document.body.dataset.lane=p;
+  $$('.lane-tabs button').forEach(b=>{const on=b.dataset.p===p; b.classList.toggle('on',on); b.setAttribute('aria-selected',on?'true':'false');});
+}
+function applyPhone(){
+  const on=PHONE_MQ.matches, th=$('#themes');
+  document.body.classList.toggle('phone',on);
+  if(on){ $('#more-themes').appendChild(th); setView(_view); setLane(_lane); }
+  else { $('.hdr-sub').appendChild(th); if(_review&&_view==='review'){} }
+}
+PHONE_MQ.addEventListener('change',applyPhone);
+/* the lane picker sticks just under the header — export its live height */
+new ResizeObserver(()=>document.documentElement.style.setProperty('--hdr-h',document.querySelector('header').offsetHeight+'px'))
+  .observe(document.querySelector('header'));
+/* home-screen app resumed from the background: refresh now, and re-open the
+   SSE stream iOS quietly killed while we were suspended */
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState!=='visible') return;
+  load();
+  if(_es&&_es.readyState===2){ try{_es.close();}catch(_){} _es=null; startSSE(); }
 });
 /* Enter/Space activation for the role=button elements that aren't <button>
    (card titles, timeline points) — real buttons already emit click on them */
@@ -1277,9 +1508,10 @@ function renderChips(s){
   $('#chips-c').innerHTML=
     `<b class="c5">${c5}</b> crit · <b class="c4">${c4}</b> urg`+
     (over>0?` · <b class="cov">${over}</b> over`:'')+
-    ` · <b>${openN}</b> open`+
+    `<span class="cc-open"> · <b>${openN}</b> open</span>`+
     (!fd?'':` · <span data-act="flux" role="button" tabindex="0">+${fd.added}/−${fd.done} ${win}▾</span>`);
   $('#ver').textContent='pt · v'+s.version;
+  const bd=$('#tab-crit-bd'); if(bd) bd.textContent=c5>0?String(c5):'';
 }
 /* live per-domain counts on the header switch */
 function renderDomainCounts(){
@@ -1360,7 +1592,13 @@ function renderLanes(tasks){
   /* snapshot each lane's scroll offset so the 15s auto-refresh doesn't yank a
      reading operator back to the top of the lane */
   $$('.lane-body').forEach(b=>{_laneScroll[b.dataset.p]=b.scrollTop;});
-  $('#lanes').innerHTML=[5,4,3,2,1].map(p=>{
+  /* phone lane picker (display:none on desktop) — first paint lands on the
+     highest non-empty lane if the remembered one is empty */
+  if(first&&isPhone()&&!by[_lane].length){ const nz=[5,4,3,2,1].find(p=>by[p].length); if(nz) _lane=String(nz); }
+  const picker=`<div class="lane-tabs" role="tablist" aria-label="Priority lane">`+[5,4,3,2,1].map(p=>
+    `<button type="button" role="tab" class="p${p}${String(p)===_lane?' on':''}" aria-selected="${String(p)===_lane}" data-act="pick-lane" data-p="${p}">`+
+    `<b>P${p}<i>${by[p].length}</i></b><small>${PNAME[p]}</small></button>`).join('')+`</div>`;
+  $('#lanes').innerHTML=picker+[5,4,3,2,1].map(p=>{
     const list=by[p], n=list.length;
     return `<div class="lane l${p}">
       <div class="lane-h"><span class="lbl">P${p} ${PNAME[p]}</span><span class="n">${n}</span></div>
@@ -1369,13 +1607,14 @@ function renderLanes(tasks){
         <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
         <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
         ${ptrigger(t)}${originTag(t)}${domainTag(t)}
-        <button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
+        <span class="acts"><button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
         <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
-        <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
+        <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></span></div>
       </div>`).join('')}
       </div>
     </div>`;
   }).join('');
+  document.body.dataset.lane=_lane;
   /* restore scroll position + wire the fade / overflow / keyboard affordances */
   $$('.lane-body').forEach(b=>{
     if(_laneScroll[b.dataset.p]!=null) b.scrollTop=_laneScroll[b.dataset.p];
@@ -1488,16 +1727,18 @@ function toggleReview(){
 }
 function renderReview(){
   const stale=[..._tasks].filter(t=>t.age_days!=null).sort((a,b)=>b.age_days-a.age_days).slice(0,12);
-  $('#rv-banner').textContent='REVIEW MODE — '+stale.length+' stalest · j/k move · x done · d dismiss · s snooze · e edit · r exit';
+  $('#rv-banner').textContent=isPhone()
+    ?'REVIEW — '+stale.length+' stalest, oldest first'
+    :'REVIEW MODE — '+stale.length+' stalest · j/k move · x done · d dismiss · s snooze · e edit · r exit';
   $('#rv-ct').textContent=stale.length+' tasks, oldest first';
   if(!stale.length){$('#review-list').innerHTML='<div class="ph">nothing pending to review'+inDom()+'</div>';return;}
   $('#review-list').innerHTML=stale.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}" style="margin-bottom:10px">
     <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title)}</div>
     <div class="tm">${ptrigger(t)}${originTag(t)}${domainTag(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
       <span class="score">${(t.priority_score||0).toFixed(2)}</span>
-      <button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
+      <span class="acts"><button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
       <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
-      <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></div>
+      <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></span></div>
   </div>`).join('');
   select(0);
 }
@@ -1634,6 +1875,7 @@ async function load(force){
   }
 }
 setDomain(_domain);   // paints the switch + data-domain before first data
+applyPhone();         // phone shell (panes + tab bar) before first data
 load(); startPoll(); startSSE();
 </script>
 </body>

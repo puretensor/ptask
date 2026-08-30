@@ -385,3 +385,37 @@ class VoiceFieldsTests(unittest.TestCase):
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.dirname(__file__)))
     unittest.main()
+
+
+class PublicAssetTests(unittest.TestCase):
+    """Home-screen app assets (touch icon, manifest) are served without auth —
+    iOS fetches them outside the page's credentialed session. Everything else
+    stays behind the Basic-auth gate."""
+
+    def test_touch_icon_and_manifest_are_public_but_index_is_not(self):
+        old_user, old_pass = server.AUTH_USER, server.AUTH_PASS
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server.AUTH_USER, server.AUTH_PASS = "ops", "test-secret"
+        thread.start()
+        try:
+            for path, ctype in (("/apple-touch-icon.png", "image/png"),
+                                ("/icon-192.png", "image/png"),
+                                ("/icon-512.png", "image/png"),
+                                ("/manifest.webmanifest", None)):
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+                connection.request("GET", path)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200, path)
+                if ctype:
+                    self.assertEqual(response.getheader("Content-Type"), ctype, path)
+                self.assertGreater(len(response.read()), 100, path)
+                connection.close()
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+            connection.request("GET", "/")
+            self.assertEqual(connection.getresponse().status, 401)
+            connection.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            server.AUTH_USER, server.AUTH_PASS = old_user, old_pass

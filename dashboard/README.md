@@ -93,6 +93,25 @@ counts at 1.3:1; Mission statusbar/ages at 2.6-2.9:1):
 - **Neglect Heatmap** — pending tasks by priority × age bucket (the real
   "what's been sitting" signal)
 
+### Phone / home-screen app (v0.13, ≤640px)
+
+Designed for Safari "Add to Home Screen" on an iPhone 17 Pro Max (440×956 CSS
+px, safe areas 59 top / 34 bottom): `viewport-fit=cover` + `black-translucent`
+status bar, safe-area padding on the header, tab bar, drawer and composer, a
+180px `apple-touch-icon.png` and PNG manifest icons (served **without** auth —
+iOS fetches them outside the page session; everything else stays gated).
+
+- Two-row header: brand · crit/urg/overdue counts · **+** ; full-width
+  ALL/ENG/MGMT switch. The theme switch moves into the **More** pane.
+- **One pane at a time** behind a fixed bottom tab bar — Critical (with a P5
+  badge) · Lanes · Recent · Review · More (timeline + heatmap + appearance).
+  The pane and lane choice persist in localStorage.
+- **Lanes** show one priority at a time via a sticky P5…P1 picker; the page
+  scrolls, nothing scrolls inside anything else. Recent loses its 340px box.
+- Detail drawer → bottom sheet; composer → top-anchored sheet with 16px inputs
+  (no iOS focus-zoom); hover lifts are disabled where hover doesn't exist.
+- Resuming from the background refreshes and re-opens the SSE stream.
+
 ## API (sidecar)
 
 | Method | Path | Notes |
