@@ -76,17 +76,24 @@ fn resolve_blocking(
         )
             .into_response();
     }
-    let open: Vec<String> = state
-        .db
-        .with_conn(|c| {
-            let mut stmt = c.prepare(
-                "SELECT id FROM tasks
+    let open: Vec<String> = match state.db.with_conn(|c| {
+        let mut stmt = c.prepare(
+            "SELECT id FROM tasks
                  WHERE capture_key = ?1 AND status_v2 NOT IN ('done','dismissed')",
-            )?;
-            let rows = stmt.query_map([&key], |r| r.get::<_, String>(0))?;
-            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-        })
-        .unwrap_or_default();
+        )?;
+        let rows = stmt.query_map([&key], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(target: "ptask::capture", error = %e, "resolve lookup failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("{}", e)})),
+            )
+                .into_response();
+        }
+    };
 
     let mut closed = 0usize;
     let mut pt_ids = Vec::new();
