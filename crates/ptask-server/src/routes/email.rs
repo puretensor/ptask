@@ -51,7 +51,10 @@ fn email_blocking(state: AppState, headers: HeaderMap, body: Bytes) -> axum::res
     };
     let subject = msg.subject().unwrap_or("(no subject)").to_string();
     let body_text = msg.body_text(0).map(|s| s.to_string()).unwrap_or_default();
-    let message_id = msg.message_id().unwrap_or("none").to_string();
+    let source_file = match msg.message_id().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => format!("email:{id}"),
+        None => format!("email:anon:{}", uuid::Uuid::new_v4()),
+    };
 
     // Compose the raw_items text: subject + blank line + body. Distill's
     // speech-act classifier handles the rest. Keep it short — anything too
@@ -61,18 +64,24 @@ fn email_blocking(state: AppState, headers: HeaderMap, body: Bytes) -> axum::res
     } else {
         format!("{}\n\n{}", subject, body_text)
     };
-    let source_file = format!("email:{}", message_id);
 
-    match ptask_core::raw_items::insert(&state.db, &text, "email", &source_file) {
-        Ok(r) => (
-            StatusCode::CREATED,
-            Json(EmailResp {
-                id: r.id,
-                subject,
-                source_file: r.source_file,
-            }),
-        )
-            .into_response(),
+    match ptask_core::raw_items::insert_idempotent(&state.db, &text, "email", &source_file) {
+        Ok((r, duplicate)) => {
+            let status = if duplicate {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
+            (
+                status,
+                Json(EmailResp {
+                    id: r.id,
+                    subject,
+                    source_file: r.source_file,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!(target: "ptask::email", error = %e, "insert failed");
             (
