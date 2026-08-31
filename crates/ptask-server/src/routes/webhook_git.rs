@@ -179,10 +179,23 @@ async fn handle(
                     errors.push(e);
                     continue;
                 }
+                Ok(CloseOutcome::Retry(e)) => {
+                    warn!(target: "ptask::webhook", source, error = %e, "close unavailable");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({"error": e})),
+                    )
+                        .into_response();
+                }
                 Err(e) => {
                     warn!(target: "ptask::webhook", source, error = %e, "blocking close task aborted");
-                    errors.push(format!("{}: internal error", pt_id));
-                    continue;
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!("{}: internal error", pt_id)
+                        })),
+                    )
+                        .into_response();
                 }
                 Ok(CloseOutcome::Applied {
                     event_type,
@@ -223,6 +236,8 @@ enum CloseOutcome {
         result: String,
     },
     Failed(String),
+    /// Store/lookup fault — the provider must retry the delivery.
+    Retry(String),
 }
 
 /// Idempotency lookup, task lookup, and mutation stay together on the
@@ -238,7 +253,7 @@ fn apply_close(
         Ok(Some(_)) => return CloseOutcome::Duplicate,
         Ok(None) => {}
         Err(e) => {
-            return CloseOutcome::Failed(format!("{}: idempotency lookup: {}", pt_id, e));
+            return CloseOutcome::Retry(format!("{}: idempotency lookup: {}", pt_id, e));
         }
     }
 
@@ -247,7 +262,15 @@ fn apply_close(
     // constraint keep replayed deliveries idempotent.
     let task = match tasks::resolve(&state.db, pt_id) {
         Ok(task) => task,
-        Err(e) => return CloseOutcome::Failed(format!("{}: {}", pt_id, e)),
+        Err(e) => {
+            let msg = format!("{}: {}", pt_id, e);
+            return match e {
+                ptask_core::Error::PtIdNotFound(_) | ptask_core::Error::Other(_) => {
+                    CloseOutcome::Failed(msg)
+                }
+                _ => CloseOutcome::Retry(msg),
+            };
+        }
     };
     match tasks::mark_done(
         &state.db,
@@ -277,7 +300,13 @@ fn apply_close(
             }),
             result: format!("{}=advanced→{}", pt_id, next_deadline),
         },
-        Err(e) => CloseOutcome::Failed(format!("{}: {}", pt_id, e)),
+        Err(e) => {
+            let msg = format!("{}: {}", pt_id, e);
+            match e {
+                ptask_core::Error::Other(_) => CloseOutcome::Failed(msg),
+                _ => CloseOutcome::Retry(msg),
+            }
+        }
     }
 }
 
