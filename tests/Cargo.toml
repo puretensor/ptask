@@ -1,0 +1,27 @@
+[workspace]
+
+[package]
+name = "ptask-contract-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ptask-core = { path = "../crates/ptask-core" }
+tempfile = "3"
+
+[[test]]
+name = "contract_pt_id"
+path = "contract_pt_id.rs"
+
+[[test]]
+name = "contract_tokens"
+path = "contract_tokens.rs"
+
+[[test]]
+name = "contract_status_dates"
+path = "contract_status_dates.rs"
+
+[[test]]
+name = "contract_recurrence"
+path = "contract_recurrence.rs"
