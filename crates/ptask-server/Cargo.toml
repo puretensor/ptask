@@ -27,6 +27,7 @@ hmac = { workspace = true }
 hex  = { workspace = true }
 rusqlite = { workspace = true }
 mail-parser = { workspace = true }
+uuid = { workspace = true }
 
 # Semantic dedup for the capture fast lane (v2.5.0). Optional: pulls the
 # candle embedding stack via ptask-distill's native-ml feature. Without it

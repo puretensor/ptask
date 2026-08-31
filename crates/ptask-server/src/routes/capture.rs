@@ -223,53 +223,56 @@ fn capture_blocking(
             .into_response();
     }
     let source = req.source.clone().unwrap_or_else(|| "http".into());
+    let client_key = req
+        .client_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // Identity is (source_file, text) under V014 UNIQUE. Unkeyed captures must
+    // not share the literal "http://capture" breadcrumb — that made two
+    // independent "buy bread" posts collide and 500. A client_key (or an
+    // explicit source_file) is the idempotency identity; otherwise mint one.
     let source_file = req
         .source_file
-        .clone()
-        .or_else(|| req.client_key.clone())
-        .unwrap_or_else(|| "http://capture".into());
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| client_key.clone())
+        .unwrap_or_else(|| format!("http://capture/{}", uuid::Uuid::new_v4()));
 
-    if req.client_key.is_some() {
-        let dup: Option<(i64, String, String)> = state
-            .db
-            .with_conn(|c| {
-                use rusqlite::OptionalExtension;
-                Ok(c.query_row(
-                    "SELECT id, source_type, source_date FROM raw_items
-                     WHERE source_file = ?1 AND text = ?2 ORDER BY id DESC LIMIT 1",
-                    rusqlite::params![source_file, text],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    let (row, duplicate) =
+        match ptask_core::raw_items::insert_idempotent(&state.db, &text, &source, &source_file) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(target: "ptask::capture", error = %e, "insert failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("{}", e)})),
                 )
-                .optional()?)
-            })
-            .unwrap_or(None);
-        if let Some((id, source_type, source_date)) = dup {
-            return (
-                StatusCode::OK,
-                Json(CaptureResp {
-                    id,
-                    source_type,
-                    source_date,
-                    duplicate: true,
-                    task_uuid: None,
-                    pt_id: None,
-                }),
-            )
-                .into_response();
-        }
+                    .into_response();
+            }
+        };
+    // Same key+text after a completed fast-lane is a heartbeat replay: return
+    // the original PT-N and do not bump capture_count (the re-nag loop
+    // client_key exists to kill). duplicate && !processed is the crash window
+    // — raw_item landed, task create did not — so fall through to the lane.
+    if duplicate && row.processed {
+        let (task_uuid, pt_id) = lookup_task_for_capture_key(&state.db, client_key.as_deref());
+        return (
+            StatusCode::OK,
+            Json(CaptureResp {
+                id: row.id,
+                source_type: row.source_type,
+                source_date: row.source_date,
+                duplicate: true,
+                task_uuid,
+                pt_id,
+            }),
+        )
+            .into_response();
     }
-
-    let row = match ptask_core::raw_items::insert(&state.db, &text, &source, &source_file) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(target: "ptask::capture", error = %e, "insert failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("{}", e)})),
-            )
-                .into_response();
-        }
-    };
 
     // ---- critical fast lane -------------------------------------------------
     let severity = effective_severity(&req, &source);
@@ -288,23 +291,32 @@ fn capture_blocking(
         // ---- v2.5.0 signal intelligence: refresh, don't duplicate ----------
         // The same live incident re-captured (deterministic capture_key) or
         // re-worded (semantic >= 0.82) bumps the existing open task instead of
-        // minting a new PT-N. Fail-open: any error falls through to create.
-        let open_incidents: Vec<(String, String, Option<String>)> = state
-            .db
-            .with_conn(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT id, title, capture_key FROM tasks
+        // minting a new PT-N. Listing open incidents must fail closed: a
+        // swallowed error skipped dedup and minted a second incident PT-N.
+        // Semantic-match refresh still falls through to create (fuzzy).
+        let open_incidents: Vec<(String, String, Option<String>)> = match state.db.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, title, capture_key FROM tasks
                      WHERE source_type = 'incident'
                        AND status_v2 NOT IN ('done','dismissed')",
-                )?;
-                let rows = stmt.query_map([], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?))
-                })?;
-                Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-            })
-            .unwrap_or_default();
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?))
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(target: "ptask::capture", error = %e, "open-incident lookup failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("{e}")})),
+                )
+                    .into_response();
+            }
+        };
 
-        let exact = req.client_key.as_ref().and_then(|k| {
+        let exact = client_key.as_ref().and_then(|k| {
             open_incidents
                 .iter()
                 .find(|(_, _, ck)| ck.as_deref() == Some(k.as_str()))
@@ -334,7 +346,7 @@ fn capture_blocking(
                          updated_at = ?1,
                          capture_key = COALESCE(capture_key, ?2)
                      WHERE id = ?3",
-                    rusqlite::params![now, req.client_key, existing_uuid],
+                    rusqlite::params![now, client_key, existing_uuid],
                 )?;
                 Ok(())
             });
@@ -351,7 +363,7 @@ fn capture_blocking(
                         "score": score,
                         "severity": sev,
                         "raw_item_id": row.id,
-                        "client_key": req.client_key,
+                        "client_key": client_key,
                         "title": title,
                     });
                     if let Err(e) = ptask_core::event_log::record(
@@ -399,7 +411,16 @@ fn capture_blocking(
                         .into_response();
                 }
                 Err(e) => {
-                    // Fail open: fall through to normal create.
+                    // Exact-key refresh failed: minting a second PT-N for the
+                    // same live incident is worse than a 500 the client can retry.
+                    if how == "capture_key" {
+                        tracing::error!(target: "ptask::capture", error = %e, "occurrence refresh failed");
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": format!("{e}")})),
+                        )
+                            .into_response();
+                    }
                     tracing::warn!(target: "ptask::capture", error = %e, "occurrence refresh failed — creating new task");
                 }
             }
@@ -428,7 +449,7 @@ fn capture_blocking(
             Ok(t) => {
                 task_uuid = Some(t.id.clone());
                 pt_id = t.pt_id.clone();
-                if let Some(key) = req.client_key.as_deref() {
+                if let Some(key) = client_key.as_deref() {
                     let set = state.db.with_conn(|c| {
                         c.execute(
                             "UPDATE tasks SET capture_key = ?1 WHERE id = ?2",
@@ -463,15 +484,44 @@ fn capture_blocking(
     }
 
     (
-        StatusCode::CREATED,
+        if duplicate {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
         Json(CaptureResp {
             id: row.id,
             source_type: row.source_type,
             source_date: row.source_date,
-            duplicate: false,
+            duplicate,
             task_uuid,
             pt_id,
         }),
     )
         .into_response()
+}
+
+/// Best-effort lookup of a task created under this capture key, so a retried
+/// fast-lane capture can return the original PT-N instead of `task_uuid: null`.
+fn lookup_task_for_capture_key(
+    db: &ptask_core::Db,
+    key: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let Some(key) = key.filter(|k| !k.is_empty()) else {
+        return (None, None);
+    };
+    use rusqlite::OptionalExtension;
+    db.with_conn(|c| {
+        Ok(c.query_row(
+            "SELECT id, pt_id FROM tasks WHERE capture_key = ?1
+             ORDER BY updated_at DESC LIMIT 1",
+            [key],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?)
+    })
+    .ok()
+    .flatten()
+    .map(|(uuid, pt_id)| (Some(uuid), pt_id))
+    .unwrap_or((None, None))
 }

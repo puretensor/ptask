@@ -334,6 +334,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_unkeyed_identical_text_is_two_facts_not_a_500() {
+        // V014 UNIQUE(source_file, text) plus the shared "http://capture"
+        // breadcrumb made a second independent post of the same words fail
+        // with a constraint error. Unkeyed captures must mint a unique
+        // source_file so identical text is two inbox rows, not a 500.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let body = serde_json::json!({"text": "buy bread"});
+        let req = || {
+            Request::builder()
+                .uri("/capture")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        };
+        let resp1 = app.clone().oneshot(req()).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let resp2 = app.oneshot(req()).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::CREATED);
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn capture_client_key_replay_returns_original_row_and_task() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let body = serde_json::json!({
+            "text": "[puresentinel sev3] ceph HEALTH_ERR",
+            "source": "puresentinel:incident:ceph",
+            "severity": 3,
+            "client_key": "probe:ceph:health"
+        });
+        let req = || {
+            Request::builder()
+                .uri("/capture")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        };
+        let resp1 = app.clone().oneshot(req()).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let first: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp1.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(first["duplicate"], true);
+        let pt = first["pt_id"].as_str().unwrap().to_string();
+        let uuid = first["task_uuid"].as_str().unwrap().to_string();
+
+        let resp2 = app.oneshot(req()).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let second: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp2.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(second["duplicate"], true);
+        assert_eq!(second["id"], first["id"]);
+        assert_eq!(second["pt_id"], pt);
+        assert_eq!(second["task_uuid"], uuid);
+        db.with_conn(|c| {
+            let raws: i64 = c.query_row("SELECT COUNT(*) FROM raw_items", [], |r| r.get(0))?;
+            let tasks: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+            let count: i64 = c.query_row(
+                "SELECT capture_count FROM tasks WHERE id = ?1",
+                [&uuid],
+                |r| r.get(0),
+            )?;
+            assert_eq!(raws, 1);
+            assert_eq!(tasks, 1);
+            assert_eq!(count, 1, "heartbeat replay must not bump capture_count");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_sev3_crash_window_replay_still_materialises_a_task() {
+        // Crash window: raw_item landed, fast-lane create did not. A retry
+        // used to return duplicate:true with no task_uuid.
+        let db = open_test_db();
+        ptask_core::raw_items::insert_idempotent(&db, "disk full", "http", "inc-1").unwrap();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let body = serde_json::json!({
+            "text": "disk full",
+            "severity": 3,
+            "client_key": "inc-1"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/capture")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed["duplicate"], true);
+        assert!(parsed["task_uuid"].as_str().is_some());
+        let n: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE source_type='incident'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(n, 1, "fast-lane must still create on unprocessed replay");
+    }
+
+    #[tokio::test]
     async fn sync_round_trip_create_then_done() {
         let db = open_test_db();
         let app = router(AppState::new(
