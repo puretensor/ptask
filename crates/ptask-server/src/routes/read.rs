@@ -11,7 +11,7 @@ use crate::AppState;
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Json};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use serde::Deserialize;
 
@@ -64,6 +64,10 @@ async fn list(
     headers: HeaderMap,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
+    crate::blocking::db_response(move || list_blocking(state, headers, params)).await
+}
+
+fn list_blocking(state: AppState, headers: HeaderMap, params: ListParams) -> Response {
     if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
@@ -101,6 +105,10 @@ async fn next(
     headers: HeaderMap,
     Query(params): Query<NextParams>,
 ) -> impl IntoResponse {
+    crate::blocking::db_response(move || next_blocking(state, headers, params)).await
+}
+
+fn next_blocking(state: AppState, headers: HeaderMap, params: NextParams) -> Response {
     if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
@@ -123,6 +131,10 @@ async fn detail(
     headers: HeaderMap,
     Path(uuid): Path<String>,
 ) -> impl IntoResponse {
+    crate::blocking::db_response(move || detail_blocking(state, headers, uuid)).await
+}
+
+fn detail_blocking(state: AppState, headers: HeaderMap, uuid: String) -> Response {
     if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
@@ -144,6 +156,10 @@ async fn resolve(
     headers: HeaderMap,
     Query(params): Query<ResolveParams>,
 ) -> impl IntoResponse {
+    crate::blocking::db_response(move || resolve_blocking(state, headers, params)).await
+}
+
+fn resolve_blocking(state: AppState, headers: HeaderMap, params: ResolveParams) -> Response {
     if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
