@@ -101,8 +101,12 @@ fn resolve_blocking(
         let task = match ptask_core::tasks::resolve_for_lookup(&state.db, uuid, false) {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!(target: "ptask::capture", error = %e, uuid = %uuid, "resolve lookup failed");
-                continue;
+                tracing::error!(target: "ptask::capture", error = %e, uuid = %uuid, "resolve lookup failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("{}", e)})),
+                )
+                    .into_response();
             }
         };
         let ctx = EventCtx {
@@ -133,7 +137,12 @@ fn resolve_blocking(
                 }
             }
             Err(e) => {
-                tracing::warn!(target: "ptask::capture", error = %e, uuid = %uuid, "mark_done failed");
+                tracing::error!(target: "ptask::capture", error = %e, uuid = %uuid, "mark_done failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("{}", e)})),
+                )
+                    .into_response();
             }
         }
     }
