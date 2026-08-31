@@ -59,18 +59,29 @@ async fn require_hal_bearer(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let bearer = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::to_string);
-    let ok = bearer.is_some_and(|tok| {
-        ptask_core::tokens::resolve(&state.db, &tok)
-            .ok()
-            .flatten()
-            .is_some_and(|id| id.client_id == "hal" && id.scope >= ptask_core::tokens::Scope::Write)
-    });
+    let headers = req.headers().clone();
+    let db = state.db.clone();
+    let ok = match crate::blocking::db_value(move || {
+        crate::auth::presented_token(&headers).is_some_and(|tok| {
+            ptask_core::tokens::resolve(&db, &tok)
+                .ok()
+                .flatten()
+                .is_some_and(|id| {
+                    id.client_id == "hal" && id.scope >= ptask_core::tokens::Scope::Write
+                })
+        })
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "mcp auth lookup failed"})),
+            )
+                .into_response();
+        }
+    };
     if !ok {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -469,6 +480,129 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 1, "fast-lane must still create on unprocessed replay");
+    }
+
+    #[tokio::test]
+    async fn capture_resolve_closes_open_incident_and_rejects_empty_key() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let body = serde_json::json!({
+            "text": "[puresentinel sev3] site down",
+            "severity": 3,
+            "client_key": "probe:site:down"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/capture")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let empty = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/capture/resolve")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"client_key":"  "}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+        let resolved = app
+            .oneshot(
+                Request::builder()
+                    .uri("/capture/resolve")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"client_key":"probe:site:down"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let parsed: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resolved.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed["closed"], 1);
+        db.with_conn(|c| {
+            let status: String = c.query_row(
+                "SELECT status_v2 FROM tasks WHERE capture_key = 'probe:site:down'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(status, "done");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_resolve_task_fetch_error_is_500_not_closed_zero() {
+        // An open incident whose row cannot be loaded used to be skipped, then
+        // HTTP 200 {closed:0} — the same lie as an unknown key, so recovery
+        // stopped retrying while the incident stayed open.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let body = serde_json::json!({
+            "text": "[puresentinel sev3] site down",
+            "severity": 3,
+            "client_key": "probe:poison"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/capture")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET priority = 'not-an-int' WHERE capture_key = 'probe:poison'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let resolved = app
+            .oneshot(
+                Request::builder()
+                    .uri("/capture/resolve")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"client_key":"probe:poison"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
@@ -972,6 +1106,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_delta_row_fetch_error_is_500_not_a_silent_skip() {
+        // A poisoned row used to be treated like a deletion: the fetch Err
+        // was dropped, the cursor still advanced, and the client never saw
+        // the update. A mapping failure must 500 so the caller retries with
+        // the old token.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::tasks::NewTask::minimal("seed"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let req = serde_json::json!({ "sync_token": "*", "commands": [] });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = parsed["sync_token"].as_str().unwrap().to_string();
+
+        let poisoned = ptask_core::tasks::create(
+            &db,
+            ptask_core::tasks::NewTask::minimal("poison"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET priority = 'not-an-int' WHERE id = ?1",
+                rusqlite::params![poisoned.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let req = serde_json::json!({ "sync_token": token, "commands": [] });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn sync_garbage_token_is_400_not_a_full_sync() {
+        // A non-integer token used to parse as 0 (full sync, empty tombstones).
+        // A delta client would merge every live task and never drop deletes.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::tasks::NewTask::minimal("seed"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let req = serde_json::json!({ "sync_token": "12x", "commands": [] });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn sync_full_sync_returns_existing_tasks_without_events() {
         let db = open_test_db();
         // Raw SQL insert: a task that genuinely predates pt_event_log (every
@@ -1130,6 +1362,41 @@ mod tests {
         assert!(s.contains("pt_raw_items_unprocessed "));
         assert!(s.contains("pt_event_log_cursor "));
         assert!(s.contains("pt_views_total "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn metrics_db_error_is_500_not_a_zero_gauge() {
+        // A failed cursor/count query used to render as `pt_event_log_cursor 0`
+        // on HTTP 200, so Prometheus treated a broken store as "caught up".
+        let db = open_test_db();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::tasks::NewTask::minimal("seed"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute("ALTER TABLE pt_event_log RENAME TO pt_event_log_gone", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let app = router(AppState::new(db, Default::default(), Default::default()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let s = std::str::from_utf8(&body).unwrap();
+        assert!(s.contains("pt_metrics_render_error"));
+        assert!(!s.contains("pt_event_log_cursor 0"));
     }
 
     // PTASK_METRICS_TOKEN: read-only credential for /metrics. Accepted on
@@ -1441,6 +1708,54 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn gitea_webhook_store_fault_is_500_so_the_provider_retries() {
+        // A failed idempotency lookup used to be stuffed into `errors` on
+        // HTTP 200, so Gitea/GitHub would not retry and the Closes directive
+        // was lost. Store faults must 500.
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let db = open_test_db();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("close me"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let pt = t.pt_id.clone().unwrap();
+        db.with_conn(|c| {
+            c.execute("ALTER TABLE pt_event_log RENAME TO pt_event_log_gone", [])?;
+            Ok(())
+        })
+        .unwrap();
+        let body = serde_json::json!({
+            "ref": "refs/heads/main",
+            "commits": [{ "id": "abc123", "message": format!("Fixes {pt}: ship it") }]
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-secret").unwrap();
+        mac.update(&body_bytes);
+        let sig = hex::encode(mac.finalize().into_bytes());
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db, Default::default(), hooks));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/webhook/gitea")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("X-Gitea-Signature", &sig)
+                    .body(Body::from(body_bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[tokio::test]
     async fn email_endpoint_parses_subject_and_body() {
         let db = open_test_db();
@@ -1484,6 +1799,67 @@ Don't forget the sourdough.\r\n";
                 .unwrap();
             assert!(text.contains("Buy bread tomorrow"));
             assert!(text.contains("sourdough"));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn email_duplicate_message_id_is_idempotent_not_a_500() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let raw = "Subject: Same mail twice\r\n\
+From: ops@example.test\r\n\
+Message-ID: <dup@example.test>\r\n\
+\r\n\
+body\r\n";
+        let post = || {
+            Request::builder()
+                .uri("/email")
+                .method("POST")
+                .header("content-type", "message/rfc822")
+                .body(Body::from(raw))
+                .unwrap()
+        };
+        let resp1 = app.clone().oneshot(post()).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let first: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp1.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let resp2 = app.clone().oneshot(post()).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let second: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp2.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(second["id"], first["id"]);
+
+        // Two emails with no Message-ID must not share email:none and 500.
+        let anon = "Subject: No id\r\nFrom: ops@example.test\r\n\r\nplain\r\n";
+        let post_anon = || {
+            Request::builder()
+                .uri("/email")
+                .method("POST")
+                .header("content-type", "message/rfc822")
+                .body(Body::from(anon))
+                .unwrap()
+        };
+        let a = app.clone().oneshot(post_anon()).await.unwrap();
+        let b = app.oneshot(post_anon()).await.unwrap();
+        assert_eq!(a.status(), StatusCode::CREATED);
+        assert_eq!(b.status(), StatusCode::CREATED);
+        db.with_conn(|c| {
+            let n: i64 = c.query_row("SELECT COUNT(*) FROM raw_items", [], |r| r.get(0))?;
+            assert_eq!(n, 3);
             Ok(())
         })
         .unwrap();

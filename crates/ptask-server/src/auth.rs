@@ -182,7 +182,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn presented_token(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn presented_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -246,5 +246,16 @@ mod tests {
     fn validate_bind_auth_allows_explicit_override() {
         let addr: SocketAddr = "0.0.0.0:9501".parse().unwrap();
         assert!(validate_bind_auth_state(&addr, false, false, true).is_ok());
+    }
+
+    #[test]
+    fn presented_token_accepts_lowercase_bearer_and_x_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "bearer  tok-one  ".parse().unwrap());
+        assert_eq!(presented_token(&headers).as_deref(), Some("tok-one"));
+
+        headers.clear();
+        headers.insert(TOKEN_HEADER, " tok-two ".parse().unwrap());
+        assert_eq!(presented_token(&headers).as_deref(), Some("tok-two"));
     }
 }
