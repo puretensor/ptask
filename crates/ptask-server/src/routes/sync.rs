@@ -174,10 +174,13 @@ fn read_delta(state: &AppState, full_sync: bool, since: i64) -> DeltaRead {
         event_log::deleted_task_uuids_since(&state.db, since).map_err(|e| ("tombstone read", e))?;
     let mut rows = Vec::new();
     for u in &delta_uuids {
-        // Deleted tasks legitimately fail the row fetch — they're
-        // reported through the tombstone list instead.
-        if let Ok(t) = task_by_uuid(&state.db, u) {
-            rows.push(t);
+        // Deleted tasks are absent from `tasks` and arrive as tombstones.
+        // Any other fetch error must 500: swallowing it advanced the cursor
+        // past an update the client never received.
+        match task_by_uuid_opt(&state.db, u) {
+            Ok(Some(t)) => rows.push(t),
+            Ok(None) => {}
+            Err(e) => return Err(("delta task fetch", e)),
         }
     }
     Ok((new_cursor, rows, deleted))
@@ -224,6 +227,26 @@ async fn sync(
             Ok(Err(resp)) => return resp,
             Err(_) => return sync_task_aborted("authentication"),
         };
+
+    // Parse the cursor before applying commands. A garbage token used to
+    // unwrap_or(0) after mutations, which is a full sync with empty
+    // tombstones — a delta client would never drop locally-cached deletes.
+    let (full_sync, since): (bool, i64) = match req.sync_token.as_deref() {
+        None | Some("*") | Some("") => (true, 0),
+        Some(s) => match s.parse::<i64>() {
+            Ok(parsed) => (parsed <= 0, parsed),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "sync_token must be an integer, *, or empty"
+                    })),
+                )
+                    .into_response();
+            }
+        },
+    };
+
     let mut status: BTreeMap<String, Value> = BTreeMap::new();
     let mut temp_map: BTreeMap<String, String> = BTreeMap::new();
 
@@ -277,15 +300,6 @@ async fn sync(
         }
     }
 
-    // Delta: tasks touched since the supplied cursor. Full-sync sentinel "*"
-    // or a missing/zero token returns everything.
-    let (full_sync, since): (bool, i64) = match req.sync_token.as_deref() {
-        None | Some("*") | Some("") => (true, 0),
-        Some(s) => {
-            let parsed = s.parse().unwrap_or(0);
-            (parsed <= 0, parsed)
-        }
-    };
     let read_state = state.clone();
     let (new_cursor, delta_tasks, deleted_task_uuids) =
         match crate::blocking::db_value(move || read_delta(&read_state, full_sync, since)).await {
@@ -600,32 +614,39 @@ fn resolve_task(state: &AppState, args: &Value) -> Result<tasks::Task, anyhow::E
     Err(anyhow::anyhow!("expected args.task_uuid or args.pt_id"))
 }
 
-/// Direct fetch by UUID (no PT-N indirection).
-fn task_by_uuid(db: &ptask_core::Db, uuid: &str) -> Result<tasks::Task, anyhow::Error> {
+/// Direct fetch by UUID (no PT-N indirection). `None` = no such row.
+fn task_by_uuid_opt(db: &ptask_core::Db, uuid: &str) -> ptask_core::Result<Option<tasks::Task>> {
+    use rusqlite::OptionalExtension;
     let conn = db.get()?;
-    let row = conn.query_row(
-        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
-         FROM tasks t
-         WHERE t.id = ?1",
-        [uuid],
-        |r| {
-            Ok(tasks::Task {
-                id: r.get(0)?,
-                pt_id: r.get(1)?,
-                title: r.get(2)?,
-                description: r.get(3).unwrap_or_default(),
-                priority: r.get(4)?,
-                status: r.get(5)?,
-                created_at: r.get(6)?,
-                updated_at: r.get(7)?,
-                deadline: r.get(8)?,
-                source_type: r.get(9)?,
-                ai_reasoning: r.get(10).unwrap_or_default(),
-            })
-        },
-    )?;
+    let row = conn
+        .query_row(
+            "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
+                    t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+             FROM tasks t
+             WHERE t.id = ?1",
+            [uuid],
+            |r| {
+                Ok(tasks::Task {
+                    id: r.get(0)?,
+                    pt_id: r.get(1)?,
+                    title: r.get(2)?,
+                    description: r.get(3).unwrap_or_default(),
+                    priority: r.get(4)?,
+                    status: r.get(5)?,
+                    created_at: r.get(6)?,
+                    updated_at: r.get(7)?,
+                    deadline: r.get(8)?,
+                    source_type: r.get(9)?,
+                    ai_reasoning: r.get(10).unwrap_or_default(),
+                })
+            },
+        )
+        .optional()?;
     Ok(row)
+}
+
+fn task_by_uuid(db: &ptask_core::Db, uuid: &str) -> Result<tasks::Task, anyhow::Error> {
+    task_by_uuid_opt(db, uuid)?.ok_or_else(|| anyhow::anyhow!("task not found: {uuid}"))
 }
 
 #[cfg(test)]
@@ -684,5 +705,12 @@ mod tests {
             "unrelated runtime work was starved for {timer_elapsed:?} while /sync \
              waited for a connection"
         );
+    }
+
+    #[test]
+    fn task_by_uuid_missing_is_none_not_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("t.db")).unwrap();
+        assert!(task_by_uuid_opt(&db, "missing-uuid").unwrap().is_none());
     }
 }
