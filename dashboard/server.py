@@ -8,7 +8,10 @@ to the `pt` binary so the canonical mutation path is never bypassed.
 Endpoints
 ---------
   GET  /healthz                 -> "OK"               (no auth; tunnel/systemd probe)
-  GET  /                        -> www/index.html     (auth)
+  GET  /                        -> www/index.html     (public login shell)
+  GET  /api/auth/check          -> current browser-session status
+  POST /api/auth/login          -> password exchange for an opaque session cookie
+  POST /api/auth/logout         -> revoke the current browser session
   GET  /api/stats               -> counts, throughput, neglect buckets
   GET  /api/tasks?status=&limit&order -> task list + scoring fields (order: score|created)
   GET  /api/critical?limit=     -> top pending by priority_score
@@ -28,9 +31,12 @@ Config (env)
   PTASK_DB         SQLite path (default ~/puretensor-tasks/tasks.db)
   PTASK_BIN        pt binary  (default ~/.cargo/bin/pt)
   PTASK_DASH_BIND  bind addr  (default 0.0.0.0:9510)
-  PTASK_DASH_USER  basic-auth user (default "ops")
-  PTASK_DASH_PASS  basic-auth pass (default: disabled if unset on localhost,
+  PTASK_DASH_USER  compatibility-only basic-auth user (default "ops")
+  PTASK_DASH_PASS  dashboard password (disabled if unset on localhost,
                    required otherwise). Set in the systemd EnvironmentFile.
+  PTASK_DASH_SESSION_STORE  hashed session file (default
+                   ~/.local/state/ptask-dashboard/sessions.json)
+  PTASK_DASH_SECURE_COOKIE  add Secure to the browser cookie (default true)
   PTASK_DASH_WWW   static dir (default ./www next to this file)
 """
 from __future__ import annotations
@@ -51,6 +57,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+from session_auth import LoginThrottle, SessionStore, parse_cookie, session_cookie
+
 HOME = Path.home()
 DB_PATH = os.environ.get("PTASK_DB", str(HOME / "puretensor-tasks" / "tasks.db"))
 PT_BIN = os.environ.get("PTASK_BIN", str(HOME / ".cargo" / "bin" / "pt"))
@@ -58,8 +66,19 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
+SESSION_STORE_PATH = Path(os.environ.get(
+    "PTASK_DASH_SESSION_STORE",
+    str(HOME / ".local" / "state" / "ptask-dashboard" / "sessions.json"),
+))
+COOKIE_SECURE = os.environ.get("PTASK_DASH_SECURE_COOKIE", "1").strip().lower() not in {
+    "0", "false", "no", "off",
+}
+COOKIE_NAME = "ptask_session"
+LOGIN_ATTEMPT_DELAY = 0.250
+SESSIONS = SessionStore(SESSION_STORE_PATH)
+LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png", "/manifest.webmanifest"})
 
 # /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
@@ -654,13 +673,15 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     # -- helpers --
-    def _json(self, obj, code=200):
+    def _json(self, obj, code=200, headers=None):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self._security_headers()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -694,6 +715,11 @@ class Handler(BaseHTTPRequestHandler):
     def _authed(self) -> bool:
         if not AUTH_PASS:  # auth disabled (local dev) when no pass configured
             return True
+        if SESSIONS.validate(self._session_token()):
+            return True
+        # Compatibility for non-browser consumers during the cookie migration.
+        # The server no longer emits a Basic challenge, so human browsers use
+        # the login page and opaque session cookie instead.
         hdr = self.headers.get("Authorization", "")
         if hdr.startswith("Basic "):
             try:
@@ -703,16 +729,15 @@ class Handler(BaseHTTPRequestHandler):
                 return False
         return False
 
+    def _session_token(self) -> str | None:
+        return parse_cookie(self.headers.get("Cookie", ""), COOKIE_NAME)
+
     def _need_auth(self):
-        self.send_response(401)
-        self._security_headers()
-        self.send_header("WWW-Authenticate", 'Basic realm="PTASK"')
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
+        self._json({"error": "authentication required"}, 401)
 
     def _origin_ok(self) -> bool:
-        # Browsers can reuse cached Basic credentials on cross-origin POSTs;
-        # non-browser clients commonly omit Origin and remain compatible.
+        # Session cookies and cached Basic credentials can both ride a browser
+        # request; non-browser clients commonly omit Origin and remain compatible.
         origin = self.headers.get("Origin")
         if origin is None:
             return True
@@ -810,9 +835,14 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/healthz":
             return self._text("OK")
+        if path == "/api/auth/check":
+            if self._authed():
+                return self._json({"authenticated": True})
+            return self._json({"authenticated": False}, 401)
         # home-screen app assets: iOS fetches the touch icon / manifest outside
-        # the page's credentialed session, so they are public (branding only)
-        if path in PUBLIC_ASSETS:
+        # the page's credentialed session. The root is also public because it
+        # contains the login shell; every data endpoint remains gated.
+        if path == "/" or path in PUBLIC_ASSETS:
             return self._serve_static(path)
         if not self._authed():
             return self._need_auth()
@@ -853,11 +883,53 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(e)}, 500)
 
     def do_POST(self):
+        u = urlparse(self.path)
+        if u.path == "/api/auth/login":
+            if not self._origin_ok():
+                return self._json({"error": "cross-origin request rejected"}, 403)
+            body = self._read_json_body()
+            if body is None:
+                return
+            client = self.client_address[0]
+            time.sleep(LOGIN_ATTEMPT_DELAY)
+            remaining = LOGIN_THROTTLE.locked_for(client)
+            if remaining:
+                return self._json(
+                    {"error": "too many attempts; try again later"},
+                    429,
+                    {"Retry-After": str(remaining)},
+                )
+            if not AUTH_PASS:
+                return self._json({"ok": True, "auth_required": False})
+            password = body.get("password") if isinstance(body, dict) else None
+            if not isinstance(password, str) or not hmac.compare_digest(password, AUTH_PASS):
+                remaining = LOGIN_THROTTLE.failure(client)
+                if remaining:
+                    return self._json(
+                        {"error": "too many attempts; try again later"},
+                        429,
+                        {"Retry-After": str(remaining)},
+                    )
+                return self._json({"error": "invalid password"}, 401)
+            LOGIN_THROTTLE.success(client)
+            token = SESSIONS.create()
+            return self._json(
+                {"ok": True},
+                headers={"Set-Cookie": session_cookie(
+                    COOKIE_NAME, token, 24 * 60 * 60, COOKIE_SECURE,
+                )},
+            )
+
         if not self._authed():
             return self._need_auth()
         if not self._origin_ok():
             return self._json({"error": "cross-origin request rejected"}, 403)
-        u = urlparse(self.path)
+        if u.path == "/api/auth/logout":
+            SESSIONS.remove(self._session_token())
+            return self._json(
+                {"ok": True},
+                headers={"Set-Cookie": session_cookie(COOKIE_NAME, "", 0, COOKIE_SECURE)},
+            )
         if u.path == "/api/voice":          # binary audio body, larger cap — own reader
             return self._handle_voice()
         body = self._read_json_body()

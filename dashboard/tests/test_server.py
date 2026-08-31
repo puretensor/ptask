@@ -1,10 +1,12 @@
 import base64
 import http.client
+import json
 import os
 import sqlite3
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 import server
 
@@ -27,6 +29,82 @@ class AuthTests(unittest.TestCase):
     def test_compare_digest_auth_helper_importable(self):
         self.assertRegex(server.VERSION, r"^\d+\.\d+\.\d+$")
         self.assertGreater(server.MAX_POST_BYTES, 400)
+
+    def test_browser_login_uses_opaque_revocable_session(self):
+        old = (
+            server.AUTH_PASS,
+            server.SESSIONS,
+            server.LOGIN_THROTTLE,
+            server.LOGIN_ATTEMPT_DELAY,
+            server.COOKIE_SECURE,
+        )
+        with tempfile.TemporaryDirectory() as td:
+            server.AUTH_PASS = "shared-dashboard-password"
+            server.SESSIONS = server.SessionStore(Path(td) / "sessions.json")
+            server.LOGIN_THROTTLE = server.LoginThrottle()
+            server.LOGIN_ATTEMPT_DELAY = 0
+            server.COOKIE_SECURE = False
+            httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            host = f"127.0.0.1:{httpd.server_port}"
+
+            def request(method, path, body=None, headers=None):
+                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+                payload = json.dumps(body).encode() if body is not None else None
+                merged = dict(headers or {})
+                if payload is not None:
+                    merged["Content-Type"] = "application/json"
+                connection.request(method, path, body=payload, headers=merged)
+                response = connection.getresponse()
+                data = response.read()
+                result = response.status, dict(response.getheaders()), data
+                connection.close()
+                return result
+
+            try:
+                status, headers, _ = request("GET", "/")
+                self.assertEqual(status, 200)
+                status, headers, _ = request("GET", "/api/stats")
+                self.assertEqual(status, 401)
+                self.assertNotIn("WWW-Authenticate", headers)
+
+                origin = {"Origin": f"http://{host}"}
+                status, _, _ = request(
+                    "POST", "/api/auth/login", {"password": "wrong"}, origin,
+                )
+                self.assertEqual(status, 401)
+                status, headers, body = request(
+                    "POST",
+                    "/api/auth/login",
+                    {"password": "shared-dashboard-password"},
+                    origin,
+                )
+                self.assertEqual(status, 200, body)
+                cookie = headers["Set-Cookie"].split(";", 1)[0]
+                self.assertNotIn("shared-dashboard-password", headers["Set-Cookie"])
+                self.assertIn("HttpOnly", headers["Set-Cookie"])
+                self.assertIn("SameSite=Strict", headers["Set-Cookie"])
+
+                session_headers = {"Cookie": cookie}
+                self.assertEqual(request("GET", "/api/auth/check", headers=session_headers)[0], 200)
+                server.SESSIONS = server.SessionStore(Path(td) / "sessions.json")
+                self.assertEqual(request("GET", "/version", headers=session_headers)[0], 200)
+
+                logout_headers = {**session_headers, **origin}
+                self.assertEqual(request("POST", "/api/auth/logout", {}, logout_headers)[0], 200)
+                self.assertEqual(request("GET", "/api/auth/check", headers=session_headers)[0], 401)
+            finally:
+                httpd.shutdown()
+                thread.join(timeout=2)
+                httpd.server_close()
+                (
+                    server.AUTH_PASS,
+                    server.SESSIONS,
+                    server.LOGIN_THROTTLE,
+                    server.LOGIN_ATTEMPT_DELAY,
+                    server.COOKIE_SECURE,
+                ) = old
 
 
 class OriginTests(unittest.TestCase):
@@ -388,11 +466,9 @@ if __name__ == "__main__":
 
 
 class PublicAssetTests(unittest.TestCase):
-    """Home-screen app assets (touch icon, manifest) are served without auth —
-    iOS fetches them outside the page's credentialed session. Everything else
-    stays behind the Basic-auth gate."""
+    """PWA assets and the login shell are public; dashboard data stays gated."""
 
-    def test_touch_icon_and_manifest_are_public_but_index_is_not(self):
+    def test_touch_icon_manifest_and_login_shell_are_public_but_api_is_not(self):
         old_user, old_pass = server.AUTH_USER, server.AUTH_PASS
         httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -413,7 +489,13 @@ class PublicAssetTests(unittest.TestCase):
                 connection.close()
             connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
             connection.request("GET", "/")
-            self.assertEqual(connection.getresponse().status, 401)
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 200)
+            connection.request("GET", "/api/stats")
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 401)
             connection.close()
         finally:
             httpd.shutdown()

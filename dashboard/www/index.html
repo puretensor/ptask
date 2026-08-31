@@ -480,6 +480,25 @@ button.chip{font-family:var(--font);cursor:pointer}
 .statusbar.err .live{color:var(--p4t)}
 .statusbar.err .live .dot{animation:none}
 .statusbar.err #status{color:var(--p4t);font-weight:700}
+.logout-btn{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:6px;
+  padding:5px 9px;font:600 10px var(--font);cursor:pointer;text-transform:var(--uppercase);letter-spacing:var(--letter)}
+.logout-btn:hover,.logout-btn:focus-visible{color:var(--text);border-color:var(--accent);outline:none}
+.auth-gate{position:fixed;inset:0;z-index:500;display:grid;place-items:center;padding:20px;background:var(--bg)}
+.auth-gate[hidden]{display:none}
+.auth-card{width:min(390px,100%);padding:32px;border:var(--card-border);border-radius:var(--radius);
+  background:var(--panel);box-shadow:var(--shadow);text-align:center}
+.auth-mark{width:52px;height:52px;margin:0 auto 12px;filter:drop-shadow(0 0 10px rgba(0,212,170,.35))}
+.auth-title{margin:0;color:var(--text);font:800 26px var(--font-head);letter-spacing:.08em}
+.auth-subtitle{margin:8px 0 22px;color:var(--muted);font-size:12px}
+.auth-form{display:grid;gap:12px}
+.auth-input{width:100%;min-height:46px;padding:11px 13px;border:1px solid var(--border);border-radius:10px;
+  background:var(--bg2);color:var(--text);font:16px var(--font);outline:none}
+.auth-input:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 25%,transparent)}
+.auth-submit{min-height:44px;border:0;border-radius:10px;background:var(--grad);color:var(--ink);
+  font:800 12px var(--font);text-transform:var(--uppercase);letter-spacing:.08em;cursor:pointer}
+.auth-submit:disabled{opacity:.55;cursor:wait}
+.auth-error{min-height:18px;color:var(--p5t);font-size:11px}
+.auth-checking{color:var(--muted);font-size:12px}
 .ph{padding:16px 4px;font-size:12px;color:var(--dim)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @keyframes flash{0%{box-shadow:0 0 0 0 rgba(255,59,92,.7)}100%{box-shadow:0 0 0 16px rgba(255,59,92,0)}}
@@ -763,7 +782,7 @@ button,[role="button"]{touch-action:manipulation}
 }
 </style>
 </head>
-<body>
+<body class="auth-pending">
 <svg style="display:none" aria-hidden="true">
   <symbol id="i-check" viewBox="0 0 16 16"><path d="M2.5 8.5l3.5 3.5 7.5-8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-zzz" viewBox="0 0 16 16"><path d="M2 4h5L2.5 9H8M9 8h4l-3.6 4H13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
@@ -782,6 +801,19 @@ button,[role="button"]{touch-action:manipulation}
   <symbol id="i-dots" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="12.5" cy="8" r="1.5" fill="currentColor"/></symbol>
 </svg>
 <a href="#main" class="skip">Skip to dashboard</a>
+<div id="authGate" class="auth-gate" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+  <div class="auth-card">
+    <svg class="auth-mark" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="auth-ptg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00D4AA"/><stop offset="100%" stop-color="#0080FF"/></linearGradient></defs><path d="M20 24 H80 L57 54 V78 L43 70 V54 Z" fill="none" stroke="url(#auth-ptg)" stroke-width="5.5" stroke-linejoin="round"/></svg>
+    <h1 id="authTitle" class="auth-title">PTASK</h1>
+    <p class="auth-subtitle">Private task dashboard</p>
+    <p id="authChecking" class="auth-checking">Checking session…</p>
+    <form id="authForm" class="auth-form" hidden>
+      <input id="authPassword" class="auth-input" type="password" placeholder="Dashboard password" aria-label="Dashboard password" autocomplete="current-password" />
+      <button id="authSubmit" class="auth-submit" type="submit">Login</button>
+      <div id="authError" class="auth-error" role="alert"></div>
+    </form>
+  </div>
+</div>
 <header>
   <div class="hdr">
     <div class="brand">
@@ -857,6 +889,7 @@ button,[role="button"]{touch-action:manipulation}
     <div class="spacer" style="flex:1"></div>
     <span class="kbd-hints" aria-hidden="true"><b>j/k</b> move · <b>x</b> done · <b>d</b> dismiss · <b>s</b> snooze · <b>e</b> edit · <b>o</b> detail · <b>1-5</b> priority · <b>r</b> review</span>
     <span id="ver"></span>
+    <button id="logout-btn" class="logout-btn" type="button">Log out</button>
   </div>
 </main>
 <!-- phone tab bar (display:none above 640px) -->
@@ -1062,7 +1095,25 @@ function ptrigger(t){
   return `<button class="pchip p${p}" aria-haspopup="menu" data-act="prio" data-id="${id}" data-p="${p}" title="priority P${p} ${PNAME[p]} — click to change">P${p}<span class="car">▾</span></button>`;
 }
 function scoreMini(s){const w=Math.min(100,Math.round(s*100));return `<span class="scoremini"><i style="width:${w}%"></i></span>`;}
-async function api(p){const r=await fetch(p,{headers:{'Accept':'application/json'}});if(!r.ok)throw new Error(p+' '+r.status);return r.json();}
+function showLogin(msg=''){
+  document.body.classList.remove('auth-pending');
+  document.body.classList.add('auth-locked');
+  $('#authGate').hidden=false; $('#authChecking').hidden=true; $('#authForm').hidden=false;
+  $('#authError').textContent=msg;
+  if(typeof _es!=='undefined'&&_es){try{_es.close();}catch(e){} _es=null;}
+  if(typeof stopPoll==='function') stopPoll();
+  setTimeout(()=>$('#authPassword').focus(),0);
+}
+function hideLogin(){
+  document.body.classList.remove('auth-pending','auth-locked');
+  $('#authGate').hidden=true; $('#authPassword').value=''; $('#authError').textContent='';
+}
+async function api(p){
+  const r=await fetch(p,{headers:{'Accept':'application/json'},credentials:'include'});
+  if(r.status===401){showLogin('Your session has expired.');const e=new Error('authentication required');e.auth=true;throw e;}
+  if(!r.ok)throw new Error(p+' '+r.status);
+  return r.json();
+}
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
 
 /* ---- done + quick-add (writes shell out to pt) ---- */
@@ -1869,6 +1920,7 @@ async function load(force){
     renderAll();
     first=false;
   }catch(e){
+    if(e.auth) return;
     /* the board keeps showing the last good data — say so, loudly enough */
     $('#sbar').classList.add('err'); $('#live-lbl').textContent='STALE';
     $('#status').textContent='⚠ connection lost ('+e.message+')'+(_lastGood?' — showing data from '+_lastGood:'')+' · retrying';
@@ -1876,7 +1928,37 @@ async function load(force){
 }
 setDomain(_domain);   // paints the switch + data-domain before first data
 applyPhone();         // phone shell (panes + tab bar) before first data
-load(); startPoll(); startSSE();
+let _appStarted=false;
+function startApp(){
+  hideLogin();
+  if(_appStarted) return;
+  _appStarted=true;
+  load(); startPoll(); startSSE();
+}
+$('#authForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const password=$('#authPassword').value;
+  if(!password) return;
+  $('#authSubmit').disabled=true; $('#authError').textContent='';
+  try{
+    const r=await fetch('/api/auth/login',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});
+    if(r.ok){location.reload();return;}
+    if(r.status===429){const retry=r.headers.get('Retry-After');$('#authError').textContent=retry?`Too many attempts. Try again in ${retry}s.`:'Too many attempts. Try again later.';}
+    else $('#authError').textContent='Invalid password';
+  }catch(e){$('#authError').textContent='Could not sign in. Check your connection.';}
+  $('#authSubmit').disabled=false;
+});
+$('#logout-btn').addEventListener('click',async()=>{
+  try{await fetch('/api/auth/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:'{}'});}catch(e){}
+  location.reload();
+});
+(async()=>{
+  try{
+    const r=await fetch('/api/auth/check',{credentials:'include',headers:{'Accept':'application/json'}});
+    if(r.ok){startApp();return;}
+    showLogin();
+  }catch(e){showLogin('Could not check the session. Check your connection.');}
+})();
 </script>
 </body>
 </html>

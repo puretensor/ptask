@@ -145,8 +145,10 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_DB` | `~/puretensor-tasks/tasks.db` | SQLite path (opened read-only) |
 | `PTASK_BIN` | `~/.cargo/bin/pt` | pt binary for write delegation |
 | `PTASK_DASH_BIND` | `0.0.0.0:9510` | bind address |
-| `PTASK_DASH_USER` | `ops` | basic-auth user |
-| `PTASK_DASH_PASS` | _(unset)_ | basic-auth pass; **required for non-loopback binds** |
+| `PTASK_DASH_USER` | `ops` | compatibility-only Basic-auth user for non-browser clients |
+| `PTASK_DASH_PASS` | _(unset)_ | dashboard password; **required for non-loopback binds** |
+| `PTASK_DASH_SESSION_STORE` | `~/.local/state/ptask-dashboard/sessions.json` | restart-persistent SHA-256 session-token store |
+| `PTASK_DASH_SECURE_COOKIE` | `1` | add `Secure` to the HttpOnly, SameSite=Strict browser cookie |
 | `PTASK_DASH_WWW` | `./www` | static dir |
 | `PTASK_STT_URL` | `http://127.0.0.1:9000/transcribe` | voice STT endpoint (local Whisper); accepts `-F audio=@` |
 | `PTASK_VOICE_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model for voice→task extraction |
@@ -195,6 +197,12 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.14.0 / pTask v3.17.0** — PT-VE login parity: the public shell presents
+  a branded password form instead of a browser Basic-auth prompt, exchanges the
+  dashboard password for an opaque 24-hour HttpOnly session, persists only
+  session-token hashes across restarts, supports explicit logout, and throttles
+  repeated failures (five attempts, five-minute lockout). Existing Basic auth
+  remains compatibility-only for non-browser consumers and is never challenged.
 - **v0.9.1** — state-changing sidecar routes reject browser requests whose
   `Origin` does not match `Host`, preventing cached Basic credentials from
   authorizing cross-origin task or voice mutations. Header-free clients such
