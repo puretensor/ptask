@@ -389,14 +389,24 @@ impl PtaskMcp {
             return Err(McpError::invalid_params("text must be non-empty", None));
         }
         let source = source.unwrap_or_else(|| "mcp".into());
+        // Identity is (source_file, text) under V014 UNIQUE. Unkeyed captures
+        // must not share `mcp://{actor}` — two independent "buy bread" notes
+        // from the same agent would collapse into one inbox row. A client_key
+        // is the idempotency identity; otherwise mint one.
         let source_file = client_key
-            .clone()
-            .unwrap_or_else(|| format!("mcp://{}", self.actor));
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("mcp://{}/{}", self.actor, uuid::Uuid::new_v4()));
         let (row, duplicate) =
             ptask_core::raw_items::insert_idempotent(&self.db, &text, &source, &source_file)
                 .map_err(domain_err)?;
         let mut out = serde_json::json!({"id": row.id, "duplicate": duplicate});
-        if !duplicate && severity.is_some_and(|s| s >= 3) {
+        // `!duplicate` skipped the crash window (row landed, task did not).
+        // `!row.processed` still satisfies PT-1687: a completed capture is
+        // processed, so a retry does not mint a second incident task.
+        if !row.processed && severity.is_some_and(|s| s >= 3) {
             let sev = severity.unwrap();
             let new = ptask_core::NewTask {
                 title: text
@@ -637,5 +647,70 @@ mod tests {
         })
         .unwrap();
         let _ = result;
+    }
+
+    #[tokio::test]
+    async fn unkeyed_capture_of_identical_text_is_two_facts() {
+        // Without a client_key, every capture is a distinct inbox fact. Sharing
+        // mcp://{actor} used to UNIQUE-collapse two independent "buy milk"
+        // notes from the same agent into one row (duplicate: true).
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+
+        let arg = || {
+            Parameters(CaptureArg {
+                text: "buy milk".into(),
+                source: Some("mcp".into()),
+                severity: None,
+                client_key: None,
+            })
+        };
+
+        mcp.task_capture(arg()).await.expect("first");
+        mcp.task_capture(arg()).await.expect("second");
+
+        db.with_conn(|c| {
+            let raws: i64 = c.query_row("SELECT COUNT(*) FROM raw_items", [], |r| r.get(0))?;
+            assert_eq!(
+                raws, 2,
+                "two unkeyed captures of the same text must both land"
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sev3_unprocessed_replay_still_materialises_a_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+        ptask_core::raw_items::insert_idempotent(
+            &db,
+            "[puresentinel sev3] disk full",
+            "mcp",
+            "mcp://sentinel/crash-window",
+        )
+        .unwrap();
+
+        mcp.task_capture(Parameters(CaptureArg {
+            text: "[puresentinel sev3] disk full".into(),
+            source: Some("mcp".into()),
+            severity: Some(3),
+            client_key: Some("mcp://sentinel/crash-window".into()),
+        }))
+        .await
+        .expect("replay");
+
+        db.with_conn(|c| {
+            let tasks: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
+            assert_eq!(
+                tasks, 1,
+                "fast-lane must still create on unprocessed replay"
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 }
