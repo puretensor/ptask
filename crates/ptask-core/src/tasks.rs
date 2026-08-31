@@ -595,6 +595,26 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     let tx = conn.transaction()?;
     let now = iso_now();
 
+    let status_v2: String = tx
+        .query_row(
+            "SELECT status_v2 FROM tasks WHERE id = ?1",
+            [&task.id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                crate::Error::Other(format!("task not found: {}", task.id))
+            }
+            other => other.into(),
+        })?;
+    if status_v2 == "done" {
+        // Already complete: return without a second journal row. A dashboard
+        // double-submit (or two agents) used to insert another task.completed
+        // event and refresh updated_at, which made undo/sync see a fresh
+        // completion that had already happened.
+        return Ok(DoneOutcome::Completed);
+    }
+
     // Look up the recurrence rule, if any.
     let rec_row: Option<(String, String, Option<String>)> = tx
         .query_row(
@@ -1694,6 +1714,41 @@ mod tests {
         let t = create(&db, NewTask::minimal("done logs event"), &EventCtx::test()).unwrap();
         mark_done(&db, &t, &EventCtx::test()).unwrap();
         assert_eq!(event_count(&db, "task.completed"), 1);
+    }
+
+    #[test]
+    fn mark_done_on_already_done_is_idempotent() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("already done"), &EventCtx::test()).unwrap();
+        mark_done(&db, &t, &EventCtx::test()).unwrap();
+        let updated_at: String = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT updated_at FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+
+        let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
+        assert_eq!(outcome, DoneOutcome::Completed);
+        assert_eq!(event_count(&db, "task.completed"), 1);
+        db.with_conn(|c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM interactions WHERE task_id=?1 AND action='status_change'",
+                [&t.id],
+                |r| r.get(0),
+            )?;
+            assert_eq!(n, 1);
+            let later: String =
+                c.query_row("SELECT updated_at FROM tasks WHERE id=?1", [&t.id], |r| {
+                    r.get(0)
+                })?;
+            assert_eq!(later, updated_at);
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
