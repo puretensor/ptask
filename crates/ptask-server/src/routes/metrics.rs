@@ -8,8 +8,8 @@
 use crate::AppState;
 use axum::Router;
 use axum::extract::State;
-use axum::http::{HeaderMap, header};
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use ptask_core::Db;
 use std::fmt::Write;
@@ -19,26 +19,35 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    crate::blocking::db_response(move || metrics_blocking(state, headers)).await
+}
+
+fn metrics_blocking(state: AppState, headers: HeaderMap) -> Response {
     // Same enforce-if-configured gate as the write routes: /metrics leaks
     // task/store counts. When PTASK_API_TOKEN is unset this returns None and
     // the scrape is served (back-compat); when set, a missing/wrong token 401s.
     if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
         return resp;
     }
-    let body = render(&state.db).unwrap_or_else(|e| {
-        format!(
-            "# pt_metrics_render_error: {}\n",
-            e.to_string().replace('\n', " ")
+    match render(&state.db) {
+        Ok(body) => (
+            [(
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
+            body,
         )
-    });
-    (
-        [(
-            header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        body,
-    )
-        .into_response()
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!(
+                "# pt_metrics_render_error: {}\n",
+                e.to_string().replace('\n', " ")
+            ),
+        )
+            .into_response(),
+    }
 }
 
 fn render(db: &Db) -> ptask_core::Result<String> {
@@ -85,7 +94,7 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     })?;
 
     // --- raw_items unprocessed ---
-    let unprocessed = ptask_core::raw_items::unprocessed_count(db).unwrap_or(0);
+    let unprocessed = ptask_core::raw_items::unprocessed_count(db)?;
     writeln!(
         out,
         "# HELP pt_raw_items_unprocessed Unprocessed inbox captures."
@@ -95,13 +104,13 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     writeln!(out, "pt_raw_items_unprocessed {}", unprocessed).ok();
 
     // --- views ---
-    let views = ptask_core::views::list(db).unwrap_or_default();
+    let views = ptask_core::views::list(db)?;
     writeln!(out, "# HELP pt_views_total Saved views count.").ok();
     writeln!(out, "# TYPE pt_views_total gauge").ok();
     writeln!(out, "pt_views_total {}", views.len()).ok();
 
     // --- event log cursor (sync token) ---
-    let cursor = ptask_core::event_log::current_cursor(db).unwrap_or(0);
+    let cursor = ptask_core::event_log::current_cursor(db)?;
     writeln!(
         out,
         "# HELP pt_event_log_cursor Highest pt_event_log.id (sync cursor)."
@@ -134,12 +143,10 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     })?;
 
     // --- recurrence count ---
-    let rec_count: i64 = db
-        .with_conn(|c| {
-            let n: i64 = c.query_row("SELECT COUNT(*) FROM pt_recurrence", [], |r| r.get(0))?;
-            Ok(n)
-        })
-        .unwrap_or(0);
+    let rec_count: i64 = db.with_conn(|c| {
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM pt_recurrence", [], |r| r.get(0))?;
+        Ok(n)
+    })?;
     writeln!(
         out,
         "# HELP pt_recurrence_total Recurring task definitions."
@@ -154,18 +161,16 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     // alert rule fires when this exceeds ~26h (daily timer + slack).
     // -1 = never ran. SQLite's strftime handles the mixed +01:00/UTC
     // offsets these rows carry.
-    let distill_age: i64 = db
-        .with_conn(|c| {
-            let n: Option<i64> = c.query_row(
-                "SELECT CAST(strftime('%s','now') AS INTEGER)
+    let distill_age: i64 = db.with_conn(|c| {
+        let n: Option<i64> = c.query_row(
+            "SELECT CAST(strftime('%s','now') AS INTEGER)
                         - CAST(strftime('%s', MAX(ts)) AS INTEGER)
                  FROM pt_event_log WHERE event_type = 'distill.run'",
-                [],
-                |r| r.get(0),
-            )?;
-            Ok(n.unwrap_or(-1))
-        })
-        .unwrap_or(-1);
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n.unwrap_or(-1))
+    })?;
     writeln!(
         out,
         "# HELP pt_distill_last_success_age_seconds Seconds since the last successful distill run (-1 = never)."
@@ -174,16 +179,14 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     writeln!(out, "# TYPE pt_distill_last_success_age_seconds gauge").ok();
     writeln!(out, "pt_distill_last_success_age_seconds {}", distill_age).ok();
 
-    let distill_failed: i64 = db
-        .with_conn(|c| {
-            let n: i64 = c.query_row(
-                "SELECT COUNT(*) FROM pt_event_log WHERE event_type = 'distill.failed'",
-                [],
-                |r| r.get(0),
-            )?;
-            Ok(n)
-        })
-        .unwrap_or(0);
+    let distill_failed: i64 = db.with_conn(|c| {
+        let n: i64 = c.query_row(
+            "SELECT COUNT(*) FROM pt_event_log WHERE event_type = 'distill.failed'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    })?;
     writeln!(
         out,
         "# HELP pt_distill_failed_total Distill runs recorded as failed."
@@ -197,7 +200,7 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     // forever and wedged everything behind it with no signal at all; the
     // pipeline now walks past it, so this gauge is what makes it visible.
     // Any non-zero value wants a human eye — nothing clears it automatically.
-    let quarantined = ptask_core::raw_items::quarantined_count(db).unwrap_or(0);
+    let quarantined = ptask_core::raw_items::quarantined_count(db)?;
     writeln!(
         out,
         "# HELP pt_distill_quarantined_captures Unprocessed raw_items parked after repeated distill failures."
