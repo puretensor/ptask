@@ -78,7 +78,7 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.14.0"
+VERSION = "0.14.1"
 PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png", "/manifest.webmanifest"})
 
 # /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
