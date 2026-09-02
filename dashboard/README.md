@@ -160,12 +160,22 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 ## Deploy
 
 ```bash
+# One-time: create a clean deployment worktree. Do not serve from the active
+# development checkout at ~/ptask; branch switches there must not change live code.
+git -C ~/ptask fetch origin main
+git -C ~/ptask worktree add -b deploy/ptask-dashboard \
+  ~/worktrees/ptask-production origin/main
+
+# Later releases: fast-forward only after the canonical main commit is merged.
+git -C ~/worktrees/ptask-production pull --ff-only origin main
+
 # secrets (not in git)
 echo 'PTASK_DASH_PASS=<pass>' > ~/puretensor-tasks/.dashboard.env
 chmod 600 ~/puretensor-tasks/.dashboard.env
 
 # user service
-cp ptask-dashboard.service ~/.config/systemd/user/
+cp ~/worktrees/ptask-production/dashboard/ptask-dashboard.service \
+  ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ptask-dashboard
 loginctl enable-linger "$USER"          # survive logout
@@ -197,6 +207,10 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.14.1 / pTask v3.17.1** — production now runs from a dedicated,
+  fast-forward-only worktree instead of the active development checkout or the
+  archived standalone dashboard repository. This prevents branch switches and
+  merge trains from changing the live cockpit source.
 - **v0.14.0 / pTask v3.17.0** — PT-VE login parity: the public shell presents
   a branded password form instead of a browser Basic-auth prompt, exchanges the
   dashboard password for an opaque 24-hour HttpOnly session, persists only
