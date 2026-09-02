@@ -1,0 +1,14 @@
+[Unit]
+Description=pTask reaper — dismiss stale machine-generated tasks (reversible)
+Documentation=https://github.com/puretensor/ptask
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.cargo/bin/pt reap
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=5min

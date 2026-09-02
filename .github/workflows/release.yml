@@ -3,7 +3,8 @@ name: release
 # Fires when an operator pushes a `vX.Y.Z` tag. Builds the `pt` binary
 # for x86_64-unknown-linux-gnu AND aarch64-unknown-linux-gnu (mon3),
 # generates SHA-256 manifests, and attaches everything to the GitHub
-# Release. Built on ubuntu-22.04 so the glibc floor (2.35) covers mon2.
+# Release. Built on the self-hosted tensor-core runner (glibc 2.39; every fleet
+# consumer is 2.39 too); the Gitea release leg pins ubuntu-22.04 for a 2.35 floor.
 #
 # Musl static-binary target deferred: candle + tokenizers + onig need
 # musl-clean build env validation that lives on the workstation, not in

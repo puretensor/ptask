@@ -234,12 +234,80 @@ mod tests {
                     classification TEXT,
                     classification_confidence REAL DEFAULT 0.0,
                     classification_reasoning TEXT DEFAULT ''
-                 );",
+                 );
+                 CREATE UNIQUE INDEX raw_items_identity
+                    ON raw_items (source_file, text);",
             )
             .unwrap();
         }
         std::mem::forget(dir);
         Db::open(&path).unwrap()
+    }
+
+    // ---- Fable pass 2026-09-02 pins (3.18.0) ---------------------------------
+
+    #[tokio::test]
+    async fn capture_repeat_without_client_key_is_idempotent_not_500() {
+        // V014's unique index used to turn an unkeyed re-send into a 500 carrying
+        // raw SQLite text; the insert itself is the idempotency check now.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let body = serde_json::json!({"text": "same text twice", "source": "http-test"});
+        let mut statuses = Vec::new();
+        let mut duplicates = Vec::new();
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/capture")
+                        .method("POST")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            statuses.push(resp.status());
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            duplicates.push(parsed["duplicate"].as_bool().unwrap_or(false));
+        }
+        assert_eq!(statuses, vec![StatusCode::CREATED, StatusCode::OK]);
+        assert_eq!(duplicates, vec![false, true]);
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn sync_refuses_an_unbounded_command_array() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let commands: Vec<serde_json::Value> = (0..crate::routes::sync::MAX_SYNC_COMMANDS + 1)
+            .map(|i| serde_json::json!({"type": "item_add", "uuid": format!("u-{i}"), "args": {"content": "x"}}))
+            .collect();
+        let body = serde_json::json!({"commands": commands});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sync")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

@@ -52,6 +52,14 @@ impl Db {
             | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
+        fn wal_autocheckpoint_override() -> Option<i64> {
+            std::env::var("PTASK_WAL_AUTOCHECKPOINT")
+                .ok()?
+                .trim()
+                .parse::<i64>()
+                .ok()
+        }
+
         let manager = SqliteConnectionManager::file(&path)
             .with_flags(flags)
             .with_init(|c| {
@@ -60,6 +68,14 @@ impl Db {
                 c.pragma_update(None, "synchronous", "NORMAL")?;
                 c.pragma_update(None, "foreign_keys", "ON")?;
                 c.busy_timeout(Duration::from_secs(30))?;
+                // litestream.yml states the DB should open with wal_autocheckpoint=0
+                // so litestream owns the checkpoint cadence; nothing applied it, so
+                // SQLite's 1000-page autocheckpoint competed with the replicator.
+                // Env-gated: a host without litestream must keep the default or its
+                // WAL grows without bound.
+                if let Some(pages) = wal_autocheckpoint_override() {
+                    c.pragma_update(None, "wal_autocheckpoint", pages)?;
+                }
                 Ok(())
             });
 

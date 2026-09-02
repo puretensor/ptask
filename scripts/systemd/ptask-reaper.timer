@@ -1,0 +1,14 @@
+[Unit]
+Description=pTask reaper — daily staleness sweep
+Documentation=https://github.com/puretensor/ptask
+
+[Timer]
+# Daily, early morning, after the nightly backup (03:xx) and before the
+# operator's day. 5min jitter to avoid aligning with other ptask timers.
+OnCalendar=*-*-* 05:20:00
+RandomizedDelaySec=300
+Persistent=true
+Unit=ptask-reaper.service
+
+[Install]
+WantedBy=timers.target

@@ -241,47 +241,38 @@ fn capture_blocking(
         .or_else(|| req.client_key.clone())
         .unwrap_or_else(|| "http://capture".into());
 
-    if req.client_key.is_some() {
-        let dup: Option<(i64, String, String)> = state
-            .db
-            .with_conn(|c| {
-                use rusqlite::OptionalExtension;
-                Ok(c.query_row(
-                    "SELECT id, source_type, source_date FROM raw_items
-                     WHERE source_file = ?1 AND text = ?2 ORDER BY id DESC LIMIT 1",
-                    rusqlite::params![source_file, text],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    // PT-1687 shipped the unique index on (source_file, text); the HTTP lane was
+    // left on the non-tolerant insert, so an unkeyed re-send (and the loser of
+    // two concurrent keyed sends) surfaced as a 500 carrying raw SQLite text.
+    // The insert itself is the idempotency check now: one statement, no race.
+    let row =
+        match ptask_core::raw_items::insert_idempotent(&state.db, &text, &source, &source_file) {
+            Ok((r, duplicate)) => {
+                if duplicate {
+                    return (
+                        StatusCode::OK,
+                        Json(CaptureResp {
+                            id: r.id,
+                            source_type: r.source_type,
+                            source_date: r.source_date,
+                            duplicate: true,
+                            task_uuid: None,
+                            pt_id: None,
+                        }),
+                    )
+                        .into_response();
+                }
+                r
+            }
+            Err(e) => {
+                tracing::error!(target: "ptask::capture", error = %e, "insert failed");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("{}", e)})),
                 )
-                .optional()?)
-            })
-            .unwrap_or(None);
-        if let Some((id, source_type, source_date)) = dup {
-            return (
-                StatusCode::OK,
-                Json(CaptureResp {
-                    id,
-                    source_type,
-                    source_date,
-                    duplicate: true,
-                    task_uuid: None,
-                    pt_id: None,
-                }),
-            )
-                .into_response();
-        }
-    }
-
-    let row = match ptask_core::raw_items::insert(&state.db, &text, &source, &source_file) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(target: "ptask::capture", error = %e, "insert failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("{}", e)})),
-            )
-                .into_response();
-        }
-    };
+                    .into_response();
+            }
+        };
 
     // ---- critical fast lane -------------------------------------------------
     let severity = effective_severity(&req, &source);

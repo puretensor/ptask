@@ -65,6 +65,11 @@ ic2=$(sqlite3 "$SCRATCH/nightly.db" "PRAGMA integrity_check;")
 echo "ptask-restore-verify: mon1 nightly ok ($(basename "$latest"), ${age_h}h old)"
 
 # ---- 3. Off-site freshness ------------------------------------------------
+if [ "$OFFSITE" = "none" ]; then
+    echo "ptask-restore-verify: offsite skipped (PTASK_BACKUP_OFFSITE=none)"
+    echo "ptask-restore-verify: ALL OK"
+    exit 0
+fi
 offsite_host="${OFFSITE%%:*}"
 offsite_dir="${OFFSITE#*:}"
 off_latest=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$offsite_host" \

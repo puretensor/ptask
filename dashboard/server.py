@@ -63,7 +63,9 @@ HOME = Path.home()
 DB_PATH = os.environ.get("PTASK_DB", str(HOME / "puretensor-tasks" / "tasks.db"))
 PT_BIN = os.environ.get("PTASK_BIN", str(HOME / ".cargo" / "bin" / "pt"))
 WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().parent / "www")))
-BIND = os.environ.get("PTASK_DASH_BIND", "0.0.0.0:9510")
+# Loopback by default: the API is pinned to the tailnet address on purpose and
+# the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
+BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
 AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
 SESSION_STORE_PATH = Path(os.environ.get(
@@ -473,7 +475,7 @@ def build_edit_args(tid: str, body: dict) -> tuple[list[str] | None, str | None]
     `pt priority` separately. Returns (None, None) when the body carries no
     field this builder owns.
     """
-    args = ["edit", tid]
+    args = ["edit", tid]  # flags follow the id; a `--` here would make them positional
     title = body.get("title")
     if title is not None:
         if not isinstance(title, str) or not (3 <= len(title.strip()) <= 400):
@@ -722,11 +724,20 @@ class Handler(BaseHTTPRequestHandler):
         # the login page and opaque session cookie instead.
         hdr = self.headers.get("Authorization", "")
         if hdr.startswith("Basic "):
+            # Same lockout as the login form: this path was guessable at request speed.
+            client = self.client_address[0]
+            if LOGIN_THROTTLE.locked_for(client):
+                return False
             try:
                 user, _, pw = base64.b64decode(hdr[6:], validate=True).decode().partition(":")
-                return hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(pw, AUTH_PASS)
+                ok = hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(pw, AUTH_PASS)
             except Exception:  # noqa: BLE001
-                return False
+                ok = False
+            if ok:
+                LOGIN_THROTTLE.success(client)
+            else:
+                LOGIN_THROTTLE.failure(client)
+            return ok
         return False
 
     def _session_token(self) -> str | None:
@@ -941,7 +952,7 @@ class Handler(BaseHTTPRequestHandler):
             tid = m.group(1)
             if not _ID_RE.match(tid):
                 return self._json({"error": "bad id"}, 400)
-            ok, msg = pt_exec(["done", tid])
+            ok, msg = pt_exec(["done", "--", tid])
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         m = re.match(r"^/api/tasks/([^/]+)/priority$", u.path)
@@ -952,7 +963,7 @@ class Handler(BaseHTTPRequestHandler):
             level = body.get("level")
             if not isinstance(level, int) or isinstance(level, bool) or not (1 <= level <= 5):
                 return self._json({"error": "level must be an integer 1..5"}, 400)
-            ok, msg = pt_exec(["priority", tid, str(level)])
+            ok, msg = pt_exec(["priority", "--", tid, str(level)])
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         # Triage verbs the cockpit sends that previously existed only on the
@@ -967,9 +978,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(days, int) or isinstance(days, bool):
                     return self._json({"error": "days must be an integer"}, 400)
                 days = max(1, min(90, days))
-                ok, msg = pt_exec(["snooze", tid, f"{days} days"])
+                ok, msg = pt_exec(["snooze", "--", tid, f"{days} days"])
             else:
-                ok, msg = pt_exec([verb, tid])
+                ok, msg = pt_exec([verb, "--", tid])
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         m = re.match(r"^/api/tasks/([^/]+)/edit$", u.path)
@@ -991,7 +1002,7 @@ class Handler(BaseHTTPRequestHandler):
                 ok1, msg1 = pt_exec(args)
                 ok, msgs = ok and ok1, msgs + [msg1]
             if level is not None:
-                ok2, msg2 = pt_exec(["priority", tid, str(level)])
+                ok2, msg2 = pt_exec(["priority", "--", tid, str(level)])
                 ok, msgs = ok and ok2, msgs + [msg2]
             return self._json({"ok": ok, "message": " · ".join(m for m in msgs if m)},
                               200 if ok else 500)

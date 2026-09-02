@@ -63,9 +63,15 @@ fn email_blocking(state: AppState, headers: HeaderMap, body: Bytes) -> axum::res
     };
     let source_file = format!("email:{}", message_id);
 
-    match ptask_core::raw_items::insert(&state.db, &text, "email", &source_file) {
-        Ok(r) => (
-            StatusCode::CREATED,
+    // Two deliveries of one Message-ID (or two id-less mails with one body) hit
+    // the unique index; the idempotent insert answers 200 for the repeat.
+    match ptask_core::raw_items::insert_idempotent(&state.db, &text, "email", &source_file) {
+        Ok((r, duplicate)) => (
+            if duplicate {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            },
             Json(EmailResp {
                 id: r.id,
                 subject,
