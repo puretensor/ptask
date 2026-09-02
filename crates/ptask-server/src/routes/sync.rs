@@ -198,6 +198,9 @@ fn authenticate_writer(
     )
 }
 
+/// Upper bound on commands per /sync request (413 beyond).
+pub const MAX_SYNC_COMMANDS: usize = 200;
+
 fn sync_task_aborted(stage: &str) -> axum::response::Response {
     warn!(target: "ptask::sync", stage, "sync blocking task aborted");
     (
@@ -224,6 +227,17 @@ async fn sync(
             Ok(Err(resp)) => return resp,
             Err(_) => return sync_task_aborted("authentication"),
         };
+    // Each command takes the single SQLite write lock in turn; axum's 2 MB body
+    // limit alone permits thousands per request.
+    if req.commands.len() > MAX_SYNC_COMMANDS {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!("too many commands: {} > {}", req.commands.len(), MAX_SYNC_COMMANDS)
+            })),
+        )
+            .into_response();
+    }
     let mut status: BTreeMap<String, Value> = BTreeMap::new();
     let mut temp_map: BTreeMap<String, String> = BTreeMap::new();
 

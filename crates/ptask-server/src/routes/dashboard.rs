@@ -1148,7 +1148,9 @@ async fn api_voice(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    let client = reqwest::Client::new();
+    // One pooled client per process instead of a fresh one per request.
+    static VOICE_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = VOICE_CLIENT.get_or_init(reqwest::Client::new);
     match client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, ctype)

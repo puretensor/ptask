@@ -103,11 +103,16 @@ pub fn resolve(db: &Db, presented: &str) -> Result<Option<Identity>> {
         return Ok(None);
     };
     let scope = Scope::parse(&scopes).unwrap_or(Scope::Read);
+    // Bookkeeping only: a write that cannot land (litestream restore, full disk,
+    // a long writer holding the lock past busy_timeout) must not turn every
+    // authenticated call — including pure reads and the MCP gate — into a 401.
     let now = crate::dates::format_iso(&crate::dates::now_in_operator_tz()?);
-    conn.execute(
+    if let Err(e) = conn.execute(
         "UPDATE pt_api_tokens SET last_used_at = ?1 WHERE token_hash = ?2",
         params![now, hash],
-    )?;
+    ) {
+        tracing::warn!(target: "ptask::tokens", error = %e, "last_used_at touch skipped");
+    }
     Ok(Some(Identity { client_id, scope }))
 }
 

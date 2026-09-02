@@ -44,6 +44,16 @@ struct PushEvent {
     /// PR-style payloads put the title elsewhere; v0.5.x scans commits only.
     #[serde(default, rename = "ref")]
     pub git_ref: Option<String>,
+    /// The push payload names the repository's default branch; `main`/`master`
+    /// were a hardcoded guess that silently skipped every other default.
+    #[serde(default)]
+    pub repository: Option<PushRepository>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PushRepository {
+    #[serde(default)]
+    pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,7 +143,11 @@ async fn handle(
     // Magic-word Closes/Fixes apply on merge to the default branch, not on
     // every feature-branch push. The payload already carries `ref`; it was
     // deserialized and then ignored.
-    if !closes_from_git_ref(event.git_ref.as_deref()) {
+    let default_branch = event
+        .repository
+        .as_ref()
+        .and_then(|r| r.default_branch.as_deref());
+    if !closes_from_git_ref(event.git_ref.as_deref(), default_branch) {
         info!(
             target: "ptask::webhook",
             source,
@@ -312,9 +326,14 @@ fn close_event_uuid(source: &str, commit: &PushCommit, pt_id: &str) -> String {
     format!("git:{}:{}:{}:close", source, commit_key, pt_id)
 }
 
-/// True when this push landed on a default branch (`main` or `master`).
-fn closes_from_git_ref(git_ref: Option<&str>) -> bool {
-    matches!(git_ref, Some("refs/heads/main" | "refs/heads/master"))
+/// True when this push landed on the repository's default branch — the one the
+/// payload names, falling back to `main`/`master` when it names none.
+fn closes_from_git_ref(git_ref: Option<&str>, default_branch: Option<&str>) -> bool {
+    let Some(git_ref) = git_ref else { return false };
+    match default_branch.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(branch) => git_ref == format!("refs/heads/{branch}"),
+        None => matches!(git_ref, "refs/heads/main" | "refs/heads/master"),
+    }
 }
 
 /// HMAC-SHA256(body, secret) compared in constant time to `signature_hex`.
@@ -341,12 +360,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn closes_follow_the_payloads_default_branch() {
+        assert!(closes_from_git_ref(Some("refs/heads/trunk"), Some("trunk")));
+        assert!(!closes_from_git_ref(Some("refs/heads/main"), Some("trunk")));
+        assert!(closes_from_git_ref(Some("refs/heads/main"), Some("  ")));
+        assert!(!closes_from_git_ref(None, Some("main")));
+    }
+
+    #[test]
     fn closes_only_on_default_branch_refs() {
-        assert!(closes_from_git_ref(Some("refs/heads/main")));
-        assert!(closes_from_git_ref(Some("refs/heads/master")));
-        assert!(!closes_from_git_ref(Some("refs/heads/feature/fixes-pt-42")));
-        assert!(!closes_from_git_ref(Some("refs/tags/v3.13.1")));
-        assert!(!closes_from_git_ref(None));
+        assert!(closes_from_git_ref(Some("refs/heads/main"), None));
+        assert!(closes_from_git_ref(Some("refs/heads/master"), None));
+        assert!(!closes_from_git_ref(
+            Some("refs/heads/feature/fixes-pt-42"),
+            None
+        ));
+        assert!(!closes_from_git_ref(Some("refs/tags/v3.13.1"), None));
+        assert!(!closes_from_git_ref(None, None));
     }
 
     #[test]
