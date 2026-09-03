@@ -1,1 +1,3 @@
-node_modules/
+# A symlink, not a directory: "node_modules/" would not match it and the repo would go
+# dirty every time the harness runs.
+node_modules
