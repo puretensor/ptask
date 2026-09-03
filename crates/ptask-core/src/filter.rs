@@ -21,6 +21,7 @@
 //!             | due before: <phrase>
 //!             | due after:  <phrase>
 //!             | search:     <keyword>
+//!             | kind:       scout|ship
 //! ```
 //!
 //! Examples:
@@ -54,6 +55,8 @@ pub enum Expr {
     DueBefore(String),
     DueAfter(String),
     Search(String),
+    /// `kind: scout` / `kind: ship` — investigation vs implementation.
+    Kind(String),
 }
 
 /// Compiled SQL fragment + bound parameter values (positional).
@@ -164,6 +167,10 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
         Expr::DueAfter(d) => {
             params.push(Value::Text(d.clone()));
             format!("substr(t.deadline,1,10) > ?{}", params.len())
+        }
+        Expr::Kind(k) => {
+            params.push(Value::Text(k.clone()));
+            format!("COALESCE(t.kind,'ship') = ?{}", params.len())
         }
         Expr::Search(kw) => {
             // LIKE wildcards escaped same way as tasks::resolve.
@@ -314,6 +321,11 @@ impl<'a> ParseCtx<'a> {
         if self.match_keyword("due:") {
             let phrase = self.consume_phrase();
             return Ok(Expr::DueOn(self.resolve_date(&phrase)?));
+        }
+        if self.match_keyword("kind:") {
+            let phrase = self.consume_phrase();
+            let kind: crate::tasks::TaskKind = phrase.trim().parse()?;
+            return Ok(Expr::Kind(kind.as_str().to_string()));
         }
         if self.match_keyword("search:") {
             let phrase = self.consume_phrase();
@@ -477,6 +489,13 @@ mod tests {
     fn label_and_project_tokens() {
         assert!(matches!(ast("@home"), Expr::Label(ref s) if s == "home"));
         assert!(matches!(ast("#fleet"), Expr::Project(ref s) if s == "fleet"));
+    }
+
+    #[test]
+    fn kind_token_parses_and_rejects_junk() {
+        assert!(matches!(ast("kind: scout"), Expr::Kind(ref k) if k == "scout"));
+        assert!(matches!(ast("kind: implement"), Expr::Kind(ref k) if k == "ship"));
+        assert!(parse("kind: sideways").is_err());
     }
 
     #[test]

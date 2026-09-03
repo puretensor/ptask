@@ -5,9 +5,9 @@ provenance links, idempotent capture, and a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 11 tools (`task_next / task_list / task_add /
-task_show / task_done / task_dismiss / task_edit / task_claim / task_capture /
-task_search / task_digest`):
+Two transports, one handler, 12 tools (`task_next / task_list / task_add /
+task_show / task_done / task_dismiss / task_edit / task_claim / task_promote /
+task_capture / task_search / task_digest`):
 
 - **streamable-HTTP** at `http://127.0.0.1:9501/mcp` (or your `PTASK_SYNC_URL`),
   bearer-gated to a named write token. Per-request identity cannot reach rmcp
@@ -32,6 +32,11 @@ or stdio: `{ "type": "stdio", "command": "pt", "args": ["mcp"], "env": {"PTASK_A
 
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
+- **task_promote** — flips an investigation into implementation work
+  (`kind` scout → ship, `deliverable` report → pr) on the SAME row. Promotion
+  must never close the scout and open a ship duplicate: that is re-ticketing,
+  not disposition, and it inflates the open count. Journaled `task.promoted`;
+  refuses a terminal task so a resurrection is always a deliberate `reopen`.
 - **task_add(discovered_from)** — records a `discovered_from` link in
   `task_links`; mirrors HAL's spawn_task provenance pattern.
 - **task_digest** — deterministic session priming (recent done/dismissed,

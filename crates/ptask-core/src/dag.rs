@@ -29,6 +29,7 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable,
                 (SELECT COUNT(*) FROM task_links l JOIN tasks d ON d.id = l.to_uuid
                  WHERE l.from_uuid = t.id AND l.kind = 'depends_on'
                    AND d.status_v2 != 'done') AS unmet
@@ -41,7 +42,7 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
 
     let mut out: Vec<Task> = Vec::new();
     let rows = stmt.query_map([], |r| {
-        let unmet: i64 = r.get(11)?;
+        let unmet: i64 = r.get(13)?;
         let task = Task {
             id: r.get(0)?,
             pt_id: r.get(1)?,
@@ -54,6 +55,8 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
             deadline: r.get(8)?,
             source_type: r.get(9)?,
             ai_reasoning: r.get(10).unwrap_or_default(),
+            kind: r.get(11).unwrap_or_else(|_| "ship".to_string()),
+            deliverable: r.get(12).unwrap_or_default(),
         };
         Ok((task, unmet))
     })?;
@@ -78,7 +81,8 @@ pub fn pending_with_missing_deps(db: &Db) -> Result<Vec<(Task, Vec<String>)>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
          FROM tasks t
          WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
            AND EXISTS (SELECT 1 FROM task_links l JOIN tasks d ON d.id = l.to_uuid
@@ -99,6 +103,8 @@ pub fn pending_with_missing_deps(db: &Db) -> Result<Vec<(Task, Vec<String>)>> {
                 deadline: r.get(8)?,
                 source_type: r.get(9)?,
                 ai_reasoning: r.get(10).unwrap_or_default(),
+                kind: r.get(11).unwrap_or_else(|_| "ship".to_string()),
+                deliverable: r.get(12).unwrap_or_default(),
             })
         })?
         .collect::<std::result::Result<_, _>>()?;

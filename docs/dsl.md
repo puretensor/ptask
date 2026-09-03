@@ -61,6 +61,7 @@ Boolean expressions over field tokens.
 | `created:`*phrase* | `created_at` on that day |
 | `search:`*str* | `title LIKE %str%` (case-insensitive) |
 | `status:STATE` | exact status; same lexicon as `-s` |
+| `kind:`*scout\|ship* | investigation vs implementation (see `pt promote`) |
 
 ### Operators
 
@@ -79,6 +80,7 @@ pt list '(today | overdue) & #fleet'
 pt list '@waiting & no date'
 pt list 'due before: next friday & !recurring'
 pt list 'search: ceph & @ops'
+pt list 'kind: scout & p4'
 ```
 
 ## Quoting

@@ -119,6 +119,8 @@ async fn handle_add(bot: &Bot, chat_id: ChatId, db: &Db, text: &str) -> Result<(
     };
     let ext = ptask_core::Extensions {
         labels: q.labels.clone(),
+        kind: None,
+        deliverable: None,
         project: q.project.clone(),
         duration_min: q.duration_min,
         planned_at: None,

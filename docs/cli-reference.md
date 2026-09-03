@@ -152,6 +152,8 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 | Verb | Use |
 |---|---|
 | `pt start <query>` | mark in progress (status_v2 `in_progress`) |
+| `pt kind <query> <scout\|ship> [--deliverable report\|pr\|none]` | set a task's shape; `pt add --kind scout` declares it at creation |
+| `pt promote <query>` | investigation → implementation: flips `kind` scout→ship (and `report`→`pr`) on the **same row**, so the open count is unchanged. Refuses a terminal task — reopen it first. |
 | `pt snooze <query> <until…>` | park until a date (natural language ok); auto-wakes to todo via the hourly scoring run |
 | `pt depend <query> --on <target> [--clear]` | dependency edges in `task_links`; `pt next` hides tasks with unmet deps; no `--on` shows current edges |
 | `pt review [--stale-days N]` | interactive sweep of stale tasks (TTY: k/d/x/s/q; non-TTY prints the list) |

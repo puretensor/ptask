@@ -100,6 +100,11 @@ enum Command {
     /// Talk to a remote canonical `pt serve` (no local DB).
     #[command(subcommand)]
     Remote(RemoteCommand),
+    /// Promote an investigation to implementation: kind scout → ship on the
+    /// SAME row (never close + reopen a duplicate).
+    Promote(StartArgs),
+    /// Set a task's kind (scout|ship) and optional deliverable.
+    Kind(KindArgs),
     /// Mark a task in progress (you're actively working it).
     Start(StartArgs),
     /// Snooze a task until a date — it leaves `pt next` and reminders,
@@ -558,6 +563,24 @@ struct AddArgs {
     /// Disable quick-add parsing — treat the title literally.
     #[arg(long = "raw")]
     raw: bool,
+    /// Task shape: scout (investigation) or ship (implementation, default).
+    #[arg(long = "kind")]
+    kind: Option<String>,
+    /// What finishing it produces: report | pr | none.
+    /// Defaults to the kind's deliverable when --kind is given.
+    #[arg(long = "deliverable")]
+    deliverable: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct KindArgs {
+    /// PT-N, bare integer, or title substring.
+    query: String,
+    /// scout | ship.
+    kind: String,
+    /// report | pr | none. Left unchanged when omitted.
+    #[arg(long = "deliverable")]
+    deliverable: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -746,6 +769,8 @@ fn main() -> Result<()> {
                 Some(Command::Accountability(c)) => cmd_accountability(db, c),
                 Some(Command::Scoring(c)) => cmd_scoring(&db, c),
                 Some(Command::Start(a)) => cmd_start(&db, a),
+                Some(Command::Promote(a)) => cmd_promote(&db, a),
+                Some(Command::Kind(a)) => cmd_kind(&db, a),
                 Some(Command::Snooze(a)) => cmd_snooze(&db, a),
                 Some(Command::Reap(a)) => cmd_reap(&db, a),
                 Some(Command::Depend(a)) => cmd_depend(&db, a),
@@ -807,7 +832,31 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         ai_confidence: 1.0,
         ai_reasoning: a.reason.unwrap_or_default(),
     };
+    let kind = match a.kind.as_deref() {
+        Some(k) => Some(
+            k.parse::<tasks::TaskKind>()
+                .map_err(anyhow::Error::msg)?
+                .as_str()
+                .to_string(),
+        ),
+        None => None,
+    };
+    let deliverable = match a.deliverable.as_deref() {
+        Some(d) => Some(
+            tasks::validate_deliverable(d)
+                .map_err(anyhow::Error::msg)?
+                .to_string(),
+        ),
+        // A declared scout defaults to a report; ship keeps the historical
+        // "unset" so existing rows and new ones stay comparable.
+        None => match kind.as_deref() {
+            Some("scout") => Some("report".to_string()),
+            _ => None,
+        },
+    };
     let ext = Extensions {
+        kind,
+        deliverable,
         labels: q.labels.clone(),
         project: q.project.clone(),
         duration_min: q.duration_min,
@@ -1097,6 +1146,14 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         priority::label(t.priority)
     );
     println!("  deadline: {}", t.deadline.as_deref().unwrap_or("--"));
+    println!(
+        "  kind:     {}{}",
+        t.kind,
+        match t.deliverable.as_deref() {
+            Some(d) => format!(" → {d}"),
+            None => String::new(),
+        }
+    );
     if !t.description.is_empty() {
         println!("  desc:     {}", t.description);
     }
@@ -1666,6 +1723,51 @@ fn cmd_start(db: &Db, a: StartArgs) -> Result<()> {
                 "{} {} · in progress",
                 task.pt_id.as_deref().unwrap_or(""),
                 task.title
+            )
+        },
+    )
+}
+
+fn cmd_promote(db: &Db, a: StartArgs) -> Result<()> {
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    tasks::promote(db, &task.id, &cli_ctx())?;
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id,
+            "kind": "ship", "deliverable": "pr"
+        }),
+        || {
+            println!(
+                "{} {} · scout → ship (same row)",
+                task.pt_id.as_deref().unwrap_or(""),
+                task.title
+            )
+        },
+    )
+}
+
+fn cmd_kind(db: &Db, a: KindArgs) -> Result<()> {
+    let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    let kind: tasks::TaskKind = a.kind.parse().map_err(anyhow::Error::msg)?;
+    if let Some(d) = a.deliverable.as_deref() {
+        tasks::validate_deliverable(d).map_err(anyhow::Error::msg)?;
+    }
+    tasks::set_kind(db, &task.id, kind, a.deliverable.as_deref(), &cli_ctx())?;
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id,
+            "kind": kind.as_str(), "deliverable": a.deliverable
+        }),
+        || {
+            println!(
+                "{} {} · kind={}{}",
+                task.pt_id.as_deref().unwrap_or(""),
+                task.title,
+                kind.as_str(),
+                match a.deliverable.as_deref() {
+                    Some(d) => format!(" deliverable={d}"),
+                    None => String::new(),
+                }
             )
         },
     )
