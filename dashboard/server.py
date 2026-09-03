@@ -83,7 +83,7 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.16.0"
+VERSION = "0.16.1"
 # The login shell at "/" is public, so anything it loads before sign-in must be too: the two
 # Face ID modules are part of the gate itself, not data behind it.
 PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",
