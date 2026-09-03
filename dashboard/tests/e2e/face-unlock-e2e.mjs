@@ -108,6 +108,34 @@ await page.click('#authSubmit');
 await page.waitForSelector('#authGate', { state: 'hidden', timeout: 15000 });
 check('password remains the fallback', await page.isHidden('#authGate'));
 
+// --- 7. REGRESSION: a password sign-in on an ALREADY-ENROLLED device must not re-enrol.
+// The enrol checkbox ships `checked` and only its wrapping label is hidden, so gating on
+// box.checked alone minted a fresh platform passkey on every password login — orphaning the
+// previous one in the keychain with no way for the app to remove it. Counting credentials is the
+// only assertion that catches it; step 2 asserted the count once and never again.
+await context.clearCookies();
+await page.goto(BASE, { waitUntil: 'domcontentloaded' });
+await page.waitForSelector('#authForm:not([hidden])');
+check('device is enrolled again after step 6', await page.isVisible('#faceUnlockBtn'));
+const beforeCount = (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials.length;
+await page.fill('#authPassword', PASSWORD);
+await page.click('#authSubmit');
+await page.waitForSelector('#authGate', { state: 'hidden', timeout: 15000 });
+await page.waitForTimeout(1500);
+const afterCount = (await cdp.send('WebAuthn.getCredentials', { authenticatorId })).credentials.length;
+check('an enrolled device does NOT mint a second passkey on a password sign-in',
+  afterCount === beforeCount, `${beforeCount} -> ${afterCount} credential(s)`);
+
+// --- 8. the forget control is the only escape from a passkey the platform has lost
+await context.clearCookies();
+await page.goto(BASE, { waitUntil: 'domcontentloaded' });
+await page.waitForSelector('#authForm:not([hidden])');
+check('the forget control is offered alongside the unlock button', await page.isVisible('#faceForgetBtn'));
+await page.click('#faceForgetBtn');
+await page.waitForFunction(() => document.getElementById('faceUnlockBtn')?.hidden === true, null, { timeout: 10000 });
+check('forgetting withdraws the Face ID button', await page.isHidden('#faceUnlockBtn'));
+check('and re-offers enrolment immediately', await page.isVisible('#faceEnrolRow'));
+
 check('no unexpected console errors across the whole run', consoleErrors.length === 0, consoleErrors.join(' | '));
 await browser.close();
 

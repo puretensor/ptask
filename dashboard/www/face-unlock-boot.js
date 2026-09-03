@@ -16,6 +16,7 @@ import {
   createFaceUnlock,
   faceUnlockMessage,
   indexedDbStore,
+  isRecoverable,
   signInWithFace,
   webauthnPrf,
 } from "./face-unlock.js";
@@ -58,17 +59,26 @@ async function postPassword(password) {
   return r.status;
 }
 
+// Whether enrolment is actually on offer. The checkbox ships `checked` in index.html and nothing
+// ever unchecks it — only the wrapping label's `hidden` is toggled — so `box.checked` alone said
+// "yes" even on a device that was already enrolled or had no authenticator at all, and every
+// password sign-in minted another orphan passkey. Visibility and intent now share one variable.
+let enrolOffered = false;
+
 function showUnlock(on) {
   const btn = $("faceUnlockBtn");
   const divider = $("faceDivider");
+  const forget = $("faceForgetBtn");
   if (btn) btn.hidden = !on;
   if (divider) divider.hidden = !on;
+  if (forget) forget.hidden = !on;
 }
 
 async function offerEnrolIfSupported() {
   const row = $("faceEnrolRow");
   if (!row || !faceUnlock) return;
-  row.hidden = !(await faceUnlock.isSupported());
+  enrolOffered = await faceUnlock.isSupported();
+  row.hidden = !enrolOffered;
 }
 
 async function unlockWithFace() {
@@ -93,8 +103,7 @@ async function unlockWithFace() {
     }
   } catch (error) {
     say(faceUnlockMessage(error));
-    const code = error && error.code;
-    if (code === "stale-binding" || code === "version" || code === "decrypt-failed") {
+    if (isRecoverable(error)) {
       await faceUnlock.forget();
       showUnlock(false);
       await offerEnrolIfSupported();
@@ -109,7 +118,7 @@ async function unlockWithFace() {
  */
 async function afterPasswordLogin(password) {
   const box = $("faceEnrol");
-  if (!faceUnlock || !box || !box.checked) return;
+  if (!faceUnlock || !enrolOffered || !box || !box.checked) return;
   try {
     await faceUnlock.enroll(password);
   } catch (error) {
@@ -120,12 +129,29 @@ async function afterPasswordLogin(password) {
   }
 }
 
-window.ptaskFaceUnlock = { afterPasswordLogin, forget: () => faceUnlock?.forget() };
+/**
+ * The operator's escape hatch. A platform passkey deleted from the device (or lost in a restore)
+ * is reported by WebAuthn as an ordinary NotAllowedError — indistinguishable from "the user
+ * cancelled", by design — so no automatic rule can tell the two apart. Without this control the
+ * enrolment record stays valid forever, isEnrolled() keeps returning true, the enrolment checkbox
+ * is therefore never re-offered, and the only recovery is clearing site data.
+ */
+async function forgetFace() {
+  if (!faceUnlock) return;
+  await faceUnlock.forget();
+  showUnlock(false);
+  await offerEnrolIfSupported();
+  say("Face ID has been forgotten on this device. Sign in with the password to set it up again.");
+}
+
+window.ptaskFaceUnlock = { afterPasswordLogin, forgetFace, forget: () => faceUnlock?.forget() };
 
 (async () => {
   if (!faceUnlock) return;
   const btn = $("faceUnlockBtn");
   if (btn) btn.addEventListener("click", unlockWithFace);
+  const forget = $("faceForgetBtn");
+  if (forget) forget.addEventListener("click", forgetFace);
   if (await faceUnlock.isEnrolled()) {
     showUnlock(true);
     return;

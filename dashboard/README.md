@@ -217,6 +217,21 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.17.0 / pTask v3.22.0** — Face ID fixes from the 2026-09-03 adversarial review. The enrol
+  checkbox ships `checked` and only its wrapping label is hidden, so gating enrolment on
+  `box.checked` alone re-enrolled on **every** password sign-in — minting a fresh platform passkey
+  each time and orphaning the previous one in the keychain with no way for the app to remove it.
+  Enrolment is now gated on an `enrolOffered` flag set from `isSupported()`, so visibility and
+  intent cannot disagree. A **Forget Face ID on this device** control was added: a passkey deleted
+  on the device is reported by WebAuthn as an ordinary cancel, by design, so nothing automatic can
+  recover it and the record would otherwise stay valid forever with enrolment never re-offered. The
+  recovery code list moved into the shared core (`RECOVERABLE_CODES` / `isRecoverable`) because the
+  three wirings' hand-written copies had drifted. The core now refuses a degenerate PRF secret
+  (must be exactly 32 bytes and not constant). Tests: 22 contract + 6 markup + a 24-check e2e, with
+  new cases for the re-enrol regression, the forget control, and two properties that were
+  previously unfalsifiable — deleting `userVerification: "required"` or the rpId binding check used
+  to leave every test green.
+
 - **v0.16.0 / pTask v3.21.0** — Face ID unlock, replicated from pureKEY (`forzieri`).
   On a device with a platform authenticator the auth gate offers **Remember this
   device with Face ID**; a WebAuthn PRF secret (`rpId` = the serving hostname, user
