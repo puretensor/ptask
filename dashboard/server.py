@@ -83,7 +83,7 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.17.0"
+VERSION = "0.17.1"
 # The login shell at "/" is public, so anything it loads before sign-in must be too: the two
 # Face ID modules are part of the gate itself, not data behind it.
 PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",
@@ -844,7 +844,8 @@ class Handler(BaseHTTPRequestHandler):
                 return False
             try:
                 user, _, pw = base64.b64decode(hdr[6:], validate=True).decode().partition(":")
-                ok = hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(pw, AUTH_PASS)
+                ok = (hmac.compare_digest(user.encode(), AUTH_USER.encode())
+                      and hmac.compare_digest(pw.encode(), AUTH_PASS.encode()))
             except Exception:  # noqa: BLE001
                 ok = False
             if ok:
@@ -1040,7 +1041,8 @@ class Handler(BaseHTTPRequestHandler):
             if not AUTH_PASS:
                 return self._json({"ok": True, "auth_required": False})
             password = body.get("password") if isinstance(body, dict) else None
-            if not isinstance(password, str) or not hmac.compare_digest(password, AUTH_PASS):
+            if not isinstance(password, str) or not hmac.compare_digest(
+                    password.encode("utf-8"), AUTH_PASS.encode("utf-8")):
                 remaining = LOGIN_THROTTLE.failure(client)
                 if remaining:
                     return self._json(

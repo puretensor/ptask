@@ -14,6 +14,13 @@ SESSION_MAX_AGE = 24 * 60 * 60
 LOGIN_MAX_FAILURES = 5
 LOGIN_LOCKOUT = 5 * 60
 LOGIN_FAILURE_WINDOW = 15 * 60
+# Ceiling on the throttle table. The key is the caller's own source address,
+# which an attacker with a routed IPv6 /64 can vary without limit, so the
+# table must be bounded by policy rather than by how many clients exist.
+LOGIN_MAX_RECORDS = 4096
+# Expiry is cheap to check per record and expensive to sweep, so sweep on a
+# timer (or when the table is over its ceiling) instead of on every attempt.
+LOGIN_PRUNE_INTERVAL = 30.0
 
 
 def _digest(token: str) -> str:
@@ -116,11 +123,12 @@ class LoginThrottle:
         self._now = now
         self._lock = threading.Lock()
         self._records: dict[str, tuple[int, float, float | None]] = {}
+        self._last_prune = now()
 
     def locked_for(self, client: str) -> int:
         now = self._now()
         with self._lock:
-            self._prune(now)
+            self._maybe_prune(now)
             record = self._records.get(client)
             if not record or record[2] is None or record[2] <= now:
                 return 0
@@ -129,19 +137,60 @@ class LoginThrottle:
     def failure(self, client: str) -> int:
         now = self._now()
         with self._lock:
-            self._prune(now)
+            self._maybe_prune(now)
             failures, last, locked_until = self._records.get(client, (0, now, None))
             if now - last > LOGIN_FAILURE_WINDOW:
                 failures, locked_until = 0, None
             failures += 1
             if failures >= LOGIN_MAX_FAILURES:
                 locked_until = now + LOGIN_LOCKOUT
+            if client not in self._records:
+                self._make_room(now)
             self._records[client] = (failures, now, locked_until)
             return max(1, int(locked_until - now + 0.999)) if locked_until else 0
 
     def success(self, client: str) -> None:
         with self._lock:
             self._records.pop(client, None)
+
+    def _maybe_prune(self, now: float) -> None:
+        """Sweep expired records, but not on every request.
+
+        `_prune` is O(table). Calling it per attempt made a single host able to
+        pin the event loop simply by failing logins fast: the table grows with
+        attacker-chosen keys and each new attempt rebuilds all of it. Records
+        carry their own expiry, so a late sweep is never a correctness problem —
+        `locked_for` and `failure` both re-check the window themselves.
+        """
+        if (len(self._records) > LOGIN_MAX_RECORDS
+                or now - self._last_prune >= LOGIN_PRUNE_INTERVAL):
+            self._prune(now)
+            self._last_prune = now
+
+    def _make_room(self, now: float) -> None:
+        """Keep the table under its ceiling before admitting a new client."""
+        if len(self._records) < LOGIN_MAX_RECORDS:
+            return
+        # Amortised, not unconditional: with a full table and nothing yet
+        # expired, sweeping here would restore the per-attempt O(table) cost
+        # this method exists to remove.
+        self._maybe_prune(now)
+        if len(self._records) < LOGIN_MAX_RECORDS:
+            return
+        # Evict clients that are NOT locked out first, oldest before newest.
+        # Eviction forgives failures, so an active lockout is the last thing to
+        # go: otherwise a flood of fresh keys would unlock the very client the
+        # lockout was protecting against.
+        #
+        # Evict a batch, not one record: one eviction per admission would make
+        # the sort itself the per-attempt O(table) cost.
+        order = sorted(
+            self._records,
+            key=lambda key: (self._records[key][2] is not None,
+                             self._records[key][1]),
+        )
+        for victim in order[:max(1, LOGIN_MAX_RECORDS // 10)]:
+            del self._records[victim]
 
     def _prune(self, now: float) -> None:
         self._records = {

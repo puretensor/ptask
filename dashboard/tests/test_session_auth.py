@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from session_auth import LoginThrottle, SessionStore, parse_cookie, session_cookie
+from session_auth import (
+    LOGIN_MAX_FAILURES,
+    LOGIN_MAX_RECORDS,
+    LoginThrottle,
+    SessionStore,
+    parse_cookie,
+    session_cookie,
+)
 
 
 class SessionStoreTests(unittest.TestCase):
@@ -55,3 +62,24 @@ class CookieTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_login_throttle_table_stays_bounded_under_key_flooding():
+    """The throttle key is the caller's own address, which a host with a routed
+    IPv6 /64 can vary without limit. An unbounded table plus an O(table) prune
+    per attempt let one client pin the dashboard's event loop."""
+    throttle = LoginThrottle()
+    for index in range(200_000):
+        throttle.failure(f"2001:db8::{index:x}")
+    assert len(throttle._records) <= LOGIN_MAX_RECORDS
+
+
+def test_a_locked_out_client_is_not_forgiven_by_eviction():
+    throttle = LoginThrottle()
+    for _ in range(LOGIN_MAX_FAILURES):
+        throttle.failure("1.2.3.4")
+    assert throttle.locked_for("1.2.3.4") > 0
+    for index in range(LOGIN_MAX_RECORDS * 2):
+        throttle.failure(f"2001:db8::{index:x}")
+        throttle.locked_for("1.2.3.4")
+    assert throttle.locked_for("1.2.3.4") > 0

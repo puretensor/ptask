@@ -217,6 +217,14 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.17.1 / pTask v3.22.1** — The failed-login throttle is bounded. Its key is the
+  caller's own address (`Cf-Connecting-Ip` behind Cloudflare), so a host with a routed
+  IPv6 /64 could mint unlimited keys, and the table was swept with an O(table) rebuild
+  on *every* attempt — enough for one client to pin the dashboard's event loop. The table
+  now caps at `LOGIN_MAX_RECORDS`, sweeps on a 30 s timer instead of per request, and
+  evicts unlocked clients before locked ones so a flood cannot forgive a lockout.
+  Separately, `hmac.compare_digest` raises on a non-ASCII `str`, which turned a wrong
+  password containing an accent into a 500; both comparisons now encode first.
 - **v0.17.0 / pTask v3.22.0** — Face ID fixes from the 2026-09-03 adversarial review. The enrol
   checkbox ships `checked` and only its wrapping label is hidden, so gating enrolment on
   `box.checked` alone re-enrolled on **every** password sign-in — minting a fresh platform passkey
