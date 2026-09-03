@@ -868,39 +868,65 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
 
     let task = tasks::create_with_extensions(db, new, ext, &cli_ctx())?;
 
-    let label = priority::label(task.priority).to_ascii_uppercase();
-    println!("Task created [{}]: {}", label, task.title);
-    if let Some(pid) = &task.pt_id {
-        println!("  {}", pid);
+    // The quick-add derivations (labels, project, duration) live on `q`, not on
+    // the row projection, so the JSON shape carries both halves — otherwise a
+    // caller that creates with `@label`/`#project` cannot see what it just set.
+    #[derive(serde::Serialize)]
+    struct AddOutput {
+        #[serde(flatten)]
+        task: ptask_core::Task,
+        labels: Vec<String>,
+        project: Option<String>,
+        duration_min: Option<i64>,
+        reminder: Option<String>,
+        recurrence: Option<String>,
+        warnings: Vec<String>,
     }
-    println!("  ID: {}", task.id);
-    println!(
-        "  Priority: {} ({})",
-        task.priority,
-        priority::label(task.priority)
-    );
-    if let Some(d) = &task.deadline {
-        println!("  Deadline: {}", d);
-    }
-    if !task.description.is_empty() {
-        println!("  Description: {}", task.description);
-    }
-    if !q.labels.is_empty() {
-        println!("  Labels: {}", q.labels.join(", "));
-    }
-    if let Some(p) = &q.project {
-        println!("  Project: {}", p);
-    }
-    if let Some(m) = q.duration_min {
-        println!("  Duration: {}m", m);
-    }
-    if let Some(r) = &q.reminder {
-        println!("  Reminder: {}", r);
-    }
-    if let Some(rec) = &q.recurrence {
-        println!("  Recurring: {}", rec.original_input);
-    }
-    Ok(())
+    let out = AddOutput {
+        task,
+        labels: q.labels.clone(),
+        project: q.project.clone(),
+        duration_min: q.duration_min,
+        reminder: q.reminder.clone(),
+        recurrence: q.recurrence.as_ref().map(|r| r.original_input.clone()),
+        warnings: q.warnings.clone(),
+    };
+
+    emit(&out, || {
+        let t = &out.task;
+        let label = priority::label(t.priority).to_ascii_uppercase();
+        println!("Task created [{}]: {}", label, t.title);
+        if let Some(pid) = &t.pt_id {
+            println!("  {}", pid);
+        }
+        println!("  ID: {}", t.id);
+        println!(
+            "  Priority: {} ({})",
+            t.priority,
+            priority::label(t.priority)
+        );
+        if let Some(d) = &t.deadline {
+            println!("  Deadline: {}", d);
+        }
+        if !t.description.is_empty() {
+            println!("  Description: {}", t.description);
+        }
+        if !out.labels.is_empty() {
+            println!("  Labels: {}", out.labels.join(", "));
+        }
+        if let Some(p) = &out.project {
+            println!("  Project: {}", p);
+        }
+        if let Some(m) = out.duration_min {
+            println!("  Duration: {}m", m);
+        }
+        if let Some(r) = &out.reminder {
+            println!("  Reminder: {}", r);
+        }
+        if let Some(rec) = &out.recurrence {
+            println!("  Recurring: {}", rec);
+        }
+    })
 }
 
 fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {

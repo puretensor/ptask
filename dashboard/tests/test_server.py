@@ -501,3 +501,110 @@ class PublicAssetTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
             server.AUTH_USER, server.AUTH_PASS = old_user, old_pass
+
+
+class VoiceDomainTests(unittest.TestCase):
+    """v0.15.0: the extractor also picks the ENG/MGMT hemisphere."""
+
+    def test_domain_accepted_and_normalized(self):
+        for raw, want in (("eng", "eng"), ("  MGMT ", "mgmt"), ("Eng", "eng")):
+            out = server._normalize_voice_fields({"title": "abc def", "domain": raw}, "t")
+            self.assertEqual(out["domain"], want)
+
+    def test_unknown_domain_is_dropped_not_guessed(self):
+        # A dropped domain leaves the cockpit's domainOf() heuristic in charge —
+        # one classifier for the whole board rather than a second server-side copy.
+        for bad in ("engineering", "ops", "", None, 3, "both"):
+            out = server._normalize_voice_fields({"title": "abc def", "domain": bad}, "t")
+            self.assertIsNone(out["domain"], f"domain={bad!r} should be dropped")
+
+    def test_reason_collapsed_and_capped(self):
+        out = server._normalize_voice_fields(
+            {"title": "abc def", "reason": "  a\n  b   c  "}, "t")
+        self.assertEqual(out["reason"], "a b c")
+        long = server._normalize_voice_fields({"title": "abc def", "reason": "x" * 500}, "t")
+        self.assertEqual(len(long["reason"]), 200)
+
+
+class TranscriptGuardTests(unittest.TestCase):
+    """Silence and Whisper artefacts must never reach the create path."""
+
+    def test_real_dictation_passes(self):
+        for good in ("rotate the cloudflare api token",
+                     "file the VAT return with HMRC",
+                     "fix the DNS"):
+            self.assertTrue(server.transcript_is_speech(good), good)
+
+    def test_silence_and_artefacts_rejected(self):
+        for bad in ("", "   ", "you", "Okay.", "Bye bye", "Thank you.",
+                    "Thank you for watching!", "[Music]", "(upbeat music)",
+                    "Subtitles by the Amara.org community", "www.mooji.org",
+                    "谢谢大家的观看请订阅我的频道"):
+            self.assertFalse(server.transcript_is_speech(bad), repr(bad))
+
+
+class VoiceCreateTests(unittest.TestCase):
+    """POST /api/voice/task turns drafted fields into a real `pt add`."""
+
+    def test_created_ids_prefers_json_then_falls_back_to_text(self):
+        as_json = '{"id": "abc-123", "pt_id": "PT-9"}'
+        self.assertEqual(server._created_ids(as_json), ("PT-9", "abc-123"))
+        # a `pt` binary that predates --json on add still prints the human form
+        as_text = ("Task created [URGENT]: x\n  PT-42\n  ID: 11112222-3333\n"
+                   "  Priority: 4 (urgent)\n")
+        self.assertEqual(server._created_ids(as_text), ("PT-42", "11112222-3333"))
+        self.assertEqual(server._created_ids("nothing useful"), (None, None))
+
+    def _capture_argv(self, fields, transcript="rotate the token now please"):
+        seen = {}
+
+        def fake_exec(args):
+            seen["args"] = args
+            return True, '{"id": "u-1", "pt_id": "PT-7"}'
+
+        real = server.pt_exec
+        server.pt_exec = fake_exec
+        try:
+            ok, out = server.voice_create_task(fields, transcript)
+        finally:
+            server.pt_exec = real
+        return ok, out, seen["args"]
+
+    def test_domain_rides_as_an_inline_quickadd_token(self):
+        ok, out, args = self._capture_argv(
+            {"title": "Rotate the API token", "priority": 4, "domain": "eng",
+             "reason": "infra work", "description": "", "deadline": None})
+        self.assertTrue(ok)
+        self.assertEqual((out["pt_id"], out["id"]), ("PT-7", "u-1"))
+        self.assertEqual(args[-1], "Rotate the API token @domain:eng")
+        self.assertIn("--json", args)
+        self.assertIn("--priority=4", args)
+        reason = next(a for a in args if a.startswith("--reason="))
+        self.assertIn("infra work", reason)
+        self.assertIn("voice: rotate the token now please", reason)
+
+    def test_no_domain_means_no_token(self):
+        _, _, args = self._capture_argv(
+            {"title": "Something ambiguous", "priority": 2, "domain": None,
+             "reason": "", "description": "", "deadline": None})
+        self.assertEqual(args[-1], "Something ambiguous")
+        self.assertFalse(any("@domain:" in a for a in args))
+
+    def test_token_dropped_rather_than_overflowing_the_title(self):
+        title = "x" * 396          # 396 + len(" @domain:eng")=12 -> 408 > 400
+        _, _, args = self._capture_argv(
+            {"title": title, "priority": 2, "domain": "eng",
+             "reason": "", "description": "", "deadline": None})
+        self.assertEqual(args[-1], title)
+
+    def test_pt_failure_is_reported_not_swallowed(self):
+        real = server.pt_exec
+        server.pt_exec = lambda args: (False, "no such column")
+        try:
+            ok, out = server.voice_create_task(
+                {"title": "abc def", "priority": 2, "domain": None,
+                 "reason": "", "description": "", "deadline": None}, "t")
+        finally:
+            server.pt_exec = real
+        self.assertFalse(ok)
+        self.assertEqual(out["error"], "no such column")

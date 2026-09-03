@@ -24,7 +24,10 @@ Endpoints
                                    [--deadline=] -- "<title>"`
   POST /api/voice  (raw audio body) -> Whisper STT + Bedrock Claude draft
                                 -> {transcript, fields:{title,description,priority,
-                                   deadline,labels}} for the composer to pre-fill
+                                   deadline,labels,domain,reason}} for the
+                                   composer to pre-fill
+  POST /api/voice/task (raw audio body) -> the same, and then creates the task:
+                                -> {ok, pt_id, id, transcript, fields, stt, llm}
 
 Config (env)
 ------------
@@ -80,7 +83,7 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.14.1"
+VERSION = "0.15.0"
 PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png", "/manifest.webmanifest"})
 
 # /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
@@ -117,12 +120,19 @@ MAX_AUDIO_BYTES = 12 * 1024 * 1024  # voice clips (webm/opus) — separate, larg
 # extraction runs on cloud AWS Bedrock Claude (keyless via ~/.aws), with the
 # local vLLM as a fallback. Every endpoint/model is env-overridable so either
 # stage can be repointed at any provider without code changes.
+#
+# v0.15.0: the fallback used to point at 127.0.0.1:8772 / mistral-medium-3.5,
+# a seat that stopped listening — so a Bedrock outage degraded silently to
+# llm="none" and a raw-transcript title instead of failing over. It now points
+# at the same-host sovereign seat, which needs reasoning_effort="none" or the
+# nemotron_v3 reasoning parser returns content: null (~/AGENTS.md § Seat triage).
 AWS_BIN = os.environ.get("PTASK_AWS_BIN", "/usr/local/bin/aws")
 STT_URL = os.environ.get("PTASK_STT_URL", "http://127.0.0.1:9000/transcribe")
 VOICE_MODEL = os.environ.get("PTASK_VOICE_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 VOICE_REGION = os.environ.get("PTASK_VOICE_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
-VOICE_FALLBACK_URL = os.environ.get("PTASK_VOICE_FALLBACK_URL", "http://127.0.0.1:8772/v1/chat/completions")
-VOICE_FALLBACK_MODEL = os.environ.get("PTASK_VOICE_FALLBACK_MODEL", "mistral-medium-3.5")
+VOICE_FALLBACK_URL = os.environ.get("PTASK_VOICE_FALLBACK_URL", "http://127.0.0.1:8600/v1/chat/completions")
+VOICE_FALLBACK_MODEL = os.environ.get("PTASK_VOICE_FALLBACK_MODEL", "nemotron-lightning")
+VOICE_FALLBACK_EFFORT = os.environ.get("PTASK_VOICE_FALLBACK_EFFORT", "none")
 
 # Columns we expose. Kept explicit so a schema change can't leak surprises.
 # Byte-for-byte the Rust dashboard route's TASK_COLS (ai_reasoning had drifted
@@ -532,9 +542,49 @@ VOICE_SYSTEM = (
     '  "deadline": absolute date "YYYY-MM-DD" resolved from phrases like "today", "tomorrow", '
     '"next Friday", "in 3 days", "end of month" relative to today; null if no date is mentioned.\n'
     '  "labels": array of 0-4 short lowercase tags inferred from the topic; [] if unclear.\n'
+    '  "domain": "eng" for engineering work (fleet, infrastructure, software, security, '
+    'hardware, monitoring, deployments) or "mgmt" for management work (corporate, finance, '
+    "tax, legal, banking, people/hiring, travel, business development, suppliers). Omit the "
+    "key entirely if the note is genuinely ambiguous — do not guess.\n"
+    '  "reason": one line, <= 120 chars, why you chose that domain and priority.\n'
     "Speech may contain filler words, false starts, or transcription noise — clean it up and "
     "capture the intent. Return only the JSON object."
 )
+
+# Whisper invents speech from silence and room noise. Every other voice producer
+# on the fleet filters these (voice-kb/proofreader.py, hermes voice_mode.py); the
+# composer path could skip it because a human reviewed the draft, but the
+# dictate-to-create path writes a real task, so the guard is load-bearing here.
+HALLUCINATION_RE = re.compile(
+    r"^(thank(s| you)( for watching| very much)?|thanks for watching|"
+    r"please subscribe|subscribe to my channel|like and subscribe|"
+    r"you|bye|okay|ok|so|mm+|uh+|um+|hmm+|"
+    r"\[.*\]|\(.*\)|"
+    r"transcription by .*|subtitles by .*|amara\.org.*|www\..*)"
+    r"[.!\s]*$",
+    re.IGNORECASE,
+)
+# 3 rather than hal-memo's 4: a real dictated task can be as terse as "fix the
+# DNS", and a false reject is recoverable (the UI echoes what it heard and
+# invites a retry) where a false accept writes junk into the queue.
+MIN_TRANSCRIPT_WORDS = 3
+
+
+def transcript_is_speech(transcript: str) -> bool:
+    """False when the transcript is silence, noise, or a known Whisper artefact."""
+    t = (transcript or "").strip()
+    if not t:
+        return False
+    if HALLUCINATION_RE.match(t):
+        return False
+    if len(t.split()) < MIN_TRANSCRIPT_WORDS:
+        return False
+    # Whisper drifts into CJK/Cyrillic/Arabic on noise; a mostly non-Latin
+    # transcript from an English-speaking operator is an artefact, not a task.
+    letters = [c for c in t if c.isalpha()]
+    if letters and sum(c.isascii() for c in letters) / len(letters) < 0.5:
+        return False
+    return True
 
 
 def _extract_json(text: str) -> dict:
@@ -608,16 +658,22 @@ def _bedrock_extract(transcript: str, today: str) -> dict:
 
 def _vllm_extract(transcript: str, today: str) -> dict:
     """Local fallback extraction via the on-fleet vLLM (OpenAI-compatible)."""
-    data = json.dumps({
+    payload = {
         "model": VOICE_FALLBACK_MODEL, "max_tokens": 600, "temperature": 0,
         "messages": [{"role": "system", "content": VOICE_SYSTEM.format(today=today)},
                      {"role": "user", "content": transcript}],
-    }).encode()
+    }
+    if VOICE_FALLBACK_EFFORT:
+        payload["reasoning_effort"] = VOICE_FALLBACK_EFFORT
+    data = json.dumps(payload).encode()
     req = urllib.request.Request(VOICE_FALLBACK_URL, data=data,
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=40) as resp:
         out = json.load(resp)
-    return _extract_json(out["choices"][0]["message"]["content"])
+    content = out["choices"][0]["message"].get("content")
+    if not content:  # reasoning-parser seats answer with content: null on a bad effort
+        raise RuntimeError("local seat returned empty content")
+    return _extract_json(content)
 
 
 def voice_extract(transcript: str) -> tuple[dict, str]:
@@ -663,8 +719,63 @@ def _normalize_voice_fields(d: dict, transcript: str) -> dict:
             s = re.sub(r"[^a-z0-9 _-]", "", str(x).strip().lower())[:24].strip()
             if s:
                 labels.append(s)
+    # An explicit domain is only honoured when the model names one of the two
+    # hemispheres. Anything else stays None and the cockpit's domainOf() applies
+    # the same heuristic it applies to every other task — one classifier, not two.
+    dom = str(d.get("domain") or "").strip().lower()
+    domain = dom if dom in ("eng", "mgmt") else None
+    reason = " ".join(str(d.get("reason") or "").split())[:200]
     return {"title": title, "description": desc, "priority": pri,
-            "deadline": deadline, "labels": labels}
+            "deadline": deadline, "labels": labels,
+            "domain": domain, "reason": reason}
+
+
+_PT_ID_RE = re.compile(r"^\s*(PT-\d+)\s*$", re.MULTILINE)
+_UUID_LINE_RE = re.compile(r"^\s*ID:\s*(\S+)\s*$", re.MULTILINE)
+
+
+def _created_ids(out: str) -> tuple[str | None, str | None]:
+    """Pull (pt_id, uuid) out of `pt add` output.
+
+    Prefers the --json object; falls back to the human text so the sidecar keeps
+    working against a `pt` binary older than the one that honours --json on add.
+    """
+    obj = _extract_json(out)
+    if isinstance(obj, dict) and obj.get("id"):
+        return obj.get("pt_id"), obj.get("id")
+    m1, m2 = _PT_ID_RE.search(out), _UUID_LINE_RE.search(out)
+    return (m1.group(1) if m1 else None), (m2.group(1) if m2 else None)
+
+
+def voice_create_task(fields: dict, transcript: str) -> tuple[bool, dict]:
+    """Drafted fields -> a real task via `pt add`. Returns (ok, payload-fragment).
+
+    The domain rides as an inline `@domain:<d>` quick-add token, exactly as the
+    composer does on create — both backends parse quick-add labels at add time,
+    so no follow-up edit request is needed. The classification rationale and the
+    raw transcript land in ai_reasoning via --reason, which is what makes the
+    decision auditable after the fact.
+    """
+    title = (fields.get("title") or "").strip()
+    dom = fields.get("domain")
+    if dom in ("eng", "mgmt"):
+        tok = f" @domain:{dom}"
+        if len(title) + len(tok) <= 400:
+            title += tok
+    body = {"title": title, "priority": fields.get("priority"),
+            "description": fields.get("description") or None,
+            "deadline": fields.get("deadline") or None}
+    args, err = build_add_args({k: v for k, v in body.items() if v is not None})
+    if err:
+        return False, {"error": err}
+    reason = fields.get("reason") or ""
+    args.insert(1, "--reason=" + (f"{reason} · " if reason else "") + f"voice: {transcript}"[:600])
+    args.insert(1, "--json")
+    ok, msg = pt_exec(args)
+    if not ok:
+        return False, {"error": msg or "pt add failed"}
+    pt_id, uuid_ = _created_ids(msg)
+    return True, {"pt_id": pt_id, "id": uuid_, "message": msg}
 
 
 # ---------------------------------------------------------------------- server
@@ -781,8 +892,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "bad json"}, 400)
             return None
 
-    def _handle_voice(self):
-        """POST /api/voice — raw audio body → Whisper STT → Bedrock draft → fields."""
+    def _handle_voice(self, create: bool = False):
+        """Raw audio body → Whisper STT → LLM draft → fields.
+
+        `/api/voice` stops there and the composer fills itself in for review.
+        `/api/voice/task` (create=True) goes on to write the task, so the phone
+        can capture one end to end without opening a form.
+        """
         try:
             n = int(self.headers.get("Content-Length", "0") or 0)
         except ValueError:
@@ -800,11 +916,19 @@ class Handler(BaseHTTPRequestHandler):
             transcript = voice_transcribe(audio, suffix)
         except Exception as e:  # noqa: BLE001
             return self._json({"ok": False, "error": f"transcription failed: {e}"}, 502)
-        if not transcript:
-            return self._json({"ok": False, "error": "no speech detected", "transcript": ""})
+        if not transcript_is_speech(transcript):
+            # Never create from silence or a Whisper artefact — say so and stop.
+            return self._json({"ok": False, "error": "no speech detected",
+                               "transcript": transcript})
         fields, llm = voice_extract(transcript)
-        return self._json({"ok": True, "transcript": transcript, "fields": fields,
-                           "stt": "whisper", "llm": llm})
+        out = {"ok": True, "transcript": transcript, "fields": fields,
+               "stt": "whisper", "llm": llm}
+        if not create:
+            return self._json(out)
+        ok, created = voice_create_task(fields, transcript)
+        out.update(created)
+        out["ok"] = ok
+        return self._json(out, 200 if ok else 500)
 
     def _serve_static(self, path):
         rel = "index.html" if path in ("/", "") else path.lstrip("/")
@@ -943,6 +1067,8 @@ class Handler(BaseHTTPRequestHandler):
             )
         if u.path == "/api/voice":          # binary audio body, larger cap — own reader
             return self._handle_voice()
+        if u.path == "/api/voice/task":     # same, and creates the task outright
+            return self._handle_voice(create=True)
         body = self._read_json_body()
         if body is None:
             return

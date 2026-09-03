@@ -204,8 +204,11 @@ Writes (attributed `actor=dashboard`): `POST /api/tasks` (create, quick-add
 tokens parse) · `POST /api/tasks/{id}/done|dismiss|reopen` ·
 `/{id}/snooze {days}` · `/{id}/priority {level}` ·
 `/{id}/edit {title?,description?,priority?,deadline?|null}`.
-`POST /api/voice` proxies to the Python voice shim (`PTASK_VOICE_SHIM_URL`,
-default http://127.0.0.1:9510).
+`POST /api/voice` and `POST /api/voice/task` proxy to the Python voice shim
+(`PTASK_VOICE_SHIM_URL`, default http://127.0.0.1:9510) — the first returns
+drafted fields for the composer to review, the second creates the task
+outright for the cockpit's capture bar. Two routes rather than one flag: the
+proxy forwards only the path it is given, never the query string.
 
 ## POST /tg/callback (v2.2.0)
 
