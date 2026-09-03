@@ -39,6 +39,8 @@ _arguments "${_arguments_options[@]}" : \
 '--description=[Description override]:DESCRIPTION:_default' \
 '--deadline=[Deadline override (ISO date, e.g. 2026-05-20)]:DEADLINE:_default' \
 '--reason=[Why this task was created — stored as ai_reasoning]:REASON:_default' \
+'--kind=[Task shape\: scout (investigation) or ship (implementation, default)]:KIND:_default' \
+'--deliverable=[What finishing it produces\: report | pr | none. Defaults to the kind'\''s deliverable when --kind is given]:DELIVERABLE:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--raw[Disable quick-add parsing — treat the title literally]' \
@@ -740,6 +742,28 @@ esac
     ;;
 esac
 ;;
+(promote)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N, bare integer, or title substring:_default' \
+&& ret=0
+;;
+(kind)
+_arguments "${_arguments_options[@]}" : \
+'--deliverable=[report | pr | none. Left unchanged when omitted]:DELIVERABLE:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N, bare integer, or title substring:_default' \
+':kind -- scout | ship:_default' \
+&& ret=0
+;;
 (start)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
@@ -1197,6 +1221,14 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(promote)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(kind)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (start)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1317,6 +1349,8 @@ _pt_commands() {
 'accountability:Run one accountability cycle (escalation + Telegram/email)' \
 'scoring:Recompute composite priority scores for all active tasks' \
 'remote:Talk to a remote canonical \`pt serve\` (no local DB)' \
+'promote:Promote an investigation to implementation\: kind scout → ship on the SAME row (never close + reopen a duplicate)' \
+'kind:Set a task'\''s kind (scout|ship) and optional deliverable' \
 'start:Mark a task in progress (you'\''re actively working it)' \
 'snooze:Snooze a task until a date — it leaves \`pt next\` and reminders, then wakes to todo automatically' \
 'reap:Reap stale machine-generated tasks (incident >7d idle, distilled >30d idle) — soft-dismiss, reversible via \`pt reopen\`' \
@@ -1468,6 +1502,8 @@ _pt__subcmd__help_commands() {
 'accountability:Run one accountability cycle (escalation + Telegram/email)' \
 'scoring:Recompute composite priority scores for all active tasks' \
 'remote:Talk to a remote canonical \`pt serve\` (no local DB)' \
+'promote:Promote an investigation to implementation\: kind scout → ship on the SAME row (never close + reopen a duplicate)' \
+'kind:Set a task'\''s kind (scout|ship) and optional deliverable' \
 'start:Mark a task in progress (you'\''re actively working it)' \
 'snooze:Snooze a task until a date — it leaves \`pt next\` and reminders, then wakes to todo automatically' \
 'reap:Reap stale machine-generated tasks (incident >7d idle, distilled >30d idle) — soft-dismiss, reversible via \`pt reopen\`' \
@@ -1578,6 +1614,11 @@ _pt__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'pt help help commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__kind_commands] )) ||
+_pt__subcmd__help__subcmd__kind_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help kind commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__list_commands] )) ||
 _pt__subcmd__help__subcmd__list_commands() {
     local commands; commands=()
@@ -1607,6 +1648,11 @@ _pt__subcmd__help__subcmd__plan_commands() {
 _pt__subcmd__help__subcmd__priority_commands() {
     local commands; commands=()
     _describe -t commands 'pt help priority commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__promote_commands] )) ||
+_pt__subcmd__help__subcmd__promote_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help promote commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__reap_commands] )) ||
 _pt__subcmd__help__subcmd__reap_commands() {
@@ -1824,6 +1870,11 @@ _pt__subcmd__help__subcmd__why_commands() {
     local commands; commands=()
     _describe -t commands 'pt help why commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__kind_commands] )) ||
+_pt__subcmd__kind_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt kind commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__list_commands] )) ||
 _pt__subcmd__list_commands() {
     local commands; commands=()
@@ -1853,6 +1904,11 @@ _pt__subcmd__plan_commands() {
 _pt__subcmd__priority_commands() {
     local commands; commands=()
     _describe -t commands 'pt priority commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__promote_commands] )) ||
+_pt__subcmd__promote_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt promote commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__reap_commands] )) ||
 _pt__subcmd__reap_commands() {
