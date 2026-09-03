@@ -217,6 +217,27 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.16.0 / pTask v3.21.0** — Face ID unlock, replicated from pureKEY (`forzieri`).
+  On a device with a platform authenticator the auth gate offers **Remember this
+  device with Face ID**; a WebAuthn PRF secret (`rpId` = the serving hostname, user
+  verification required, resident key) derives a non-extractable AES-GCM key that
+  wraps the dashboard password in IndexedDB, and the next visit shows **Unlock with
+  Face ID** instead of the keyboard. The server surface is unchanged — Face ID
+  replays the same password to the same `POST /api/auth/login`, with the same
+  250 ms delay, 5-failure lockout and opaque `ptask_session` cookie. The enrolment
+  is refused, never repaired: a different hostname or origin, an unknown record
+  version, a tampered wrap, or a `401` from the login route drops it and the
+  password becomes the only way in; a `429` or an unreachable server keeps it.
+  `www/face-unlock.js` is the crypto core, vendored byte-identical into pNOC and
+  pSCOPE, with 16 contract tests in `tests/face_unlock.test.mjs`. Storage is
+  IndexedDB, never localStorage. Verified end to end by
+  `tests/e2e/run.sh`, which boots a throwaway sidecar and drives a real Chromium with a
+  CDP virtual platform authenticator through enrolment, unlock and the 401 refusal
+  (kept out of CI only because it needs a browser download — run it after touching the
+  auth gate). **Not** available on the Rust `pt serve` dashboard
+  route, which still authenticates with HTTP Basic and so has no login endpoint to
+  replay a password to.
+
 - **v0.15.0 / pTask v3.20.0** — dictation-first capture. A full-width record bar
   is the first control in the header on every width (the typed `new task…` box
   is gone; the composer is now the `+` button beside it, or the `n` key). One

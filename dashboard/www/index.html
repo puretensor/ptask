@@ -498,6 +498,12 @@ button.chip{font-family:var(--font);cursor:pointer}
   font:800 12px var(--font);text-transform:var(--uppercase);letter-spacing:.08em;cursor:pointer}
 .auth-submit:disabled{opacity:.55;cursor:wait}
 .auth-error{min-height:18px;color:var(--p5t);font-size:11px}
+/* Face ID unlock. The button leads when this device is enrolled — the common case is the first
+   thing the thumb reaches — and the enrol tick sits under the password button, off that path. */
+.auth-face{background:transparent;border:1px solid var(--accent);color:var(--accent)}
+.auth-divider{text-align:center;color:var(--muted);font-size:11px;letter-spacing:1px;text-transform:uppercase}
+.auth-enrol{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;cursor:pointer}
+.auth-enrol input[type="checkbox"]{accent-color:var(--accent);cursor:pointer;margin:0}
 .auth-checking{color:var(--muted);font-size:12px}
 .ph{padding:16px 4px;font-size:12px;color:var(--dim)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
@@ -875,8 +881,13 @@ button,[role="button"]{touch-action:manipulation}
     <p class="auth-subtitle">Private task dashboard</p>
     <p id="authChecking" class="auth-checking">Checking session…</p>
     <form id="authForm" class="auth-form" hidden>
+      <!-- Face ID. Both rows start hidden; face-unlock-boot.js unhides only what this device
+           can actually deliver, so a browser without a platform authenticator sees no change. -->
+      <button id="faceUnlockBtn" class="auth-submit auth-face" type="button" hidden>Unlock with Face ID</button>
+      <div id="faceDivider" class="auth-divider" hidden>or</div>
       <input id="authPassword" class="auth-input" type="password" placeholder="Dashboard password" aria-label="Dashboard password" autocomplete="current-password" />
       <button id="authSubmit" class="auth-submit" type="submit">Login</button>
+      <label id="faceEnrolRow" class="auth-enrol" hidden><input type="checkbox" id="faceEnrol" checked /> <span>Remember this device with Face ID</span></label>
       <div id="authError" class="auth-error" role="alert"></div>
     </form>
   </div>
@@ -2230,7 +2241,7 @@ $('#authForm').addEventListener('submit',async e=>{
   $('#authSubmit').disabled=true; $('#authError').textContent='';
   try{
     const r=await fetch('/api/auth/login',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})});
-    if(r.ok){location.reload();return;}
+    if(r.ok){await window.ptaskFaceUnlock?.afterPasswordLogin(password);location.reload();return;}
     if(r.status===429){const retry=r.headers.get('Retry-After');$('#authError').textContent=retry?`Too many attempts. Try again in ${retry}s.`:'Too many attempts. Try again later.';}
     else $('#authError').textContent='Invalid password';
   }catch(e){$('#authError').textContent='Could not sign in. Check your connection.';}
@@ -2248,5 +2259,7 @@ $('#logout-btn').addEventListener('click',async()=>{
   }catch(e){showLogin('Could not check the session. Check your connection.');}
 })();
 </script>
+<!-- Face ID unlock. A module, so it runs after the inline script above and never blocks it. -->
+<script type="module" src="face-unlock-boot.js"></script>
 </body>
 </html>

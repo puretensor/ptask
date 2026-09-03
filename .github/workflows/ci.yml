@@ -93,6 +93,9 @@ jobs:
           python-version: '3.x'
       - run: python -m unittest discover -s tests -v
         working-directory: dashboard
+      - name: face-unlock contract tests
+        run: node --test tests/face_unlock.test.mjs tests/face_unlock_markup.test.mjs
+        working-directory: dashboard
 
   security:
     name: dependency policy check
