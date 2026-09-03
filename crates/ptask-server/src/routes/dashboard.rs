@@ -936,6 +936,8 @@ fn api_create_blocking(state: AppState, headers: HeaderMap, body: CreateBody) ->
     };
     let ext = ptask_core::Extensions {
         labels: q.labels.clone(),
+        kind: None,
+        deliverable: None,
         project: q.project.clone(),
         duration_min: q.duration_min,
         planned_at: None,

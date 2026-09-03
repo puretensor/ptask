@@ -29,6 +29,21 @@ pub struct Task {
     pub deadline: Option<String>,
     pub source_type: String,
     pub ai_reasoning: String,
+    /// `scout` (investigation, deliverable a report) or `ship`
+    /// (implementation, deliverable a PR). See [`promote`].
+    ///
+    /// Defaulted on deserialize so a `pt remote` client stays compatible
+    /// with a canonical server that predates V015 (it omits the field).
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// What finishing this task produces: `report` | `pr` | `none`.
+    /// `None` on rows that predate V015 or never declared one.
+    #[serde(default)]
+    pub deliverable: Option<String>,
+}
+
+fn default_kind() -> String {
+    "ship".into()
 }
 
 /// What to write for a new task. Matches Python `create_task` parameters.
@@ -68,6 +83,11 @@ pub struct Extensions {
     /// Scheduled date (`due:` token) — when the operator PLANS to do it,
     /// distinct from the hard `deadline`.
     pub due_at: Option<String>,
+    /// `scout` (investigation) or `ship` (implementation). `None` keeps
+    /// the schema default (`ship`).
+    pub kind: Option<String>,
+    /// `report` | `pr` | `none`. `None` leaves the column unset.
+    pub deliverable: Option<String>,
     /// Optional recurrence rule. When set, a row is written to
     /// `pt_recurrence` in the same transaction as the task insert.
     /// `next_occurrence` is initialised from the task's deadline.
@@ -143,7 +163,7 @@ pub fn create_with_extensions(
             escalation_level, dismissal_count, priority_score, score_urgency,
             score_dependency, score_neglect, subtasks, task_type,
             cluster_keywords, pt_id, project, duration_min, planned_at,
-            energy, created_by_pt, due_at
+            energy, created_by_pt, due_at, kind, deliverable
          ) VALUES (
             ?1, ?2, ?3, ?4, 'pending', 'todo',
             ?5, ?5, ?6, ?7, '[]',
@@ -151,7 +171,7 @@ pub fn create_with_extensions(
             0, 0, 0.0, 0.0,
             0.0, 0.0, '[]', 'operational',
             '[]', ?10, ?11, ?12, ?13,
-            ?14, 1, ?15
+            ?14, 1, ?15, COALESCE(?16, 'ship'), ?17
          )",
         params![
             id,
@@ -169,6 +189,8 @@ pub fn create_with_extensions(
             ext.planned_at,
             ext.energy,
             ext.due_at,
+            ext.kind,
+            ext.deliverable,
         ],
     )?;
 
@@ -217,6 +239,8 @@ pub fn create_with_extensions(
         deadline: new.deadline,
         source_type: new.source_type,
         ai_reasoning: new.ai_reasoning,
+        kind: ext.kind.clone().unwrap_or_else(|| "ship".into()),
+        deliverable: ext.deliverable.clone(),
     };
     let payload = serde_json::to_value(&task)
         .map_err(|e| crate::Error::Other(format!("task.created payload: {}", e)))?;
@@ -246,7 +270,8 @@ pub fn list_with_filter(
         // no extension row (e.g. pre-backfill legacy rows) visible for
         // non-label/project filters.
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
          FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid = t.id",
     );
     let mut conds: Vec<String> = Vec::new();
@@ -325,7 +350,8 @@ pub fn list(
     let conn = db.get()?;
     let mut sql = String::from(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
          FROM tasks t",
     );
     let mut conds: Vec<String> = Vec::new();
@@ -360,6 +386,8 @@ pub fn list(
             deadline: r.get(8)?,
             source_type: r.get(9)?,
             ai_reasoning: r.get(10).unwrap_or_default(),
+            kind: r.get(11).unwrap_or_else(|_| "ship".to_string()),
+            deliverable: r.get(12).unwrap_or_default(),
         })
     })?;
     let out: Vec<Task> = rows.collect::<std::result::Result<_, _>>()?;
@@ -371,7 +399,8 @@ pub fn list_all(db: &Db) -> Result<Vec<Task>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
          FROM tasks t
          ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC",
     )?;
@@ -403,7 +432,8 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     if let Some(pt_id_str) = pt_candidate {
         let row = conn.query_row(
             "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                    t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                    t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
              FROM tasks t
              WHERE t.pt_id = ?1",
             [&pt_id_str],
@@ -419,7 +449,8 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     // Title substring search on pending tasks.
     let mut stmt = conn.prepare(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
          FROM tasks t
          WHERE t.status_v2 NOT IN ('done','dismissed') AND lower(t.title) LIKE ?1 ESCAPE '\\'
          ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC",
@@ -485,7 +516,8 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
     {
         let row = conn.query_row(
             "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                    t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                    t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
              FROM tasks t
              WHERE t.id = ?1",
             [&q.to_ascii_lowercase()],
@@ -512,7 +544,8 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
     if let Some(pt_id_str) = pt_candidate {
         let row = conn.query_row(
             "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                    t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                    t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
              FROM tasks t
              WHERE t.pt_id = ?1",
             [&pt_id_str],
@@ -527,7 +560,8 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
 
     let mut sql = String::from(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
          FROM tasks t
          WHERE lower(t.title) LIKE ?1 ESCAPE '\\'",
     );
@@ -1162,6 +1196,159 @@ pub fn claim(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     Ok(())
 }
 
+/// The two shapes a task can have: an investigation whose output is a
+/// written finding (`scout`), or implementation whose output is a merged
+/// change (`ship`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskKind {
+    Scout,
+    Ship,
+}
+
+impl TaskKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskKind::Scout => "scout",
+            TaskKind::Ship => "ship",
+        }
+    }
+
+    /// The deliverable a task of this kind produces by default.
+    pub fn default_deliverable(self) -> &'static str {
+        match self {
+            TaskKind::Scout => "report",
+            TaskKind::Ship => "pr",
+        }
+    }
+}
+
+impl std::str::FromStr for TaskKind {
+    type Err = crate::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "scout" | "investigate" | "investigation" => Ok(TaskKind::Scout),
+            "ship" | "implement" | "implementation" => Ok(TaskKind::Ship),
+            other => Err(crate::Error::Other(format!(
+                "unknown task kind {other:?} (expected scout|ship)"
+            ))),
+        }
+    }
+}
+
+/// Valid `deliverable` values. `None` on rows that never declared one.
+pub fn validate_deliverable(d: &str) -> Result<&str> {
+    match d {
+        "report" | "pr" | "none" => Ok(d),
+        other => Err(crate::Error::Other(format!(
+            "unknown deliverable {other:?} (expected report|pr|none)"
+        ))),
+    }
+}
+
+/// Set a task's kind (and optionally its deliverable) on the SAME row.
+/// `deliverable = None` leaves the existing value untouched.
+pub fn set_kind(
+    db: &Db,
+    task_uuid: &str,
+    kind: TaskKind,
+    deliverable: Option<&str>,
+    ctx: &EventCtx,
+) -> Result<()> {
+    if let Some(d) = deliverable {
+        validate_deliverable(d)?;
+    }
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let changed = match deliverable {
+        Some(d) => tx.execute(
+            "UPDATE tasks SET kind=?1, deliverable=?2, updated_at=?3 WHERE id=?4",
+            params![kind.as_str(), d, now, task_uuid],
+        )?,
+        None => tx.execute(
+            "UPDATE tasks SET kind=?1, updated_at=?2 WHERE id=?3",
+            params![kind.as_str(), now, task_uuid],
+        )?,
+    };
+    if changed == 0 {
+        return Err(crate::Error::Other("task not found".into()));
+    }
+    record_event_tx(
+        &tx,
+        ctx,
+        task_uuid,
+        "task.updated",
+        &serde_json::json!({
+            "task_uuid": task_uuid,
+            "kind": kind.as_str(),
+            "deliverable": deliverable,
+        }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Promote an investigation into implementation work: `kind` flips
+/// `scout` → `ship` on the SAME row, and a still-default `report`
+/// deliverable becomes `pr`.
+///
+/// This is the schema-level enforcement of the 2026-08-19 rule that
+/// closing a task must not manufacture more open work: promotion never
+/// closes the scout row and opens a ship duplicate, so the net open count
+/// is unchanged. A terminal task is refused rather than silently
+/// resurrected — reopen it first, so the count change is a deliberate,
+/// separately-attributed act.
+pub fn promote(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    let current: Option<(String, String)> = tx
+        .query_row(
+            "SELECT kind, status_v2 FROM tasks WHERE id=?1",
+            [task_uuid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (kind, status_v2) = current.ok_or_else(|| crate::Error::Other("task not found".into()))?;
+    if kind != "scout" {
+        return Err(crate::Error::Other(format!(
+            "task is already kind={kind} — nothing to promote"
+        )));
+    }
+    if matches!(status_v2.as_str(), "done" | "dismissed") {
+        return Err(crate::Error::Other(
+            "task is terminal — `pt reopen` it first, then promote".into(),
+        ));
+    }
+    tx.execute(
+        "UPDATE tasks
+            SET kind='ship',
+                deliverable = CASE WHEN deliverable IS NULL OR deliverable='report'
+                                   THEN 'pr' ELSE deliverable END,
+                updated_at=?1
+          WHERE id=?2 AND kind='scout'",
+        params![now, task_uuid],
+    )?;
+    tx.execute(
+        "INSERT INTO interactions (task_id, action, ts, details)
+         VALUES (?1, 'status_change', ?2, 'Promoted scout → ship (same row)')",
+        params![task_uuid, now],
+    )?;
+    record_event_tx(
+        &tx,
+        ctx,
+        task_uuid,
+        "task.promoted",
+        &serde_json::json!({
+            "task_uuid": task_uuid,
+            "from_kind": "scout",
+            "to_kind": "ship",
+        }),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Snooze until `until_iso` (status_v2 `snoozed`; legacy `delayed`). The
 /// task leaves `pt next` and accountability until the wake time passes,
 /// when [`wake_expired_snoozes`] flips it back to todo.
@@ -1541,6 +1728,8 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         deadline: r.get(8)?,
         source_type: r.get(9)?,
         ai_reasoning: r.get(10).unwrap_or_default(),
+        kind: r.get(11).unwrap_or_else(|_| "ship".to_string()),
+        deliverable: r.get(12).unwrap_or_default(),
     })
 }
 
@@ -1624,6 +1813,95 @@ mod tests {
             Ok(c.query_row(
                 "SELECT COUNT(*) FROM pt_event_log WHERE event_type=?1",
                 [event_type],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    /// The PT-1971 contract: promoting an investigation must flip `kind` on
+    /// the SAME row. The open-task count before and after is identical —
+    /// a promotion that closed the scout and opened a ship duplicate would
+    /// fail both assertions.
+    #[test]
+    fn promote_flips_kind_on_same_row_and_leaves_open_count_unchanged() {
+        let (_dir, db) = fresh_db();
+        let ext = Extensions {
+            kind: Some("scout".into()),
+            deliverable: Some("report".into()),
+            ..Default::default()
+        };
+        let t = create_with_extensions(
+            &db,
+            NewTask::minimal("investigate the thing"),
+            ext,
+            &EventCtx::test(),
+        )
+        .unwrap();
+        assert_eq!(t.kind, "scout");
+
+        let open_before = open_count(&db);
+        promote(&db, &t.id, &EventCtx::test()).unwrap();
+        assert_eq!(open_count(&db), open_before, "promotion changed open count");
+
+        let after = resolve(&db, t.pt_id.as_deref().unwrap()).unwrap();
+        assert_eq!(after.id, t.id, "promotion moved the work to a new row");
+        assert_eq!(after.kind, "ship");
+        assert_eq!(after.deliverable.as_deref(), Some("pr"));
+        assert_eq!(event_count(&db, "task.promoted"), 1);
+    }
+
+    #[test]
+    fn promote_refuses_a_ship_task_and_a_terminal_scout() {
+        let (_dir, db) = fresh_db();
+        let ship = create(&db, NewTask::minimal("already shipping"), &EventCtx::test()).unwrap();
+        assert!(promote(&db, &ship.id, &EventCtx::test()).is_err());
+
+        let scout = create_with_extensions(
+            &db,
+            NewTask::minimal("finished investigation"),
+            Extensions {
+                kind: Some("scout".into()),
+                ..Default::default()
+            },
+            &EventCtx::test(),
+        )
+        .unwrap();
+        mark_done(&db, &scout, &EventCtx::test()).unwrap();
+        assert!(
+            promote(&db, &scout.id, &EventCtx::test()).is_err(),
+            "a terminal scout must be reopened deliberately, not resurrected by promote"
+        );
+    }
+
+    #[test]
+    fn set_kind_validates_and_defaults_are_ship() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("plain task"), &EventCtx::test()).unwrap();
+        assert_eq!(t.kind, "ship");
+        assert_eq!(t.deliverable, None);
+
+        set_kind(
+            &db,
+            &t.id,
+            TaskKind::Scout,
+            Some("report"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let after = resolve(&db, t.pt_id.as_deref().unwrap()).unwrap();
+        assert_eq!(after.kind, "scout");
+        assert_eq!(after.deliverable.as_deref(), Some("report"));
+
+        assert!(validate_deliverable("nonsense").is_err());
+        assert!("sideways".parse::<TaskKind>().is_err());
+    }
+
+    fn open_count(db: &Db) -> i64 {
+        db.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status_v2 NOT IN ('done','dismissed')",
+                [],
                 |r| r.get(0),
             )?)
         })

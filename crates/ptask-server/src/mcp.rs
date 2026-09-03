@@ -37,6 +37,7 @@ fn task_json(t: &ptask_core::tasks::Task) -> serde_json::Value {
         "status": t.status, "created_at": t.created_at,
         "updated_at": t.updated_at, "deadline": t.deadline,
         "source_type": t.source_type,
+        "kind": t.kind, "deliverable": t.deliverable,
     })
 }
 
@@ -77,6 +78,14 @@ pub struct AddArg {
     /// a discovered_from link.
     #[serde(default)]
     pub discovered_from: Option<String>,
+    /// Task shape: "scout" (investigation, deliverable a report) or "ship"
+    /// (implementation, deliverable a PR — the default).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// What finishing it produces: "report" | "pr" | "none". Defaults to
+    /// the kind's deliverable.
+    #[serde(default)]
+    pub deliverable: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -208,6 +217,8 @@ impl PtaskMcp {
             text,
             reason,
             discovered_from,
+            kind,
+            deliverable,
         }): Parameters<AddArg>,
     ) -> Result<CallToolResult, McpError> {
         let q = ptask_core::quickadd::parse(&text).map_err(domain_err)?;
@@ -220,8 +231,30 @@ impl PtaskMcp {
             ai_confidence: 1.0,
             ai_reasoning: reason.unwrap_or_default(),
         };
+        let kind = match kind.as_deref() {
+            Some(k) => Some(
+                k.parse::<ptask_core::tasks::TaskKind>()
+                    .map_err(domain_err)?
+                    .as_str()
+                    .to_string(),
+            ),
+            None => None,
+        };
+        let deliverable = match deliverable.as_deref() {
+            Some(d) => Some(
+                ptask_core::tasks::validate_deliverable(d)
+                    .map_err(domain_err)?
+                    .to_string(),
+            ),
+            None => match kind.as_deref() {
+                Some("scout") => Some("report".to_string()),
+                _ => None,
+            },
+        };
         let ext = ptask_core::Extensions {
             labels: q.labels.clone(),
+            kind,
+            deliverable,
             project: q.project.clone(),
             duration_min: q.duration_min,
             planned_at: None,
@@ -388,6 +421,20 @@ impl PtaskMcp {
     }
 
     #[tool(
+        description = "Promote an investigation to implementation: flips kind scout → ship on the SAME task row (deliverable report → pr). Never close a scout and open a ship duplicate — promotion must leave the open-task count unchanged. Errors on a terminal task; reopen it first."
+    )]
+    async fn task_promote(
+        &self,
+        Parameters(IdArg { id }): Parameters<IdArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, false).map_err(domain_err)?;
+        ptask_core::tasks::promote(&self.db, &t.id, &self.ctx()).map_err(domain_err)?;
+        json_ok(&serde_json::json!({
+            "ok": true, "pt_id": t.pt_id, "kind": "ship", "deliverable": "pr"
+        }))
+    }
+
+    #[tool(
         description = "Capture raw text into the distillation inbox. severity>=3 creates a task immediately (incident fast lane). Pass a stable client_key to make re-sends idempotent (federation)."
     )]
     async fn task_capture(
@@ -533,6 +580,8 @@ mod tests {
                 text: "task that must not survive".into(),
                 reason: None,
                 discovered_from: Some("PT-999999".into()),
+                kind: None,
+                deliverable: None,
             }))
             .await;
 
@@ -614,6 +663,8 @@ mod tests {
                 text: "discovered child".into(),
                 reason: None,
                 discovered_from: parent.pt_id.clone(),
+                kind: None,
+                deliverable: None,
             }))
             .await;
 

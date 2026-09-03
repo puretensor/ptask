@@ -954,6 +954,8 @@ mod tests {
             deadline: None,
             source_type: "manual".into(),
             ai_reasoning: String::new(),
+            kind: "ship".into(),
+            deliverable: None,
         };
         assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), 0);
 

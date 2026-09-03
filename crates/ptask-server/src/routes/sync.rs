@@ -366,6 +366,8 @@ fn apply_command(
             };
             let ext = ptask_core::Extensions {
                 labels: q.labels.clone(),
+                kind: None,
+                deliverable: None,
                 project: q.project.clone(),
                 duration_min: q.duration_min,
                 planned_at: None,
@@ -619,7 +621,8 @@ fn task_by_uuid(db: &ptask_core::Db, uuid: &str) -> Result<tasks::Task, anyhow::
     let conn = db.get()?;
     let row = conn.query_row(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning
+                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
+                t.kind, t.deliverable
          FROM tasks t
          WHERE t.id = ?1",
         [uuid],
@@ -636,6 +639,8 @@ fn task_by_uuid(db: &ptask_core::Db, uuid: &str) -> Result<tasks::Task, anyhow::
                 deadline: r.get(8)?,
                 source_type: r.get(9)?,
                 ai_reasoning: r.get(10).unwrap_or_default(),
+                kind: r.get(11).unwrap_or_else(|_| "ship".to_string()),
+                deliverable: r.get(12).unwrap_or_default(),
             })
         },
     )?;
