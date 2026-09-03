@@ -83,8 +83,11 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.15.0"
-PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png", "/manifest.webmanifest"})
+VERSION = "0.16.0"
+# The login shell at "/" is public, so anything it loads before sign-in must be too: the two
+# Face ID modules are part of the gate itself, not data behind it.
+PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",
+                           "/manifest.webmanifest", "/face-unlock.js", "/face-unlock-boot.js"})
 
 # /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
 # SQL, so nothing user-supplied may pass through unmapped.
