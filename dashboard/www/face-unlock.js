@@ -15,10 +15,21 @@
 //
 // Three refusals gate a reveal, and each is a refusal, never a repair. The password is the only
 // fallback:
-//   * binding    — the record carries the rpId and origin it was enrolled under. A hostname
-//                  cutover changes which passkey the platform will even offer (pureKEY had to
-//                  re-enrol by hand when forzieri.puretensor.ai became key.puretensor.ai), so a
-//                  record from the old name is dropped, never retried.
+//   * binding    — the record carries the rpId and origin it was enrolled under, and a mismatch is
+//                  dropped before the authenticator is touched.
+//                  BE HONEST ABOUT WHAT THIS BUYS. IndexedDB is already partitioned by origin, so
+//                  in an ordinary browser a record written at one hostname is INVISIBLE at another
+//                  rather than refused — you get "not-enrolled", not "stale-binding", and the user
+//                  is simply offered enrolment again (minting a second passkey; see the note on
+//                  aliases below). Within one origin these fields are tautologies. The check earns
+//                  its place only where the store is NOT origin-partitioned: a record restored from
+//                  a backup or synced between profiles, a future build that migrates the database,
+//                  and the `version` field, which is the one component a later release can actually
+//                  trip. It is cheap defence in depth, not the hostname-cutover guard the first
+//                  version of this comment advertised.
+//                  ALIASES ARE A REAL CONSEQUENCE: pNOC answers on noc. and ptve., pSCOPE on
+//                  scope., specola.puretensor.ai and specola.fox. Each is a separate origin, so
+//                  each gets its own enrolment and its own resident passkey.
 //   * integrity  — AES-GCM authenticates the wrap: a tampered, truncated or foreign record
 //                  fails to open rather than yielding a plausible wrong password.
 //   * currency   — the server is the canary. `reveal()` hands back a password; if the sign-in
@@ -31,6 +42,22 @@
 
 export const RECORD_VERSION = 1;
 
+/** A PRF secret is a 32-byte HMAC output; anything else is a broken authenticator, not a short key. */
+export const PRF_SECRET_BYTES = 32;
+
+/**
+ * The failure codes a UI must respond to by dropping the enrolment and re-offering enrolment.
+ *
+ * This lives in the core because three wirings each kept their own copy of it and they had already
+ * drifted: pSCOPE omitted "decrypt-failed", so a corrupt record there left a Face ID button that
+ * could never succeed and could never be re-enrolled. A shared constant cannot drift.
+ *
+ * Deliberately NOT included: "prf-failed" (a cancelled or timed-out prompt — the enrolment is fine)
+ * and "prf-unsupported" (a device capability problem — re-enrolling would fail the same way).
+ * For those, the operator needs the explicit forget control, not an automatic drop.
+ */
+export const RECOVERABLE_CODES = Object.freeze(["not-enrolled", "version", "stale-binding", "decrypt-failed"]);
+
 /** Error carrying a stable machine-readable `code` alongside the human message. */
 export class FaceUnlockError extends Error {
   /**
@@ -42,6 +69,15 @@ export class FaceUnlockError extends Error {
     this.name = "FaceUnlockError";
     this.code = code;
   }
+}
+
+/**
+ * True when this failure means the stored enrolment is unusable and should be dropped so the
+ * operator is offered enrolment again. Call this instead of hand-listing codes at a call site.
+ * @param {unknown} error
+ */
+export function isRecoverable(error) {
+  return error instanceof FaceUnlockError && RECOVERABLE_CODES.includes(error.code);
 }
 
 const enc = new TextEncoder();
@@ -87,7 +123,7 @@ function messageOf(error) {
 /**
  * @typedef {object} PrfProvider
  * @property {() => Promise<boolean>} isSupported
- * @property {() => Promise<{ credentialId: string, secret: Uint8Array<ArrayBuffer> }>} register
+ * @property {(exclude?: string[]) => Promise<{ credentialId: string, secret: Uint8Array<ArrayBuffer> }>} register
  * @property {(args: { credentialId: string }) => Promise<{ secret: Uint8Array<ArrayBuffer> }>} evaluate
  */
 
@@ -110,11 +146,22 @@ export function webauthnPrf({ rpId, appId, appName, userName = "operator", displ
   if (!appId) throw new FaceUnlockError("config", "webauthnPrf needs an appId");
   const salt = enc.encode(`${appId}.prf.v1`);
 
-  /** @param {PublicKeyCredential | null} result */
+  /**
+   * The PRF output, checked for the two degenerate shapes that would silently destroy the scheme.
+   * A short secret weakens the wrapping key; a constant one (all-zero is the observed quirk) makes
+   * it derivable by anyone, so two devices with the same quirk would open each other's wrap. Both
+   * are refusals, not warnings — a usable Face ID is better absent than counterfeit.
+   * @param {PublicKeyCredential | null} result
+   */
   const prfOf = (result) => {
     const first = result?.getClientExtensionResults?.()?.prf?.results?.first;
     if (!first) throw new FaceUnlockError("prf-unsupported", "this authenticator did not return a PRF secret");
-    return bytesOf(first);
+    const secret = bytesOf(first);
+    if (secret.byteLength !== PRF_SECRET_BYTES)
+      throw new FaceUnlockError("prf-unsupported", `this authenticator returned a ${secret.byteLength}-byte PRF secret, not ${PRF_SECRET_BYTES}`);
+    if (secret.every((b) => b === secret[0]))
+      throw new FaceUnlockError("prf-unsupported", "this authenticator returned a constant PRF secret");
+    return secret;
   };
 
   // An unanswered platform prompt otherwise hangs forever — always give it an abort signal.
@@ -155,7 +202,13 @@ export function webauthnPrf({ rpId, appId, appName, userName = "operator", displ
       return Boolean(available);
     },
 
-    async register() {
+    /**
+     * @param {string[]} [exclude] credential ids already enrolled on this device. Without this the
+     * platform happily mints a second resident passkey for the same site on every enrolment, and
+     * nothing in the app can ever delete the orphan — the operator ends up with a Settings list of
+     * identical entries, exactly one of which works.
+     */
+    async register(exclude = []) {
       const cred = /** @type {PublicKeyCredential | null} */ (
         await withTimeout((signal) =>
           navigator.credentials.create({
@@ -164,6 +217,7 @@ export function webauthnPrf({ rpId, appId, appName, userName = "operator", displ
               challenge: crypto.getRandomValues(new Uint8Array(32)),
               rp: { name: appName || appId, id: rpId },
               user: { id: crypto.getRandomValues(new Uint8Array(16)), name: userName, displayName: displayName || userName },
+              excludeCredentials: exclude.map((id) => ({ type: "public-key", id: unb64url(id) })),
               pubKeyCredParams: [
                 { type: "public-key", alg: -7 },
                 { type: "public-key", alg: -257 },
@@ -219,6 +273,14 @@ export function webauthnPrf({ rpId, appId, appName, userName = "operator", displ
  * @returns {RecordStore}
  */
 export function indexedDbStore({ dbName = "face-unlock", storeName = "enrolment", key = "record" } = {}) {
+  // Ask for durable storage once. Safari evicts script-writable storage (IndexedDB included) after
+  // seven days without interaction, and a fleet dashboard is precisely the site nobody opens for a
+  // week — the enrolment would vanish silently and the next visit would mint another passkey.
+  // Best-effort: the promise is ignored, because a refusal is not a reason to fail an unlock.
+  try {
+    navigator?.storage?.persist?.().catch(() => {});
+  } catch { /* no Storage API, or a context that forbids it */ }
+
   const open = () =>
     new Promise(/** @param {(db: IDBDatabase) => void} resolve */ (resolve, reject) => {
       const request = indexedDB.open(dbName, 1);
@@ -348,7 +410,10 @@ export function createFaceUnlock({ prf, store, appId, rpId, origin, subtle = glo
     async enroll(password) {
       if (typeof password !== "string" || password === "")
         throw new FaceUnlockError("enroll", "a dashboard password is required");
-      const { credentialId, secret } = await prf.register();
+      // Hand the platform the credential we already hold so it refuses to mint a duplicate.
+      const previous = await store.load().catch(() => null);
+      const exclude = previous?.credentialId ? [previous.credentialId] : [];
+      const { credentialId, secret } = await prf.register(exclude);
       const wrappingKey = await wrappingKeyFrom(secret);
       secret.fill(0);
       const iv = crypto.getRandomValues(new Uint8Array(12));
