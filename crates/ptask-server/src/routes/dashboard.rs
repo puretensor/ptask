@@ -102,6 +102,10 @@ pub fn router() -> Router<AppState> {
             "/api/voice",
             post(api_voice).layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES)),
         )
+        .route(
+            "/api/voice/task",
+            post(api_voice_task).layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES)),
+        )
         .route("/index.html", get(serve_index))
         .route("/manifest.webmanifest", get(serve_manifest))
 }
@@ -1135,6 +1139,26 @@ async fn api_voice(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
+    voice_proxy(state, headers, body, "/api/voice").await
+}
+
+/// Same passthrough, but the shim goes on to create the task — the cockpit's
+/// dictate-to-capture bar. A separate route rather than a query flag because
+/// the proxy forwards only the path it is given, never the query string.
+async fn api_voice_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    voice_proxy(state, headers, body, "/api/voice/task").await
+}
+
+async fn voice_proxy(
+    state: AppState,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+    path: &str,
+) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -1142,8 +1166,9 @@ async fn api_voice(
         return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
     let url = format!(
-        "{}/api/voice",
-        state.dash.voice_shim_url.trim_end_matches('/')
+        "{}{}",
+        state.dash.voice_shim_url.trim_end_matches('/'),
+        path
     );
     let ctype = headers
         .get(header::CONTENT_TYPE)

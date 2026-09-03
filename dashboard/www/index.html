@@ -507,10 +507,71 @@ button.chip{font-family:var(--font);cursor:pointer}
 .fade{animation:fadein .5s ease both}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel2);border:var(--card-border);color:var(--text);padding:10px 18px;border-radius:10px;box-shadow:var(--shadow);font-size:13px;z-index:99;opacity:0;transition:opacity .3s}
 .toast.show{opacity:1}
-.quickadd{display:flex;gap:8px}
-.quickadd input{background:var(--panel);border:var(--card-border);color:var(--text);border-radius:var(--chip-radius);padding:6px 12px;font-family:var(--font);font-size:12px;width:180px}
-.quickadd input:focus{outline:none;border-color:var(--accent);box-shadow:var(--glow)}
-.quickadd button{background:var(--grad);color:var(--ink);border:none;border-radius:var(--chip-radius);padding:6px 14px;font-weight:700;cursor:pointer;font-size:12px}
+/* ------------------------------------------------------- capture bar (v0.15)
+   The dictation control is the first real thing on the page, on every width —
+   pTask is a thing you talk at, and the typed path is the small button beside
+   it. The bar owns a whole header row so the tap target is unmissable on a
+   phone and the recording state is impossible to mistake for anything else. */
+.hdr-cap{display:flex;align-items:stretch;gap:8px;padding:0 18px 10px;max-width:1500px;margin:0 auto}
+.capbtn{
+  flex:1;display:flex;align-items:center;gap:10px;cursor:pointer;min-height:44px;
+  background:var(--panel);border:1px solid var(--accent);color:var(--accent-t);
+  border-radius:12px;padding:9px 14px;font-family:var(--font);font-size:14px;font-weight:700;
+  text-align:left;transition:background .15s,border-color .15s,color .15s;
+}
+.capbtn:hover{background:var(--panel2);filter:brightness(1.06)}
+.capbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.capbtn .caplbl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.capbtn .captime{font-variant-numeric:tabular-nums;font-size:13px;opacity:.9}
+.capbtn .ic{width:17px;height:17px;flex:none}
+/* recording: the whole bar turns into the stop target and says so */
+.capbtn.rec{background:var(--p5);border-color:var(--p5);color:var(--ink);animation:vpulse 1.3s infinite}
+.capbtn.proc{cursor:wait;border-style:dashed}
+.capbtn.off{border-color:var(--border);color:var(--muted);cursor:not-allowed}
+/* live input level — five bars off an AnalyserNode, so you can see the mic is
+   actually hearing you before you have spoken a whole sentence into nothing */
+.caplvl{display:none;align-items:center;gap:3px;height:18px;flex:none}
+.capbtn.rec .caplvl{display:flex}
+.capbtn.rec .ic-mic{display:none}
+.caplvl i{display:block;width:3px;height:100%;border-radius:2px;background:currentColor;
+  transform:scaleY(.18);transform-origin:center;transition:transform .06s linear}
+.captype{
+  flex:none;display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;
+  min-width:52px;background:var(--grad);color:var(--ink);border:none;border-radius:12px;
+  padding:0 12px;font-family:var(--font);font-weight:800;font-size:13px;
+}
+.captype:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.captype .ic{width:16px;height:16px}
+[data-theme="lcars"] .capbtn,[data-theme="lcars"] .captype{border-radius:0 14px 14px 0}
+
+/* result card — what the dictation actually produced, with one tap to undo it */
+.capres{
+  background:var(--card-bg);backdrop-filter:var(--backdrop);border:var(--card-border);
+  border-left:4px solid var(--accent);border-radius:var(--radius);
+  padding:12px 14px;margin-top:16px;box-shadow:var(--shadow);
+  animation:capin .28s ease-out;
+}
+.capres.warn{border-left-color:var(--p4)}
+.capres.undone{border-left-color:var(--dim);opacity:.85}
+@keyframes capin{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.capres .cap-hd{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.capres .cap-ok{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--accent-t)}
+.capres.warn .cap-ok{color:var(--p4t)}
+.capres.undone .cap-ok{color:var(--muted)}
+.capres .cap-sp{flex:1}
+.capres .cap-btn{cursor:pointer;background:transparent;border:1px solid var(--border);color:var(--muted);
+  border-radius:8px;padding:4px 10px;font-family:var(--font);font-size:11px;font-weight:700;transition:all .15s}
+.capres .cap-btn:hover{color:var(--text);border-color:var(--accent)}
+.capres .cap-x{width:26px;height:26px;padding:0;font-size:13px;line-height:1;flex:none}
+.capres .cap-title{font-size:15px;font-weight:600;line-height:1.35;margin-bottom:8px;word-break:break-word}
+.capres .cap-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.capres .cap-p{font-family:var(--font);font-weight:800;font-size:10px;line-height:1.4;
+  padding:5px 8px;border-radius:6px;color:var(--ink);display:inline-flex;align-items:center;min-height:24px}
+[data-theme="lcars"] .capres .cap-p{border-radius:0 8px 8px 0}
+.capres .cap-due{font-size:11px;color:var(--muted)}
+.capres .cap-llm{font-size:10px;color:var(--dim);margin-left:auto}
+.capres .cap-heard{font-size:11px;color:var(--muted);font-style:italic;line-height:1.45;word-break:break-word}
+.capres .cap-why{font-size:10px;color:var(--dim);margin-top:4px;line-height:1.45}
 /* ---- body-level overlays: severity picker popover + done-confirm dialog ---- */
 [hidden]{display:none!important}
 .popover{position:fixed;z-index:96;min-width:154px;padding:5px;
@@ -668,10 +729,15 @@ button,[role="button"]{touch-action:manipulation}
   .brandtxt small{display:none}
   .chips-c{font-size:11px;text-align:right;white-space:normal;line-height:1.35;flex:0 1 auto;min-width:0}
   .chips-c .cc-open{display:none}
-  .quickadd{flex:none}
-  .quickadd input{display:none}
-  .quickadd button{width:40px;height:36px;padding:0;font-size:22px;line-height:1;border-radius:10px;display:flex;align-items:center;justify-content:center}
-  .quickadd button .lbl{display:none}
+  /* the dictation bar is the widest, tallest thing in the chrome on a phone —
+     thumb-reachable, unmissable, and the typed path shrinks to its right */
+  .hdr-cap{padding:0 12px 8px;gap:6px}
+  .capbtn{min-height:48px;font-size:15px;border-radius:13px;padding:9px 13px}
+  .capbtn .caplbl{white-space:normal}
+  .captype{min-width:46px;padding:0 9px;border-radius:13px}
+  .captype .lbl{display:none}
+  .capres{padding:11px 13px;margin-top:12px}
+  .capres .cap-title{font-size:15px}
   .hdr-sub{padding:0 12px 8px;gap:8px}
   .domains{flex:1}
   .domains button{flex:1;padding:7px 4px;font-size:11px;min-height:34px;text-align:center;justify-content:center}
@@ -771,7 +837,7 @@ button,[role="button"]{touch-action:manipulation}
   #compose.modal{align-items:flex-start;padding:calc(10px + env(safe-area-inset-top,0px)) 10px 10px}
   #compose .modal-card{max-height:calc(100dvh - env(safe-area-inset-top,0px) - 20px);padding:18px 16px}
   .modal-card.compose{max-width:none}
-  .cform input[type=text],.cform textarea,.cform input[type=date],.quickadd input{font-size:16px}
+  .cform input[type=text],.cform textarea,.cform input[type=date]{font-size:16px}
   .cform{gap:12px}
   .sev button{min-width:0;flex:1 1 30%;padding:10px 4px}
   .modal-actions{gap:8px}
@@ -789,6 +855,7 @@ button,[role="button"]{touch-action:manipulation}
   <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.5 4h11M5.5 4V2.5h5V4M4 4l.7 9.5h6.6L12 4M6.5 6.8v4M9.5 6.8v4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-mic" viewBox="0 0 16 16"><rect x="6" y="1.5" width="4" height="8" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 8a4.5 4.5 0 0 0 9 0M8 12.5V15M5.5 15h5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
   <symbol id="i-stop" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="currentColor"/></symbol>
+  <symbol id="i-kbd" viewBox="0 0 16 16"><rect x="1" y="4" width="14" height="8" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M4 6.6h.01M6.5 6.6h.01M9 6.6h.01M11.5 6.6h.01M4 9.4h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
   <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2 15 14H1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 6.5v3.2M8 11.8v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
   <symbol id="i-user" viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M2.8 14a5.2 5.2 0 0 1 10.4 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
   <symbol id="i-bot" viewBox="0 0 16 16"><rect x="3" y="5.5" width="10" height="7.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 5.5V3M6.2 3h3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="9.2" r="1.05" fill="currentColor"/><circle cx="10" cy="9.2" r="1.05" fill="currentColor"/></symbol>
@@ -824,10 +891,22 @@ button,[role="button"]{touch-action:manipulation}
     <div class="spacer"></div>
     <div class="chips" id="chips"></div>
     <div class="chips-c" id="chips-c" aria-label="task counts"></div>
-    <div class="quickadd">
-      <input id="qa" placeholder="new task…" maxlength="400" aria-label="New task title — opens the composer">
-      <button id="qabtn" aria-label="New task"><span class="plus">+</span><span class="lbl"> Add</span></button>
-    </div>
+  </div>
+  <!-- capture row: dictation is the primary path, typing is the small button -->
+  <div class="hdr-cap">
+    <!-- no aria-label: the visible label IS the state ("Dictate a task" ->
+         "Listening... tap to stop" -> "transcribing..."), so letting it be the
+         accessible name keeps the two from drifting apart. The ticking timer is
+         hidden from the name so it is not re-announced every second. -->
+    <button type="button" class="capbtn" id="cap-btn">
+      <svg class="ic ic-mic" aria-hidden="true"><use href="#i-mic"/></svg>
+      <span class="caplvl" id="cap-lvl" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+      <span class="caplbl" id="cap-lbl">Dictate a task</span>
+      <span class="captime" id="cap-time" aria-hidden="true"></span>
+    </button>
+    <button type="button" class="captype" id="cap-type" aria-label="Type a task instead">
+      <svg class="ic" aria-hidden="true"><use href="#i-kbd"/></svg><span class="lbl">+</span>
+    </button>
   </div>
   <div class="hdr-sub">
     <div class="domains" id="domains" role="radiogroup" aria-label="Task domain — engineering, management, or all">
@@ -846,6 +925,10 @@ button,[role="button"]{touch-action:manipulation}
 </header>
 
 <main class="wrap" id="main">
+  <!-- a <div>, deliberately: body.phone main>section{display:none} hides every
+       pane but the active one, and the capture result must survive that -->
+  <div class="capres" id="capres" role="status" aria-live="polite" hidden></div>
+
   <section id="critical-sec">
     <div class="sec-h"><h2><svg class="ic" aria-hidden="true"><use href="#i-warn"/></svg> Critical Now</h2><div class="ln"></div><span class="ct" id="crit-ct"></span></div>
     <div class="crit-strip" id="crit"><div class="ph">loading…</div></div>
@@ -887,7 +970,7 @@ button,[role="button"]{touch-action:manipulation}
     <span class="live"><span class="dot"></span><span id="live-lbl">LIVE</span></span>
     <span id="status">connecting…</span>
     <div class="spacer" style="flex:1"></div>
-    <span class="kbd-hints" aria-hidden="true"><b>j/k</b> move · <b>x</b> done · <b>d</b> dismiss · <b>s</b> snooze · <b>e</b> edit · <b>o</b> detail · <b>1-5</b> priority · <b>r</b> review</span>
+    <span class="kbd-hints" aria-hidden="true"><b>n</b> new · <b>j/k</b> move · <b>x</b> done · <b>d</b> dismiss · <b>s</b> snooze · <b>e</b> edit · <b>o</b> detail · <b>1-5</b> priority · <b>r</b> review</span>
     <span id="ver"></span>
     <button id="logout-btn" class="logout-btn" type="button">Log out</button>
   </div>
@@ -1181,6 +1264,11 @@ document.addEventListener('click',e=>{
   else if(kind==='pick-flux'){ pickFlux(el.dataset.w); }
   else if(kind==='pick-view'){ setView(el.dataset.v); }
   else if(kind==='pick-lane'){ setLane(el.dataset.p); }
+  else if(kind==='cap-close'){ capClose(); }
+  else if(kind==='cap-undo'){ capUndo(); }
+  else if(kind==='cap-restore'){ capRestore(); }
+  else if(kind==='cap-domain'){ capFlipDomain(); }
+  else if(kind==='cap-edit'){ capEdit(); }
 });
 
 /* ---- phone app shell (≤640px): one pane at a time behind the bottom tab
@@ -1413,12 +1501,13 @@ $('#c-dom').addEventListener('keydown',e=>{
   const b=$(`#c-dom [data-v="${n}"]`); if(b) b.focus();
 });
 function openCompose(seed){
-  rememberInvoker('#qabtn');
+  rememberInvoker('#cap-type');
   _popupOpen=true;
   const s=(seed||'').slice(0,400);
   $('#c-title').value=s; $('#c-desc').value=''; $('#c-deadline').value='';
   buildSev(2);
   buildDom(_domain==='all'?'auto':_domain);   // a filtered view seeds its own domain
+  _vdest='compose';
   // voice control: ready when the browser allows mic (secure context), else guide to HTTPS
   if(voiceSupported()){ setVoiceState('idle'); voiceMsg('dictate to fill every field'); }
   else { setVoiceState('off'); voiceMsg('open https://ptask.puretensor.ai to dictate — the mic needs a secure (HTTPS) connection','warn'); }
@@ -1454,29 +1543,49 @@ async function submitCompose(ev){
       if(deadline) payload.deadline=deadline;
       r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       j=await r.json();
-      if(j.ok){ closePopups(); $('#qa').value=''; toast('✓ created · P'+_sev+' '+PNAME[_sev]); load(); }
+      if(j.ok){ closePopups(); toast('✓ created · P'+_sev+' '+PNAME[_sev]); load(); }
       else { toast('✗ '+(j.error||j.message||'failed')); }
     }
   }catch(e){ toast('✗ '+e.message); }
   finally{ btn.disabled=false; }
 }
-$('#qabtn').onclick=()=>openCompose($('#qa').value);
-$('#qa').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();openCompose($('#qa').value);}});
+$('#cap-type').onclick=()=>openCompose('');
 $('#cform').addEventListener('submit',submitCompose);
 $('#c-cancel').onclick=closePopups;
 /* ⌘/Ctrl+Enter submits from anywhere in the form (fast capture) */
 $('#cform').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')submitCompose(e);});
 
-/* ---- voice: speak → Whisper STT → Bedrock draft → auto-fill the composer ---- */
-let _rec=null,_chunks=[],_recTimer=null,_recStart=0,_vstate='idle',_vsend=true;
-function voiceMsg(t,cls){const m=$('#v-msg');m.textContent=t||'';m.className='vmsg'+(cls?' '+cls:'');}
+/* ---- voice: speak → Whisper STT → LLM draft → either fill the composer
+   (`compose`, the review path) or create the task outright (`capture`, the
+   header bar). One MediaRecorder, one state machine; _vdest only decides which
+   control it paints and which endpoint the blob is posted to. ---- */
+let _rec=null,_chunks=[],_recTimer=null,_recStart=0,_vstate='idle',_vsend=true,_vdest='compose';
+function voiceMsg(t,cls){
+  if(_vdest==='capture'){ if(t) capNote(t,cls); return; }
+  const m=$('#v-msg'); m.textContent=t||''; m.className='vmsg'+(cls?' '+cls:'');
+}
 function setVoiceState(s){
-  _vstate=s; const b=$('#v-btn');
+  _vstate=s;
+  if(_vdest==='capture') return setCapState(s);
+  const b=$('#v-btn');
   b.classList.remove('rec','proc','off'); b.disabled=false;
   if(s==='idle')      b.innerHTML='<svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg> Speak to fill';
   else if(s==='rec'){ b.classList.add('rec'); b.innerHTML='<svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg> Stop · 0s'; }
   else if(s==='proc'){b.classList.add('proc'); b.disabled=true; b.textContent='transcribing & drafting…';}
   else if(s==='off'){ b.classList.add('off'); b.disabled=true; b.innerHTML='<svg class="ic" aria-hidden="true"><use href="#i-mic"/></svg> voice needs HTTPS'; }
+}
+/* header capture bar: same four states, its own chrome */
+function setCapState(s){
+  const b=$('#cap-btn'), l=$('#cap-lbl'), t=$('#cap-time');
+  b.classList.remove('rec','proc','off'); b.disabled=false; t.textContent='';
+  if(s==='idle'){ l.textContent='Dictate a task'; }
+  else if(s==='rec'){ b.classList.add('rec'); l.textContent='Listening… tap to stop'; t.textContent='0:00'; }
+  else if(s==='proc'){ b.classList.add('proc'); b.disabled=true; l.textContent='transcribing…'; }
+  else if(s==='off'){ b.classList.add('off'); b.disabled=true; l.textContent='Voice needs HTTPS'; }
+}
+function capTick(sec){
+  if(_vdest!=='capture') return;
+  $('#cap-time').textContent=Math.floor(sec/60)+':'+String(sec%60).padStart(2,'0');
 }
 function voiceSupported(){return window.isSecureContext&&navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder;}
 async function startRec(){
@@ -1490,14 +1599,45 @@ async function startRec(){
     _rec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);
     _rec.ondataavailable=e=>{if(e.data&&e.data.size)_chunks.push(e.data);};
     _rec.onstop=()=>{
+      stopLevel();
       stream.getTracks().forEach(t=>t.stop());
       const type=(_rec&&_rec.mimeType)||mime||'audio/webm'; _rec=null;
       if(_vsend&&_chunks.length) sendVoice(new Blob(_chunks,{type})); else setVoiceState('idle');
     };
-    _rec.start(); _recStart=Date.now(); setVoiceState('rec'); voiceMsg('listening… click to stop');
+    _rec.start(); _recStart=Date.now(); setVoiceState('rec');
+    if(_vdest==='compose') voiceMsg('listening… click to stop');
+    startLevel(stream);
     _recTimer=setInterval(()=>{const s=Math.floor((Date.now()-_recStart)/1000);
-      $('#v-btn').innerHTML='<svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg> Stop · '+s+'s'; if(s>=60) stopRec(true);},250);
+      if(_vdest==='capture') capTick(s);
+      else $('#v-btn').innerHTML='<svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg> Stop · '+s+'s';
+      if(s>=60) stopRec(true);},250);
   }catch(e){ setVoiceState('idle'); voiceMsg('mic blocked: '+(e&&e.message||e),'warn'); }
+}
+/* live input level off an AnalyserNode. Cheap (one rAF for <=60s) and it is the
+   difference between "a button I pressed" and "a device that is hearing me". */
+let _actx=null,_anal=null,_raf=0;
+function startLevel(stream){
+  try{
+    const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return;
+    _actx=new AC(); _anal=_actx.createAnalyser(); _anal.fftSize=512;
+    _actx.createMediaStreamSource(stream).connect(_anal);
+    const buf=new Uint8Array(_anal.fftSize), bars=$$('#cap-lvl i'), shape=[.5,.78,1,.78,.5];
+    const tick=()=>{
+      if(!_anal) return;
+      _anal.getByteTimeDomainData(buf);
+      let peak=0; for(let i=0;i<buf.length;i++){const v=Math.abs(buf[i]-128); if(v>peak) peak=v;}
+      const lvl=Math.min(1,peak/70);
+      bars.forEach((b,i)=>{b.style.transform='scaleY('+(0.18+lvl*shape[i]*0.82).toFixed(3)+')';});
+      _raf=requestAnimationFrame(tick);
+    };
+    tick();
+  }catch(_){ stopLevel(); }
+}
+function stopLevel(){
+  if(_raf){cancelAnimationFrame(_raf);_raf=0;}
+  _anal=null;
+  if(_actx){try{_actx.close();}catch(_){} _actx=null;}
+  $$('#cap-lvl i').forEach(b=>{b.style.transform='';});
 }
 function stopRec(send){
   _vsend=send!==false;
@@ -1505,6 +1645,7 @@ function stopRec(send){
   if(_rec&&_rec.state!=='inactive'){try{_rec.stop();}catch(_){}}
 }
 async function sendVoice(blob){
+  if(_vdest==='capture') return sendVoiceCapture(blob);
   setVoiceState('proc'); voiceMsg('transcribing & drafting…');
   try{
     const r=await fetch('/api/voice',{method:'POST',headers:{'Content-Type':blob.type||'audio/webm'},body:blob});
@@ -1515,12 +1656,153 @@ async function sendVoice(blob){
     if(f.title) $('#c-title').value=f.title;
     if(f.description) $('#c-desc').value=f.description;
     if(f.priority) pickSev(f.priority);
+    if(f.domain) pickDom(f.domain);
     $('#c-deadline').value=f.deadline||'';
     voiceMsg('heard: “'+(j.transcript||'')+'”','heard');
     toast('✓ filled from voice'+(j.llm&&j.llm!=='bedrock'?' · '+j.llm:''));
   }catch(e){ setVoiceState('idle'); voiceMsg('✗ '+e.message,'warn'); }
 }
-$('#v-btn').onclick=()=>{ if(_vstate==='idle') startRec(); else if(_vstate==='rec') stopRec(true); };
+$('#v-btn').onclick=()=>{
+  if(_vstate==='rec') return stopRec(true);
+  if(_vstate!=='idle') return;
+  _vdest='compose'; startRec();
+};
+
+/* ---- dictate → task, one press. The endpoint transcribes, classifies and
+   creates in one round trip; the card below is the receipt, and Undo is the
+   escape hatch for a mis-hearing (dismiss, which `pt reopen` reverses — never
+   a hard delete). ---- */
+let _cap=null, _capTimer=null;
+function capClose(){
+  if(_capTimer){clearTimeout(_capTimer);_capTimer=null;}
+  const c=$('#capres'); c.hidden=true; c.innerHTML=''; _cap=null;
+}
+function capArm(ms){
+  if(_capTimer) clearTimeout(_capTimer);
+  _capTimer=setTimeout(capClose,ms);
+}
+function capNote(text,cls){
+  const c=$('#capres');
+  c.className='capres'+(cls==='warn'?' warn':'');
+  c.innerHTML='<div class="cap-hd"><span class="cap-ok">'+esc(text)+'</span><span class="cap-sp"></span>'+
+    '<button type="button" class="cap-btn cap-x" data-act="cap-close" aria-label="dismiss">✕</button></div>';
+  c.hidden=false;
+}
+/* the card is re-rendered on every state change, so every control rides a
+   data-act through the global delegate — no inline handlers (see README). */
+function renderCap(){
+  if(!_cap) return;
+  const c=$('#capres'), f=_cap.fields||{};
+  if(_cap.state==='undone'){
+    c.className='capres undone';
+    c.innerHTML='<div class="cap-hd"><span class="cap-ok">'+esc(_cap.pt_id||'task')+' undone</span>'+
+      '<span class="cap-sp"></span>'+
+      '<button type="button" class="cap-btn" data-act="cap-restore">Restore</button>'+
+      '<button type="button" class="cap-btn cap-x" data-act="cap-close" aria-label="dismiss">✕</button></div>'+
+      '<div class="cap-title">'+esc(f.title||'')+'</div>';
+    c.hidden=false; capArm(15000); return;
+  }
+  /* classify with the SAME function every other card uses: an explicit
+     domain: label wins, and when the model declined to choose, the standing
+     heuristic decides — one classifier for the whole board, not two. */
+  const pseudo={title:f.title||'',project:'',
+    labels:(f.labels||[]).concat(f.domain?['domain:'+f.domain]:[])};
+  const d=domainOf(pseudo), eng=d==='eng';
+  const p=Math.min(5,Math.max(1,f.priority||2));
+  c.className='capres';
+  c.innerHTML=
+    '<div class="cap-hd"><span class="cap-ok">✓ '+esc(_cap.pt_id||'created')+' created</span>'+
+      '<span class="cap-sp"></span>'+
+      '<button type="button" class="cap-btn" data-act="cap-edit">Edit</button>'+
+      '<button type="button" class="cap-btn" data-act="cap-undo">Undo</button>'+
+      '<button type="button" class="cap-btn cap-x" data-act="cap-close" aria-label="dismiss">✕</button></div>'+
+    '<div class="cap-title">'+esc(f.title||'')+'</div>'+
+    '<div class="cap-meta">'+
+      '<button type="button" class="dtag '+d+'" data-act="cap-domain" data-d="'+d+'" '+
+        'title="'+(eng?'Engineering':'Management')+(f.domain?'':' (auto-classified)')+
+        ' — click to move to '+(eng?'Management':'Engineering')+'">'+
+        '<svg class="ic" aria-hidden="true"><use href="#'+(eng?'i-eng':'i-mgmt')+'"/></svg>'+(eng?'ENG':'MGMT')+'</button>'+
+      '<span class="cap-p p'+p+'">P'+p+' '+esc(PNAME[p])+'</span>'+
+      (f.deadline?'<span class="cap-due">due '+esc(f.deadline)+'</span>':'')+
+      '<span class="cap-llm">'+esc(_cap.llm||'')+'</span>'+
+    '</div>'+
+    '<div class="cap-heard">heard: “'+esc(_cap.transcript||'')+'”</div>'+
+    (f.reason?'<div class="cap-why">'+esc(f.reason)+'</div>':'');
+  c.hidden=false;
+  capArm(25000);
+}
+async function sendVoiceCapture(blob){
+  setVoiceState('proc'); capNote('transcribing…');
+  try{
+    const r=await fetch('/api/voice/task',{method:'POST',
+      headers:{'Content-Type':blob.type||'audio/webm'},body:blob});
+    const j=await r.json();
+    setVoiceState('idle');
+    if(!j.ok){
+      /* nothing was created — say what was heard so a retry is informed */
+      capNote((j.transcript?'didn\u2019t catch that — heard: “'+j.transcript+'”'
+                          :'didn\u2019t catch that — '+(j.error||'no speech detected')),'warn');
+      capArm(12000);
+      return;
+    }
+    _cap={state:'ok',pt_id:j.pt_id,uuid:j.id,fields:j.fields||{},transcript:j.transcript||'',llm:j.llm||''};
+    renderCap();
+    toast('✓ '+(j.pt_id||'task')+' created from voice');
+    load(true);
+  }catch(e){ setVoiceState('idle'); capNote('✗ '+e.message,'warn'); capArm(12000); }
+}
+async function capUndo(){
+  if(!_cap||!_cap.pt_id&&!_cap.uuid) return;
+  const id=_cap.pt_id||_cap.uuid;
+  try{
+    const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/dismiss',
+      {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const j=await r.json();
+    if(!j.ok){ toast('✗ '+(j.error||j.message||'undo failed')); return; }
+    _cap.state='undone'; renderCap(); toast('↺ '+id+' undone'); load(true);
+  }catch(e){ toast('✗ '+e.message); }
+}
+async function capRestore(){
+  if(!_cap) return;
+  const id=_cap.pt_id||_cap.uuid;
+  try{
+    const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/reopen',
+      {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const j=await r.json();
+    if(!j.ok){ toast('✗ '+(j.error||j.message||'restore failed')); return; }
+    _cap.state='ok'; renderCap(); toast('✓ '+id+' restored'); load(true);
+  }catch(e){ toast('✗ '+e.message); }
+}
+async function capEdit(){
+  if(!_cap) return;
+  const id=_cap.pt_id||_cap.uuid;
+  await load(true);                 // the row is seconds old — make sure it is cached
+  capClose();
+  if(!_pendingAll.some(x=>(x.pt_id||x.id)===id||x.id===id)) return toast('✗ '+id+' not loaded yet');
+  openEdit(id);
+}
+function capFlipDomain(){
+  if(!_cap) return;
+  const f=_cap.fields, pseudo={title:f.title||'',project:'',
+    labels:(f.labels||[]).concat(f.domain?['domain:'+f.domain]:[])};
+  const to=domainOf(pseudo)==='eng'?'mgmt':'eng';
+  f.domain=to;                 // the card reflects the intent immediately
+  renderCap();
+  setDomainLabel(_cap.pt_id||_cap.uuid,_cap.uuid,to);
+}
+/* don't let the receipt time out from under a thumb that is reaching for Undo */
+$('#capres').addEventListener('pointerenter',()=>{ if(_capTimer){clearTimeout(_capTimer);_capTimer=null;} });
+$('#capres').addEventListener('pointerleave',()=>{ if(_cap) capArm(10000); });
+$('#cap-btn').onclick=()=>{
+  if(_vstate==='rec') return stopRec(true);
+  if(_vstate!=='idle') return;
+  if(!voiceSupported()){
+    _vdest='capture'; setVoiceState('off');
+    capNote('open https://ptask.puretensor.ai to dictate — the mic needs HTTPS','warn');
+    capArm(12000); return;
+  }
+  capClose(); _vdest='capture'; startRec();
+};
 
 /* ---- renderers ---- */
 /* flux is windowed (30m/1h/6h/24h/7d); the backend returns every window so
@@ -1766,6 +2048,7 @@ document.addEventListener('keydown',e=>{
   else if(k==='e'&&selId()){e.preventDefault();openEdit(selId());}
   else if(k==='o'&&selUuid()){e.preventDefault();openDrawer(selUuid());}
   else if('12345'.includes(k)&&selId()){e.preventDefault();setPriority(selId(),parseInt(k,10));}
+  else if(k==='n'){e.preventDefault();openCompose('');}
   else if(k==='r'||(k==='q'&&_review)){e.preventDefault();toggleReview();}
   else if(k==='Escape'){const dr=$('#drawer');if(dr.classList.contains('open')){closeDrawer();}else{_sel=-1;cards().forEach(c=>c.classList.remove('sel'));}}
 });
@@ -1842,6 +2125,7 @@ function openEdit(id){
   $('#c-deadline').value=(t.deadline_date||'');
   buildSev(t.priority);
   buildDom('auto');   // AUTO on edit = leave the domain untouched
+  _vdest='compose';
   $('#compose').hidden=false;
   $('#c-title').focus({preventScroll:true});
 }
@@ -1933,6 +2217,10 @@ function startApp(){
   hideLogin();
   if(_appStarted) return;
   _appStarted=true;
+  /* Show the mic as unavailable up front over plain http rather than letting
+     the operator press a dead-looking button first — the phone reaches this
+     app over HTTPS, a laptop on the tailnet address does not. */
+  if(!voiceSupported()){ _vdest='capture'; setVoiceState('off'); }
   load(); startPoll(); startSSE();
 }
 $('#authForm').addEventListener('submit',async e=>{

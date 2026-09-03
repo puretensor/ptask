@@ -79,13 +79,22 @@ counts at 1.3:1; Mission statusbar/ages at 2.6-2.9:1):
   Tab is trapped inside. Timeline points open it too (`data-act=drawer`).
 - **Phone header** (<640px): the five count chips collapse to one compact
   summary line (`#chips-c`); only one of `#chips`/`#chips-c` is displayed so
-  screen readers read the counts once.
+  screen readers read the counts once. The capture bar keeps its own full-width
+  row — the dictation control is never the thing that gets shrunk.
+- **The capture result card is a `<div>`, not a `<section>`.** The phone shell
+  hides every `main > section` but the active pane; the receipt for a task you
+  just dictated has to survive that whichever tab you are on.
 
 ## Layout
 
 - **Header** — crystal-cube mark, live UTC clock, count chips (crit / urgent /
-  overdue / due≤7d / open), **task composer** (title + description + severity +
-  optional deadline, with **🎤 speak-to-fill** voice capture), theme switcher
+  overdue / due≤7d / open), then the full-width **capture bar**: press to
+  dictate, and the task is transcribed, classified ENG/MGMT and created in one
+  round trip, with a result card carrying the PT-id and an Undo. Beside it the
+  small **⌨ +** button (or the `n` key) opens the **task composer** (title +
+  description + severity + domain + optional deadline, with its own
+  **🎤 speak-to-fill** for the review path). Domain switch + theme switcher
+  sit on the row below.
 - **Critical Now** — top tasks by composite `priority_score` (raw P-level as a
   badge), pulse/glow animation on newly-arrived criticals
 - **Priority Lanes** — P5→P1 columns, score-ranked within each, inline done button
@@ -128,7 +137,8 @@ iOS fetches them outside the page session; everything else stays gated).
 | POST | `/api/tasks/<id>/reopen` | shells `pt reopen <id>` (v0.12) |
 | POST | `/api/tasks/<id>/edit` `{title?, description?, priority?, deadline?, labels_add?, labels_remove?}` | shells `pt edit` (+ `pt priority` for level); null deadline clears (v0.12) |
 | POST | `/api/tasks` `{title, description?, priority?, deadline?}` | shells `pt add [--priority=] [--description=] [--deadline=] -- "<title>"` |
-| POST | `/api/voice` (raw audio body) | Whisper STT → Bedrock Claude draft → `{transcript, fields:{title,description,priority,deadline,labels}}` to pre-fill the composer |
+| POST | `/api/voice` (raw audio body) | Whisper STT → Bedrock Claude draft → `{transcript, fields:{title,description,priority,deadline,labels,domain,reason}}` to pre-fill the composer |
+| POST | `/api/voice/task` (raw audio body) | The same pipeline, then `pt add` — the header capture bar's one-press path. Returns `{ok, pt_id, id, transcript, fields, stt, llm}`. Rejects silence and Whisper artefacts with `ok:false` and creates nothing |
 
 ## Run locally
 
@@ -207,6 +217,25 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.15.0 / pTask v3.20.0** — dictation-first capture. A full-width record bar
+  is the first control in the header on every width (the typed `new task…` box
+  is gone; the composer is now the `+` button beside it, or the `n` key). One
+  press records, and `POST /api/voice/task` transcribes, classifies and creates
+  the task in a single round trip — the result card below the header shows the
+  PT-id, the ENG/MGMT hemisphere with the model's reasoning, priority and
+  deadline, and offers Undo (a reversible dismiss, never a hard delete).
+  The extractor now also returns `domain` and `reason`: an explicit hemisphere
+  is written as a `domain:eng`/`domain:mgmt` label so the classification is a
+  stored fact, and when the model declines to choose, the cockpit's existing
+  `domainOf()` heuristic decides as it always has. A transcript guard rejects
+  silence, sub-three-word fragments, non-Latin drift and known Whisper
+  idle-hallucinations before anything is written — the composer path could rely
+  on a human reviewing the draft, the create path cannot. The local extraction
+  fallback pointed at `127.0.0.1:8772` / `mistral-medium-3.5`, a seat that had
+  stopped listening, so a Bedrock outage degraded silently to a raw-transcript
+  title; it now targets the sovereign `nemotron-lightning` seat on
+  `127.0.0.1:8600` with the `reasoning_effort: "none"` that model requires, and
+  raises instead of returning empty content.
 - **v0.14.1 / pTask v3.17.1** — production now runs from a dedicated,
   fast-forward-only worktree instead of the active development checkout or the
   archived standalone dashboard repository. This prevents branch switches and
