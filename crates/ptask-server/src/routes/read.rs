@@ -161,6 +161,7 @@ fn resolve_error_status(e: &ptask_core::Error) -> StatusCode {
     let msg = e.to_string();
     match e {
         ptask_core::Error::PtIdNotFound(_) => StatusCode::NOT_FOUND,
+        ptask_core::Error::Blocked(_) => StatusCode::CONFLICT,
         ptask_core::Error::Other(_) if msg == "empty task query" => StatusCode::BAD_REQUEST,
         ptask_core::Error::Other(_)
             if msg.starts_with("no active task matching")

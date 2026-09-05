@@ -49,6 +49,17 @@ pub struct IdArg {
     pub id: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DependArg {
+    /// The dependent task (PT-N, number, uuid, or title substring).
+    pub task: String,
+    /// The prerequisite it depends on.
+    pub on: String,
+    /// Remove the edge instead of adding it.
+    #[serde(default)]
+    pub remove: bool,
+}
+
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct NextArg {
     /// Max tasks to return (default 10).
@@ -310,6 +321,9 @@ impl PtaskMcp {
             .collect::<Vec<_>>();
         let mut v = task_json(&t);
         v["history"] = serde_json::json!(hist);
+        // Open prerequisites: non-empty means task_done will be refused.
+        let blockers = ptask_core::tasks::open_blockers(&self.db, &t.id).map_err(domain_err)?;
+        v["blocked_by"] = serde_json::json!(blockers);
         json_ok(&v)
     }
 
@@ -431,6 +445,30 @@ impl PtaskMcp {
         ptask_core::tasks::promote(&self.db, &t.id, &self.ctx()).map_err(domain_err)?;
         json_ok(&serde_json::json!({
             "ok": true, "pt_id": t.pt_id, "kind": "ship", "deliverable": "pr"
+        }))
+    }
+
+    #[tool(
+        description = "Add or remove a dependency edge: `task` cannot be closed until `on` is done or dismissed. Chains (3 on 2 on 1) and fan-out (2 and 3 both on 1) are both fine; cycles are rejected. Pass remove=true to drop the edge."
+    )]
+    async fn task_depend(
+        &self,
+        Parameters(DependArg { task, on, remove }): Parameters<DependArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let from = ptask_core::tasks::resolve_for_lookup(&self.db, &task, true).map_err(domain_err)?;
+        let to = ptask_core::tasks::resolve_for_lookup(&self.db, &on, true).map_err(domain_err)?;
+        if remove {
+            ptask_core::tasks::remove_dependency(&self.db, &from.id, &to.id, &self.ctx())
+                .map_err(domain_err)?;
+        } else {
+            ptask_core::tasks::add_dependency(&self.db, &from.id, &to.id, &self.ctx())
+                .map_err(domain_err)?;
+        }
+        self.rescore();
+        let blockers = ptask_core::tasks::open_blockers(&self.db, &from.id).map_err(domain_err)?;
+        json_ok(&serde_json::json!({
+            "ok": true, "task": from.pt_id, "depends_on": to.pt_id,
+            "removed": remove, "blocked_by": blockers,
         }))
     }
 

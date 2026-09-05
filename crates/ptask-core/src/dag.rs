@@ -32,7 +32,7 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
                 t.kind, t.deliverable,
                 (SELECT COUNT(*) FROM task_links l JOIN tasks d ON d.id = l.to_uuid
                  WHERE l.from_uuid = t.id AND l.kind = 'depends_on'
-                   AND d.status_v2 != 'done') AS unmet
+                   AND d.status_v2 NOT IN ('done','dismissed')) AS unmet
          FROM tasks t
          WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
          ORDER BY t.priority_score DESC,
@@ -87,7 +87,7 @@ pub fn pending_with_missing_deps(db: &Db) -> Result<Vec<(Task, Vec<String>)>> {
          WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
            AND EXISTS (SELECT 1 FROM task_links l JOIN tasks d ON d.id = l.to_uuid
                        WHERE l.from_uuid = t.id AND l.kind = 'depends_on'
-                         AND d.status_v2 != 'done')",
+                         AND d.status_v2 NOT IN ('done','dismissed'))",
     )?;
     let tasks: Vec<Task> = stmt
         .query_map([], |r| {
@@ -114,7 +114,7 @@ pub fn pending_with_missing_deps(db: &Db) -> Result<Vec<(Task, Vec<String>)>> {
     for task in tasks {
         let mut miss = conn.prepare(
             "SELECT l.to_uuid FROM task_links l JOIN tasks d ON d.id = l.to_uuid
-             WHERE l.from_uuid = ?1 AND l.kind = 'depends_on' AND d.status_v2 != 'done'",
+             WHERE l.from_uuid = ?1 AND l.kind = 'depends_on' AND d.status_v2 NOT IN ('done','dismissed')",
         )?;
         let missing: Vec<String> = miss
             .query_map([&task.id], |r| r.get::<_, String>(0))?

@@ -629,6 +629,20 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     let tx = conn.transaction()?;
     let now = iso_now();
 
+    // Dependency gate: a task with open `depends_on` prerequisites cannot
+    // close, from any surface. Checked inside the write transaction so a
+    // blocker cannot be reopened between the check and the flip. Done and
+    // dismissed prerequisites both count as satisfied — a dismissed
+    // predecessor must not lock its successors forever.
+    let blockers = open_blockers_tx(&tx, &task.id)?;
+    if !blockers.is_empty() {
+        let handle = task.pt_id.clone().unwrap_or_else(|| task.id.clone());
+        return Err(crate::Error::Blocked(format!(
+            "{handle} is blocked by open task(s): {} — complete or dismiss them first, or drop the edge with `pt depend {handle} --on <PT-ID> --clear`",
+            blockers.join(", ")
+        )));
+    }
+
     // Look up the recurrence rule, if any.
     let rec_row: Option<(String, String, Option<String>)> = tx
         .query_row(
@@ -737,6 +751,35 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     )?;
     tx.commit()?;
     Ok(DoneOutcome::Completed)
+}
+
+/// Open `depends_on` prerequisites of `task_uuid`, as `PT-N — title` handles
+/// (UUID when the blocker has no pt_id). Empty when the task may close.
+fn open_blockers_tx(tx: &rusqlite::Transaction<'_>, task_uuid: &str) -> Result<Vec<String>> {
+    let mut stmt = tx.prepare(
+        "SELECT d.pt_id, d.id, d.title FROM task_links l
+         JOIN tasks d ON d.id = l.to_uuid
+         WHERE l.from_uuid = ?1 AND l.kind = 'depends_on'
+           AND d.status_v2 NOT IN ('done', 'dismissed')
+         ORDER BY d.created_at",
+    )?;
+    let rows = stmt
+        .query_map([task_uuid], |r| {
+            let pt: Option<String> = r.get(0)?;
+            let id: String = r.get(1)?;
+            let title: String = r.get(2)?;
+            Ok(format!("{} ({})", pt.unwrap_or(id), title))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Open prerequisites of a task (see `open_blockers_tx`), for surfaces that
+/// want to show *why* a task cannot close before the operator tries.
+pub fn open_blockers(db: &Db, task_uuid: &str) -> Result<Vec<String>> {
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    open_blockers_tx(&tx, task_uuid)
 }
 
 /// Parse an ISO-formatted deadline string (as produced by `dates::format_iso`,
@@ -2489,6 +2532,78 @@ mod tests {
         assert!(b.starts_with("feature/PT-1-"));
         // Slug is capped at 50 chars; total length therefore ~50+13.
         assert!(b.len() <= 50 + "feature/PT-1-".len());
+    }
+
+    #[test]
+    fn mark_done_refuses_while_a_dependency_is_open() {
+        // Chain: t3 depends on t2 depends on t1.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let t1 = create(&db, NewTask::minimal("one"), &ctx).unwrap();
+        let t2 = create(&db, NewTask::minimal("two"), &ctx).unwrap();
+        let t3 = create(&db, NewTask::minimal("three"), &ctx).unwrap();
+        add_dependency(&db, &t2.id, &t1.id, &ctx).unwrap();
+        add_dependency(&db, &t3.id, &t2.id, &ctx).unwrap();
+
+        let err = mark_done(&db, &t3, &ctx).unwrap_err();
+        assert!(matches!(err, crate::Error::Blocked(_)), "{err:?}");
+        assert!(err.to_string().contains(t2.pt_id.as_deref().unwrap()), "{err}");
+        let err = mark_done(&db, &t2, &ctx).unwrap_err();
+        assert!(matches!(err, crate::Error::Blocked(_)));
+        // Nothing flipped.
+        let s: String = db
+            .get()
+            .unwrap()
+            .query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&t3.id], |r| r.get(0))
+            .unwrap();
+        assert_ne!(s, "done");
+
+        // Closing in order works.
+        assert_eq!(mark_done(&db, &t1, &ctx).unwrap(), DoneOutcome::Completed);
+        assert!(matches!(mark_done(&db, &t3, &ctx), Err(crate::Error::Blocked(_))));
+        assert_eq!(mark_done(&db, &t2, &ctx).unwrap(), DoneOutcome::Completed);
+        assert_eq!(mark_done(&db, &t3, &ctx).unwrap(), DoneOutcome::Completed);
+    }
+
+    #[test]
+    fn mark_done_fanout_lets_siblings_close_in_any_order() {
+        // t2 and t3 both depend only on t1: once t1 is done, t3 may close before t2.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let t1 = create(&db, NewTask::minimal("one"), &ctx).unwrap();
+        let t2 = create(&db, NewTask::minimal("two"), &ctx).unwrap();
+        let t3 = create(&db, NewTask::minimal("three"), &ctx).unwrap();
+        add_dependency(&db, &t2.id, &t1.id, &ctx).unwrap();
+        add_dependency(&db, &t3.id, &t1.id, &ctx).unwrap();
+
+        assert!(matches!(mark_done(&db, &t3, &ctx), Err(crate::Error::Blocked(_))));
+        mark_done(&db, &t1, &ctx).unwrap();
+        assert_eq!(mark_done(&db, &t3, &ctx).unwrap(), DoneOutcome::Completed);
+        assert_eq!(mark_done(&db, &t2, &ctx).unwrap(), DoneOutcome::Completed);
+    }
+
+    #[test]
+    fn mark_done_treats_dismissed_dependency_as_satisfied() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let t1 = create(&db, NewTask::minimal("one"), &ctx).unwrap();
+        let t2 = create(&db, NewTask::minimal("two"), &ctx).unwrap();
+        add_dependency(&db, &t2.id, &t1.id, &ctx).unwrap();
+        dismiss(&db, &t1.id, &ctx).unwrap();
+        assert_eq!(mark_done(&db, &t2, &ctx).unwrap(), DoneOutcome::Completed);
+    }
+
+    #[test]
+    fn mark_done_blocked_error_lists_every_open_blocker() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let a = create(&db, NewTask::minimal("a"), &ctx).unwrap();
+        let b = create(&db, NewTask::minimal("b"), &ctx).unwrap();
+        let t = create(&db, NewTask::minimal("t"), &ctx).unwrap();
+        add_dependency(&db, &t.id, &a.id, &ctx).unwrap();
+        add_dependency(&db, &t.id, &b.id, &ctx).unwrap();
+        let msg = mark_done(&db, &t, &ctx).unwrap_err().to_string();
+        assert!(msg.contains(a.pt_id.as_deref().unwrap()) && msg.contains(b.pt_id.as_deref().unwrap()), "{msg}");
     }
 
     #[test]

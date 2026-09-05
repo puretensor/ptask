@@ -5,9 +5,9 @@ provenance links, idempotent capture, and a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 12 tools (`task_next / task_list / task_add /
+Two transports, one handler, 13 tools (`task_next / task_list / task_add /
 task_show / task_done / task_dismiss / task_edit / task_claim / task_promote /
-task_capture / task_search / task_digest`):
+task_depend / task_capture / task_search / task_digest`):
 
 - **streamable-HTTP** at `http://127.0.0.1:9501/mcp` (or your `PTASK_SYNC_URL`),
   bearer-gated to a named write token. Per-request identity cannot reach rmcp
@@ -32,6 +32,13 @@ or stdio: `{ "type": "stdio", "command": "pt", "args": ["mcp"], "env": {"PTASK_A
 
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
+- **task_depend** — `task` depends `on` a prerequisite (`remove=true` drops the
+  edge). **A task with open prerequisites cannot be closed** — `task_done`
+  (and `pt done`, the dashboard, Telegram, sync, git-webhook auto-close) all
+  refuse with a `Blocked` error naming every open blocker; HTTP surfaces
+  return 409. Chains (`3 on 2 on 1`) enforce strict order; fan-out (`2 on 1`,
+  `3 on 1`) lets 2 and 3 close in any order once 1 is done. A dismissed
+  prerequisite counts as satisfied. `task_show` returns `blocked_by`.
 - **task_promote** — flips an investigation into implementation work
   (`kind` scout → ship, `deliverable` report → pr) on the SAME row. Promotion
   must never close the scout and open a ship duplicate: that is re-ticketing,

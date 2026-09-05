@@ -636,6 +636,7 @@ fn act_done_blocking(state: AppState, headers: HeaderMap, id: String) -> Respons
                 &format!("advanced to {next_deadline}"),
             )
         }
+        Err(e @ ptask_core::Error::Blocked(_)) => jerr(StatusCode::CONFLICT, &e.to_string()),
         Err(e) => jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     }
 }

@@ -1194,6 +1194,11 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
     }
     if !d.depends_on.is_empty() {
         println!("  deps on:  {}", d.depends_on.join(", "));
+        if let Ok(open) = tasks::open_blockers(db, &t.id)
+            && !open.is_empty()
+        {
+            println!("  BLOCKED:  cannot close until done: {}", open.join(", "));
+        }
     }
     if !d.blocks_tasks.is_empty() {
         println!("  blocks:   {}", d.blocks_tasks.join(", "));

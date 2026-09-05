@@ -22,6 +22,11 @@ pub enum Error {
     #[error("pt_id not found: {0}")]
     PtIdNotFound(String),
 
+    /// The task has `depends_on` edges to tasks that are still open, so it
+    /// cannot be completed yet. The message names every open blocker.
+    #[error("{0}")]
+    Blocked(String),
+
     #[error("{0}")]
     Other(String),
 }
