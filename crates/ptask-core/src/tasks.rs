@@ -262,6 +262,27 @@ pub fn list_with_filter(
     priority_filter: Option<i64>,
     limit: usize,
 ) -> Result<Vec<Task>> {
+    list_with_filter_sorted(
+        db,
+        filter_expr,
+        status,
+        priority_filter,
+        limit,
+        SortKey::default(),
+    )
+}
+
+/// [`list_with_filter`] with an explicit ordering. Severity-first is the
+/// default; pass [`SortKey::Score`] for the composite "work on this next"
+/// ranking.
+pub fn list_with_filter_sorted(
+    db: &Db,
+    filter_expr: Option<&crate::filter::Expr>,
+    status: Option<&str>,
+    priority_filter: Option<i64>,
+    limit: usize,
+    sort: SortKey,
+) -> Result<Vec<Task>> {
     let conn = db.get()?;
     let mut sql = String::from(
         // The filter DSL compiles `@label` / `#project` atoms to `x.labels` /
@@ -298,7 +319,7 @@ pub fn list_with_filter(
         sql.push_str(" WHERE ");
         sql.push_str(&conds.join(" AND "));
     }
-    sql.push_str(" ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC LIMIT ?");
+    sql.push_str(&format!(" ORDER BY {} LIMIT ?", sort.sql()));
     bound.push(rusqlite::types::Value::Integer(limit as i64));
     // Final placeholder index for LIMIT.
     let limit_idx = bound.len();
@@ -368,7 +389,7 @@ pub fn list(
         sql.push_str(" WHERE ");
         sql.push_str(&conds.join(" AND "));
     }
-    sql.push_str(" ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC LIMIT ?");
+    sql.push_str(&format!(" ORDER BY {} LIMIT ?", SortKey::default().sql()));
     bound.push(Box::new(limit as i64));
 
     let mut stmt = conn.prepare(&sql)?;
@@ -397,13 +418,14 @@ pub fn list(
 /// List every task row, including completed tasks.
 pub fn list_all(db: &Db) -> Result<Vec<Task>> {
     let conn = db.get()?;
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
                 t.kind, t.deliverable
          FROM tasks t
-         ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC",
-    )?;
+         ORDER BY {}",
+        SortKey::default().sql()
+    ))?;
     let rows = stmt.query_map([], row_to_task)?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
@@ -447,14 +469,15 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     }
 
     // Title substring search on pending tasks.
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
                 t.kind, t.deliverable
          FROM tasks t
          WHERE t.status_v2 NOT IN ('done','dismissed') AND lower(t.title) LIKE ?1 ESCAPE '\\'
-         ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC",
-    )?;
+         ORDER BY {}",
+        SortKey::default().sql()
+    ))?;
     let pat = format!("%{}%", escape_like_pattern(&q.to_ascii_lowercase()));
     let rows: Vec<Task> = stmt
         .query_map([&pat], row_to_task)?
@@ -568,7 +591,7 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
     if !include_terminal {
         sql.push_str(" AND t.status NOT IN ('done', 'dismissed')");
     }
-    sql.push_str(" ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC");
+    sql.push_str(&format!(" ORDER BY {}", SortKey::default().sql()));
 
     let mut stmt = conn.prepare(&sql)?;
     let pat = format!("%{}%", escape_like_pattern(&q.to_ascii_lowercase()));
@@ -2547,20 +2570,28 @@ mod tests {
 
         let err = mark_done(&db, &t3, &ctx).unwrap_err();
         assert!(matches!(err, crate::Error::Blocked(_)), "{err:?}");
-        assert!(err.to_string().contains(t2.pt_id.as_deref().unwrap()), "{err}");
+        assert!(
+            err.to_string().contains(t2.pt_id.as_deref().unwrap()),
+            "{err}"
+        );
         let err = mark_done(&db, &t2, &ctx).unwrap_err();
         assert!(matches!(err, crate::Error::Blocked(_)));
         // Nothing flipped.
         let s: String = db
             .get()
             .unwrap()
-            .query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&t3.id], |r| r.get(0))
+            .query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&t3.id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_ne!(s, "done");
 
         // Closing in order works.
         assert_eq!(mark_done(&db, &t1, &ctx).unwrap(), DoneOutcome::Completed);
-        assert!(matches!(mark_done(&db, &t3, &ctx), Err(crate::Error::Blocked(_))));
+        assert!(matches!(
+            mark_done(&db, &t3, &ctx),
+            Err(crate::Error::Blocked(_))
+        ));
         assert_eq!(mark_done(&db, &t2, &ctx).unwrap(), DoneOutcome::Completed);
         assert_eq!(mark_done(&db, &t3, &ctx).unwrap(), DoneOutcome::Completed);
     }
@@ -2576,7 +2607,10 @@ mod tests {
         add_dependency(&db, &t2.id, &t1.id, &ctx).unwrap();
         add_dependency(&db, &t3.id, &t1.id, &ctx).unwrap();
 
-        assert!(matches!(mark_done(&db, &t3, &ctx), Err(crate::Error::Blocked(_))));
+        assert!(matches!(
+            mark_done(&db, &t3, &ctx),
+            Err(crate::Error::Blocked(_))
+        ));
         mark_done(&db, &t1, &ctx).unwrap();
         assert_eq!(mark_done(&db, &t3, &ctx).unwrap(), DoneOutcome::Completed);
         assert_eq!(mark_done(&db, &t2, &ctx).unwrap(), DoneOutcome::Completed);
@@ -2603,7 +2637,10 @@ mod tests {
         add_dependency(&db, &t.id, &a.id, &ctx).unwrap();
         add_dependency(&db, &t.id, &b.id, &ctx).unwrap();
         let msg = mark_done(&db, &t, &ctx).unwrap_err().to_string();
-        assert!(msg.contains(a.pt_id.as_deref().unwrap()) && msg.contains(b.pt_id.as_deref().unwrap()), "{msg}");
+        assert!(
+            msg.contains(a.pt_id.as_deref().unwrap()) && msg.contains(b.pt_id.as_deref().unwrap()),
+            "{msg}"
+        );
     }
 
     #[test]

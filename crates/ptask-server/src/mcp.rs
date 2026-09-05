@@ -455,7 +455,8 @@ impl PtaskMcp {
         &self,
         Parameters(DependArg { task, on, remove }): Parameters<DependArg>,
     ) -> Result<CallToolResult, McpError> {
-        let from = ptask_core::tasks::resolve_for_lookup(&self.db, &task, true).map_err(domain_err)?;
+        let from =
+            ptask_core::tasks::resolve_for_lookup(&self.db, &task, true).map_err(domain_err)?;
         let to = ptask_core::tasks::resolve_for_lookup(&self.db, &on, true).map_err(domain_err)?;
         if remove {
             ptask_core::tasks::remove_dependency(&self.db, &from.id, &to.id, &self.ctx())
