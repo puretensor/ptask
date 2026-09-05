@@ -167,6 +167,23 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_VOICE_FALLBACK_URL` | `http://127.0.0.1:8772/v1/chat/completions` | local vLLM fallback if Bedrock errors |
 | `PTASK_VOICE_FALLBACK_MODEL` | `mistral-medium-3.5` | fallback model id |
 
+## Browser verification
+
+Two by-hand end-to-end checks (not in CI — each needs a browser download).
+Both boot their own sidecar on a spare loopback port with a throwaway password,
+so neither touches the live dashboard or its session store.
+
+```bash
+dashboard/tests/e2e/run.sh            # Face ID unlock against a virtual authenticator
+dashboard/tests/e2e/severity-order.sh # the board renders severity-ordered
+```
+
+`severity-order.sh` serves a copy of the task DB and asserts, in a real
+Chromium, that the Critical panel never shows a lower severity above a higher
+one, that `/api/tasks` returns severity-first by default, and that each
+priority lane holds only its own band. Run it after touching `TASK_ORDERS`,
+`q_tasks`, or the board's render path.
+
 ## Deploy
 
 ```bash
