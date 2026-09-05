@@ -6,6 +6,7 @@
 
 use crate::error::Result;
 use crate::event_log::EventCtx;
+use crate::ordering::SortKey;
 use crate::storage::Db;
 use crate::{priority, pt_id};
 use jiff::Zoned;
@@ -2369,7 +2370,11 @@ mod tests {
     }
 
     #[test]
-    fn list_orders_by_priority_score_before_priority() {
+    fn list_orders_by_priority_before_priority_score() {
+        // Was `list_orders_by_priority_score_before_priority`, which pinned the
+        // defect: an unscored CRITICAL task listed *below* a heavily scored
+        // NORMAL one, so neither `pt list` nor the dashboard read as
+        // severity-ordered. Severity is now the primary key.
         let (_dir, db) = fresh_db();
         let mut critical = NewTask::minimal("critical but unscored");
         critical.priority = 5;
@@ -2392,7 +2397,8 @@ mod tests {
         .unwrap();
 
         let rows = list(&db, Some("pending"), None, 100).unwrap();
-        assert_eq!(rows[0].title, "normal but scored");
+        assert_eq!(rows[0].title, "critical but unscored");
+        assert_eq!(rows[1].title, "normal but scored");
     }
 
     #[test]
@@ -3161,5 +3167,109 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0, "bare-create undo should delete the task");
+    }
+
+    // ---- list ordering: severity is the primary key -------------------------
+
+    /// Create a task at `priority` and stamp its composite score directly —
+    /// the scorer is exercised elsewhere; here we only care about ordering.
+    fn seeded(db: &Db, title: &str, priority: i64, score: f64) -> Task {
+        let mut nt = NewTask::minimal(title);
+        nt.priority = priority;
+        let t = create(db, nt, &EventCtx::test()).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET priority_score = ?1 WHERE id = ?2",
+                rusqlite::params![score, &t.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        t
+    }
+
+    fn titles(rows: &[Task]) -> Vec<&str> {
+        rows.iter().map(|t| t.title.as_str()).collect()
+    }
+
+    #[test]
+    fn list_orders_by_severity_before_composite_score() {
+        let (_dir, db) = fresh_db();
+        // A neglected NORMAL task outscores a fresh CRITICAL one. Under the
+        // old score-first ordering it listed above it; severity must win.
+        seeded(&db, "normal-but-high-scoring", 2, 0.95);
+        seeded(&db, "critical-low-scoring", 5, 0.10);
+        seeded(&db, "high-mid-scoring", 3, 0.50);
+
+        let rows = list(&db, None, None, 50).unwrap();
+        assert_eq!(
+            titles(&rows),
+            vec![
+                "critical-low-scoring",
+                "high-mid-scoring",
+                "normal-but-high-scoring"
+            ]
+        );
+
+        let rows = list_with_filter(&db, None, None, None, 50).unwrap();
+        assert_eq!(
+            titles(&rows),
+            vec![
+                "critical-low-scoring",
+                "high-mid-scoring",
+                "normal-but-high-scoring"
+            ]
+        );
+
+        let rows = list_all(&db).unwrap();
+        assert_eq!(
+            titles(&rows),
+            vec![
+                "critical-low-scoring",
+                "high-mid-scoring",
+                "normal-but-high-scoring"
+            ]
+        );
+    }
+
+    #[test]
+    fn composite_score_breaks_ties_inside_a_severity_band() {
+        let (_dir, db) = fresh_db();
+        seeded(&db, "critical-cold", 5, 0.10);
+        seeded(&db, "critical-hot", 5, 0.90);
+        seeded(&db, "urgent-hot", 4, 0.99);
+
+        let rows = list_with_filter(&db, None, None, None, 50).unwrap();
+        assert_eq!(
+            titles(&rows),
+            vec!["critical-hot", "critical-cold", "urgent-hot"]
+        );
+    }
+
+    #[test]
+    fn score_sort_is_still_available_explicitly() {
+        let (_dir, db) = fresh_db();
+        seeded(&db, "normal-but-high-scoring", 2, 0.95);
+        seeded(&db, "critical-low-scoring", 5, 0.10);
+
+        let rows = list_with_filter_sorted(&db, None, None, None, 50, SortKey::Score).unwrap();
+        assert_eq!(
+            titles(&rows),
+            vec!["normal-but-high-scoring", "critical-low-scoring"]
+        );
+    }
+
+    #[test]
+    fn ready_tasks_rank_by_severity_too() {
+        let (_dir, db) = fresh_db();
+        seeded(&db, "normal-but-high-scoring", 2, 0.95);
+        seeded(&db, "critical-low-scoring", 5, 0.10);
+
+        let ready = crate::dag::next_ready(&db, 10).unwrap();
+        assert_eq!(
+            titles(&ready),
+            vec!["critical-low-scoring", "normal-but-high-scoring"],
+            "pt next must not hand back a NORMAL task ahead of a CRITICAL one"
+        );
     }
 }

@@ -1873,8 +1873,17 @@ function renderDomainCounts(){
   };
   set('all',e+m); set('eng',e); set('mgmt',m);
 }
+/* Severity is the primary key everywhere the board lists tasks in order; the
+   composite score only breaks ties inside a band. The API already returns this
+   order (TASK_ORDERS.severity), but sorting here too keeps the panel correct
+   against an older backend instead of silently showing a P2 above a P5. */
+function bySeverity(a,b){
+  return (b.priority-a.priority)
+      || ((b.priority_score||0)-(a.priority_score||0))
+      || String(b.created_at||'').localeCompare(String(a.created_at||''));
+}
 function renderCritical(tasks){
-  $('#crit-ct').textContent=tasks.length+' highest composite score'+(_domain==='all'?'':' · '+DNAME[_domain].toLowerCase());
+  $('#crit-ct').textContent=tasks.length+' by severity, then score'+(_domain==='all'?'':' · '+DNAME[_domain].toLowerCase());
   if(!tasks.length){
     $('#crit').innerHTML='<div class="ph">nothing critical'+inDom()+' — the board is clear</div>';
     seenCrit=new Set(); return;
@@ -2196,7 +2205,7 @@ function renderAll(){
   _tasks=pending;
   renderChips(_lastStats);
   renderDomainCounts();
-  renderCritical(pending.slice(0,12));   // payload arrives score-ordered
+  renderCritical(pending.slice().sort(bySeverity).slice(0,12));
   renderLanes(pending);
   renderRecent(filterDomain(_recentAll));
   renderTimeline(pending.filter(t=>t.deadline_date)

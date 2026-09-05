@@ -18,15 +18,15 @@ use crate::tasks::Task;
 
 /// Return active tasks ready to start: every `depends_on` link resolves to
 /// a done task, or the task has no dependency links. Snoozed tasks don't
-/// compete. Order matches `tasks::list_with_filter` (priority_score DESC,
-/// priority DESC, created_at DESC).
+/// compete. Order matches `tasks::list_with_filter` — severity first, with the
+/// composite score breaking ties inside a band (see `crate::ordering`).
 pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
     let conn = db.get()?;
 
     // Active candidates (snoozed tasks deliberately don't compete) with an
     // unmet-dependency count from task_links (schema v2 replaced the JSON
     // depends_on blobs — which were empty for every task in prod anyway).
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
                 t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
                 t.kind, t.deliverable,
@@ -35,10 +35,9 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
                    AND d.status_v2 NOT IN ('done','dismissed')) AS unmet
          FROM tasks t
          WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
-         ORDER BY t.priority_score DESC,
-                  t.priority DESC,
-                  t.created_at DESC",
-    )?;
+         ORDER BY {}",
+        crate::ordering::SortKey::default().sql()
+    ))?;
 
     let mut out: Vec<Task> = Vec::new();
     let rows = stmt.query_map([], |r| {
@@ -218,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn ordering_priority_score_first() {
+    fn ordering_score_breaks_ties_within_a_severity_band() {
         let (_dir, db) = fresh_db();
         let lo =
             crate::tasks::create(&db, NewTask::minimal("low score"), &EventCtx::test()).unwrap();
@@ -230,6 +229,9 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        // Both tasks sit at the default priority, so the composite score is
+        // the tiebreaker. Severity itself is asserted in
+        // `tasks::tests::ready_tasks_rank_by_severity_too`.
         let ready = next_ready(&db, 10).unwrap();
         assert_eq!(ready[0].title, "high score");
     }

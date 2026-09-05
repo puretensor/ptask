@@ -17,6 +17,7 @@ pub mod event_log;
 pub mod filter;
 pub mod magic_words;
 pub mod migrations;
+pub mod ordering;
 pub mod planner;
 pub mod priority;
 pub mod pt_id;

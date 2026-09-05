@@ -303,7 +303,46 @@ class TaskOrderTests(unittest.TestCase):
     def test_order_whitelist_is_closed(self):
         # The route splices TASK_ORDERS values into SQL; anything outside the
         # whitelist must 400 at the handler, so the map itself is the contract.
-        self.assertEqual(sorted(server.TASK_ORDERS), ["created", "score"])
+        self.assertEqual(sorted(server.TASK_ORDERS),
+                         ["created", "score", "severity"])
+
+    def test_default_order_is_severity_first(self):
+        # The board fetches /api/tasks with no `order`, so the default decides
+        # what the Critical panel and the lanes show. Severity must lead;
+        # priority_score is only the within-band tiebreaker.
+        self.assertEqual(server.DEFAULT_TASK_ORDER, "severity")
+        order = server.TASK_ORDERS[server.DEFAULT_TASK_ORDER]
+        self.assertLess(order.index("priority DESC"),
+                        order.index("priority_score DESC"))
+
+    def test_severity_order_puts_a_critical_above_a_high_scoring_normal(self):
+        rows = [
+            # id, priority, priority_score
+            ("normal-hot", 2, 0.95),
+            ("critical-cold", 5, 0.10),
+            ("high-mid", 3, 0.50),
+        ]
+        old_db = server.DB_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute("CREATE TABLE tasks (%s)" % ", ".join(server.TASK_COLS))
+            con.execute("CREATE TABLE pt_extensions (task_uuid TEXT, pt_id TEXT)")
+            con.execute("CREATE TABLE task_labels (task_uuid TEXT, label TEXT)")
+            for tid, prio, score in rows:
+                con.execute(
+                    "INSERT INTO tasks(id, title, priority, status, created_at,"
+                    " priority_score) VALUES (?,?,?,'pending',datetime('now'),?)",
+                    (tid, tid, prio, score),
+                )
+            con.commit()
+            con.close()
+            server.DB_PATH = f.name
+            try:
+                got = server.q_tasks(status="pending", limit=10)
+            finally:
+                server.DB_PATH = old_db
+        self.assertEqual([t["id"] for t in got],
+                         ["critical-cold", "high-mid", "normal-hot"])
 
 
 class BuildEditArgsTests(unittest.TestCase):

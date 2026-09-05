@@ -28,15 +28,16 @@ pub fn ready_candidates(
     slot_default_min: i64,
 ) -> Result<Vec<PlanCandidate>> {
     let conn = db.get()?;
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT t.pt_id, t.title, t.duration_min, t.energy,
                 (SELECT COUNT(*) FROM task_links l JOIN tasks d ON d.id = l.to_uuid
                  WHERE l.from_uuid = t.id AND l.kind = 'depends_on'
                    AND d.status_v2 != 'done') AS unmet
          FROM tasks t
          WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
-         ORDER BY t.priority_score DESC, t.priority DESC, t.created_at DESC",
-    )?;
+         ORDER BY {}",
+        crate::ordering::SortKey::default().sql()
+    ))?;
     let rows = stmt.query_map([], |r| {
         let pt_id: Option<String> = r.get(0)?;
         let title: String = r.get(1)?;

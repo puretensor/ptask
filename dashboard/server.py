@@ -83,7 +83,7 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.17.1"
+VERSION = "0.18.0"
 # The login shell at "/" is public, so anything it loads before sign-in must be too: the two
 # Face ID modules are part of the gate itself, not data behind it.
 PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",
@@ -92,10 +92,16 @@ PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.
 # /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
 # SQL, so nothing user-supplied may pass through unmapped.
 # Mirrored in the Rust dashboard route (TASK_ORDERS).
+# Severity (priority 1..5) is the PRIMARY key; the composite priority_score
+# only breaks ties inside a band. Ordering by the composite first let a
+# neglected NORMAL task outrank a fresh CRITICAL one, so neither the board nor
+# the Critical panel read as severity-ordered.
 TASK_ORDERS = {
-    "score": "priority_score DESC, priority DESC",
+    "severity": "priority DESC, priority_score DESC, created_at DESC, id DESC",
+    "score": "priority_score DESC, priority DESC, created_at DESC, id DESC",
     "created": "created_at DESC, id DESC",
 }
+DEFAULT_TASK_ORDER = "severity"
 
 # Robot (auto-generated) sources: created by autonomous processes with no
 # direct human ask — the distiller, puresentinel incident capture, subtask
@@ -255,7 +261,8 @@ def _row_to_task(r: sqlite3.Row) -> dict:
 
 
 # ----------------------------------------------------------------------- query
-def q_tasks(status="pending", limit=500, order="priority_score DESC, priority DESC"):
+def q_tasks(status="pending", limit=500, order=None):
+    order = order or TASK_ORDERS[DEFAULT_TASK_ORDER]
     con = connect()
     try:
         # pt_id (PT-N) lives in pt_extensions; it is the handle `pt done` accepts
@@ -992,7 +999,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/tasks":
                 status = (qs.get("status", ["pending"])[0])
                 limit = parse_limit(qs.get("limit", ["500"])[0], 500, 5000)
-                order_key = (qs.get("order", ["score"])[0])
+                order_key = (qs.get("order", [DEFAULT_TASK_ORDER])[0])
                 if order_key not in TASK_ORDERS:
                     raise ValueError("order must be one of: " + ", ".join(sorted(TASK_ORDERS)))
                 return self._json({"tasks": q_tasks(status=status, limit=limit,

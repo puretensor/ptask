@@ -58,6 +58,7 @@ _arguments "${_arguments_options[@]}" : \
 '--priority=[Filter by priority]:PRIORITY:_default' \
 '-n+[Max rows]:LIMIT:_default' \
 '--limit=[Max rows]:LIMIT:_default' \
+'--sort=[Order\: severity (default, critical first), score (composite ranking), or created (newest first)]:SORT:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '-v[Show description and UUID]' \

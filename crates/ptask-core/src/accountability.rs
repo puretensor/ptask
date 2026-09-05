@@ -155,7 +155,7 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
                 OR julianday(next_reminder) <= julianday(?1))
            AND COALESCE(escalation_level, 0) < 5
          ORDER BY (last_reminded IS NOT NULL), last_reminded ASC,
-                  priority_score DESC, priority DESC",
+                  priority DESC, priority_score DESC",
     )?;
     let rows = stmt.query_map([now_iso], |r| {
         Ok(EligibleTask {

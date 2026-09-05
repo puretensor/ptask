@@ -1952,7 +1952,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__list)
-            opts="-s -p -n -v -h --status --priority --limit --verbose --db --json --idempotency-key --help [FILTER]"
+            opts="-s -p -n -v -h --status --priority --limit --verbose --sort --db --json --idempotency-key --help [FILTER]"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1979,6 +1979,10 @@ _pt() {
                     return 0
                     ;;
                 -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --sort)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

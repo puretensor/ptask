@@ -602,6 +602,10 @@ struct ListArgs {
     /// Show description and UUID.
     #[arg(short = 'v', long = "verbose")]
     verbose: bool,
+    /// Order: severity (default, critical first), score (composite ranking),
+    /// or created (newest first).
+    #[arg(long = "sort", default_value = "severity")]
+    sort: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -949,7 +953,9 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
         .map(ptask_core::filter::parse)
         .transpose()
         .map_err(anyhow::Error::msg)?;
-    let rows = tasks::list_with_filter(db, filter_expr.as_ref(), status_filter, p, a.limit)?;
+    let sort = ptask_core::ordering::SortKey::parse(&a.sort).map_err(anyhow::Error::msg)?;
+    let rows =
+        tasks::list_with_filter_sorted(db, filter_expr.as_ref(), status_filter, p, a.limit, sort)?;
     if rows.is_empty() {
         println!("No tasks found.");
         return Ok(());

@@ -70,10 +70,15 @@ const FLUX_WINDOWS: [(&str, &str); 5] = [
 /// /api/tasks sort orders. Whitelisted keys only — the value is spliced into
 /// SQL, so nothing user-supplied may pass through unmapped. Mirrors the
 /// sidecar's TASK_ORDERS.
-const TASK_ORDERS: [(&str, &str); 2] = [
-    ("score", "t.priority_score DESC, t.priority DESC"),
-    ("created", "t.created_at DESC, t.id DESC"),
+const TASK_ORDERS: [(&str, &str); 3] = [
+    ("severity", ptask_core::ordering::SortKey::Severity.sql()),
+    ("score", ptask_core::ordering::SortKey::Score.sql()),
+    ("created", ptask_core::ordering::SortKey::Created.sql()),
 ];
+
+/// Index of the default order in [`TASK_ORDERS`] — severity, so the board and
+/// the Critical panel read top-down by severity band.
+const DEFAULT_ORDER: usize = 0;
 
 const AGE_BUCKETS: [(f64, f64, &str); 5] = [
     (0.0, 7.0, "0-7d"),
@@ -322,11 +327,11 @@ async fn api_tasks(
     }
     let status = q.status.unwrap_or_else(|| "pending".into());
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
-    let order_key = q.order.as_deref().unwrap_or("score");
+    let order_key = q.order.as_deref().unwrap_or(TASK_ORDERS[DEFAULT_ORDER].0);
     let Some((_, order_sql)) = TASK_ORDERS.iter().find(|(k, _)| *k == order_key) else {
         return jerr(
             StatusCode::BAD_REQUEST,
-            "order must be one of: created, score",
+            "order must be one of: created, score, severity",
         );
     };
     match q_tasks(&state, &status, limit, order_sql) {
@@ -344,7 +349,7 @@ async fn api_critical(
         return need_auth();
     }
     let limit = q.limit.unwrap_or(12).clamp(1, 100);
-    match q_tasks(&state, "pending", limit, TASK_ORDERS[0].1) {
+    match q_tasks(&state, "pending", limit, TASK_ORDERS[DEFAULT_ORDER].1) {
         Ok(tasks) => Json(serde_json::json!({"tasks": tasks})).into_response(),
         Err(e) => jerr(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -480,7 +485,7 @@ async fn api_timeline(State(state): State<AppState>, headers: HeaderMap) -> Resp
     if !authed(&state, &headers) {
         return need_auth();
     }
-    match q_tasks(&state, "pending", 2000, TASK_ORDERS[0].1) {
+    match q_tasks(&state, "pending", 2000, TASK_ORDERS[DEFAULT_ORDER].1) {
         Ok(tasks) => {
             let mut items: Vec<serde_json::Value> = tasks
                 .into_iter()
@@ -509,7 +514,7 @@ async fn api_heatmap(State(state): State<AppState>, headers: HeaderMap) -> Respo
     if !authed(&state, &headers) {
         return need_auth();
     }
-    match q_tasks(&state, "pending", 5000, TASK_ORDERS[0].1) {
+    match q_tasks(&state, "pending", 5000, TASK_ORDERS[DEFAULT_ORDER].1) {
         Ok(tasks) => {
             let mut grid: HashMap<i64, HashMap<&str, i64>> = HashMap::new();
             for p in 1..=5 {

@@ -84,6 +84,7 @@ complete -c pt -n "__fish_pt_using_subcommand add" -s h -l help -d 'Print help'
 complete -c pt -n "__fish_pt_using_subcommand list" -s s -l status -d 'Filter by status (or `all`)' -r
 complete -c pt -n "__fish_pt_using_subcommand list" -s p -l priority -d 'Filter by priority' -r
 complete -c pt -n "__fish_pt_using_subcommand list" -s n -l limit -d 'Max rows' -r
+complete -c pt -n "__fish_pt_using_subcommand list" -l sort -d 'Order: severity (default, critical first), score (composite ranking), or created (newest first)' -r
 complete -c pt -n "__fish_pt_using_subcommand list" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand list" -l idempotency-key -d 'Idempotency key recorded with the mutation\'s event — a retried command with the same key returns ok without re-applying' -r
 complete -c pt -n "__fish_pt_using_subcommand list" -s v -l verbose -d 'Show description and UUID'
