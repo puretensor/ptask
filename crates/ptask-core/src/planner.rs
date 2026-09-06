@@ -32,7 +32,7 @@ pub fn ready_candidates(
         "SELECT t.pt_id, t.title, t.duration_min, t.energy,
                 (SELECT COUNT(*) FROM task_links l JOIN tasks d ON d.id = l.to_uuid
                  WHERE l.from_uuid = t.id AND l.kind = 'depends_on'
-                   AND d.status_v2 != 'done') AS unmet
+                   AND d.status_v2 NOT IN ('done','dismissed')) AS unmet
          FROM tasks t
          WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
          ORDER BY {}",
@@ -171,5 +171,46 @@ mod tests {
     fn empty_queue_and_zero_slots() {
         assert!(pack(&[], &[480]).scheduled.is_empty());
         assert_eq!(pack(&[cand("a", 30)], &[]).unscheduled, vec![0]);
+    }
+
+    fn fresh_db() -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        (dir, Db::open(&path).unwrap())
+    }
+
+    /// v3.23.0: a dismissed prerequisite must not lock successors forever.
+    /// `dag::next_ready` and `mark_done` honoured that; `ready_candidates`
+    /// (the `pt plan` queue) still counted `status_v2 != 'done'` as unmet,
+    /// so a dismissed blocker kept the successor off the day's plan.
+    #[test]
+    fn dismissed_prerequisite_does_not_block_planning() {
+        use crate::event_log::EventCtx;
+        use crate::tasks::NewTask;
+
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let blocker = crate::tasks::create(&db, NewTask::minimal("blocker"), &ctx).unwrap();
+        let downstream = crate::tasks::create(&db, NewTask::minimal("downstream"), &ctx).unwrap();
+        crate::tasks::add_dependency(&db, &downstream.id, &blocker.id, &ctx).unwrap();
+        crate::tasks::dismiss(&db, &blocker.id, &ctx).unwrap();
+
+        let ready: Vec<_> = crate::dag::next_ready(&db, 10)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.title)
+            .collect();
+        assert_eq!(ready, vec!["downstream".to_string()]);
+
+        let planned: Vec<_> = ready_candidates(&db, 10, 30)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.title)
+            .collect();
+        assert_eq!(
+            planned,
+            vec!["downstream".to_string()],
+            "pt plan must treat a dismissed prerequisite as satisfied, matching dag::next_ready"
+        );
     }
 }
