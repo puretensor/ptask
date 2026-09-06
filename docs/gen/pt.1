@@ -1,10 +1,10 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH pt 1  "pt 3.24.1"
+.TH pt 1  "pt 3.25.0"
 .SH NAME
 pt \- Sovereign task manager for PureTensor
 .SH SYNOPSIS
-\fBpt\fR [\fB\-\-db\fR] [\fB\-\-json\fR] [\fB\-\-idempotency\-key\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBpt\fR [\fB\-\-db\fR] [\fB\-\-json\fR] [\fB\-\-idempotency\-key\fR] [\fB\-\-color\fR] [\fB\-\-no\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 Sovereign task manager for PureTensor
 .SH OPTIONS
@@ -17,6 +17,24 @@ Emit machine\-readable JSON instead of human text (task\-facing verbs)
 .TP
 \fB\-\-idempotency\-key\fR \fI<IDEMPOTENCY_KEY>\fR
 Idempotency key recorded with the mutation\*(Aqs event — a retried command with the same key returns ok without re\-applying
+.TP
+\fB\-\-color\fR \fI<COLOR>\fR [default: auto]
+Colour: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.TP
+\fB\-\-no\-color\fR
+Plain output — shorthand for `\-\-color never`
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
@@ -148,4 +166,4 @@ Generate shell completions (bash/zsh/fish) to stdout
 pt\-help(1)
 Print this message or the help of the given subcommand(s)
 .SH VERSION
-v3.24.1
+v3.25.0

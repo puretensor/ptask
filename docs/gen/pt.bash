@@ -506,7 +506,7 @@ _pt() {
 
     case "${cmd}" in
         pt)
-            opts="-h -V --db --json --idempotency-key --help --version add list done priority edit reopen show dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
+            opts="-h -V --db --json --idempotency-key --color --no-color --help --version add list done priority edit reopen show dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -520,6 +520,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -528,7 +532,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__accountability)
-            opts="-h --db --json --idempotency-key --help run help"
+            opts="-h --db --json --idempotency-key --color --no-color --help run help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -540,6 +544,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -592,7 +600,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__accountability__subcmd__run)
-            opts="-h --dry-run --db --json --idempotency-key --help"
+            opts="-h --dry-run --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -606,6 +614,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -614,7 +626,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__add)
-            opts="-p -d -h --priority --description --deadline --reason --raw --kind --deliverable --db --json --idempotency-key --help <TITLE>"
+            opts="-p -d -h --priority --description --deadline --reason --raw --kind --deliverable --db --json --idempotency-key --color --no-color --help <TITLE>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -660,6 +672,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -668,7 +684,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__backfill)
-            opts="-h --db --json --idempotency-key --help"
+            opts="-h --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -680,6 +696,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -690,7 +710,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__bot)
-            opts="-h --db --json --idempotency-key --help"
+            opts="-h --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -702,6 +722,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -712,7 +736,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__branch)
-            opts="-h --db --json --idempotency-key --help <QUERY>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -726,6 +750,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -734,7 +762,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__bulk)
-            opts="-h --set-priority --done --dismiss --dry-run --db --json --idempotency-key --help <FILTER>"
+            opts="-h --set-priority --done --dismiss --dry-run --db --json --idempotency-key --color --no-color --help <FILTER>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -752,6 +780,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -760,7 +792,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__delegate)
-            opts="-h --db --json --idempotency-key --help <ID>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <ID>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -774,6 +806,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -782,7 +818,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__depend)
-            opts="-h --on --clear --db --json --idempotency-key --help <QUERY>"
+            opts="-h --on --clear --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -800,6 +836,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -808,7 +848,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__digest)
-            opts="-h --days --db --json --idempotency-key --help"
+            opts="-h --days --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -826,6 +866,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -834,7 +878,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__dismiss)
-            opts="-h --db --json --idempotency-key --help <QUERY>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -848,6 +892,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -856,7 +904,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__distill)
-            opts="-h --batch --db --json --idempotency-key --help"
+            opts="-h --batch --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -874,6 +922,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -882,7 +934,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__done)
-            opts="-h --db --json --idempotency-key --help <QUERIES>..."
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERIES>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -896,6 +948,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -904,7 +960,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__edit)
-            opts="-h --deadline --clear-deadline --title --desc --label --unlabel --db --json --idempotency-key --help <QUERY>"
+            opts="-h --deadline --clear-deadline --title --desc --label --unlabel --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -938,6 +994,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -946,7 +1006,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__export)
-            opts="-h --out --git --db --json --idempotency-key --help"
+            opts="-h --out --git --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -964,6 +1024,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -972,7 +1036,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__gen__subcmd__completions)
-            opts="-h --db --json --idempotency-key --help bash zsh fish"
+            opts="-h --db --json --idempotency-key --color --no-color --help bash zsh fish"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -984,6 +1048,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -994,7 +1062,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__gen__subcmd__manpage)
-            opts="-h --db --json --idempotency-key --help"
+            opts="-h --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1006,6 +1074,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -1926,7 +1998,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__kind)
-            opts="-h --deliverable --db --json --idempotency-key --help <QUERY> <KIND>"
+            opts="-h --deliverable --db --json --idempotency-key --color --no-color --help <QUERY> <KIND>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1944,6 +2016,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -1952,7 +2028,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__list)
-            opts="-s -p -n -v -h --status --priority --limit --verbose --sort --db --json --idempotency-key --help [FILTER]"
+            opts="-s -p -n -v -h --status --priority --limit --verbose --sort --db --json --idempotency-key --color --no-color --help [FILTER]"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1994,6 +2070,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2002,7 +2082,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__log)
-            opts="-n -h --limit --db --json --idempotency-key --help <QUERY>"
+            opts="-n -h --limit --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2022,6 +2102,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2032,7 +2116,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__mcp)
-            opts="-h --db --json --idempotency-key --help"
+            opts="-h --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2046,6 +2130,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2054,7 +2142,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__next)
-            opts="-n -h --limit --db --json --idempotency-key --help"
+            opts="-n -h --limit --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2076,6 +2164,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2084,7 +2176,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__plan)
-            opts="-n -h --account --days --work --tz --calendar --slot-default --limit --write --gcal --db --json --idempotency-key --help"
+            opts="-n -h --account --days --work --tz --calendar --slot-default --limit --write --gcal --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2134,6 +2226,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2142,7 +2238,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__priority)
-            opts="-h --db --json --idempotency-key --help <QUERY> <LEVEL>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY> <LEVEL>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2154,6 +2250,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2164,7 +2264,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__promote)
-            opts="-h --db --json --idempotency-key --help <QUERY>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2176,6 +2276,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2186,7 +2290,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__reap)
-            opts="-h --dry-run --json --db --idempotency-key --help"
+            opts="-h --dry-run --json --db --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2198,6 +2302,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2208,7 +2316,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote)
-            opts="-h --db --json --idempotency-key --help add list done priority edit reopen show next dismiss start snooze depend rm version help"
+            opts="-h --db --json --idempotency-key --color --no-color --help add list done priority edit reopen show next dismiss start snooze depend rm version help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2222,6 +2330,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2230,7 +2342,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__add)
-            opts="-h --url --db --json --idempotency-key --help <TEXT>"
+            opts="-h --url --db --json --idempotency-key --color --no-color --help <TEXT>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2248,6 +2360,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2256,7 +2372,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__depend)
-            opts="-h --on --clear --url --db --json --idempotency-key --help <QUERY>"
+            opts="-h --on --clear --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2278,6 +2394,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2286,7 +2406,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__dismiss)
-            opts="-h --url --db --json --idempotency-key --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2302,6 +2422,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2312,7 +2436,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__done)
-            opts="-h --url --db --json --idempotency-key --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2330,6 +2454,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2338,7 +2466,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__edit)
-            opts="-h --deadline --clear-deadline --title --desc --url --db --json --idempotency-key --help <QUERY>"
+            opts="-h --deadline --clear-deadline --title --desc --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2366,6 +2494,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2600,7 +2732,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__list)
-            opts="-s -f -p -n -h --status --filter --priority --limit --url --db --json --idempotency-key --help"
+            opts="-s -f -p -n -h --status --filter --priority --limit --url --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2650,6 +2782,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2658,7 +2794,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__next)
-            opts="-n -h --limit --url --db --json --idempotency-key --help"
+            opts="-n -h --limit --url --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2684,6 +2820,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2692,7 +2832,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__priority)
-            opts="-h --url --db --json --idempotency-key --help <QUERY> <LEVEL>"
+            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY> <LEVEL>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2708,6 +2848,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2718,7 +2862,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__reopen)
-            opts="-h --url --db --json --idempotency-key --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2734,6 +2878,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2744,7 +2892,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__rm)
-            opts="-h --url --db --json --idempotency-key --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2760,6 +2908,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2770,7 +2922,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__show)
-            opts="-h --url --db --json --idempotency-key --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2786,6 +2938,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2796,7 +2952,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__snooze)
-            opts="-h --url --db --json --idempotency-key --help <QUERY> [UNTIL]..."
+            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY> [UNTIL]..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2812,6 +2968,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2822,7 +2982,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__start)
-            opts="-h --url --db --json --idempotency-key --help <QUERY>"
+            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2838,6 +2998,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2848,7 +3012,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__version)
-            opts="-h --url --db --json --idempotency-key --help"
+            opts="-h --url --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2866,6 +3030,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2874,7 +3042,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__reopen)
-            opts="-h --db --json --idempotency-key --help <QUERY>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2888,6 +3056,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2896,7 +3068,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__review)
-            opts="-h --stale-days --db --json --idempotency-key --help"
+            opts="-h --stale-days --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2914,6 +3086,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -2922,7 +3098,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__rm)
-            opts="-y -h --yes --db --json --idempotency-key --help <QUERY>"
+            opts="-y -h --yes --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2934,6 +3110,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -2944,7 +3124,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__scoring)
-            opts="-h --db --json --idempotency-key --help run help"
+            opts="-h --db --json --idempotency-key --color --no-color --help run help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2956,6 +3136,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3008,7 +3192,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__scoring__subcmd__run)
-            opts="-h --dry-run --v1 --diff --db --json --idempotency-key --help"
+            opts="-h --dry-run --v1 --diff --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3022,6 +3206,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -3030,7 +3218,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__search)
-            opts="-n -h --limit --db --json --idempotency-key --help [QUERY]..."
+            opts="-n -h --limit --db --json --idempotency-key --color --no-color --help [QUERY]..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3052,6 +3240,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -3060,7 +3252,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__serve)
-            opts="-h --bind --db --json --idempotency-key --help"
+            opts="-h --bind --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3078,6 +3270,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -3086,7 +3282,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__show)
-            opts="-h --db --json --idempotency-key --help <QUERY>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3098,6 +3294,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3108,7 +3308,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__snooze)
-            opts="-h --db --json --idempotency-key --help <QUERY> [UNTIL]..."
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY> [UNTIL]..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3120,6 +3320,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3130,7 +3334,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__start)
-            opts="-h --db --json --idempotency-key --help <QUERY>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3142,6 +3346,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3152,7 +3360,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__token)
-            opts="-h --db --json --idempotency-key --help create list revoke help"
+            opts="-h --db --json --idempotency-key --color --no-color --help create list revoke help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3166,6 +3374,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -3174,7 +3386,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__token__subcmd__create)
-            opts="-h --scope --db --json --idempotency-key --help <CLIENT_ID>"
+            opts="-h --scope --db --json --idempotency-key --color --no-color --help <CLIENT_ID>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3190,6 +3402,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3270,7 +3486,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__token__subcmd__list)
-            opts="-h --db --json --idempotency-key --help"
+            opts="-h --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3282,6 +3498,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3292,7 +3512,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__token__subcmd__revoke)
-            opts="-h --db --json --idempotency-key --help <CLIENT_ID>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <CLIENT_ID>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3306,6 +3526,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -3314,7 +3538,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__tui)
-            opts="-h --db --json --idempotency-key --help"
+            opts="-h --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3326,6 +3550,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3336,7 +3564,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__undo)
-            opts="-h --db --json --idempotency-key --help"
+            opts="-h --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3348,6 +3576,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3358,7 +3590,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view)
-            opts="-h --db --json --idempotency-key --help save list show rm help"
+            opts="-h --db --json --idempotency-key --color --no-color --help save list show rm help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3370,6 +3602,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3464,7 +3700,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view__subcmd__list)
-            opts="-h --db --json --idempotency-key --help"
+            opts="-h --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3476,6 +3712,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3486,7 +3726,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view__subcmd__rm)
-            opts="-h --db --json --idempotency-key --help <NAME>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <NAME>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3498,6 +3738,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)
@@ -3508,7 +3752,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view__subcmd__save)
-            opts="-h --db --json --idempotency-key --help <NAME> <FILTER>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <NAME> <FILTER>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3522,6 +3766,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -3530,7 +3778,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view__subcmd__show)
-            opts="-n -h --limit --db --json --idempotency-key --help <NAME>"
+            opts="-n -h --limit --db --json --idempotency-key --color --no-color --help <NAME>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3552,6 +3800,10 @@ _pt() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;
@@ -3560,7 +3812,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__why)
-            opts="-h --db --json --idempotency-key --help <QUERY>"
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3572,6 +3824,10 @@ _pt() {
                     ;;
                 --idempotency-key)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
                     return 0
                     ;;
                 *)

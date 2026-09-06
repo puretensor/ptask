@@ -193,7 +193,7 @@ pub fn changed_task_uuids_since(db: &Db, since: i64) -> Result<Vec<String>> {
 }
 
 /// One row of a task's attributed history, newest first.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct HistoryEvent {
     pub id: i64,
     pub ts: String,

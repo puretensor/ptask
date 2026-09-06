@@ -26,6 +26,11 @@ pub struct RemoteClient {
 }
 
 impl RemoteClient {
+    /// The server this client talks to, for headlines and error context.
+    pub fn url(&self) -> &str {
+        &self.base
+    }
+
     pub fn from_env() -> Result<Self> {
         Self::with_url(&default_url())
     }

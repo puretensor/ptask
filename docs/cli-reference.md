@@ -163,7 +163,13 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 
 Globals (v2.0.0): `--json` on task-facing verbs emits machine-readable
 output; `--idempotency-key <k>` keys the mutation's event so retries are
-safe. Quick-add gains `due:<date>` (scheduled) alongside hard deadlines.
+safe. Since v3.25.0 the human output renders through the shared PureTensor
+terminal theme (the `fleet-upgrade` look: gradient headline rules, box-ruled
+severity-banded tables, semantic pills — green done, amber needs a human, red
+critical). Colour is on only when stdout is a TTY; `--color always|never`,
+`--no-color`, `NO_COLOR` and `PT_COLOR=always|never` override that, and
+`--json` is always plain. `pt list`, `pt next`, `pt log` and `pt view show`
+honour `--json` too. Quick-add gains `due:<date>` (scheduled) alongside hard deadlines.
 Statuses are the 8-state v2 model: triage/backlog/todo/in_progress/
 snoozed/done/dismissed/blocked (legacy column maintained for
 not-yet-retired consumers).

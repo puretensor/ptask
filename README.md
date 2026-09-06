@@ -33,7 +33,7 @@ pt mcp                                            # MCP server over stdio
 
 | Surface | Entry point | Notes |
 |---|---|---|
-| CLI | `pt <verb>` | `--json` for machine output, `--idempotency-key` for safe retries |
+| CLI | `pt <verb>` | PureTensor fleet terminal theme (`fleet-upgrade` look); `--json` for machine output, `--no-color` / `--color`, `--idempotency-key` for safe retries |
 | TUI | `pt` / `pt tui` | ratatui |
 | Sync API | `pt serve` | axum; canonical store on one host, clients use `pt remote` |
 | Telegram | `pt bot` | Bot API long-poll |
