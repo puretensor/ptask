@@ -92,13 +92,14 @@ fn render_evening_at(db: &Db, now: &jiff::Zoned) -> Result<String> {
         Ok(())
     })?;
 
-    // Still-open overdue (operator missed them).
+    // Still-open overdue (operator missed them). Push status into SQL
+    // against the legacy `tasks.status` column (`pending` covers
+    // todo/triage/backlog/in_progress). Filtering the returned
+    // `Task.status` (which is `status_v2`) for the token `"pending"`
+    // matches nothing after V010.
     let overdue_expr = ptask_core::filter::parse("overdue")?;
     let still_overdue =
-        ptask_core::tasks::list_with_filter(db, Some(&overdue_expr), None, None, 50)?
-            .into_iter()
-            .filter(|t| t.status == "pending")
-            .collect::<Vec<_>>();
+        ptask_core::tasks::list_with_filter(db, Some(&overdue_expr), Some("pending"), None, 50)?;
 
     // Blocked = status='blocked' OR with unmet deps. Cheap version: just
     // status='blocked' for now; DAG-blocked is a v0.5+ refinement.
@@ -238,6 +239,25 @@ mod tests {
         assert!(txt.contains("Completed today: 0"));
         assert!(txt.contains("Still overdue: 0"));
         assert!(txt.contains("Blocked: 0"));
+    }
+
+    /// `list_with_filter` projects `status_v2` as `Task.status` (`todo` for a
+    /// newly created row). Filtering that field for the legacy token
+    /// `"pending"` drops every open overdue task, so the evening recap always
+    /// printed "Still overdue: 0". Morning already pushes status into SQL
+    /// (`Some("pending")` against the legacy column).
+    #[test]
+    fn evening_recap_counts_an_open_overdue_task() {
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("still overdue canary");
+        new.deadline = Some("2020-01-01".into());
+        ptask_core::tasks::create(&db, new, &EventCtx::test()).unwrap();
+        let txt = render_evening(&db).unwrap();
+        assert!(
+            txt.contains("Still overdue: 1"),
+            "open overdue task must appear in the evening recap, got:\n{txt}"
+        );
+        assert!(txt.contains("still overdue canary"), "got:\n{txt}");
     }
 
     #[test]
