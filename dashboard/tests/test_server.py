@@ -25,6 +25,63 @@ class BindSafetyTests(unittest.TestCase):
         self.assertFalse(server.is_loopback_host("0.0.0.0"))
 
 
+def _readme_config_defaults():
+    """Parse the Config (env) table in dashboard/README.md into {var: default}."""
+    readme = Path(__file__).resolve().parent.parent / "README.md"
+    rows = {}
+    in_table = False
+    for line in readme.read_text().splitlines():
+        if line.startswith("| Var | Default |"):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        if not line.startswith("|"):
+            break
+        if line.startswith("|---"):
+            continue
+        parts = [p.strip() for p in line.strip().strip("|").split("|")]
+        if len(parts) < 2:
+            continue
+        var = parts[0].strip("`")
+        default = parts[1].strip("`")
+        rows[var] = default
+    return rows
+
+
+class ReadmeDefaultsTests(unittest.TestCase):
+    """The config table and module docstring must match the live defaults.
+
+    v3.18.0 moved the bind default to loopback and v0.15.0 retargeted the
+    voice fallback; the README table and server.py docstring were left on
+    the old values. Following those docs re-exposes the dashboard and
+    points STT failover at a seat that no longer listens.
+    """
+
+    def test_config_table_matches_server_defaults(self):
+        rows = _readme_config_defaults()
+        self.assertEqual(rows.get("PTASK_DASH_BIND"), "127.0.0.1:9510")
+        self.assertEqual(
+            rows.get("PTASK_VOICE_FALLBACK_URL"),
+            "http://127.0.0.1:8600/v1/chat/completions",
+        )
+        self.assertEqual(rows.get("PTASK_VOICE_FALLBACK_MODEL"), "nemotron-lightning")
+        src = Path(server.__file__).read_text()
+        self.assertIn("PTASK_DASH_BIND  bind addr  (default 127.0.0.1:9510)", src)
+        self.assertIn(
+            'os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")',
+            src,
+        )
+        self.assertIn(
+            'os.environ.get("PTASK_VOICE_FALLBACK_URL", "http://127.0.0.1:8600/v1/chat/completions")',
+            src,
+        )
+        self.assertIn(
+            'os.environ.get("PTASK_VOICE_FALLBACK_MODEL", "nemotron-lightning")',
+            src,
+        )
+
+
 class AuthTests(unittest.TestCase):
     def test_compare_digest_auth_helper_importable(self):
         self.assertRegex(server.VERSION, r"^\d+\.\d+\.\d+$")

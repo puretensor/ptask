@@ -154,7 +154,7 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 |-----|---------|---------|
 | `PTASK_DB` | `~/puretensor-tasks/tasks.db` | SQLite path (opened read-only) |
 | `PTASK_BIN` | `~/.cargo/bin/pt` | pt binary for write delegation |
-| `PTASK_DASH_BIND` | `0.0.0.0:9510` | bind address |
+| `PTASK_DASH_BIND` | `127.0.0.1:9510` | bind address (loopback; production sets this to the tailnet) |
 | `PTASK_DASH_USER` | `ops` | compatibility-only Basic-auth user for non-browser clients |
 | `PTASK_DASH_PASS` | _(unset)_ | dashboard password; **required for non-loopback binds** |
 | `PTASK_DASH_SESSION_STORE` | `~/.local/state/ptask-dashboard/sessions.json` | restart-persistent SHA-256 session-token store |
@@ -164,8 +164,8 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_VOICE_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model for voice→task extraction |
 | `PTASK_VOICE_REGION` | `$AWS_DEFAULT_REGION` or `us-east-1` | Bedrock region (keyless, IAM via `~/.aws`) |
 | `PTASK_AWS_BIN` | `/usr/local/bin/aws` | aws CLI path for Bedrock invoke |
-| `PTASK_VOICE_FALLBACK_URL` | `http://127.0.0.1:8772/v1/chat/completions` | local vLLM fallback if Bedrock errors |
-| `PTASK_VOICE_FALLBACK_MODEL` | `mistral-medium-3.5` | fallback model id |
+| `PTASK_VOICE_FALLBACK_URL` | `http://127.0.0.1:8600/v1/chat/completions` | local vLLM fallback if Bedrock errors |
+| `PTASK_VOICE_FALLBACK_MODEL` | `nemotron-lightning` | fallback model id |
 
 ## Browser verification
 
