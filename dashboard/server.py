@@ -9,6 +9,7 @@ Endpoints
 ---------
   GET  /healthz                 -> "OK"               (no auth; tunnel/systemd probe)
   GET  /                        -> www/index.html     (public login shell)
+  GET  /api/config              -> public title/domain configuration
   GET  /api/auth/check          -> current browser-session status
   POST /api/auth/login          -> password exchange for an opaque session cookie
   POST /api/auth/logout         -> revoke the current browser session
@@ -34,6 +35,9 @@ Config (env)
   PTASK_DB         SQLite path (default ~/puretensor-tasks/tasks.db)
   PTASK_BIN        pt binary  (default ~/.cargo/bin/pt)
   PTASK_DASH_BIND  bind addr  (default 127.0.0.1:9510)
+  PTASK_DASH_TITLE dashboard brand (default "PTASK")
+  PTASK_DASH_DOMAINS comma-separated key[:Label[:ABBR]] domain list
+  PTASK_DASH_DEFAULT_DOMAIN configured key used for unlabelled tasks
   PTASK_DASH_USER  compatibility-only basic-auth user (default "ops")
   PTASK_DASH_PASS  dashboard password (disabled if unset on localhost,
                    required otherwise). Set in the systemd EnvironmentFile.
@@ -62,6 +66,51 @@ from urllib.parse import urlparse, parse_qs
 
 from session_auth import LoginThrottle, SessionStore, parse_cookie, session_cookie
 
+
+_DOMAIN_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,23}$")
+
+
+def parse_domains(s: str | None) -> list[dict]:
+    """Parse PTASK_DASH_DOMAINS into validated key/label/abbreviation records."""
+    if not s or all(not entry.strip() for entry in s.split(",")):
+        return []
+    domains = []
+    seen = set()
+    for raw_entry in s.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            raise ValueError("domain key must not be empty")
+        fields = [field.strip() for field in entry.split(":")]
+        if len(fields) > 3:
+            raise ValueError(f"domain entry has more than 3 fields: {entry!r}")
+        key = fields[0]
+        if not _DOMAIN_KEY_RE.fullmatch(key):
+            raise ValueError(f"invalid domain key: {key!r}")
+        if key == "all":
+            raise ValueError("domain key 'all' is reserved")
+        if key in seen:
+            raise ValueError(f"duplicate domain key: {key!r}")
+        label = fields[1] if len(fields) > 1 and fields[1] else key.capitalize()
+        abbr = fields[2] if len(fields) > 2 and fields[2] else key[:4].upper()
+        if len(abbr) > 5:
+            raise ValueError(f"domain abbreviation is longer than 5 characters: {abbr!r}")
+        domains.append({"key": key, "label": label, "abbr": abbr})
+        seen.add(key)
+    return domains
+
+
+def resolve_default_domain(domains: list[dict], requested: str | None) -> str | None:
+    """Resolve the configured default, failing when it is not in the domain list."""
+    if not domains:
+        return None
+    if requested is None:
+        return domains[0]["key"]
+    keys = {domain["key"] for domain in domains}
+    if requested not in keys:
+        raise ValueError(f"default domain is not configured: {requested!r}")
+    return requested
+
+
 HOME = Path.home()
 DB_PATH = os.environ.get("PTASK_DB", str(HOME / "puretensor-tasks" / "tasks.db"))
 PT_BIN = os.environ.get("PTASK_BIN", str(HOME / ".cargo" / "bin" / "pt"))
@@ -83,7 +132,12 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.18.1"
+VERSION = "0.19.0"
+DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
+DASH_DOMAINS = parse_domains(os.environ.get("PTASK_DASH_DOMAINS"))
+DASH_DEFAULT_DOMAIN = resolve_default_domain(
+    DASH_DOMAINS, os.environ.get("PTASK_DASH_DEFAULT_DOMAIN"),
+)
 # The login shell at "/" is public, so anything it loads before sign-in must be too: the two
 # Face ID modules are part of the gate itself, not data behind it.
 PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",
@@ -985,6 +1039,13 @@ class Handler(BaseHTTPRequestHandler):
             if self._authed():
                 return self._json({"authenticated": True})
             return self._json({"authenticated": False}, 401)
+        if path == "/api/config":
+            return self._json({
+                "title": DASH_TITLE,
+                "domains": DASH_DOMAINS,
+                "default_domain": DASH_DEFAULT_DOMAIN,
+                "version": VERSION,
+            })
         # home-screen app assets: iOS fetches the touch icon / manifest outside
         # the page's credentialed session. The root is also public because it
         # contains the login shell; every data endpoint remains gated.

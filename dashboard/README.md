@@ -25,19 +25,19 @@ self-contained `index.html`, vanilla JS + CSS custom properties).
 | **LCARS** | Star-Trek ops console, blocky amber/orange/lavender (rail collapses <700px) |
 | **Executive** | Light, minimal, whitespace |
 
-## Domain split (v0.12 / pt 3.6)
+## Domain split (v0.19 / pt 3.26)
 
-The header carries an **ALL / ENG / MGMT** switch (localStorage `ptask-domain`)
-that splits the board into its two hemispheres — Engineering (fleet/software
-work, teal→blue identity) and Management (corporate/finance/people work, warm
-gold→coral identity). Switching is a pure client-side re-render: critical,
-lanes, recent, timeline, heatmap, review, and the header counts all derive
-from one score-ordered pending payload. Classification is deterministic
-(`domainOf` in index.html): explicit `domain:eng`/`domain:mgmt` label >
-project map > label map > title keywords > ENG. Every card wears a clickable
-domain chip that moves the task to the other side by persisting an explicit
-`domain:` label through `pt edit --label/--unlabel`; the composer offers
-AUTO/ENG/MGMT (create rides an inline `@domain:` token).
+The header domain switch is configured with `PTASK_DASH_DOMAINS` as
+comma-separated `key[:Label[:ABBR]]` entries. The first configured domain is
+the default unless `PTASK_DASH_DEFAULT_DOMAIN` selects another key. Every card
+wears a clickable domain chip that advances through the configured list by
+persisting an explicit `domain:` label through `pt edit --label/--unlabel`;
+the composer offers AUTO plus the same list.
+
+With `PTASK_DASH_DOMAINS` unset or blank, the cockpit retains its legacy
+**ALL / ENG / MGMT** switch and deterministic classifier: explicit
+`domain:eng`/`domain:mgmt` label > project map > label map > title keywords >
+ENG. Switching remains a pure client-side re-render across every panel.
 
 ## Design tokens (v2.6.8 design pass — see DESIGN_BASELINE.md)
 
@@ -126,6 +126,7 @@ iOS fetches them outside the page session; everything else stays gated).
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/healthz` | no auth (tunnel/systemd probe) |
+| GET | `/api/config` | public dashboard title, domains, default domain, and version |
 | GET | `/api/stats` | counts, throughput, overdue, due≤7d |
 | GET | `/api/tasks?status=&limit=` | tasks + scoring fields + `project` + `labels` (v0.12) |
 | GET | `/api/critical?limit=` | top pending by `priority_score` |
@@ -155,6 +156,9 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_DB` | `~/puretensor-tasks/tasks.db` | SQLite path (opened read-only) |
 | `PTASK_BIN` | `~/.cargo/bin/pt` | pt binary for write delegation |
 | `PTASK_DASH_BIND` | `127.0.0.1:9510` | bind address (loopback; production sets this to the tailnet) |
+| `PTASK_DASH_TITLE` | `PTASK` | header, login, browser, and home-screen title |
+| `PTASK_DASH_DOMAINS` | _(unset)_ | comma-separated `key[:Label[:ABBR]]` list; blank keeps legacy ENG/MGMT mode |
+| `PTASK_DASH_DEFAULT_DOMAIN` | first configured key | domain assigned to tasks without an explicit configured `domain:` label |
 | `PTASK_DASH_USER` | `ops` | compatibility-only Basic-auth user for non-browser clients |
 | `PTASK_DASH_PASS` | _(unset)_ | dashboard password; **required for non-loopback binds** |
 | `PTASK_DASH_SESSION_STORE` | `~/.local/state/ptask-dashboard/sessions.json` | restart-persistent SHA-256 session-token store |

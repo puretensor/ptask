@@ -704,3 +704,112 @@ class VoiceCreateTests(unittest.TestCase):
             server.pt_exec = real
         self.assertFalse(ok)
         self.assertEqual(out["error"], "no such column")
+
+
+class DomainConfigTests(unittest.TestCase):
+    """PTASK_DASH_DOMAINS turns the hardcoded ENG/MGMT hemisphere switch into a
+    per-instance list, so a second tenant (a non-engineer) can run the same
+    cockpit with their own hats. Unset = the legacy ENG/MGMT heuristic mode,
+    byte-for-byte the previous behaviour."""
+
+    def test_unset_or_blank_means_legacy_mode(self):
+        self.assertEqual(server.parse_domains(None), [])
+        self.assertEqual(server.parse_domains(""), [])
+        self.assertEqual(server.parse_domains("  , "), [])
+
+    def test_parses_key_label_abbr_triples(self):
+        got = server.parse_domains(
+            "puretensor:PureTensor:PT, bretalon:Bretalon:BRET,eaglestone:Eaglestone:EAGLE"
+        )
+        self.assertEqual(got, [
+            {"key": "puretensor", "label": "PureTensor", "abbr": "PT"},
+            {"key": "bretalon", "label": "Bretalon", "abbr": "BRET"},
+            {"key": "eaglestone", "label": "Eaglestone", "abbr": "EAGLE"},
+        ])
+
+    def test_label_and_abbr_default_from_key(self):
+        got = server.parse_domains("personal")
+        self.assertEqual(got, [{"key": "personal", "label": "Personal", "abbr": "PERS"}])
+        got = server.parse_domains("diloretio:Diloretio")
+        self.assertEqual(got[0]["abbr"], "DILO")
+
+    def test_rejects_reserved_duplicate_and_malformed_keys(self):
+        for bad in ("all:Everything", "eng:Engineering,eng:Again", "Bad Key:x",
+                    "toolongtoolongtoolongtoolongtoolong:x", ":NoKey", "x:y:z:extra"):
+            with self.assertRaises(ValueError, msg=bad):
+                server.parse_domains(bad)
+
+    def test_abbr_is_capped_at_five_chars(self):
+        with self.assertRaises(ValueError):
+            server.parse_domains("k:Label:TOOLONG")
+
+    def test_default_domain_must_be_a_configured_key(self):
+        doms = server.parse_domains("a:A,b:B")
+        self.assertEqual(server.resolve_default_domain(doms, None), "a")
+        self.assertEqual(server.resolve_default_domain(doms, "b"), "b")
+        with self.assertRaises(ValueError):
+            server.resolve_default_domain(doms, "zzz")
+        self.assertIsNone(server.resolve_default_domain([], "anything"))
+
+
+class ConfigEndpointTests(unittest.TestCase):
+    """GET /api/config is the ONE place the shell learns its brand and domain
+    list. It is public (the login shell needs the title before any session
+    exists) and it carries nothing secret."""
+
+    def _boot(self):
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        return httpd
+
+    def _get(self, httpd, path):
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+        connection.request("GET", path)
+        response = connection.getresponse()
+        body = response.read()
+        connection.close()
+        return response, body
+
+    def test_config_is_public_and_reflects_env(self):
+        saved = (server.AUTH_USER, server.AUTH_PASS, server.DASH_TITLE,
+                 server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN)
+        server.AUTH_USER, server.AUTH_PASS = "ops", "test-secret"
+        server.DASH_TITLE = "ALAN"
+        server.DASH_DOMAINS = server.parse_domains("puretensor:PureTensor:PT,personal:Personal:ME")
+        server.DASH_DEFAULT_DOMAIN = server.resolve_default_domain(server.DASH_DOMAINS, "personal")
+        httpd = self._boot()
+        try:
+            response, body = self._get(httpd, "/api/config")
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Cache-Control"), "no-store")
+            cfg = json.loads(body)
+            self.assertEqual(cfg["title"], "ALAN")
+            self.assertEqual(cfg["default_domain"], "personal")
+            self.assertEqual([d["key"] for d in cfg["domains"]], ["puretensor", "personal"])
+            self.assertEqual(cfg["domains"][1]["abbr"], "ME")
+            self.assertEqual(cfg["version"], server.VERSION)
+            # nothing else leaks through the public surface
+            self.assertEqual(set(cfg), {"title", "domains", "default_domain", "version"})
+            response, _ = self._get(httpd, "/api/stats")
+            self.assertEqual(response.status, 401)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            (server.AUTH_USER, server.AUTH_PASS, server.DASH_TITLE,
+             server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN) = saved
+
+    def test_legacy_mode_reports_no_domains_and_ptask_title(self):
+        saved = (server.DASH_TITLE, server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN)
+        server.DASH_TITLE, server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN = "PTASK", [], None
+        httpd = self._boot()
+        try:
+            _, body = self._get(httpd, "/api/config")
+            cfg = json.loads(body)
+            self.assertEqual(cfg["title"], "PTASK")
+            self.assertEqual(cfg["domains"], [])
+            self.assertIsNone(cfg["default_domain"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            server.DASH_TITLE, server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN = saved

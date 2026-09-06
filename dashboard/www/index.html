@@ -31,18 +31,11 @@
   --p5t:var(--p5); --p4t:var(--p4); --p3t:var(--p3); --p2t:var(--p2); --p1t:var(--p1);
   --accent-t:var(--accent); --hdr-muted:var(--muted); --live:var(--teal);
   --heat-base:#13131f;
-  /* domain identity (v3.6 ENG/MGMT split): Engineering wears the teal→blue
-     brand gradient; Management gets a warm gold→coral one. --dgrad/--daccent
-     follow the ACTIVE domain (data-domain on <html>) and drive the accentline,
-     the switch fill, and the per-card domain chips. --mgmt-at is the text-safe
-     variant (light themes override it like the --pNt family). */
+  /* Domain identity follows data-domain on <html>. Runtime config emits the
+     active gradient/accent rules; these defaults paint ALL and cover boot. */
   --mgmt-a:#ffb020; --mgmt-a2:#ff875e; --mgmt-at:var(--mgmt-a);
   --dgrad:var(--grad); --daccent:var(--accent-t);
   color-scheme:dark;
-}
-[data-domain="mgmt"]{
-  --dgrad:linear-gradient(90deg,var(--mgmt-a),var(--mgmt-a2));
-  --daccent:var(--mgmt-at);
 }
 /* ---- Mission Control (dark telemetry) ---- */
 [data-theme="mission"]{
@@ -182,7 +175,7 @@ header{
 .themes button:hover,.domains button:hover{color:var(--text)}
 .themes button.on{background:var(--grad);color:var(--ink);box-shadow:var(--glow)}
 .themes button:focus-visible,.domains button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-/* the ENG/MGMT/ALL view switch — selection wears the ACTIVE domain's gradient
+/* the domain/ALL view switch — selection wears the ACTIVE domain's gradient
    (aria-checked carries the state; the fill is reinforcement, not the signal) */
 .domains button{font-weight:700}
 .domains button.on{background:var(--dgrad);color:var(--ink);box-shadow:var(--glow)}
@@ -257,15 +250,13 @@ section{margin-top:22px}
   font-weight:600;color:var(--dim);letter-spacing:.04em;white-space:nowrap;cursor:default}
 .ptag .ic{width:11px;height:11px;flex:none}
 .ptag.h .ic{color:var(--accent-t)}
-/* domain chip — every card wears its hemisphere (ENG gear / MGMT case); click
-   moves the task to the other side by persisting an explicit domain: label */
+/* domain chip — every card wears its configured hat; click advances it by
+   persisting an explicit domain: label */
 .dtag{display:inline-flex;align-items:center;gap:4px;font-family:var(--font);font-size:10px;
   font-weight:700;letter-spacing:.04em;white-space:nowrap;cursor:pointer;
   background:transparent;border:1px solid var(--border);border-radius:6px;
-  padding:1px 6px;min-height:20px;transition:all .15s}
+  padding:1px 6px;min-height:20px;transition:all .15s;color:var(--sc,var(--daccent))}
 .dtag .ic{width:11px;height:11px;flex:none}
-.dtag.eng{color:var(--accent-t)}
-.dtag.mgmt{color:var(--mgmt-at)}
 .dtag:hover{border-color:currentColor}
 .dtag:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 [data-theme="lcars"] .dtag{border-radius:0 8px 8px 0}
@@ -869,8 +860,8 @@ button,[role="button"]{touch-action:manipulation}
   <symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2 15 14H1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8 6.5v3.2M8 11.8v.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
   <symbol id="i-user" viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M2.8 14a5.2 5.2 0 0 1 10.4 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
   <symbol id="i-bot" viewBox="0 0 16 16"><rect x="3" y="5.5" width="10" height="7.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 5.5V3M6.2 3h3.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="9.2" r="1.05" fill="currentColor"/><circle cx="10" cy="9.2" r="1.05" fill="currentColor"/></symbol>
-  <symbol id="i-eng" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.6v2.1M8 12.3v2.1M14.4 8h-2.1M3.7 8H1.6M12.5 3.5 11 5M5 11l-1.5 1.5M12.5 12.5 11 11M5 5 3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
-  <symbol id="i-mgmt" viewBox="0 0 16 16"><rect x="1.8" y="4.8" width="12.4" height="8.4" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.8 4.8V3.6a1.1 1.1 0 0 1 1.1-1.1h2.2a1.1 1.1 0 0 1 1.1 1.1v1.2M1.8 8.6h12.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="i-domain-0" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.6v2.1M8 12.3v2.1M14.4 8h-2.1M3.7 8H1.6M12.5 3.5 11 5M5 11l-1.5 1.5M12.5 12.5 11 11M5 5 3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="i-domain-1" viewBox="0 0 16 16"><rect x="1.8" y="4.8" width="12.4" height="8.4" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M5.8 4.8V3.6a1.1 1.1 0 0 1 1.1-1.1h2.2a1.1 1.1 0 0 1 1.1 1.1v1.2M1.8 8.6h12.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
   <!-- phone tab bar glyphs -->
   <symbol id="i-lanes" viewBox="0 0 16 16"><path d="M2 3.5h12M2 8h12M2 12.5h8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
   <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.5V8l2.6 1.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
@@ -901,7 +892,7 @@ button,[role="button"]{touch-action:manipulation}
   <div class="hdr">
     <div class="brand">
       <svg class="cube" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="ptg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00D4AA"/><stop offset="100%" stop-color="#0080FF"/></linearGradient></defs><path d="M20 24 H80 L57 54 V78 L43 70 V54 Z" fill="none" stroke="url(#ptg)" stroke-width="5.5" stroke-linejoin="round"/></svg>
-      <div class="brandtxt"><b>PTASK</b><small>Intelligence Distilled</small></div>
+      <div class="brandtxt"><b id="brandTitle">PTASK</b><small>Intelligence Distilled</small></div>
     </div>
     <span class="clock" id="clock">--:--:-- UTC</span>
     <div class="spacer"></div>
@@ -925,11 +916,7 @@ button,[role="button"]{touch-action:manipulation}
     </button>
   </div>
   <div class="hdr-sub">
-    <div class="domains" id="domains" role="radiogroup" aria-label="Task domain — engineering, management, or all">
-      <button data-act="pick-domain" data-d="all" role="radio" aria-checked="false" tabindex="-1">ALL</button>
-      <button data-act="pick-domain" data-d="eng" role="radio" aria-checked="false" tabindex="-1">ENG</button>
-      <button data-act="pick-domain" data-d="mgmt" role="radio" aria-checked="false" tabindex="-1">MGMT</button>
-    </div>
+    <div class="domains" id="domains" role="radiogroup" aria-label="Task domain or all"></div>
     <div class="themes" id="themes">
       <button data-t="mission">Mission</button>
       <button data-t="crystal">Crystal</button>
@@ -1079,14 +1066,88 @@ function setTheme(t){
 $$('#themes button').forEach(b=>b.onclick=()=>setTheme(b.dataset.t));
 setTheme(localStorage.getItem('ptask-theme')||'mission');
 
-/* ---- domain engine (v3.6): every task belongs to ENG (fleet/software work)
-   or MGMT (corporate/finance/people work). The header switch filters every
-   panel client-side — switching is a pure re-render, zero refetch (same
-   pattern as the flux range picker). Classification is deterministic:
-   explicit domain: label > project map > label map > title keywords > ENG. */
-const DNAME={all:'All',eng:'Engineering',mgmt:'Management'};
-const inDom=()=>_domain==='all'?'':' in '+DNAME[_domain];   // empty-state suffix
-const DOMAIN_LABEL_RE=/^domain:(eng|mgmt)$/;
+/* ---- domain engine: config supplies the hats, while an empty list expands to
+   the built-in two-domain classifier. Every renderer consumes this one list. */
+const LEGACY_DOMAINS=[
+  {key:'eng',label:'Engineering',abbr:'ENG',icon:'i-domain-0'},
+  {key:'mgmt',label:'Management',abbr:'MGMT',icon:'i-domain-1'}
+];
+const DOMAIN_PALETTE=[
+  {a:'#00d4aa',a2:'#0080ff',text:'#00d4aa',exec:'#0067d6'},
+  {a:'#ffb020',a2:'#ff875e',text:'#ffb020',exec:'#8a5a00'},
+  {a:'#c084fc',a2:'#818cf8',text:'#c084fc',exec:'#6d28d9'},
+  {a:'#a3e635',a2:'#22c55e',text:'#a3e635',exec:'#3f6212'},
+  {a:'#22d3ee',a2:'#38bdf8',text:'#22d3ee',exec:'#0e7490'},
+  {a:'#fb7185',a2:'#f472b6',text:'#fb7185',exec:'#be123c'}
+];
+let _domains=LEGACY_DOMAINS.map((d,i)=>({...d,palette:i}));
+let _domainByKey=new Map(_domains.map(d=>[d.key,d]));
+let _domainHeuristics=true, _defaultDomain='eng';
+let DNAME={all:'All',...Object.fromEntries(_domains.map(d=>[d.key,d.label]))};
+let DOMAIN_LABEL_RE=new RegExp('^domain:('+_domains.map(d=>d.key).join('|')+')$');
+let CDOM_OPTS=[];
+let _domain=localStorage.getItem('ptask-domain')||'all';
+const inDom=()=>_domain==='all'?'':' in '+esc(DNAME[_domain]||'this domain');
+const domainKeys=()=>_domains.map(d=>d.key);
+const isAnyDomainLabel=l=>typeof l==='string'&&l.startsWith('domain:');
+function nextDomain(d){
+  const keys=domainKeys(), i=keys.indexOf(d);
+  return keys[(i+1+keys.length)%keys.length];
+}
+function domainColor(d){
+  if(_domainHeuristics) return d==='eng'?'var(--accent-t)':'var(--mgmt-at)';
+  const item=_domainByKey.get(d);
+  return `var(--domain-${item?item.palette:0}-text)`;
+}
+function applyDomainConfig(cfg){
+  const configured=Array.isArray(cfg&&cfg.domains)&&cfg.domains.length>0;
+  const source=configured?cfg.domains:LEGACY_DOMAINS;
+  _domains=source.map((d,i)=>({...d,palette:i%DOMAIN_PALETTE.length}));
+  _domainByKey=new Map(_domains.map(d=>[d.key,d]));
+  _domainHeuristics=!configured;
+  _defaultDomain=configured?cfg.default_domain:_domains[0].key;
+  if(!_domainByKey.has(_defaultDomain)) _defaultDomain=_domains[0].key;
+  DNAME={all:'All',...Object.fromEntries(_domains.map(d=>[d.key,d.label]))};
+  DOMAIN_LABEL_RE=new RegExp('^domain:('+domainKeys().join('|')+')$');
+  CDOM_OPTS=[['auto','AUTO','var(--muted)'],
+    ..._domains.map(d=>[d.key,d.abbr,domainColor(d)])];
+
+  const title=String(cfg&&cfg.title!=null?cfg.title:'PTASK');
+  $('#brandTitle').textContent=title;
+  $('#authTitle').textContent=title;
+  document.title=title+' · Triage Cockpit';
+  const appTitle=$('meta[name="apple-mobile-web-app-title"]');
+  if(appTitle) appTitle.setAttribute('content',title);
+
+  const group=$('#domains');
+  group.setAttribute('aria-label',configured?'Task domain or all':
+    'Task domain — engineering, management, or all');
+  group.innerHTML=
+    '<button data-act="pick-domain" data-d="all" role="radio" aria-checked="false" tabindex="-1">ALL</button>'+
+    _domains.map(d=>`<button data-act="pick-domain" data-d="${d.key}" role="radio" `+
+      `aria-checked="false" tabindex="-1">${esc(d.abbr)}</button>`).join('');
+
+  let style=$('#domain-config-style');
+  if(!style){style=document.createElement('style');style.id='domain-config-style';document.head.appendChild(style);}
+  const vars=DOMAIN_PALETTE.map((p,i)=>
+    `--domain-${i}-a:${p.a};--domain-${i}-a2:${p.a2};--domain-${i}-text:${p.text};`).join('');
+  const light=DOMAIN_PALETTE.map((p,i)=>`--domain-${i}-text:${p.exec};`).join('');
+  const rules=_domains.map(d=>{
+    if(_domainHeuristics&&d.key==='eng')
+      return '[data-domain="eng"]{--dgrad:var(--grad);--daccent:var(--accent-t)}';
+    if(_domainHeuristics&&d.key==='mgmt')
+      return '[data-domain="mgmt"]{--dgrad:linear-gradient(90deg,var(--mgmt-a),var(--mgmt-a2));--daccent:var(--mgmt-at)}';
+    return `[data-domain="${d.key}"]{--dgrad:linear-gradient(90deg,var(--domain-${d.palette}-a),var(--domain-${d.palette}-a2));--daccent:var(--domain-${d.palette}-text)}`;
+  }).join('');
+  style.textContent=`:root{${vars}}[data-theme="exec"]{${light}}${rules}`;
+
+  const saved=localStorage.getItem('ptask-domain')||'all';
+  setDomain(saved==='all'||_domainByKey.has(saved)?saved:'all');
+}
+const _configReady=fetch('/api/config',{headers:{'Accept':'application/json'}})
+  .then(r=>{if(!r.ok)throw new Error('/api/config '+r.status);return r.json();})
+  .then(cfg=>applyDomainConfig(cfg));
+
 const ENG_PROJECTS=new Set(['infra','ptve','specola','puresentinel','nexus','immune','vulcan',
   'scriptorium','habla','pureprospect','instance08-hardening','ptask','puremind','warroom']);
 const MGMT_PROJECTS=new Set(['corp-tax','bizdev','citizenship','amax','azure','supermicro',
@@ -1100,6 +1161,7 @@ const MGMT_TITLE_RE=/\b(vat|itin|w-?7|w-?8ben(-?e)?|o-?1a|irs|1040|1042|5472|fil
 const ENG_TITLE_RE=/\b(kubectl|k[38]s|pods?|deploy(ment)?s?|gpu|cuda|vllm|ceph|dns|tls|ssl|webhooks?|prometheus|grafana|nodes?|systemd|docker|containers?|nginx|ssh|bmc|ipmi|kernel|nvme|zfs|vlan|tailscale|api|endpoint|crash-?loops?|restarts?|exporters?|backups?|pvc|ingress|cron(jobs?)?|timers?|repos?|builds?|pipelines?|migrations?|database|sqlite|postgres|servers?|daemons?|scripts?|dashboards?|probes?|liveness|monitoring|hardening|firmware)\b/i;
 function domainOf(t){
   for(const l of (t.labels||[])){const m=DOMAIN_LABEL_RE.exec(l); if(m) return m[1];}
+  if(!_domainHeuristics) return _defaultDomain;
   const pj=(t.project||'').toLowerCase();
   if(ENG_PROJECTS.has(pj)) return 'eng';
   if(MGMT_PROJECTS.has(pj)) return 'mgmt';
@@ -1111,9 +1173,8 @@ function domainOf(t){
   if(MGMT_TITLE_RE.test(hay)&&!ENG_TITLE_RE.test(hay)) return 'mgmt';
   return 'eng';
 }
-let _domain=localStorage.getItem('ptask-domain')||'all';
 function setDomain(d){
-  if(!(d in DNAME)) d='all';
+  if(d!=='all'&&!_domainByKey.has(d)) d='all';
   _domain=d;
   document.documentElement.dataset.domain=d;
   localStorage.setItem('ptask-domain',d);
@@ -1127,11 +1188,11 @@ function setDomain(d){
 }
 /* radiogroup keyboard pattern, same as the severity picker */
 $('#domains').addEventListener('keydown',e=>{
-  const order=['all','eng','mgmt'], i=order.indexOf(_domain);
+  const order=['all',...domainKeys()], i=order.indexOf(_domain), len=order.length;
   let n=null;
-  if(e.key==='ArrowRight'||e.key==='ArrowDown') n=order[(i+1)%3];
-  else if(e.key==='ArrowLeft'||e.key==='ArrowUp') n=order[(i+2)%3];
-  else if(e.key==='Home') n='all'; else if(e.key==='End') n='mgmt';
+  if(e.key==='ArrowRight'||e.key==='ArrowDown') n=order[(i+1)%len];
+  else if(e.key==='ArrowLeft'||e.key==='ArrowUp') n=order[(i-1+len)%len];
+  else if(e.key==='Home') n=order[0]; else if(e.key==='End') n=order[len-1];
   if(n==null) return;
   e.preventDefault(); setDomain(n);
   const b=$(`#domains [data-d="${n}"]`); if(b) b.focus();
@@ -1163,17 +1224,18 @@ function originTag(t,verbose){
   return `<span class="ptag${robot?'':' h'}" title="${robot?'auto-generated (robot)':'operator-directed (human)'} · source: ${src}">`+
     `<svg class="ic" aria-hidden="true"><use href="#${robot?'i-bot':'i-user'}"/></svg>${lbl}</span>`;
 }
-/* domain chip — which hemisphere the task lives in. Click moves it to the
-   other side by writing an explicit domain: label through the pt edit path,
-   so the reassignment outlives every heuristic re-classification. */
+/* Domain chip: click advances through the configured list and stores the
+   choice through the canonical pt edit path. */
 function domainTag(t){
-  const d=domainOf(t), eng=d==='eng';
+  const d=domainOf(t), cur=_domainByKey.get(d), to=nextDomain(d), next=_domainByKey.get(to);
   const explicit=(t.labels||[]).some(l=>DOMAIN_LABEL_RE.test(l));
-  const cur=eng?'Engineering':'Management', other=eng?'Management':'Engineering';
-  return `<button class="dtag ${d}" data-act="domain" data-d="${d}" `+
-    `title="${cur}${explicit?'':' (auto-classified)'} — click to move to ${other}" `+
-    `aria-label="domain ${cur} — move to ${other}">`+
-    `<svg class="ic" aria-hidden="true"><use href="#${eng?'i-eng':'i-mgmt'}"/></svg>${eng?'ENG':'MGMT'}</button>`;
+  const auto=_domainHeuristics&&!explicit?' (auto-classified)':'';
+  const title=`${cur.label}${auto} — click to move to ${next.label}`;
+  const aria=_domainHeuristics?`domain ${cur.label} — move to ${next.label}`:
+    `${cur.label} — click to move to ${next.label}`;
+  const icon=cur.icon?`<svg class="ic" aria-hidden="true"><use href="#${cur.icon}"/></svg>`:'';
+  return `<button class="dtag" data-act="domain" data-d="${d}" style="--sc:${domainColor(d)}" `+
+    `title="${esc(title)}" aria-label="${esc(aria)}">${icon}${esc(cur.abbr)}</button>`;
 }
 /* relative creation time for the Recently Added rail — "3m ago" beats an ISO
    stamp for the question this section answers: how fresh is this task? */
@@ -1238,17 +1300,19 @@ async function setPriority(id,level,ev){
 /* domain reassignment — swaps the explicit domain: label via the edit
    endpoint (canonical pt write path), then patches the local caches so the
    card jumps sides instantly instead of waiting for the next refetch. */
-async function setDomainLabel(id,uuid,to){
-  const from=to==='eng'?'mgmt':'eng';
+async function setDomainLabel(id,uuid,to,knownLabels){
+  const task=_pendingAll.find(t=>t.id===uuid)||_recentAll.find(t=>t.id===uuid);
+  const known=Array.isArray(knownLabels)?knownLabels:(task&&task.labels)||[];
+  const remove=[...new Set(known.filter(l=>isAnyDomainLabel(l)&&l!=='domain:'+to))];
   try{
     const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/edit',{method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({labels_add:['domain:'+to],labels_remove:['domain:'+from]})});
+      body:JSON.stringify({labels_add:['domain:'+to],labels_remove:remove})});
     const j=await r.json();
     if(!j.ok){ toast('✗ '+(j.error||j.message||'failed')); return; }
     toast('⇄ '+(j.pt_id||id)+' → '+DNAME[to]);
     const upd=t=>{ if(t.id===uuid){
-      t.labels=(t.labels||[]).filter(l=>!DOMAIN_LABEL_RE.test(l));
+      t.labels=(t.labels||[]).filter(l=>!isAnyDomainLabel(l));
       t.labels.push('domain:'+to); } };
     _pendingAll.forEach(upd); _recentAll.forEach(upd);
     renderAll();
@@ -1275,7 +1339,7 @@ document.addEventListener('click',e=>{
   else if(kind==='pick-sev'){ pickSev(+el.dataset.n); }
   else if(kind==='pick-dom'){ pickDom(el.dataset.v); }
   else if(kind==='pick-domain'){ setDomain(el.dataset.d); }
-  else if(kind==='domain'){ if(id) setDomainLabel(id,uuid,el.dataset.d==='eng'?'mgmt':'eng'); }
+  else if(kind==='domain'){ if(id) setDomainLabel(id,uuid,nextDomain(el.dataset.d)); }
   else if(kind==='flux'){ openFluxMenu(e,el); }
   else if(kind==='pick-flux'){ pickFlux(el.dataset.w); }
   else if(kind==='pick-view'){ setView(el.dataset.v); }
@@ -1488,11 +1552,11 @@ $('#c-sev').addEventListener('keydown',e=>{
   e.preventDefault(); pickSev(n);
   const b=$(`#c-sev [data-lvl="${n}"]`); if(b) b.focus();
 });
-/* composer domain picker — AUTO means "classify for me" on create and
-   "leave as is" on edit; ENG/MGMT persist an explicit domain: label. */
+/* Composer domain picker — AUTO classifies on create and leaves unchanged on
+   edit; every other option comes from the active domain config. */
 let _cdom='auto';
-const CDOM_OPTS=[['auto','AUTO','var(--muted)'],['eng','ENG','var(--teal)'],['mgmt','MGMT','var(--mgmt-a)']];
 function buildDom(sel){
+  if(!CDOM_OPTS.some(([v])=>v===sel)) sel='auto';
   _cdom=sel;
   $('#c-dom').innerHTML=CDOM_OPTS.map(([v,lbl,c])=>
     `<button type="button" class="sv${v===sel?' on':''}" role="radio" data-v="${v}"`+
@@ -1501,17 +1565,18 @@ function buildDom(sel){
     `<span class="sd"></span>${lbl}</button>`).join('');
 }
 function pickDom(v){
+  if(!CDOM_OPTS.some(([key])=>key===v)) v='auto';
   _cdom=v;
   $$('#c-dom .sv').forEach(b=>{const on=b.dataset.v===v;
     b.classList.toggle('on',on); b.setAttribute('aria-checked',on?'true':'false');
     b.tabIndex=on?0:-1;});
 }
 $('#c-dom').addEventListener('keydown',e=>{
-  const order=['auto','eng','mgmt'], i=order.indexOf(_cdom);
+  const order=CDOM_OPTS.map(([v])=>v), i=order.indexOf(_cdom), len=order.length;
   let n=null;
-  if(e.key==='ArrowRight'||e.key==='ArrowDown') n=order[(i+1)%3];
-  else if(e.key==='ArrowLeft'||e.key==='ArrowUp') n=order[(i+2)%3];
-  else if(e.key==='Home') n='auto'; else if(e.key==='End') n='mgmt';
+  if(e.key==='ArrowRight'||e.key==='ArrowDown') n=order[(i+1)%len];
+  else if(e.key==='ArrowLeft'||e.key==='ArrowUp') n=order[(i-1+len)%len];
+  else if(e.key==='Home') n=order[0]; else if(e.key==='End') n=order[len-1];
   if(n==null) return;
   e.preventDefault(); pickDom(n);
   const b=$(`#c-dom [data-v="${n}"]`); if(b) b.focus();
@@ -1544,7 +1609,10 @@ async function submitCompose(ev){
       const payload={title,priority:_sev,description,deadline:deadline||null};
       if(_cdom!=='auto'){   // AUTO on edit = leave the domain untouched
         payload.labels_add=['domain:'+_cdom];
-        payload.labels_remove=['domain:'+(_cdom==='eng'?'mgmt':'eng')];
+        const task=_pendingAll.find(t=>(t.pt_id||t.id)===_editId||t.id===_editId)
+          ||_recentAll.find(t=>(t.pt_id||t.id)===_editId||t.id===_editId);
+        payload.labels_remove=[...new Set(((task&&task.labels)||[])
+          .filter(l=>isAnyDomainLabel(l)&&l!=='domain:'+_cdom))];
       }
       r=await fetch('/api/tasks/'+encodeURIComponent(_editId)+'/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       j=await r.json();
@@ -1723,7 +1791,13 @@ function renderCap(){
      heuristic decides — one classifier for the whole board, not two. */
   const pseudo={title:f.title||'',project:'',
     labels:(f.labels||[]).concat(f.domain?['domain:'+f.domain]:[])};
-  const d=domainOf(pseudo), eng=d==='eng';
+  const d=domainOf(pseudo), cur=_domainByKey.get(d), to=nextDomain(d), next=_domainByKey.get(to);
+  const explicit=!!f.domain&&_domainByKey.has(f.domain);
+  const auto=_domainHeuristics&&!explicit?' (auto-classified)':'';
+  const domainTitle=`${cur.label}${auto} — click to move to ${next.label}`;
+  const domainAria=_domainHeuristics?`domain ${cur.label} — move to ${next.label}`:
+    `${cur.label} — click to move to ${next.label}`;
+  const domainIcon=cur.icon?'<svg class="ic" aria-hidden="true"><use href="#'+cur.icon+'"/></svg>':'';
   const p=Math.min(5,Math.max(1,f.priority||2));
   c.className='capres';
   c.innerHTML=
@@ -1734,10 +1808,9 @@ function renderCap(){
       '<button type="button" class="cap-btn cap-x" data-act="cap-close" aria-label="dismiss">✕</button></div>'+
     '<div class="cap-title">'+esc(f.title||'')+'</div>'+
     '<div class="cap-meta">'+
-      '<button type="button" class="dtag '+d+'" data-act="cap-domain" data-d="'+d+'" '+
-        'title="'+(eng?'Engineering':'Management')+(f.domain?'':' (auto-classified)')+
-        ' — click to move to '+(eng?'Management':'Engineering')+'">'+
-        '<svg class="ic" aria-hidden="true"><use href="#'+(eng?'i-eng':'i-mgmt')+'"/></svg>'+(eng?'ENG':'MGMT')+'</button>'+
+      '<button type="button" class="dtag" data-act="cap-domain" data-d="'+d+'" '+
+        'style="--sc:'+domainColor(d)+'" title="'+esc(domainTitle)+'" aria-label="'+esc(domainAria)+'">'+
+        domainIcon+esc(cur.abbr)+'</button>'+
       '<span class="cap-p p'+p+'">P'+p+' '+esc(PNAME[p])+'</span>'+
       (f.deadline?'<span class="cap-due">due '+esc(f.deadline)+'</span>':'')+
       '<span class="cap-llm">'+esc(_cap.llm||'')+'</span>'+
@@ -1801,10 +1874,11 @@ function capFlipDomain(){
   if(!_cap) return;
   const f=_cap.fields, pseudo={title:f.title||'',project:'',
     labels:(f.labels||[]).concat(f.domain?['domain:'+f.domain]:[])};
-  const to=domainOf(pseudo)==='eng'?'mgmt':'eng';
+  const known=(f.labels||[]).concat(f.domain?['domain:'+f.domain]:[]);
+  const to=nextDomain(domainOf(pseudo));
   f.domain=to;                 // the card reflects the intent immediately
   renderCap();
-  setDomainLabel(_cap.pt_id||_cap.uuid,_cap.uuid,to);
+  setDomainLabel(_cap.pt_id||_cap.uuid,_cap.uuid,to,known);
 }
 /* don't let the receipt time out from under a thumb that is reaching for Undo */
 $('#capres').addEventListener('pointerenter',()=>{ if(_capTimer){clearTimeout(_capTimer);_capTimer=null;} });
@@ -1864,14 +1938,15 @@ function renderChips(s){
 }
 /* live per-domain counts on the header switch */
 function renderDomainCounts(){
-  let e=0,m=0;
-  _pendingAll.forEach(t=>{ if(domainOf(t)==='eng') e++; else m++; });
-  const set=(d,n)=>{
+  const counts=Object.fromEntries(_domains.map(d=>[d.key,0]));
+  _pendingAll.forEach(t=>{const d=domainOf(t);if(d in counts)counts[d]++;});
+  const set=(d,n,abbr,label)=>{
     const b=$(`#domains [data-d="${d}"]`); if(!b) return;
-    b.innerHTML=`${d.toUpperCase()} <span class="dn">${n}</span>`;
-    b.setAttribute('aria-label',`${DNAME[d]} — ${n} pending task${n===1?'':'s'}`);
+    b.innerHTML=`${esc(abbr)} <span class="dn">${n}</span>`;
+    b.setAttribute('aria-label',`${label} — ${n} pending task${n===1?'':'s'}`);
   };
-  set('all',e+m); set('eng',e); set('mgmt',m);
+  set('all',_pendingAll.length,'ALL','All domains');
+  _domains.forEach(d=>set(d.key,counts[d.key],d.abbr,d.label));
 }
 /* Severity is the primary key everywhere the board lists tasks in order; the
    composite score only breaks ties inside a band. The API already returns this
@@ -2235,7 +2310,6 @@ async function load(force){
     $('#status').textContent='⚠ connection lost ('+e.message+')'+(_lastGood?' — showing data from '+_lastGood:'')+' · retrying';
   }
 }
-setDomain(_domain);   // paints the switch + data-domain before first data
 applyPhone();         // phone shell (panes + tab bar) before first data
 let _appStarted=false;
 function startApp(){
@@ -2267,7 +2341,10 @@ $('#logout-btn').addEventListener('click',async()=>{
 });
 (async()=>{
   try{
-    const r=await fetch('/api/auth/check',{credentials:'include',headers:{'Accept':'application/json'}});
+    const [,r]=await Promise.all([
+      _configReady,
+      fetch('/api/auth/check',{credentials:'include',headers:{'Accept':'application/json'}})
+    ]);
     if(r.ok){startApp();return;}
     showLogin();
   }catch(e){showLogin('Could not check the session. Check your connection.');}
