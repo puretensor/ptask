@@ -428,10 +428,7 @@ impl RemoteClient {
             .resources
             .tasks
             .into_iter()
-            .filter(|t| match status {
-                None | Some("all") => true,
-                Some(s) => t.status == s,
-            })
+            .filter(|t| list_status_keeps(&t.status, status))
             .filter(|t| priority.is_none_or(|p| t.priority == p))
             .collect();
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -481,11 +478,51 @@ fn ensure_ok(status: &BTreeMap<String, Value>, cmd_uuid: &str) -> Result<()> {
     }
 }
 
+/// Client-side status filter for `pt remote list`.
+///
+/// `/sync` serialises `status_v2` onto `Task.status` (`todo` for a newly
+/// created row). The CLI default is still the legacy token `"pending"`.
+/// Exact string compare against `"pending"` therefore drops every open task.
+fn list_status_keeps(task_status: &str, wanted: Option<&str>) -> bool {
+    match wanted {
+        None | Some("all") => true,
+        Some("pending") => match ptask_core::status::Status::parse(task_status) {
+            Ok(s) => s.legacy() == "pending",
+            // Pre-V010 `/sync` already put the legacy token on the wire.
+            Err(_) => task_status == "pending",
+        },
+        Some(s) => task_status == s,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn remote_list_pending_keeps_status_v2_open_rows() {
+        // Production `/sync` returns status_v2 (`todo`), not the legacy
+        // `pending` column. Default `pt remote list` is `-s pending`.
+        assert!(
+            list_status_keeps("todo", Some("pending")),
+            "todo is legacy-pending and must survive pt remote list"
+        );
+        assert!(list_status_keeps("triage", Some("pending")));
+        assert!(list_status_keeps("backlog", Some("pending")));
+        assert!(list_status_keeps("in_progress", Some("pending")));
+        assert!(
+            list_status_keeps("pending", Some("pending")),
+            "pre-V010 wire shape still accepted"
+        );
+        assert!(!list_status_keeps("done", Some("pending")));
+        assert!(!list_status_keeps("dismissed", Some("pending")));
+        assert!(!list_status_keeps("snoozed", Some("pending")));
+        assert!(list_status_keeps("done", Some("all")));
+        assert!(list_status_keeps("todo", Some("todo")));
+        assert!(!list_status_keeps("todo", Some("done")));
+    }
 
     fn existing_tasks_json() -> Vec<Value> {
         vec![
