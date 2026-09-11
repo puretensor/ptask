@@ -810,6 +810,14 @@ class DomainConfigTests(unittest.TestCase):
             server.resolve_default_domain(doms, "zzz")
         self.assertIsNone(server.resolve_default_domain([], "anything"))
 
+    def test_blank_requested_default_uses_the_first_key(self):
+        # PTASK_DASH_DEFAULT_DOMAIN=  (set-but-empty in an env file) is not
+        # "the operator picked a missing hat"; it is "use the first". Raising
+        # here aborts dashboard import the same way a trailing comma did.
+        doms = server.parse_domains("a:A,b:B")
+        self.assertEqual(server.resolve_default_domain(doms, ""), "a")
+        self.assertEqual(server.resolve_default_domain(doms, "  "), "a")
+
 
 class ConfigEndpointTests(unittest.TestCase):
     """GET /api/config is the ONE place the shell learns its brand and domain
