@@ -766,6 +766,16 @@ class DomainConfigTests(unittest.TestCase):
         self.assertEqual(server.parse_domains(""), [])
         self.assertEqual(server.parse_domains("  , "), [])
 
+    def test_trailing_and_blank_comma_entries_are_ignored(self):
+        # Env files and systemd Environment= lines routinely trail a comma.
+        # An empty slot is not a domain key; it must not crash dashboard import.
+        got = server.parse_domains("personal,")
+        self.assertEqual(got, [{"key": "personal", "label": "Personal", "abbr": "PERS"}])
+        got = server.parse_domains("a:A,,b:B,")
+        self.assertEqual([d["key"] for d in got], ["a", "b"])
+        got = server.parse_domains(",personal")
+        self.assertEqual(got[0]["key"], "personal")
+
     def test_parses_key_label_abbr_triples(self):
         got = server.parse_domains(
             "puretensor:PureTensor:PT, bretalon:Bretalon:BRET,eaglestone:Eaglestone:EAGLE"
