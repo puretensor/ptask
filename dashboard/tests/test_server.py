@@ -614,6 +614,43 @@ class VoiceDomainTests(unittest.TestCase):
             out = server._normalize_voice_fields({"title": "abc def", "domain": bad}, "t")
             self.assertIsNone(out["domain"], f"domain={bad!r} should be dropped")
 
+    def test_configured_domains_are_accepted_and_legacy_pair_dropped(self):
+        # v0.19 configured the board's hats; voice capture still only honoured
+        # eng/mgmt, so a second-tenant dictation could never land on a real hat
+        # and would still stamp @domain:eng on a board that does not have one.
+        saved = server.DASH_DOMAINS
+        server.DASH_DOMAINS = server.parse_domains(
+            "puretensor:PureTensor:PT,personal:Personal:ME")
+        try:
+            out = server._normalize_voice_fields(
+                {"title": "abc def", "domain": "personal"}, "t")
+            self.assertEqual(out["domain"], "personal")
+            out = server._normalize_voice_fields(
+                {"title": "abc def", "domain": "  PURETENSOR "}, "t")
+            self.assertEqual(out["domain"], "puretensor")
+            for bad in ("eng", "mgmt", "ops", None):
+                out = server._normalize_voice_fields(
+                    {"title": "abc def", "domain": bad}, "t")
+                self.assertIsNone(out["domain"], f"domain={bad!r} should be dropped")
+        finally:
+            server.DASH_DOMAINS = saved
+
+    def test_voice_prompt_lists_configured_keys(self):
+        saved = server.DASH_DOMAINS
+        server.DASH_DOMAINS = server.parse_domains("personal:Personal:ME")
+        try:
+            prompt = server.voice_system_prompt("2026-09-11")
+            self.assertIn("2026-09-11", prompt)
+            self.assertIn('"personal"', prompt)
+            self.assertNotIn('"eng"', prompt)
+            self.assertNotIn('"mgmt"', prompt)
+        finally:
+            server.DASH_DOMAINS = saved
+        # Unset config keeps the legacy hemisphere prompt byte-for-byte.
+        prompt = server.voice_system_prompt("2026-09-11")
+        self.assertIn('"eng"', prompt)
+        self.assertIn('"mgmt"', prompt)
+
     def test_reason_collapsed_and_capped(self):
         out = server._normalize_voice_fields(
             {"title": "abc def", "reason": "  a\n  b   c  "}, "t")
@@ -685,6 +722,18 @@ class VoiceCreateTests(unittest.TestCase):
              "reason": "", "description": "", "deadline": None})
         self.assertEqual(args[-1], "Something ambiguous")
         self.assertFalse(any("@domain:" in a for a in args))
+
+    def test_configured_domain_rides_as_an_inline_quickadd_token(self):
+        saved = server.DASH_DOMAINS
+        server.DASH_DOMAINS = server.parse_domains("personal:Personal:ME")
+        try:
+            ok, _, args = self._capture_argv(
+                {"title": "File the VAT return", "priority": 4, "domain": "personal",
+                 "reason": "tax", "description": "", "deadline": None})
+            self.assertTrue(ok)
+            self.assertEqual(args[-1], "File the VAT return @domain:personal")
+        finally:
+            server.DASH_DOMAINS = saved
 
     def test_token_dropped_rather_than_overflowing_the_title(self):
         title = "x" * 396          # 396 + len(" @domain:eng")=12 -> 408 > 400
