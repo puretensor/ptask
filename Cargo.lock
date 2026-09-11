@@ -2125,9 +2125,9 @@ checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 
 [[package]]
 name = "mail-parser"
-version = "0.11.3"
+version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8a2420e9ce11c2b0583ca97ddff7ab2398c8a613154e9b72e3bafdbf767f1d7"
+checksum = "4ec00bda90c6e645a54506c630c2820cd6b1890cfd2b0a169b50f74b2b8c7c86"
 dependencies = [
  "hashify",
 ]
@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-bot"
-version = "3.28.1"
+version = "3.29.0"
 dependencies = [
  "anyhow",
  "jiff",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-cli"
-version = "3.28.1"
+version = "3.29.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2693,7 +2693,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-core"
-version = "3.28.1"
+version = "3.29.0"
 dependencies = [
  "hex",
  "interim",
@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-distill"
-version = "3.28.1"
+version = "3.29.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -2737,7 +2737,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-notify"
-version = "3.28.1"
+version = "3.29.0"
 dependencies = [
  "lettre",
  "ptask-core",
@@ -2750,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-server"
-version = "3.28.1"
+version = "3.29.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-tui"
-version = "3.28.1"
+version = "3.29.0"
 dependencies = [
  "anyhow",
  "crossterm",

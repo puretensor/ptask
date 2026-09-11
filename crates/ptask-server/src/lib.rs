@@ -1526,6 +1526,29 @@ Don't forget the sourdough.\r\n";
         .unwrap();
     }
 
+    /// mail-parser 0.11.3 panics when a `Received` header ends on a folded
+    /// whitespace line (stalwartlabs/mail-parser#155). Inbound `/email` is
+    /// that parser; a panic here is a request-task abort on a well-formed
+    /// SMTP trace, not a 400.
+    #[test]
+    fn inbound_email_with_folded_received_header_does_not_panic() {
+        // Exact messages from mail-parser 0.11.6 `parse_received_truncated_fold`
+        // (stalwartlabs/mail-parser@f9a580c). 0.11.3 sliced
+        // `start_pos..offset-1` off the end of the buffer and panicked.
+        let messages: &[&[u8]] = &[
+            b"Received:\n\t",
+            b"Received:\r\n ",
+            b"Received: x\r\n ",
+            b"Received: x\r\n\t",
+            b"Received: from x by y;\r\n\t",
+            b"Received: from x (y)\r\n\t",
+            b"To: a@b\r\nReceived: x\r\n ",
+        ];
+        for raw in messages {
+            let _ = mail_parser::MessageParser::default().parse(*raw);
+        }
+    }
+
     #[tokio::test]
     async fn root_banner() {
         let db = open_test_db();
