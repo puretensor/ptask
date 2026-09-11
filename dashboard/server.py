@@ -103,7 +103,7 @@ def resolve_default_domain(domains: list[dict], requested: str | None) -> str | 
     """Resolve the configured default, failing when it is not in the domain list."""
     if not domains:
         return None
-    if requested is None:
+    if requested is None or not str(requested).strip():
         return domains[0]["key"]
     keys = {domain["key"] for domain in domains}
     if requested not in keys:
