@@ -79,7 +79,7 @@ def parse_domains(s: str | None) -> list[dict]:
     for raw_entry in s.split(","):
         entry = raw_entry.strip()
         if not entry:
-            raise ValueError("domain key must not be empty")
+            continue
         fields = [field.strip() for field in entry.split(":")]
         if len(fields) > 3:
             raise ValueError(f"domain entry has more than 3 fields: {entry!r}")
