@@ -132,7 +132,7 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.19.0"
+VERSION = "0.19.1"
 DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
 DASH_DOMAINS = parse_domains(os.environ.get("PTASK_DASH_DOMAINS"))
 DASH_DEFAULT_DOMAIN = resolve_default_domain(
@@ -595,6 +595,8 @@ def pt_exec(args: list[str]) -> tuple[bool, str]:
 
 
 # ------------------------------------------------------------------------ voice
+# {domain_clause} is filled by voice_system_prompt from PTASK_DASH_DOMAINS so a
+# second tenant is not still asked to pick eng/mgmt.
 VOICE_SYSTEM = (
     "You turn a short spoken note into ONE task, returned as STRICT JSON only — no "
     "prose, no markdown fences. Today is {today} (UTC). Output exactly these keys:\n"
@@ -606,14 +608,41 @@ VOICE_SYSTEM = (
     '  "deadline": absolute date "YYYY-MM-DD" resolved from phrases like "today", "tomorrow", '
     '"next Friday", "in 3 days", "end of month" relative to today; null if no date is mentioned.\n'
     '  "labels": array of 0-4 short lowercase tags inferred from the topic; [] if unclear.\n'
-    '  "domain": "eng" for engineering work (fleet, infrastructure, software, security, '
-    'hardware, monitoring, deployments) or "mgmt" for management work (corporate, finance, '
-    "tax, legal, banking, people/hiring, travel, business development, suppliers). Omit the "
-    "key entirely if the note is genuinely ambiguous — do not guess.\n"
+    "{domain_clause}"
     '  "reason": one line, <= 120 chars, why you chose that domain and priority.\n'
     "Speech may contain filler words, false starts, or transcription noise — clean it up and "
     "capture the intent. Return only the JSON object."
 )
+
+
+def allowed_voice_domains() -> set[str]:
+    """Domain keys voice capture may persist.
+
+    Configured PTASK_DASH_DOMAINS wins; unset keeps the legacy eng/mgmt pair so
+    the v0.19 empty-config path stays byte-for-byte the previous behaviour.
+    """
+    if DASH_DOMAINS:
+        return {d["key"] for d in DASH_DOMAINS}
+    return {"eng", "mgmt"}
+
+
+def _voice_domain_clause() -> str:
+    if DASH_DOMAINS:
+        listed = ", ".join(f'"{d["key"]}" for {d["label"]}' for d in DASH_DOMAINS)
+        return (
+            f'  "domain": one of {listed}. Omit the key entirely if the note is '
+            "genuinely ambiguous — do not guess.\n"
+        )
+    return (
+        '  "domain": "eng" for engineering work (fleet, infrastructure, software, security, '
+        'hardware, monitoring, deployments) or "mgmt" for management work (corporate, finance, '
+        "tax, legal, banking, people/hiring, travel, business development, suppliers). Omit the "
+        "key entirely if the note is genuinely ambiguous — do not guess.\n"
+    )
+
+
+def voice_system_prompt(today: str) -> str:
+    return VOICE_SYSTEM.format(today=today, domain_clause=_voice_domain_clause())
 
 # Whisper invents speech from silence and room noise. Every other voice producer
 # on the fleet filters these (voice-kb/proofreader.py, hermes voice_mode.py); the
@@ -694,7 +723,7 @@ def _bedrock_extract(transcript: str, today: str) -> dict:
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 600, "temperature": 0,
-        "system": VOICE_SYSTEM.format(today=today),
+        "system": voice_system_prompt(today),
         "messages": [{"role": "user", "content": transcript}],
     })
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as bf:
@@ -724,7 +753,7 @@ def _vllm_extract(transcript: str, today: str) -> dict:
     """Local fallback extraction via the on-fleet vLLM (OpenAI-compatible)."""
     payload = {
         "model": VOICE_FALLBACK_MODEL, "max_tokens": 600, "temperature": 0,
-        "messages": [{"role": "system", "content": VOICE_SYSTEM.format(today=today)},
+        "messages": [{"role": "system", "content": voice_system_prompt(today)},
                      {"role": "user", "content": transcript}],
     }
     if VOICE_FALLBACK_EFFORT:
@@ -783,11 +812,12 @@ def _normalize_voice_fields(d: dict, transcript: str) -> dict:
             s = re.sub(r"[^a-z0-9 _-]", "", str(x).strip().lower())[:24].strip()
             if s:
                 labels.append(s)
-    # An explicit domain is only honoured when the model names one of the two
-    # hemispheres. Anything else stays None and the cockpit's domainOf() applies
-    # the same heuristic it applies to every other task — one classifier, not two.
+    # An explicit domain is only honoured when the model names a configured hat
+    # (or eng/mgmt when PTASK_DASH_DOMAINS is unset). Anything else stays None
+    # and the cockpit's domainOf() applies the same heuristic it applies to
+    # every other task — one classifier, not two.
     dom = str(d.get("domain") or "").strip().lower()
-    domain = dom if dom in ("eng", "mgmt") else None
+    domain = dom if dom in allowed_voice_domains() else None
     reason = " ".join(str(d.get("reason") or "").split())[:200]
     return {"title": title, "description": desc, "priority": pri,
             "deadline": deadline, "labels": labels,
@@ -822,7 +852,7 @@ def voice_create_task(fields: dict, transcript: str) -> tuple[bool, dict]:
     """
     title = (fields.get("title") or "").strip()
     dom = fields.get("domain")
-    if dom in ("eng", "mgmt"):
+    if dom in allowed_voice_domains():
         tok = f" @domain:{dom}"
         if len(title) + len(tok) <= 400:
             title += tok
