@@ -608,6 +608,36 @@ pub async fn serve_stdio(db: Db, actor: String) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn negotiate_initialize_advertises_tools_on_a_supported_protocol() {
+        // rmcp 3.3.0 (2026-09-10) extracted protocol-version negotiation out of
+        // the default initialize body into ServerHandler::negotiate_initialize
+        // so a server that overrides initialize does not have to restate the
+        // rule (modelcontextprotocol/rust-sdk#1247). pTask uses the default
+        // initialize; this call is the new path that handshake now takes.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let mcp = PtaskMcp::new(db, "test-agent".into());
+        let request = InitializeRequestParams::new(
+            ClientCapabilities::default(),
+            Implementation::from_build_env(),
+        );
+        let result = mcp
+            .negotiate_initialize(&request)
+            .expect("negotiate_initialize");
+        assert!(
+            result.capabilities.tools.is_some(),
+            "pTask is a tools server; initialize must advertise tools"
+        );
+        let supported = mcp.supported_protocol_versions();
+        assert!(
+            supported.contains(&result.protocol_version),
+            "negotiated {:?} is not in supported {:?}",
+            result.protocol_version,
+            supported
+        );
+    }
+
     #[tokio::test]
     async fn task_add_rejects_invalid_provenance_before_creating() {
         let dir = tempfile::tempdir().unwrap();
