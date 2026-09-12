@@ -1012,6 +1012,12 @@ pub fn update_deadline(
 pub fn delete_task(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
+    delete_task_in_conn(&tx, task_uuid, ctx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn delete_task_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     // Capture the PT-N before the CASCADE wipes pt_extensions.
     let pt_id: Option<String> = tx
         .query_row("SELECT pt_id FROM tasks WHERE id=?1", [task_uuid], |r| {
@@ -1020,13 +1026,12 @@ pub fn delete_task(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
         .optional()?;
     tx.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
     record_event_tx(
-        &tx,
+        tx,
         ctx,
         task_uuid,
         "task.deleted",
         &serde_json::json!({ "task_uuid": task_uuid, "pt_id": pt_id }),
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -1037,9 +1042,15 @@ pub fn delete_task(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
 /// `status_change` interaction's details contain `'pending'`, which the
 /// neglect score reads as a reopen signal.
 pub fn reopen(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
-    let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
+    reopen_in_conn(&tx, task_uuid, ctx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
+    let now = iso_now();
     let status: Option<String> = tx
         .query_row("SELECT status FROM tasks WHERE id=?1", [task_uuid], |r| {
             r.get(0)
@@ -1065,13 +1076,12 @@ pub fn reopen(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
         ],
     )?;
     record_event_tx(
-        &tx,
+        tx,
         ctx,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "status": "pending" }),
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -1129,72 +1139,69 @@ pub struct UndoOutcome {
 /// their events don't carry the prior state yet. The reversal itself is a
 /// normal attributed mutation, so `pt log` shows both sides.
 pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
+    // Keep the selected history and current task state stable until reversal.
+    // A concurrent claim/edit must not commit between validation and deletion.
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let candidates: Vec<(i64, String, String, String)> = {
-        let conn = db.get()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT id, task_uuid, event_type, payload FROM pt_event_log
              WHERE task_uuid IS NOT NULL
-               AND event_type IN ('task.completed', 'task.created', 'task.updated')
              ORDER BY id DESC LIMIT 50",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         rows.collect::<std::result::Result<_, _>>()?
     };
 
-    // Tasks with a newer, non-undoable modification (priority/deadline/text/
-    // start/snooze edit) seen earlier in this newest-first scan. Their
-    // `task.created` must NOT be deleted: the create is no longer the last
-    // thing that happened, so deleting would silently discard the later edit.
-    let mut modified_after_create: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    // Only a task's newest event is eligible. This protects every later
+    // mutation, including newly introduced event types, and skips reversals
+    // already recorded by an earlier undo or a manual reopen.
+    let mut seen = std::collections::HashSet::new();
 
     for (id, task_uuid, event_type, payload) in candidates {
-        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
-        let exists: bool = {
-            let conn = db.get()?;
-            conn.query_row("SELECT 1 FROM tasks WHERE id=?1", [&task_uuid], |_| Ok(()))
-                .optional()?
-                .is_some()
-        };
-        if !exists {
+        if !seen.insert(task_uuid.clone()) {
             continue;
         }
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        let status: Option<String> = tx
+            .query_row(
+                "SELECT status_v2 FROM tasks WHERE id=?1",
+                [&task_uuid],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            continue;
+        };
         match event_type.as_str() {
-            "task.completed" => {
-                reopen(db, &task_uuid, ctx)?;
+            "task.completed" if status == "done" => {
+                reopen_in_conn(&tx, &task_uuid, ctx)?;
+                tx.commit()?;
                 return Ok(UndoOutcome {
                     reversed_event_id: id,
                     description: format!("reopened {} (was completed)", task_uuid),
                 });
             }
             "task.updated"
-                if payload.get("status").and_then(|s| s.as_str()) == Some("dismissed") =>
+                if status == "dismissed"
+                    && payload.get("status").and_then(|s| s.as_str()) == Some("dismissed") =>
             {
-                reopen(db, &task_uuid, ctx)?;
+                reopen_in_conn(&tx, &task_uuid, ctx)?;
+                tx.commit()?;
                 return Ok(UndoOutcome {
                     reversed_event_id: id,
                     description: format!("reopened {} (was dismissed)", task_uuid),
                 });
             }
             "task.created" => {
-                if modified_after_create.contains(&task_uuid) {
-                    // Created, then edited — "undo the create" would delete a
-                    // task the operator has since worked on. Skip it.
-                    continue;
-                }
-                delete_task(db, &task_uuid, ctx)?;
+                delete_task_in_conn(&tx, &task_uuid, ctx)?;
+                tx.commit()?;
                 return Ok(UndoOutcome {
                     reversed_event_id: id,
                     description: format!("deleted {} (undid create)", task_uuid),
                 });
             }
-            _ => {
-                // A non-undoable edit (priority/deadline/text/start/snooze).
-                // Record it so this task's create is protected from deletion
-                // underneath a later modification.
-                modified_after_create.insert(task_uuid);
-                continue;
-            }
+            _ => continue,
         }
     }
     Err(crate::Error::Other(
@@ -3167,6 +3174,72 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0, "bare-create undo should delete the task");
+    }
+
+    #[test]
+    fn undo_preserves_claimed_promoted_and_advanced_tasks() {
+        for mutation in ["claim", "promote", "advance"] {
+            let (_dir, db) = fresh_db();
+            let ctx = EventCtx::test();
+            let mut new = NewTask::minimal("work must survive undo");
+            let mut ext = Extensions::default();
+            if mutation == "promote" {
+                ext.kind = Some("scout".into());
+                ext.deliverable = Some("report".into());
+            } else if mutation == "advance" {
+                new.deadline = Some("2099-01-01T09:00:00Z".into());
+                ext.recurrence = Some(crate::recurrence::parse("every day").unwrap());
+            }
+            let task = create_with_extensions(&db, new, ext, &ctx).unwrap();
+            match mutation {
+                "claim" => claim(&db, &task.id, &ctx).unwrap(),
+                "promote" => promote(&db, &task.id, &ctx).unwrap(),
+                "advance" => {
+                    mark_done(&db, &task, &ctx).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let cursor = crate::event_log::current_cursor(&db).unwrap();
+            assert!(undo_last(&db, &ctx).is_err(), "undo discarded {mutation}");
+            assert!(resolve_for_lookup(&db, &task.id, true).is_ok());
+            assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor);
+        }
+    }
+
+    #[test]
+    fn undo_moves_past_reopened_or_modified_completions() {
+        for later_change in ["undo", "reopen", "priority"] {
+            let (_dir, db) = fresh_db();
+            let ctx = EventCtx::test();
+            let a = create(&db, NewTask::minimal("first task"), &ctx).unwrap();
+            let b = create(&db, NewTask::minimal("second task"), &ctx).unwrap();
+            mark_done(&db, &a, &ctx).unwrap();
+            mark_done(&db, &b, &ctx).unwrap();
+            match later_change {
+                "undo" => {
+                    undo_last(&db, &ctx).unwrap();
+                }
+                "reopen" => reopen(&db, &b.id, &ctx).unwrap(),
+                "priority" => update_priority(&db, &b.id, 4, &ctx).unwrap(),
+                _ => unreachable!(),
+            }
+            let outcome = undo_last(&db, &ctx).unwrap();
+            assert!(
+                outcome.description.contains(&a.id),
+                "{later_change}: {}",
+                outcome.description
+            );
+            assert_eq!(resolve_for_lookup(&db, &a.id, true).unwrap().status, "todo");
+            let b = resolve_for_lookup(&db, &b.id, true).unwrap();
+            assert_eq!(
+                b.status,
+                if later_change == "priority" {
+                    "done"
+                } else {
+                    "todo"
+                }
+            );
+        }
     }
 
     // ---- list ordering: severity is the primary key -------------------------
