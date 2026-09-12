@@ -174,10 +174,12 @@ fn read_delta(state: &AppState, full_sync: bool, since: i64) -> DeltaRead {
         event_log::deleted_task_uuids_since(&state.db, since).map_err(|e| ("tombstone read", e))?;
     let mut rows = Vec::new();
     for u in &delta_uuids {
-        // Deleted tasks legitimately fail the row fetch — they're
-        // reported through the tombstone list instead.
-        if let Ok(t) = task_by_uuid(&state.db, u) {
-            rows.push(t);
+        // Missing rows are delivered as tombstones. Any other read failure
+        // must abort the response so its cursor cannot hide an unread update.
+        match task_by_uuid(&state.db, u) {
+            Ok(t) => rows.push(t),
+            Err(ptask_core::Error::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => {}
+            Err(e) => return Err(("delta task read", e)),
         }
     }
     Ok((new_cursor, rows, deleted))
@@ -437,12 +439,15 @@ fn apply_command(
             let task = resolve_task(state, &cmd.args)?;
             // `deadline` present as a string sets it; present as null clears it;
             // absent is an error (this command edits the deadline).
-            if cmd.args.get("deadline").is_none() {
-                return Err(anyhow::anyhow!(
-                    "task_edit: args.deadline required (ISO string to set, null to clear)"
-                ));
-            }
-            let new_deadline = cmd.args.get("deadline").and_then(Value::as_str);
+            let new_deadline = match cmd.args.get("deadline") {
+                Some(Value::String(deadline)) => Some(deadline.as_str()),
+                Some(Value::Null) => None,
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "task_edit: args.deadline required (ISO string to set, null to clear)"
+                    ));
+                }
+            };
             tasks::update_deadline(
                 &state.db,
                 &task.id,
@@ -607,7 +612,7 @@ fn resolve_query(state: &AppState, query: &str) -> Result<tasks::Task, anyhow::E
 
 fn resolve_task(state: &AppState, args: &Value) -> Result<tasks::Task, anyhow::Error> {
     if let Some(s) = args.get("task_uuid").and_then(Value::as_str) {
-        return task_by_uuid(&state.db, s);
+        return Ok(task_by_uuid(&state.db, s)?);
     }
     if let Some(s) = args.get("pt_id").and_then(Value::as_str) {
         let t = tasks::resolve(&state.db, s)?;
@@ -617,7 +622,7 @@ fn resolve_task(state: &AppState, args: &Value) -> Result<tasks::Task, anyhow::E
 }
 
 /// Direct fetch by UUID (no PT-N indirection).
-fn task_by_uuid(db: &ptask_core::Db, uuid: &str) -> Result<tasks::Task, anyhow::Error> {
+fn task_by_uuid(db: &ptask_core::Db, uuid: &str) -> ptask_core::Result<tasks::Task> {
     let conn = db.get()?;
     let row = conn.query_row(
         "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
@@ -652,6 +657,143 @@ mod tests {
     use super::*;
     use axum::extract::State;
     use std::time::{Duration, Instant};
+
+    fn test_state() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("sync.db")).unwrap();
+        (
+            dir,
+            AppState::new(db, Default::default(), Default::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn sync_rejects_non_string_deadlines_without_mutation() {
+        let (_dir, state) = test_state();
+        let mut new = tasks::NewTask::minimal("retain my deadline");
+        new.deadline = Some("2099-01-01".into());
+        let task = tasks::create(&state.db, new, &EventCtx::test()).unwrap();
+        let cursor = event_log::current_cursor(&state.db).unwrap();
+        for value in [
+            serde_json::json!(false),
+            serde_json::json!(7),
+            serde_json::json!(1.5),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let response = sync(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(SyncReq {
+                    sync_token: Some(cursor.to_string()),
+                    resource_types: vec![],
+                    commands: vec![Command {
+                        kind: "task_edit".into(),
+                        uuid: "invalid-deadline".into(),
+                        temp_id: None,
+                        args: serde_json::json!({"task_uuid": task.id, "deadline": value}),
+                    }],
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                body["sync_status"]["invalid-deadline"]["error"].is_string(),
+                "{body}"
+            );
+            assert_eq!(
+                task_by_uuid(&state.db, &task.id).unwrap().deadline,
+                task.deadline
+            );
+            assert_eq!(event_log::current_cursor(&state.db).unwrap(), cursor);
+        }
+        // Rejected command IDs remain retryable with a valid value.
+        for deadline in [serde_json::json!("2099-02-01"), Value::Null] {
+            let cmd = Command {
+                kind: "task_edit".into(),
+                uuid: if deadline.is_null() {
+                    "clear-deadline"
+                } else {
+                    "invalid-deadline"
+                }
+                .into(),
+                temp_id: None,
+                args: serde_json::json!({"task_uuid": task.id, "deadline": deadline}),
+            };
+            apply_command(&state, &cmd, "test").unwrap();
+            assert_eq!(
+                task_by_uuid(&state.db, &task.id)
+                    .unwrap()
+                    .deadline
+                    .as_deref(),
+                deadline.as_str()
+            );
+        }
+        let cmd = Command {
+            kind: "task_edit".into(),
+            uuid: "missing-deadline".into(),
+            temp_id: None,
+            args: serde_json::json!({"task_uuid": task.id}),
+        };
+        assert!(apply_command(&state, &cmd, "test").is_err());
+    }
+
+    #[tokio::test]
+    async fn sync_delta_read_failure_does_not_advance_client_cursor() {
+        let (_dir, state) = test_state();
+        tasks::create(
+            &state.db,
+            tasks::NewTask::minimal("first"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let cursor = event_log::current_cursor(&state.db).unwrap();
+        let second = tasks::create(
+            &state.db,
+            tasks::NewTask::minimal("second"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        state
+            .db
+            .with_conn(|c| {
+                c.execute_batch("ALTER TABLE tasks RENAME TO tasks_unavailable")?;
+                Ok(())
+            })
+            .unwrap();
+        let response = sync(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(SyncReq {
+                sync_token: Some(cursor.to_string()),
+                resource_types: vec![],
+                commands: vec![],
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        state
+            .db
+            .with_conn(|c| {
+                c.execute_batch("ALTER TABLE tasks_unavailable RENAME TO tasks")?;
+                Ok(())
+            })
+            .unwrap();
+        let (_, rows, deleted) = read_delta(&state, false, cursor).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, second.id);
+        assert!(deleted.is_empty());
+        tasks::delete_task(&state.db, &second.id, &EventCtx::test()).unwrap();
+        let (_, rows, deleted) = read_delta(&state, false, cursor).unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(deleted, vec![second.id]);
+    }
 
     /// Regression (#39.2): /sync is the heaviest writer on the fleet and ran
     /// every SQLite leg — auth lookup, per-command mutation + rescore, delta
