@@ -132,7 +132,7 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.19.1"
+VERSION = "0.19.2"
 DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
 DASH_DOMAINS = parse_domains(os.environ.get("PTASK_DASH_DOMAINS"))
 DASH_DEFAULT_DOMAIN = resolve_default_domain(
@@ -1229,6 +1229,8 @@ class Handler(BaseHTTPRequestHandler):
             ok, msgs = True, []
             if args is not None:
                 ok1, msg1 = pt_exec(args)
+                if not ok1:
+                    return self._json({"ok": False, "message": msg1}, 500)
                 ok, msgs = ok and ok1, msgs + [msg1]
             if level is not None:
                 ok2, msg2 = pt_exec(["priority", "--", tid, str(level)])

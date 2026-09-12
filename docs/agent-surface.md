@@ -30,6 +30,12 @@ or stdio: `{ "type": "stdio", "command": "pt", "args": ["mcp"], "env": {"PTASK_A
 
 ## Agent mechanics
 
+`task_edit` applies all requested fields, labels and its attributed event in
+one transaction. Invalid fields or database failures while applying the edit
+leave the task and journal unchanged. A successful combined edit produces one
+`task.updated` event containing the requested fields. Rescoring runs after
+commit; a scoring failure does not roll back a successful edit.
+
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
 - **task_depend** — `task` depends `on` a prerequisite (`remove=true` drops the
