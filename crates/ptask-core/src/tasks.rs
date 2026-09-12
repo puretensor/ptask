@@ -668,9 +668,9 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     }
 
     // Look up the recurrence rule, if any.
-    let rec_row: Option<(String, String, Option<String>)> = tx
+    let rec_row: Option<(String, String, Option<String>, String)> = tx
         .query_row(
-            "SELECT r.mode, r.original_input, t.deadline
+            "SELECT r.mode, r.original_input, t.deadline, t.status_v2
              FROM pt_recurrence AS r
              JOIN tasks AS t ON t.id = r.task_uuid
              WHERE r.task_uuid = ?1",
@@ -680,6 +680,7 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             },
         )
@@ -689,7 +690,14 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             other => Err(other),
         })?;
 
-    if let Some((mode_str, original, current_deadline)) = rec_row {
+    if let Some((mode_str, original, current_deadline, status)) = rec_row {
+        // Resolve the current state inside this transaction: callers may
+        // hold a Task from before another actor dismissed the recurrence.
+        if matches!(status.as_str(), "done" | "dismissed") {
+            return Err(crate::Error::Other(
+                "recurring task is terminal; reopen it before completing an occurrence".into(),
+            ));
+        }
         let rec = crate::recurrence::parse(&original)
             .map_err(|e| crate::Error::Other(format!("re-parse recurrence: {}", e)))?;
         let completion_now = crate::dates::now_in_operator_tz()?;
@@ -724,7 +732,8 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         let next_iso = crate::dates::format_iso(&next_z);
 
         tx.execute(
-            "UPDATE tasks SET deadline=?1, updated_at=?2 WHERE id=?3",
+            "UPDATE tasks SET deadline=?1, updated_at=?2, status='pending',
+                              status_v2='todo', snoozed_until=NULL WHERE id=?3",
             params![next_iso, now, task.id],
         )?;
         tx.execute(
@@ -2690,6 +2699,88 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn recurring_completion_does_not_resurrect_a_dismissed_task() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let mut new = NewTask::minimal("cancelled recurring work");
+        new.deadline = Some("2099-01-01T09:00:00Z".into());
+        let task = create_with_extensions(
+            &db,
+            new,
+            Extensions {
+                recurrence: Some(crate::recurrence::parse("every day").unwrap()),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .unwrap();
+        dismiss(&db, &task.id, &ctx).unwrap();
+        let cursor = crate::event_log::current_cursor(&db).unwrap();
+        let schedule = load_detail(&db, &task.id).unwrap().recurrence_next;
+        assert!(
+            mark_done(&db, &task, &ctx).is_err(),
+            "stale Task must not reopen recurrence"
+        );
+        let after = resolve_for_lookup(&db, &task.id, true).unwrap();
+        assert_eq!(after.status, "dismissed");
+        assert_eq!(after.deadline, task.deadline);
+        assert_eq!(
+            load_detail(&db, &task.id).unwrap().recurrence_next,
+            schedule
+        );
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor);
+    }
+
+    #[test]
+    fn recurring_completion_releases_prior_claim_and_snooze() {
+        for rule in ["every day", "every! 5 days"] {
+            for state in ["claimed", "snoozed"] {
+                let (_dir, db) = fresh_db();
+                let ctx = EventCtx::test();
+                let mut new = NewTask::minimal("recurring work");
+                new.deadline = Some("2099-01-01T09:00:00Z".into());
+                let ext = Extensions {
+                    recurrence: Some(crate::recurrence::parse(rule).unwrap()),
+                    ..Default::default()
+                };
+                let task = create_with_extensions(&db, new, ext, &ctx).unwrap();
+                if state == "claimed" {
+                    claim(&db, &task.id, &ctx).unwrap();
+                } else {
+                    snooze(&db, &task.id, "2099-02-01", &ctx).unwrap();
+                }
+                let outcome = mark_done(&db, &task, &ctx).unwrap();
+                let DoneOutcome::Advanced { next_deadline } = outcome else {
+                    panic!("must recur")
+                };
+                let next = resolve_for_lookup(&db, &task.id, true).unwrap();
+                assert_eq!(next.status, "todo", "{rule}, {state}");
+                assert_eq!(next.pt_id, task.pt_id);
+                assert_eq!(next.deadline.as_deref(), Some(next_deadline.as_str()));
+                db.with_conn(|c| {
+                    let (status, snoozed): (String, Option<String>) = c.query_row(
+                        "SELECT status, snoozed_until FROM tasks WHERE id=?1",
+                        [&task.id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?;
+                    assert_eq!(status, "pending");
+                    assert!(snoozed.is_none());
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(
+                    load_detail(&db, &task.id)
+                        .unwrap()
+                        .recurrence_next
+                        .as_deref(),
+                    Some(next_deadline.as_str())
+                );
+                claim(&db, &task.id, &ctx).expect("new occurrence must be claimable");
+            }
+        }
     }
 
     #[test]
