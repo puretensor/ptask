@@ -129,7 +129,12 @@ raw item is consumed.
 The batch is sent to the provider in chunks of 25, not in one call. A chunk
 the provider cannot classify is halved until the offending row is alone, so
 one unprocessable capture no longer takes its whole batch down — every other
-chunk still lands and is marked processed.
+chunk still lands and is marked processed. A consolidation that returns no
+candidates for captures classified as commitments uses the same isolation
+and retry path. Those captures remain unprocessed and are quarantined after
+three failed attempts, so empty provider output cannot block newer captures
+indefinitely. Noise in a failed chunk is reclassified during bisection and
+counted as consumed only once.
 
 The isolated row is charged one `raw_items.distill_attempts`, with the reason
 in `raw_items.distill_error`. After 3 charges it is **quarantined**: no longer
