@@ -273,25 +273,15 @@ fn process_chunk<P: LlmProvider + ?Sized>(
             st.consumed_ids.extend(items.iter().map(|i| i.id));
         }
         ChunkDisposition::Retain => {
-            let kept_ids: Vec<i64> = verdicts
-                .iter()
-                .filter(|verdict| verdict.keep)
-                .map(|verdict| items[verdict.idx].id)
-                .collect();
-            warn!(
-                target: "ptask::distill",
-                kept = kept.len(),
-                raw_items = ?kept_ids,
-                "empty consolidation — retaining kept captures for the next run"
-            );
-            // The kept captures produced no task and must remain available;
-            // dropped captures were deliberately judged noise and can drain.
-            st.consumed_ids.extend(
-                items
-                    .iter()
-                    .filter(|item| !kept_ids.contains(&item.id))
-                    .map(|item| item.id),
-            );
+            // Preserve the input, but use the same isolation and bounded retry
+            // path as other provider failures. Returning success leaves the
+            // oldest captures eligible forever and can starve the queue.
+            // Nothing is consumed here: bisection reclassifies each child,
+            // including noise, and accounts for it exactly once.
+            return Err(ChunkError::provider(anyhow::anyhow!(
+                "empty consolidation for {} kept captures",
+                kept.len()
+            )));
         }
     }
     Ok(())
@@ -733,6 +723,84 @@ mod tests {
         for t in texts {
             ptask_core::raw_items::insert(db, t, "test", "test://x").unwrap();
         }
+    }
+
+    struct EmptyConsolidationProvider;
+
+    impl LlmProvider for EmptyConsolidationProvider {
+        fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+            Ok(texts
+                .iter()
+                .enumerate()
+                .map(|(idx, text)| Classification {
+                    idx,
+                    keep: text != "noise",
+                    confidence: 1.0,
+                    reason: String::new(),
+                })
+                .collect())
+        }
+        fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+            if items.iter().any(|text| text == "EMPTY") {
+                return Ok(vec![]);
+            }
+            Ok(items
+                .iter()
+                .map(|text| Candidate {
+                    title: text.clone(),
+                    priority: 2,
+                    description: String::new(),
+                })
+                .collect())
+        }
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "empty-consolidation-test"
+        }
+    }
+
+    #[test]
+    fn empty_consolidation_isolates_failed_capture_and_counts_noise_once() {
+        for with_noise in [false, true] {
+            let (_dir, db) = fresh_db();
+            seed_inbox(&db, &["EMPTY"]);
+            if with_noise {
+                seed_inbox(&db, &["noise"]);
+            }
+            seed_inbox(&db, &["renew the office lease"]);
+            let report = run_native(&db, &EmptyConsolidationProvider, 100).unwrap();
+            assert_eq!(report.created, 1);
+            assert_eq!(report.consumed, if with_noise { 2 } else { 1 });
+            assert_eq!(report.failed, 1);
+            assert_eq!(attempts(&db, "EMPTY"), 1);
+            assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn empty_consolidation_cannot_permanently_block_later_captures() {
+        let (_dir, db) = fresh_db();
+        seed_inbox(&db, &["EMPTY", "renew the office lease"]);
+        for attempt in 1..=ptask_core::raw_items::MAX_DISTILL_ATTEMPTS {
+            assert!(run_native(&db, &EmptyConsolidationProvider, 1).is_err());
+            assert_eq!(attempts(&db, "EMPTY"), attempt);
+        }
+        let report = run_native(&db, &EmptyConsolidationProvider, 1).unwrap();
+        assert_eq!(report.created, 1);
+        assert_eq!(report.consumed, 1);
+        assert_eq!(report.quarantined, 1);
+        db.with_conn(|c| {
+            let processed: i64 = c.query_row(
+                "SELECT processed FROM raw_items WHERE text='EMPTY'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(processed, 0, "quarantined input stays recoverable");
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
