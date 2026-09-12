@@ -21,34 +21,39 @@ compiles natural-language input to an RRULE-style string + a mode flag
 | `every weekday` | `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR` | fixed |
 | `every monday` | `FREQ=WEEKLY;BYDAY=MO` | fixed |
 | `every monday at 9am` | `FREQ=WEEKLY;BYDAY=MO` + time | fixed |
-| `every other tuesday` | `FREQ=WEEKLY;INTERVAL=2;BYDAY=TU` | fixed |
+| `every mon, wed, fri` | `FREQ=WEEKLY;BYDAY=MO,WE,FR` | fixed |
 | `every 1, 15, 27` | `FREQ=MONTHLY;BYMONTHDAY=1,15,27` | fixed |
-| `every last friday` | `FREQ=MONTHLY;BYDAY=-1FR` | fixed |
+| `every 2 months` | `FREQ=MONTHLY;INTERVAL=2` | fixed |
 | `every! 5 days` | `FREQ=DAILY;INTERVAL=5` | completion |
 | `every! 2 weeks` | `FREQ=WEEKLY;INTERVAL=2` | completion |
 
-Combine with the date parser for the start anchor:
-`every weekday starting tomorrow 9am`.
+Use a quick-add recurrence phrase, such as `pt add "Standup every weekday at 9am"`.
+The parser does not support `every other tuesday`, `every last friday`, or a
+`starting ...` suffix.
 
 ## Advancement
 
-On `pt done` for a recurring task, the engine clones the row with a
-new `deadline` and a fresh PT-N:
+On `pt done` for a recurring task, the engine advances the same row to its
+next `deadline`, preserving its UUID, PT-N and history:
 
-- `fixed`: compute the next RRULE occurrence from the **original due**.
+- `fixed`: advance from the **current deadline**, skipping missed occurrences
+  until the next deadline is after the completion time.
 - `completion`: compute the next RRULE occurrence from **now**.
 
-The completed instance keeps `status='done'`; the clone is `status='pending'`.
+The next occurrence is `status_v2='todo'` (legacy `status='pending'`) with
+`snoozed_until` cleared. A previous claim ends with completion, so the next
+occurrence can be claimed again. A `task.recurrence_advanced` event records
+the new deadline; no new task is created.
 
 ## Editing
 
 ```
-pt edit <PT-N> --recurrence 'every weekday'   # set / change
-pt edit <PT-N> --recurrence none              # stop
+pt edit <PT-N> --deadline 2099-01-01   # move the next occurrence
 ```
 
-(`pt edit` lands in the v1.0.x polish phase; until then mutate
-`pt_recurrence` via `pt view`-driven SQL or wait for the verb.)
+This also updates `pt_recurrence.next_occurrence`. Clearing the deadline on
+a recurring task is rejected. There is no `pt edit --recurrence` flag;
+create recurrence through quick-add, and dismiss the task to stop working it.
 
 ## Storage
 
