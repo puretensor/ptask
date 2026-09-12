@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import server
 
@@ -162,6 +163,31 @@ class AuthTests(unittest.TestCase):
                     server.LOGIN_ATTEMPT_DELAY,
                     server.COOKIE_SECURE,
                 ) = old
+
+
+class EditFailureTests(unittest.TestCase):
+    def test_failed_edit_does_not_run_priority_mutation(self):
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+        try:
+            with mock.patch.object(server, "AUTH_PASS", ""), mock.patch.object(
+                server, "pt_exec", side_effect=[(False, "cannot clear recurring deadline"), (True, "priority changed")],
+            ) as execute:
+                connection.request("POST", "/api/tasks/PT-1/edit", body=json.dumps({
+                    "deadline": None, "priority": 4,
+                }), headers={"Content-Type": "application/json"})
+                response = connection.getresponse()
+                response.read()
+                self.assertEqual(response.status, 500)
+                self.assertEqual(execute.call_count, 1)
+                self.assertEqual(execute.call_args.args[0][0], "edit")
+        finally:
+            connection.close()
+            httpd.shutdown()
+            thread.join(timeout=2)
+            httpd.server_close()
 
 
 class OriginTests(unittest.TestCase):

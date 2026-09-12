@@ -1155,26 +1155,19 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
         );
     }
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    if has_text {
-        tasks::update_text(
-            db,
-            &task.id,
-            a.title.as_deref(),
-            a.desc.as_deref(),
-            &cli_ctx(),
-        )?;
-    }
-    if has_deadline {
-        let new_deadline = if a.clear_deadline {
-            None
-        } else {
-            a.deadline.as_deref()
-        };
-        tasks::update_deadline(db, &task.id, new_deadline, &cli_ctx())?;
-    }
-    if has_labels {
-        tasks::modify_labels(db, &task.id, &a.label, &a.unlabel, &cli_ctx())?;
-    }
+    tasks::edit_atomic(
+        db,
+        &task.id,
+        tasks::TaskEdit {
+            title: a.title.as_deref(),
+            description: a.desc.as_deref(),
+            deadline: has_deadline.then_some(a.deadline.as_deref()),
+            labels_add: &a.label,
+            labels_remove: &a.unlabel,
+            ..Default::default()
+        },
+        &cli_ctx(),
+    )?;
     // Only the deadline feeds a score (urgency); a text-only edit needs no rescore.
     let note = if has_deadline {
         match ptask_core::scoring::run_once(db, false) {
@@ -3332,6 +3325,39 @@ mod tests {
         ExportArgs, cmd_export, delegation_command, gcalendar_path, git_has_staged_changes,
         run_git_checked, short_id, stale_review_tasks,
     };
+
+    #[test]
+    fn rejected_edit_leaves_cli_task_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("edit.db")).unwrap();
+        let task = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("original title"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        let cursor = ptask_core::event_log::current_cursor(&db).unwrap();
+        let result = super::cmd_edit(
+            &db,
+            super::EditArgs {
+                query: task.pt_id.clone().unwrap(),
+                deadline: Some("not-a-date".into()),
+                clear_deadline: false,
+                title: Some("changed title".into()),
+                desc: None,
+                label: vec![],
+                unlabel: vec![],
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            ptask_core::tasks::resolve_for_lookup(&db, &task.id, true)
+                .unwrap()
+                .title,
+            task.title
+        );
+        assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), cursor);
+    }
 
     #[test]
     fn gcalendar_default_follows_the_current_home() {

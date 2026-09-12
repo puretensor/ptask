@@ -390,34 +390,20 @@ impl PtaskMcp {
         {
             return Err(McpError::invalid_params("no fields to edit", None));
         }
-        if title.is_some() || description.is_some() {
-            ptask_core::tasks::update_text(
-                &self.db,
-                &t.id,
-                title.as_deref(),
-                description.as_deref(),
-                &ctx,
-            )
-            .map_err(domain_err)?;
+        if priority.is_some_and(|p| !(1..=5).contains(&p)) {
+            return Err(McpError::invalid_params("priority must be 1..5", None));
         }
-        if let Some(p) = priority {
-            if !(1..=5).contains(&p) {
-                return Err(McpError::invalid_params("priority must be 1..5", None));
-            }
-            ptask_core::tasks::update_priority(&self.db, &t.id, p, &ctx).map_err(domain_err)?;
-        }
-        if let Some(dl) = deadline {
-            let val = if dl.trim().is_empty() {
-                None
-            } else {
-                Some(dl.as_str())
-            };
-            ptask_core::tasks::update_deadline(&self.db, &t.id, val, &ctx).map_err(domain_err)?;
-        }
-        if !labels_add.is_empty() || !labels_remove.is_empty() {
-            ptask_core::tasks::modify_labels(&self.db, &t.id, &labels_add, &labels_remove, &ctx)
-                .map_err(domain_err)?;
-        }
+        let edit = ptask_core::tasks::TaskEdit {
+            title: title.as_deref(),
+            description: description.as_deref(),
+            priority,
+            deadline: deadline
+                .as_deref()
+                .map(|d| if d.trim().is_empty() { None } else { Some(d) }),
+            labels_add: &labels_add,
+            labels_remove: &labels_remove,
+        };
+        ptask_core::tasks::edit_atomic(&self.db, &t.id, edit, &ctx).map_err(domain_err)?;
         self.rescore();
         json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id}))
     }
@@ -636,6 +622,68 @@ mod tests {
             result.protocol_version,
             supported
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_edit_leaves_task_and_journal_unchanged() {
+        for invalid in ["priority", "deadline", "labels", "recurring", "database"] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Db::open(dir.path().join("edit.db")).unwrap();
+            let mut new = ptask_core::NewTask::minimal("original title");
+            new.deadline = Some("2099-01-01".into());
+            let mut ext = ptask_core::Extensions::default();
+            if invalid == "recurring" {
+                ext.recurrence = Some(ptask_core::recurrence::parse("every day").unwrap());
+            }
+            let task = ptask_core::tasks::create_with_extensions(&db, new, ext, &EventCtx::test())
+                .unwrap();
+            let cursor = ptask_core::event_log::current_cursor(&db).unwrap();
+            if invalid == "database" {
+                db.with_conn(|c| {
+                    c.execute_batch("CREATE TRIGGER reject_label BEFORE INSERT ON task_labels BEGIN SELECT RAISE(ABORT, 'test label failure'); END;")?;
+                    Ok(())
+                }).unwrap();
+            }
+            let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+            let result = mcp
+                .task_edit(Parameters(EditArg {
+                    id: task.id.clone(),
+                    title: Some("changed title".into()),
+                    description: None,
+                    priority: Some(if invalid == "priority" { 6 } else { 4 }),
+                    deadline: match invalid {
+                        "deadline" => Some("not-a-date".into()),
+                        "recurring" => Some(String::new()),
+                        _ => None,
+                    },
+                    labels_add: vec![
+                        if invalid == "labels" {
+                            " "
+                        } else {
+                            "new-label"
+                        }
+                        .into(),
+                    ],
+                    labels_remove: vec![],
+                }))
+                .await;
+            assert!(result.is_err(), "{invalid}");
+            let after = ptask_core::tasks::resolve_for_lookup(&db, &task.id, true).unwrap();
+            assert_eq!(after.title, task.title, "{invalid}");
+            assert_eq!(after.priority, task.priority, "{invalid}");
+            assert_eq!(after.deadline, task.deadline, "{invalid}");
+            assert!(
+                ptask_core::tasks::load_detail(&db, &task.id)
+                    .unwrap()
+                    .labels
+                    .is_empty()
+            );
+            assert_eq!(
+                ptask_core::event_log::current_cursor(&db).unwrap(),
+                cursor,
+                "{invalid}"
+            );
+        }
     }
 
     #[tokio::test]

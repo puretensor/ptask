@@ -1600,6 +1600,152 @@ pub fn remove_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx
     Ok(())
 }
 
+/// A single edit request. An omitted deadline is unchanged; `Some(None)` clears it.
+#[derive(Debug, Default)]
+pub struct TaskEdit<'a> {
+    pub title: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub priority: Option<i64>,
+    pub deadline: Option<Option<&'a str>>,
+    pub labels_add: &'a [String],
+    pub labels_remove: &'a [String],
+}
+
+/// Apply selected fields, side tables, interactions and one attributed event
+/// in one transaction. A rejected field or late database error changes nothing.
+pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx) -> Result<()> {
+    let has_text = edit.title.is_some() || edit.description.is_some();
+    let has_labels = !edit.labels_add.is_empty() || !edit.labels_remove.is_empty();
+    if !has_text && edit.priority.is_none() && edit.deadline.is_none() && !has_labels {
+        return Err(crate::Error::Other("no fields to edit".into()));
+    }
+    if let Some(p) = edit.priority
+        && !(1..=5).contains(&p)
+    {
+        return Err(crate::Error::Other(format!(
+            "priority {p} out of range 1..=5"
+        )));
+    }
+    if let Some(Some(d)) = edit.deadline {
+        parse_iso_zoned(d)?;
+    }
+    let add: Vec<&str> = edit
+        .labels_add
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let remove: Vec<&str> = edit
+        .labels_remove
+        .iter()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if has_labels && add.is_empty() && remove.is_empty() {
+        return Err(crate::Error::Other(
+            "modify_labels: nothing to change".into(),
+        ));
+    }
+
+    let now = iso_now();
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if edit.deadline == Some(None) {
+        let recurring: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pt_recurrence WHERE task_uuid=?1)",
+            [task_uuid],
+            |r| r.get(0),
+        )?;
+        if recurring {
+            return Err(crate::Error::Other(
+                "cannot clear deadline on a recurring task; update it instead".into(),
+            ));
+        }
+    }
+    let changed = tx.execute(
+        "UPDATE tasks SET title=COALESCE(?1,title), description=COALESCE(?2,description),
+                          priority=COALESCE(?3,priority),
+                          deadline=CASE WHEN ?4 THEN ?5 ELSE deadline END, updated_at=?6
+         WHERE id=?7",
+        params![
+            edit.title,
+            edit.description,
+            edit.priority,
+            edit.deadline.is_some(),
+            edit.deadline.flatten(),
+            now,
+            task_uuid
+        ],
+    )?;
+    if changed == 0 {
+        return Err(crate::Error::Other("task not found".into()));
+    }
+
+    let mut payload = serde_json::json!({"task_uuid": task_uuid});
+    let mut interactions: Vec<(&str, String)> = Vec::new();
+    if has_text {
+        if let Some(t) = edit.title {
+            payload["title"] = serde_json::json!(t);
+        }
+        if let Some(d) = edit.description {
+            payload["description"] = serde_json::json!(d);
+        }
+        let what = match (edit.title.is_some(), edit.description.is_some()) {
+            (true, true) => "title + description edited",
+            (true, false) => "title edited",
+            _ => "description edited",
+        };
+        interactions.push(("edit", what.into()));
+    }
+    if let Some(p) = edit.priority {
+        payload["priority"] = serde_json::json!(p);
+        interactions.push(("priority_change", format!("priority → {p}")));
+    }
+    if let Some(deadline) = edit.deadline {
+        tx.execute(
+            "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
+            params![deadline, task_uuid],
+        )?;
+        payload["deadline"] = serde_json::json!(deadline);
+        interactions.push((
+            "deadline_change",
+            match deadline {
+                Some(d) => format!("deadline → {d}"),
+                None => "deadline cleared".into(),
+            },
+        ));
+    }
+    if has_labels {
+        for label in &add {
+            tx.execute(
+                "INSERT OR IGNORE INTO task_labels (task_uuid,label) VALUES (?1,?2)",
+                params![task_uuid, label],
+            )?;
+        }
+        for label in &remove {
+            tx.execute(
+                "DELETE FROM task_labels WHERE task_uuid=?1 AND label=?2",
+                params![task_uuid, label],
+            )?;
+        }
+        payload["labels_add"] = serde_json::json!(add);
+        payload["labels_remove"] = serde_json::json!(remove);
+        interactions.push((
+            "edit",
+            format!("labels edited (+{} -{})", add.len(), remove.len()),
+        ));
+    }
+    for (action, details) in interactions {
+        tx.execute(
+            "INSERT INTO interactions (task_id,action,ts,details) VALUES (?1,?2,?3,?4)",
+            params![task_uuid, action, now, details],
+        )?;
+    }
+    record_event_tx(&tx, ctx, task_uuid, "task.updated", &payload)?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Update title and/or description (at least one `Some`). The
 /// `task.updated` event commits in the same transaction, attributed to `ctx`.
 pub fn update_text(
@@ -1889,6 +2035,140 @@ mod tests {
             .unwrap();
         }
         (dir, Db::open(&path).unwrap())
+    }
+
+    #[test]
+    fn atomic_edit_updates_all_fields_with_one_event_and_rolls_back_duplicate_key() {
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("original title");
+        new.deadline = Some("2099-01-01".into());
+        let ext = Extensions {
+            labels: vec!["old".into()],
+            recurrence: Some(crate::recurrence::parse("every day").unwrap()),
+            ..Default::default()
+        };
+        let task = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let cursor = crate::event_log::current_cursor(&db).unwrap();
+        let ctx = EventCtx::sync("edit-test", "one-edit-key");
+        edit_atomic(
+            &db,
+            &task.id,
+            TaskEdit {
+                title: Some("updated title"),
+                description: Some("updated description"),
+                priority: Some(4),
+                deadline: Some(Some("2099-02-01")),
+                labels_add: &["new".into()],
+                labels_remove: &["old".into()],
+            },
+            &ctx,
+        )
+        .unwrap();
+        let updated = resolve_for_lookup(&db, &task.id, true).unwrap();
+        assert_eq!(updated.title, "updated title");
+        assert_eq!(updated.description, "updated description");
+        assert_eq!(updated.priority, 4);
+        assert_eq!(updated.deadline.as_deref(), Some("2099-02-01"));
+        let detail = load_detail(&db, &task.id).unwrap();
+        assert_eq!(detail.labels, vec!["new"]);
+        assert_eq!(detail.recurrence_next.as_deref(), Some("2099-02-01"));
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor + 1);
+        db.with_conn(|c| {
+            let payload: String = c.query_row(
+                "SELECT payload FROM pt_event_log WHERE uuid='one-edit-key'",
+                [],
+                |r| r.get(0),
+            )?;
+            let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(payload["title"], "updated title");
+            assert_eq!(payload["deadline"], "2099-02-01");
+            assert!(payload.get("status").is_none());
+            Ok(())
+        })
+        .unwrap();
+        let before_interactions: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM interactions WHERE task_id=?1",
+                    [&task.id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let result = edit_atomic(
+            &db,
+            &task.id,
+            TaskEdit {
+                title: Some("must roll back"),
+                priority: Some(1),
+                deadline: Some(Some("2099-03-01")),
+                labels_add: &["rejected".into()],
+                labels_remove: &["new".into()],
+                ..Default::default()
+            },
+            &ctx,
+        );
+        assert!(
+            result.is_err(),
+            "duplicate event key must roll back all writes"
+        );
+        assert_eq!(
+            serde_json::to_value(resolve_for_lookup(&db, &task.id, true).unwrap()).unwrap(),
+            serde_json::to_value(updated).unwrap()
+        );
+        let detail = load_detail(&db, &task.id).unwrap();
+        assert_eq!(detail.labels, vec!["new"]);
+        assert_eq!(detail.recurrence_next.as_deref(), Some("2099-02-01"));
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor + 1);
+        db.with_conn(|c| {
+            let count: i64 = c.query_row(
+                "SELECT COUNT(*) FROM interactions WHERE task_id=?1",
+                [&task.id],
+                |r| r.get(0),
+            )?;
+            assert_eq!(count, before_interactions);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn atomic_edit_distinguishes_omitted_and_cleared_deadline() {
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("keep deadline");
+        new.deadline = Some("2099-01-01".into());
+        let ctx = EventCtx::test();
+        let task = create(&db, new, &ctx).unwrap();
+        edit_atomic(
+            &db,
+            &task.id,
+            TaskEdit {
+                title: Some("new title"),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_for_lookup(&db, &task.id, true).unwrap().deadline,
+            task.deadline
+        );
+        edit_atomic(
+            &db,
+            &task.id,
+            TaskEdit {
+                deadline: Some(None),
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .unwrap();
+        assert!(
+            resolve_for_lookup(&db, &task.id, true)
+                .unwrap()
+                .deadline
+                .is_none()
+        );
     }
 
     fn event_count(db: &Db, event_type: &str) -> i64 {

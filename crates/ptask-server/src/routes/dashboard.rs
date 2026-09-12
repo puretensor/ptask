@@ -858,39 +858,18 @@ fn act_edit_blocking(
             return jerr(StatusCode::BAD_REQUEST, "title 3-400 chars");
         }
     }
-    if (body.title.is_some() || body.description.is_some())
-        && let Err(e) = ptask_core::tasks::update_text(
-            &state.db,
-            &task.id,
-            body.title.as_deref(),
-            body.description.as_deref(),
-            &ctx,
-        )
-    {
-        return jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string());
+    if body.priority.is_some_and(|p| !(1..=5).contains(&p)) {
+        return jerr(StatusCode::BAD_REQUEST, "priority must be 1..5");
     }
-    if let Some(p) = body.priority {
-        if !(1..=5).contains(&p) {
-            return jerr(StatusCode::BAD_REQUEST, "priority must be 1..5");
-        }
-        if let Err(e) = ptask_core::tasks::update_priority(&state.db, &task.id, p, &ctx) {
-            return jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string());
-        }
-    }
-    if let Some(dl) = &body.deadline
-        && let Err(e) = ptask_core::tasks::update_deadline(&state.db, &task.id, dl.as_deref(), &ctx)
-    {
-        return jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string());
-    }
-    if (!body.labels_add.is_empty() || !body.labels_remove.is_empty())
-        && let Err(e) = ptask_core::tasks::modify_labels(
-            &state.db,
-            &task.id,
-            &body.labels_add,
-            &body.labels_remove,
-            &ctx,
-        )
-    {
+    let edit = ptask_core::tasks::TaskEdit {
+        title: body.title.as_deref(),
+        description: body.description.as_deref(),
+        priority: body.priority,
+        deadline: body.deadline.as_ref().map(|d| d.as_deref()),
+        labels_add: &body.labels_add,
+        labels_remove: &body.labels_remove,
+    };
+    if let Err(e) = ptask_core::tasks::edit_atomic(&state.db, &task.id, edit, &ctx) {
         return jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string());
     }
     rescore(&state);
@@ -1225,6 +1204,41 @@ mod tests {
     };
     use ptask_core::config::DashConfig;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn rejected_edit_leaves_dashboard_task_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("edit.db")).unwrap();
+        let task = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("original title"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        let cursor = ptask_core::event_log::current_cursor(&db).unwrap();
+        let state = AppState::new(db.clone(), Default::default(), Default::default());
+        let response = super::act_edit_blocking(
+            state,
+            HeaderMap::new(),
+            task.id.clone(),
+            super::EditBody {
+                title: Some("changed title".into()),
+                description: None,
+                priority: Some(6),
+                deadline: None,
+                labels_add: vec![],
+                labels_remove: vec![],
+            },
+        );
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            ptask_core::tasks::resolve_for_lookup(&db, &task.id, true)
+                .unwrap()
+                .title,
+            task.title
+        );
+        assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), cursor);
+    }
 
     /// Regression (#39.2): the mutating dashboard handlers were plain
     /// synchronous bodies on an async fn, so a handler that had to wait for a

@@ -123,6 +123,12 @@ iOS fetches them outside the page session; everything else stays gated).
 
 ## API (sidecar)
 
+An edit failure stops processing before a requested priority change. The
+sidecar still delegates fields and priority to separate CLI invocations for
+compatibility, so a later `pt priority` failure cannot roll back an earlier
+successful `pt edit`. The Rust dashboard API applies the entire edit in one
+transaction.
+
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/healthz` | no auth (tunnel/systemd probe) |

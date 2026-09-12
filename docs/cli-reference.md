@@ -51,7 +51,8 @@ Edit task fields: set/clear the deadline and/or replace the title/description
 (any combination; at least one required). Recurring tasks reject deadline
 clearing; setting a deadline updates their next occurrence. A deadline change
 feeds `score_urgency` and triggers an immediate rescore; a text-only edit does
-not rescore.
+not rescore. All fields in one local `pt edit` invocation commit together with
+one journal event; a rejected field leaves the entire edit unapplied.
 
 ### `pt reopen <query>`
 
