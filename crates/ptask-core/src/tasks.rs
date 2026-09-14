@@ -948,6 +948,13 @@ pub fn update_deadline(
     deadline: Option<&str>,
     ctx: &EventCtx,
 ) -> Result<()> {
+    // An empty or whitespace-only string means "clear", the same as `None`:
+    // surfaces spell a clear differently (CLI `--deadline ''`, a JSON `""`
+    // over /sync or MCP, a blanked dashboard field) and every one of them
+    // used to reach `parse_iso_zoned` and fail with a bare parse error.
+    // Normalising here keeps the recurring-task guard below correct for all
+    // of them. Surrounding whitespace is trimmed off a real date too.
+    let deadline = deadline.map(str::trim).filter(|d| !d.is_empty());
     if let Some(d) = deadline {
         parse_iso_zoned(d)?;
     }
@@ -2738,6 +2745,75 @@ mod tests {
                 })
                 .unwrap();
             assert!(deadline.is_none());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn update_deadline_blank_string_clears_like_none() {
+        // Every surface spells a clear differently: `ptask edit --deadline ''`,
+        // a JSON `"deadline": ""` over /sync or MCP, a blanked dashboard field.
+        // All of them used to fail with `parse iso zoned "": not a Timestamp or
+        // Date` instead of clearing.
+        for blank in ["", "   ", "\t"] {
+            let (_dir, db) = fresh_db();
+            let mut new = NewTask::minimal("clear me");
+            new.deadline = Some("2026-06-16".into());
+            let t = create(&db, new, &EventCtx::test()).unwrap();
+
+            update_deadline(&db, &t.id, Some(blank), &EventCtx::test())
+                .unwrap_or_else(|e| panic!("blank {:?} must clear, got {}", blank, e));
+
+            db.with_conn(|c| {
+                let deadline: Option<String> = c
+                    .query_row("SELECT deadline FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert!(deadline.is_none(), "blank {:?} must clear", blank);
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn update_deadline_blank_on_recurring_hits_the_recurrence_guard() {
+        // Normalising blank→clear must route into the recurring-task guard and
+        // its actionable message, not into the parse error it used to raise.
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every monday at 9am").unwrap();
+        let mut new = NewTask::minimal("standup");
+        new.deadline = Some("2026-05-18T09:00:00+01:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+
+        let err = update_deadline(&db, &t.id, Some(""), &EventCtx::test()).unwrap_err();
+        assert!(
+            format!("{}", err).contains("recurring task"),
+            "blank on a recurring task must explain itself, got {}",
+            err
+        );
+    }
+
+    #[test]
+    fn update_deadline_trims_surrounding_whitespace() {
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("pad me"), &EventCtx::test()).unwrap();
+
+        update_deadline(&db, &t.id, Some("  2026-06-16  "), &EventCtx::test()).unwrap();
+
+        db.with_conn(|c| {
+            let deadline: Option<String> = c
+                .query_row("SELECT deadline FROM tasks WHERE id=?1", [&t.id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(deadline.as_deref(), Some("2026-06-16"));
             Ok(())
         })
         .unwrap();

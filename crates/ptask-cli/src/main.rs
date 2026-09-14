@@ -1189,12 +1189,15 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     };
     let mut parts: Vec<String> = Vec::new();
     if has_deadline {
+        // `--deadline ''` clears too (core normalises blank to None), so the
+        // outcome line must not report an empty date as if one were set.
+        let set_to = a.deadline.as_deref().map(str::trim).unwrap_or("");
         parts.push(format!(
             "deadline {}",
-            if a.clear_deadline {
-                "cleared".to_string()
+            if a.clear_deadline || set_to.is_empty() {
+                "cleared"
             } else {
-                a.deadline.clone().unwrap_or_default()
+                set_to
             }
         ));
     }
