@@ -14,7 +14,7 @@ mod inner {
 
     fn embedder() -> Option<Arc<Embedder>> {
         EMBEDDER
-            .get_or_init(|| match Embedder::from_hf_cache() {
+            .get_or_init(|| match Embedder::from_local_hf_cache() {
                 Ok(e) => Some(Arc::new(e)),
                 Err(e) => {
                     tracing::warn!(

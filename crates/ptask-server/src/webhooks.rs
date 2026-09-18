@@ -108,6 +108,31 @@ pub async fn dispatch(
                 false
             }
         };
-        let _ = record(&state.db, Direction::Out, url, &envelope, outcome);
+        let db = state.db.clone();
+        let url_owned = url.clone();
+        let envelope = envelope.clone();
+        match crate::blocking::db_value(move || {
+            record(&db, Direction::Out, &url_owned, &envelope, outcome)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                warn!(
+                    target: "ptask::webhook",
+                    url = %url,
+                    error = %e,
+                    "outbound audit write failed"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    target: "ptask::webhook",
+                    url = %url,
+                    error = %e,
+                    "outbound audit write aborted"
+                );
+            }
+        }
     }
 }

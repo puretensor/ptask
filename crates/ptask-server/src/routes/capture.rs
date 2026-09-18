@@ -188,6 +188,70 @@ pub struct CaptureResp {
     pub pt_id: Option<String>,
 }
 
+/// Delivery idempotency vs incident identity.
+enum CaptureIdentity {
+    Proceed,
+    Duplicate,
+    NewEpisode,
+}
+
+fn capture_identity_action(
+    duplicate: bool,
+    is_incident: bool,
+    has_capture_key: bool,
+    has_open_keyed_task: bool,
+) -> CaptureIdentity {
+    if !duplicate {
+        return CaptureIdentity::Proceed;
+    }
+    if is_incident && has_capture_key && !has_open_keyed_task {
+        return CaptureIdentity::NewEpisode;
+    }
+    CaptureIdentity::Duplicate
+}
+
+fn open_incident_for_key(db: &ptask_core::Db, key: &str) -> Result<bool, ptask_core::Error> {
+    db.with_conn(|c| {
+        let n: i64 = c.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE capture_key = ?1 AND status_v2 NOT IN ('done','dismissed')",
+            [key],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    })
+}
+
+fn next_episode_source_file(
+    db: &ptask_core::Db,
+    source_file: &str,
+) -> Result<String, ptask_core::Error> {
+    let n: i64 = db.with_conn(|c| {
+        Ok(c.query_row(
+            "SELECT COUNT(*) FROM raw_items
+             WHERE source_file = ?1 OR source_file LIKE ?2",
+            rusqlite::params![source_file, format!("{source_file}#episode=%")],
+            |r| r.get(0),
+        )?)
+    })?;
+    Ok(format!("{source_file}#episode={}", n + 1))
+}
+
+fn duplicate_capture_response(r: ptask_core::raw_items::RawItem) -> axum::response::Response {
+    (
+        StatusCode::OK,
+        Json(CaptureResp {
+            id: r.id,
+            source_type: r.source_type,
+            source_date: r.source_date,
+            duplicate: true,
+            task_uuid: None,
+            pt_id: None,
+        }),
+    )
+        .into_response()
+}
+
 /// Severity from the explicit field, else parsed from a puresentinel
 /// incident marker (`[puresentinel sevN]`) when the source says incident.
 fn effective_severity(req: &CaptureReq, source: &str) -> Option<i64> {
@@ -245,24 +309,77 @@ fn capture_blocking(
     // left on the non-tolerant insert, so an unkeyed re-send (and the loser of
     // two concurrent keyed sends) surfaced as a 500 carrying raw SQLite text.
     // The insert itself is the idempotency check now: one statement, no race.
+    // Recovered incidents are a new episode: the unique key is scoped to the
+    // episode so a later identical capture can create work again.
+    let is_incident = effective_severity(&req, &source).is_some_and(|s| s >= 3);
+    let capture_key = req
+        .client_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let has_open_keyed_task = match capture_key {
+        Some(key) => match open_incident_for_key(&state.db, key) {
+            Ok(open) => open,
+            Err(e) => {
+                tracing::error!(
+                    target: "ptask::capture",
+                    error = %e,
+                    "open-incident lookup failed — refusing new episode"
+                );
+                true
+            }
+        },
+        None => false,
+    };
     let row =
         match ptask_core::raw_items::insert_idempotent(&state.db, &text, &source, &source_file) {
             Ok((r, duplicate)) => {
-                if duplicate {
-                    return (
-                        StatusCode::OK,
-                        Json(CaptureResp {
-                            id: r.id,
-                            source_type: r.source_type,
-                            source_date: r.source_date,
-                            duplicate: true,
-                            task_uuid: None,
-                            pt_id: None,
-                        }),
-                    )
-                        .into_response();
+                match capture_identity_action(
+                    duplicate,
+                    is_incident,
+                    capture_key.is_some(),
+                    has_open_keyed_task,
+                ) {
+                    CaptureIdentity::Duplicate => return duplicate_capture_response(r),
+                    CaptureIdentity::Proceed => r,
+                    CaptureIdentity::NewEpisode => {
+                        let episode_file = match next_episode_source_file(&state.db, &source_file) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                tracing::error!(
+                                    target: "ptask::capture",
+                                    error = %e,
+                                    "episode source_file failed"
+                                );
+                                return (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(serde_json::json!({"error": format!("{}", e)})),
+                                )
+                                    .into_response();
+                            }
+                        };
+                        match ptask_core::raw_items::insert_idempotent(
+                            &state.db,
+                            &text,
+                            &source,
+                            &episode_file,
+                        ) {
+                            Ok((episode_row, _)) => episode_row,
+                            Err(e) => {
+                                tracing::error!(
+                                    target: "ptask::capture",
+                                    error = %e,
+                                    "episode insert failed"
+                                );
+                                return (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(serde_json::json!({"error": format!("{}", e)})),
+                                )
+                                    .into_response();
+                            }
+                        }
+                    }
                 }
-                r
             }
             Err(e) => {
                 tracing::error!(target: "ptask::capture", error = %e, "insert failed");

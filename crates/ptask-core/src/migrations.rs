@@ -9,5 +9,5 @@ pub use migrations::runner;
 
 /// Apply all pending migrations on the given connection.
 pub fn run(conn: &mut rusqlite::Connection) -> Result<refinery::Report, refinery::Error> {
-    runner().run(conn)
+    runner().set_grouped(true).run(conn)
 }

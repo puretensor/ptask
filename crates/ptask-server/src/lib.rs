@@ -65,12 +65,28 @@ async fn require_hal_bearer(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
-    let ok = bearer.is_some_and(|tok| {
-        ptask_core::tokens::resolve(&state.db, &tok)
-            .ok()
-            .flatten()
-            .is_some_and(|id| id.client_id == "hal" && id.scope >= ptask_core::tokens::Scope::Write)
-    });
+    let db = state.db.clone();
+    let ok = match crate::blocking::db_value(move || {
+        bearer.is_some_and(|tok| {
+            ptask_core::tokens::resolve(&db, &tok)
+                .ok()
+                .flatten()
+                .is_some_and(|id| {
+                    id.client_id == "hal" && id.scope >= ptask_core::tokens::Scope::Write
+                })
+        })
+    })
+    .await
+    {
+        Ok(ok) => ok,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response();
+        }
+    };
     if !ok {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
