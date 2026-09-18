@@ -23,8 +23,7 @@ pub struct RemoteClient {
     base: String,
     api_token: Option<String>,
     client: reqwest::blocking::Client,
-    /// Global `--idempotency-key`. Finding 2 honors this as the /sync
-    /// command UUID; until then it is stored so cmd_remote can attach it.
+    /// Global `--idempotency-key`, reused as the /sync command UUID.
     idempotency_key: Option<String>,
 }
 
@@ -64,6 +63,17 @@ impl RemoteClient {
     /// The key forwarded from the CLI, if any.
     pub fn idempotency_key(&self) -> Option<&str> {
         self.idempotency_key.as_deref()
+    }
+
+    /// Stable /sync command UUID. A supplied `--idempotency-key` is reused so
+    /// retries hit the server's replay cache; multi-command edits derive
+    /// distinct child keys. Random UUIDs only when no key was supplied.
+    fn command_uuid(&self, suffix: &str) -> String {
+        match self.idempotency_key.as_deref() {
+            Some(key) if suffix.is_empty() => key.to_string(),
+            Some(key) => format!("{key}:{suffix}"),
+            None => uuid::Uuid::new_v4().to_string(),
+        }
     }
 
     /// Fetch the server's advertised version from the open `GET /version`
@@ -166,7 +176,7 @@ impl RemoteClient {
     /// `pt remote add "..."` — POST `task_create` with the quick-add text.
     /// Returns the created `Task` row.
     pub fn add(&self, text: &str) -> Result<Task> {
-        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let cmd_uuid = self.command_uuid("");
         let temp_id = format!("tmp-{cmd_uuid}");
         let req = json!({
             "sync_token": "*",
@@ -196,7 +206,7 @@ impl RemoteClient {
     /// `task_done` by uuid.
     pub fn done(&self, query: &str) -> Result<Task> {
         let task = self.resolve(query, false)?;
-        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let cmd_uuid = self.command_uuid("");
         let req = json!({
             "sync_token": "*",
             "resource_types": ["tasks"],
@@ -215,7 +225,7 @@ impl RemoteClient {
     /// canonical host. Resolves server-side, then dispatches `task_priority`.
     pub fn priority(&self, query: &str, level: i64) -> Result<Task> {
         let mut task = self.resolve(query, false)?;
-        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let cmd_uuid = self.command_uuid("");
         let req = json!({
             "sync_token": "*",
             "resource_types": ["tasks"],
@@ -248,8 +258,8 @@ impl RemoteClient {
         deadline: Option<Option<&str>>,
     ) -> Result<Task> {
         let mut task = self.resolve(query, false)?;
-        let retext_uuid = uuid::Uuid::new_v4().to_string();
-        let edit_uuid = uuid::Uuid::new_v4().to_string();
+        let retext_uuid = self.command_uuid("retext");
+        let edit_uuid = self.command_uuid("deadline");
         let mut commands: Vec<Value> = Vec::new();
         if title.is_some() || description.is_some() {
             commands.push(json!({
@@ -293,7 +303,7 @@ impl RemoteClient {
     /// one); resolve-by-substring therefore matches done tasks here too.
     pub fn reopen(&self, query: &str) -> Result<Task> {
         let mut task = self.resolve(query, true)?;
-        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let cmd_uuid = self.command_uuid("");
         let req = json!({
             "sync_token": "*",
             "resource_types": ["tasks"],
@@ -320,7 +330,7 @@ impl RemoteClient {
     /// Reversible via `reopen`. Resolves active tasks only.
     pub fn dismiss(&self, query: &str) -> Result<Task> {
         let mut task = self.resolve(query, false)?;
-        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let cmd_uuid = self.command_uuid("");
         let req = json!({
             "sync_token": "*",
             "resource_types": ["tasks"],
@@ -395,7 +405,7 @@ impl RemoteClient {
         include_terminal: bool,
     ) -> Result<Task> {
         let task = self.resolve(query, include_terminal)?;
-        let cmd_uuid = uuid::Uuid::new_v4().to_string();
+        let cmd_uuid = self.command_uuid("");
         let mut args = serde_json::Map::new();
         args.insert("task_uuid".into(), json!(task.id));
         args.extend(extra);
