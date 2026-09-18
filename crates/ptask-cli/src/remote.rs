@@ -60,11 +60,6 @@ impl RemoteClient {
         self
     }
 
-    /// The key forwarded from the CLI, if any.
-    pub fn idempotency_key(&self) -> Option<&str> {
-        self.idempotency_key.as_deref()
-    }
-
     /// Stable /sync command UUID. A supplied `--idempotency-key` is reused so
     /// retries hit the server's replay cache; multi-command edits derive
     /// distinct child keys. Random UUIDs only when no key was supplied.

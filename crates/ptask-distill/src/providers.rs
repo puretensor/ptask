@@ -470,11 +470,7 @@ fn strip_markdown_fence(content: &str) -> &str {
     rest.strip_suffix("```").unwrap_or(rest).trim()
 }
 
-fn openai_request_body(
-    model: &str,
-    prompt: &str,
-    schema: serde_json::Value,
-) -> serde_json::Value {
+fn openai_request_body(model: &str, prompt: &str, schema: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],

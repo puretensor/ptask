@@ -69,9 +69,9 @@ impl Embedder {
         let tokenizer_path = repo
             .get("tokenizer.json")
             .ok_or_else(|| anyhow!("MiniLM tokenizer.json missing from local HF cache"))?;
-        let weights_path = repo.get("model.safetensors").ok_or_else(|| {
-            anyhow!("MiniLM model.safetensors missing from local HF cache")
-        })?;
+        let weights_path = repo
+            .get("model.safetensors")
+            .ok_or_else(|| anyhow!("MiniLM model.safetensors missing from local HF cache"))?;
         Self::from_files(&config_path, &tokenizer_path, &weights_path)
     }
 

@@ -499,7 +499,8 @@ impl PtaskMcp {
         let db = self.db.clone();
         let ctx = self.ctx();
         on_blocking(move || {
-            let from = ptask_core::tasks::resolve_for_lookup(&db, &task, true).map_err(domain_err)?;
+            let from =
+                ptask_core::tasks::resolve_for_lookup(&db, &task, true).map_err(domain_err)?;
             let to = ptask_core::tasks::resolve_for_lookup(&db, &on, true).map_err(domain_err)?;
             if remove {
                 ptask_core::tasks::remove_dependency(&db, &from.id, &to.id, &ctx)
