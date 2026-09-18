@@ -58,6 +58,23 @@ impl Embedder {
         Self::from_files(&config_path, &tokenizer_path, &weights_path)
     }
 
+    /// Load MiniLM from the on-disk Hugging Face cache only. Missing assets
+    /// return `Err` immediately — no download, no unbounded HTTP wait.
+    pub fn from_local_hf_cache() -> Result<Self> {
+        let cache = hf_hub::Cache::from_env();
+        let repo = cache.model(MODEL_REPO.to_string());
+        let config_path = repo
+            .get("config.json")
+            .ok_or_else(|| anyhow!("MiniLM config.json missing from local HF cache"))?;
+        let tokenizer_path = repo
+            .get("tokenizer.json")
+            .ok_or_else(|| anyhow!("MiniLM tokenizer.json missing from local HF cache"))?;
+        let weights_path = repo.get("model.safetensors").ok_or_else(|| {
+            anyhow!("MiniLM model.safetensors missing from local HF cache")
+        })?;
+        Self::from_files(&config_path, &tokenizer_path, &weights_path)
+    }
+
     /// Load from explicit on-disk paths. Useful for tests + air-gapped nodes.
     pub fn from_files(
         config_path: &Path,
