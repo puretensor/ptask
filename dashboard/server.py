@@ -875,6 +875,9 @@ def voice_create_task(fields: dict, transcript: str) -> tuple[bool, dict]:
 # ---------------------------------------------------------------------- server
 class Handler(BaseHTTPRequestHandler):
     server_version = "ptask-dash/" + VERSION
+    # StreamRequestHandler defaults this to None; a client that never
+    # finishes the body would otherwise hold a request thread forever.
+    timeout = 15
 
     def log_message(self, fmt, *args):  # quieter logs
         pass
@@ -975,6 +978,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("Content-Length", "0") or 0)
         except ValueError:
+            self._json({"error": "bad content length"}, 400)
+            return None
+        if n < 0:
             self._json({"error": "bad content length"}, 400)
             return None
         if n > MAX_POST_BYTES:
