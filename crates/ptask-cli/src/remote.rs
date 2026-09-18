@@ -23,6 +23,9 @@ pub struct RemoteClient {
     base: String,
     api_token: Option<String>,
     client: reqwest::blocking::Client,
+    /// Global `--idempotency-key`. Finding 2 honors this as the /sync
+    /// command UUID; until then it is stored so cmd_remote can attach it.
+    idempotency_key: Option<String>,
 }
 
 impl RemoteClient {
@@ -47,7 +50,20 @@ impl RemoteClient {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty()),
             client,
+            idempotency_key: None,
         })
+    }
+
+    /// Attach the process-wide `--idempotency-key` so remote mutations can
+    /// reuse it as their /sync command UUID.
+    pub fn with_idempotency_key(mut self, key: Option<String>) -> Self {
+        self.idempotency_key = key.filter(|k| !k.trim().is_empty());
+        self
+    }
+
+    /// The key forwarded from the CLI, if any.
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_deref()
     }
 
     /// Fetch the server's advertised version from the open `GET /version`

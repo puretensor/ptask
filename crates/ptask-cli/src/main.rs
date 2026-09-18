@@ -735,10 +735,22 @@ fn emit<T: serde::Serialize>(value: &T, text: impl FnOnce()) -> Result<()> {
 /// --idempotency-key flag keys the event for safe retries.
 fn cli_ctx() -> ptask_core::event_log::EventCtx {
     let mut ctx = ptask_core::event_log::EventCtx::local(ptask_core::Config::from_env().actor);
-    if let Some(Some(key)) = CLI_IDEMPOTENCY.get().cloned() {
+    if let Some(key) = cli_idempotency_key() {
         ctx.event_uuid = Some(key);
     }
     ctx
+}
+
+fn cli_idempotency_key() -> Option<String> {
+    CLI_IDEMPOTENCY.get().cloned().flatten()
+}
+
+fn remote_client(url: Option<&str>) -> Result<remote::RemoteClient> {
+    let client = match url {
+        Some(u) => remote::RemoteClient::with_url(u)?,
+        None => remote::RemoteClient::from_env()?,
+    };
+    Ok(client.with_idempotency_key(cli_idempotency_key()))
 }
 
 fn main() {
@@ -2704,10 +2716,7 @@ fn cmd_gen_completions(args: GenCompletionsArgs) -> Result<()> {
 fn cmd_remote(c: RemoteCommand) -> Result<()> {
     match c {
         RemoteCommand::Add(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let task = client.add(&a.text)?;
             // Echo the parsed interpretation (priority + deadline) so a silent
             // mis-parse — the PT-653 class — is visible at the moment of creation.
@@ -2732,10 +2741,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::List(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let priority_filter = a
                 .priority
                 .as_deref()
@@ -2774,10 +2780,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Done(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let task = client.done(&a.query)?;
             println!(
                 "{}",
@@ -2792,10 +2795,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Priority(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let level = priority::parse(&a.level).map_err(anyhow::Error::msg)?;
             let task = client.priority(&a.query, level)?;
             println!(
@@ -2825,10 +2825,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                     "nothing to edit; use --deadline DATE | --clear-deadline | --title T | --desc D"
                 );
             }
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             // Resolve ONCE: a single /sync request carries both the title/desc
             // and deadline commands against the same resolved task_uuid, so a
             // rename can't drift the deadline onto a different task.
@@ -2869,10 +2866,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Reopen(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let task = client.reopen(&a.query)?;
             println!(
                 "{}",
@@ -2887,10 +2881,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Show(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let t = client.show(&a.query)?;
             // Rich side-table detail (best-effort: a pre-v1.9 server has no
             // /detail route, so just skip it and keep the base row).
@@ -2899,10 +2890,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Next(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let rows = client.next(a.limit)?;
             print_lines(ui::headline(
                 "ptask · next",
@@ -2918,10 +2906,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Dismiss(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let task = client.dismiss(&a.query)?;
             println!(
                 "{}",
@@ -2936,10 +2921,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Start(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let task = client.start(&a.query)?;
             println!(
                 "{}",
@@ -2954,10 +2936,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Snooze(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let phrase = a.until.join(" ");
             let until = ptask_core::dates::parse(&phrase).map_err(anyhow::Error::msg)?;
             let until_iso = ptask_core::dates::format_iso(&until);
@@ -2975,10 +2954,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Depend(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let task = client.depend(&a.query, &a.on, a.clear)?;
             println!(
                 "{}",
@@ -2997,10 +2973,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Rm(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let task = client.rm(&a.query)?;
             println!(
                 "{}",
@@ -3015,10 +2988,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             Ok(())
         }
         RemoteCommand::Version(a) => {
-            let client = match a.url {
-                Some(u) => remote::RemoteClient::with_url(&u)?,
-                None => remote::RemoteClient::from_env()?,
-            };
+            let client = remote_client(a.url.as_deref())?;
             let local = ptask_core::VERSION;
             print_lines(ui::headline("ptask · version", None, client.url()));
             match client.server_version() {
