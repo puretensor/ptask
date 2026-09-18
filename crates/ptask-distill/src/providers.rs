@@ -370,8 +370,8 @@ impl OpenAiCompatProvider {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
-    fn generate(&self, prompt: &str) -> Result<serde_json::Value> {
-        let body = openai_request_body(&self.model, prompt);
+    fn generate(&self, prompt: &str, schema: serde_json::Value) -> Result<serde_json::Value> {
+        let body = openai_request_body(&self.model, prompt, schema);
         let mut attempt_errors = Vec::new();
         for attempt in 1..=GEMINI_MAX_ATTEMPTS {
             match self.generate_once(&body) {
@@ -470,12 +470,23 @@ fn strip_markdown_fence(content: &str) -> &str {
     rest.strip_suffix("```").unwrap_or(rest).trim()
 }
 
-fn openai_request_body(model: &str, prompt: &str) -> serde_json::Value {
+fn openai_request_body(
+    model: &str,
+    prompt: &str,
+    schema: serde_json::Value,
+) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "reasoning_effort": "none"
+        "reasoning_effort": "none",
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "ptask_output",
+                "schema": schema
+            }
+        }
     })
 }
 
@@ -512,9 +523,11 @@ impl LlmProvider for OpenAiCompatProvider {
              transient status checks, vague musings, past-tense/already-done\n\
              notes, and monitoring noise that self-resolves.\n\n{FENCE_HEADER}\n\n\
              -----BEGIN UNTRUSTED ITEMS-----\n{block}-----END UNTRUSTED ITEMS-----\n\n\
-             Return a JSON array with EXACTLY one object per numbered item."
+             Return a JSON array with EXACTLY one object per numbered item.\n\
+             Each object MUST use the field names idx (integer index of the\n\
+             item) and keep (boolean). Example: [{{\"idx\":0,\"keep\":true}}]."
         );
-        let _schema = serde_json::json!({
+        let schema = serde_json::json!({
             "type": "ARRAY",
             "items": {
                 "type": "OBJECT",
@@ -527,7 +540,7 @@ impl LlmProvider for OpenAiCompatProvider {
                 "required": ["idx", "keep"]
             }
         });
-        let v = self.generate(&prompt)?;
+        let v = self.generate(&prompt, schema)?;
         let out: Vec<Classification> =
             serde_json::from_value(v).context("classification array shape")?;
         if out.len() != texts.len() {
@@ -552,9 +565,24 @@ impl LlmProvider for OpenAiCompatProvider {
              5=hard external deadline/revenue-blocking, 4=external dependency,\n\
              3=this week, 2=normal (DEFAULT), 1=nice-to-have. Merge duplicates.\n\
              An empty array is valid.\n\n{FENCE_HEADER}\n\n\
-             -----BEGIN UNTRUSTED ITEMS-----\n{block}-----END UNTRUSTED ITEMS-----"
+             -----BEGIN UNTRUSTED ITEMS-----\n{block}-----END UNTRUSTED ITEMS-----\n\n\
+             Return a JSON array of objects with fields title (string, required),\n\
+             priority (integer 1-5) and description (string).\n\
+             Example: [{{\"title\":\"File the report\",\"priority\":2}}]."
         );
-        let v = self.generate(&prompt)?;
+        let schema = serde_json::json!({
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "title": {"type": "STRING"},
+                    "priority": {"type": "INTEGER"},
+                    "description": {"type": "STRING"}
+                },
+                "required": ["title"]
+            }
+        });
+        let v = self.generate(&prompt, schema)?;
         let out: Vec<Candidate> = serde_json::from_value(v).context("candidate array shape")?;
         Ok(out.into_iter().take(8).collect())
     }
@@ -562,7 +590,14 @@ impl LlmProvider for OpenAiCompatProvider {
     fn preflight(&self) -> Result<()> {
         // Ask for an object, not a bare scalar: JSON-tuned local models render
         // a lone `true` unreliably (observed: `{"true": true}`, fenced output).
-        let v = self.generate("Reply with exactly this JSON object: {\"ok\": true}")?;
+        let v = self.generate(
+            "Reply with exactly this JSON object: {\"ok\": true}",
+            serde_json::json!({
+                "type": "OBJECT",
+                "properties": { "ok": {"type": "BOOLEAN"} },
+                "required": ["ok"]
+            }),
+        )?;
         if v["ok"].as_bool() == Some(true) {
             return Ok(());
         }
