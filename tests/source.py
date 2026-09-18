@@ -11,13 +11,26 @@ def read(rel: str) -> str:
 
 def fn_body(src: str, name: str) -> str:
     """Return the source of `fn name` through the next top-level `fn`/`}`."""
-    needle = f"fn {name}"
-    start = src.find(needle)
-    if start < 0:
+    import re
+
+    match = re.search(rf"\bfn {re.escape(name)}\b", src)
+    if not match:
         raise AssertionError(f"function {name!r} not found")
-    # Walk braces from the first `{` after the signature.
-    brace = src.find("{", start)
-    if brace < 0:
+    start = match.start()
+    # Skip `{` used in parameter destructuring (`Parameters(NextArg { limit })`).
+    brace = None
+    paren = 0
+    seen_paren = False
+    for i, ch in enumerate(src[start:], start):
+        if ch == "(":
+            paren += 1
+            seen_paren = True
+        elif ch == ")":
+            paren -= 1
+        elif ch == "{" and paren == 0 and seen_paren:
+            brace = i
+            break
+    if brace is None:
         raise AssertionError(f"function {name!r} has no body")
     depth = 0
     for i, ch in enumerate(src[brace:], brace):

@@ -30,6 +30,22 @@ fn domain_err(e: impl std::fmt::Display) -> McpError {
     McpError::invalid_params(format!("{e}"), None)
 }
 
+async fn on_blocking<T, F>(f: F) -> Result<T, McpError>
+where
+    F: FnOnce() -> Result<T, McpError> + Send + 'static,
+    T: Send + 'static,
+{
+    crate::blocking::db_value(f)
+        .await
+        .map_err(|e| McpError::internal_error(format!("blocking task: {e}"), None))?
+}
+
+fn rescore_db(db: &Db) {
+    if let Err(e) = ptask_core::scoring::run_once(db, false) {
+        tracing::warn!(target: "ptask::mcp", error = %e, "post-mutation rescore failed");
+    }
+}
+
 fn task_json(t: &ptask_core::tasks::Task) -> serde_json::Value {
     serde_json::json!({
         "id": t.id, "pt_id": t.pt_id, "title": t.title,
@@ -179,10 +195,9 @@ impl PtaskMcp {
         }
     }
 
+    #[allow(dead_code)]
     fn rescore(&self) {
-        if let Err(e) = ptask_core::scoring::run_once(&self.db, false) {
-            tracing::warn!(target: "ptask::mcp", error = %e, "post-mutation rescore failed");
-        }
+        rescore_db(&self.db);
     }
 
     #[tool(
@@ -192,9 +207,13 @@ impl PtaskMcp {
         &self,
         Parameters(NextArg { limit }): Parameters<NextArg>,
     ) -> Result<CallToolResult, McpError> {
-        let tasks = ptask_core::dag::next_ready(&self.db, limit.unwrap_or(10).clamp(1, 100))
-            .map_err(domain_err)?;
-        json_ok(&tasks.iter().map(task_json).collect::<Vec<_>>())
+        let db = self.db.clone();
+        on_blocking(move || {
+            let tasks = ptask_core::dag::next_ready(&db, limit.unwrap_or(10).clamp(1, 100))
+                .map_err(domain_err)?;
+            json_ok(&tasks.iter().map(task_json).collect::<Vec<_>>())
+        })
+        .await
     }
 
     #[tool(
@@ -204,19 +223,23 @@ impl PtaskMcp {
         &self,
         Parameters(ListArg { filter, limit }): Parameters<ListArg>,
     ) -> Result<CallToolResult, McpError> {
-        let expr = match filter.as_deref().filter(|f| !f.trim().is_empty()) {
-            Some(f) => Some(ptask_core::filter::parse(f).map_err(domain_err)?),
-            None => None,
-        };
-        let tasks = ptask_core::tasks::list_with_filter(
-            &self.db,
-            expr.as_ref(),
-            Some("pending"),
-            None,
-            limit.unwrap_or(50).clamp(1, 500),
-        )
-        .map_err(domain_err)?;
-        json_ok(&tasks.iter().map(task_json).collect::<Vec<_>>())
+        let db = self.db.clone();
+        on_blocking(move || {
+            let expr = match filter.as_deref().filter(|f| !f.trim().is_empty()) {
+                Some(f) => Some(ptask_core::filter::parse(f).map_err(domain_err)?),
+                None => None,
+            };
+            let tasks = ptask_core::tasks::list_with_filter(
+                &db,
+                expr.as_ref(),
+                Some("pending"),
+                None,
+                limit.unwrap_or(50).clamp(1, 500),
+            )
+            .map_err(domain_err)?;
+            json_ok(&tasks.iter().map(task_json).collect::<Vec<_>>())
+        })
+        .await
     }
 
     #[tool(
@@ -232,57 +255,59 @@ impl PtaskMcp {
             deliverable,
         }): Parameters<AddArg>,
     ) -> Result<CallToolResult, McpError> {
-        let q = ptask_core::quickadd::parse(&text).map_err(domain_err)?;
-        let new = ptask_core::NewTask {
-            title: q.title.clone(),
-            description: q.description.clone(),
-            priority: q.priority.unwrap_or(2),
-            deadline: q.deadline.clone(),
-            source_type: "mcp".into(),
-            ai_confidence: 1.0,
-            ai_reasoning: reason.unwrap_or_default(),
-        };
-        let kind = match kind.as_deref() {
-            Some(k) => Some(
-                k.parse::<ptask_core::tasks::TaskKind>()
-                    .map_err(domain_err)?
-                    .as_str()
-                    .to_string(),
-            ),
-            None => None,
-        };
-        let deliverable = match deliverable.as_deref() {
-            Some(d) => Some(
-                ptask_core::tasks::validate_deliverable(d)
-                    .map_err(domain_err)?
-                    .to_string(),
-            ),
-            None => match kind.as_deref() {
-                Some("scout") => Some("report".to_string()),
-                _ => None,
-            },
-        };
-        let ext = ptask_core::Extensions {
-            labels: q.labels.clone(),
-            kind,
-            deliverable,
-            project: q.project.clone(),
-            duration_min: q.duration_min,
-            planned_at: None,
-            energy: None,
-            recurrence: q.recurrence.clone(),
-            due_at: q.due.clone(),
-        };
-        let discovered_parent = discovered_from
-            .as_deref()
-            .map(|parent| ptask_core::tasks::resolve_for_lookup(&self.db, parent, true))
-            .transpose()
-            .map_err(domain_err)?;
-        let t = ptask_core::tasks::create_with_extensions(&self.db, new, ext, &self.ctx())
-            .map_err(domain_err)?;
-        if let Some(parent) = discovered_parent {
-            self.db
-                .with_conn(|c| {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let q = ptask_core::quickadd::parse(&text).map_err(domain_err)?;
+            let new = ptask_core::NewTask {
+                title: q.title.clone(),
+                description: q.description.clone(),
+                priority: q.priority.unwrap_or(2),
+                deadline: q.deadline.clone(),
+                source_type: "mcp".into(),
+                ai_confidence: 1.0,
+                ai_reasoning: reason.unwrap_or_default(),
+            };
+            let kind = match kind.as_deref() {
+                Some(k) => Some(
+                    k.parse::<ptask_core::tasks::TaskKind>()
+                        .map_err(domain_err)?
+                        .as_str()
+                        .to_string(),
+                ),
+                None => None,
+            };
+            let deliverable = match deliverable.as_deref() {
+                Some(d) => Some(
+                    ptask_core::tasks::validate_deliverable(d)
+                        .map_err(domain_err)?
+                        .to_string(),
+                ),
+                None => match kind.as_deref() {
+                    Some("scout") => Some("report".to_string()),
+                    _ => None,
+                },
+            };
+            let ext = ptask_core::Extensions {
+                labels: q.labels.clone(),
+                kind,
+                deliverable,
+                project: q.project.clone(),
+                duration_min: q.duration_min,
+                planned_at: None,
+                energy: None,
+                recurrence: q.recurrence.clone(),
+                due_at: q.due.clone(),
+            };
+            let discovered_parent = discovered_from
+                .as_deref()
+                .map(|parent| ptask_core::tasks::resolve_for_lookup(&db, parent, true))
+                .transpose()
+                .map_err(domain_err)?;
+            let t = ptask_core::tasks::create_with_extensions(&db, new, ext, &ctx)
+                .map_err(domain_err)?;
+            if let Some(parent) = discovered_parent {
+                db.with_conn(|c| {
                     c.execute(
                         "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
                          VALUES (?1, ?2, 'discovered_from',
@@ -292,16 +317,18 @@ impl PtaskMcp {
                     Ok(())
                 })
                 .map_err(domain_err)?;
-        }
-        self.rescore();
-        let mut v = task_json(&t);
-        if !q.warnings.is_empty() {
-            // Non-fatal quick-add caveats (e.g. a date phrase that resolved to
-            // the past). PT-1267 backdated a deadline silently because these
-            // were dropped on the MCP path — agents must see them.
-            v["warnings"] = serde_json::json!(q.warnings);
-        }
-        json_ok(&v)
+            }
+            rescore_db(&db);
+            let mut v = task_json(&t);
+            if !q.warnings.is_empty() {
+                // Non-fatal quick-add caveats (e.g. a date phrase that resolved to
+                // the past). PT-1267 backdated a deadline silently because these
+                // were dropped on the MCP path — agents must see them.
+                v["warnings"] = serde_json::json!(q.warnings);
+            }
+            json_ok(&v)
+        })
+        .await
     }
 
     #[tool(description = "Full detail for one task: fields + attributed journal history.")]
@@ -309,22 +336,26 @@ impl PtaskMcp {
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
     ) -> Result<CallToolResult, McpError> {
-        let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, true).map_err(domain_err)?;
-        let hist = ptask_core::event_log::history_for_task(&self.db, &t.id, 50)
-            .map_err(domain_err)?
-            .into_iter()
-            .map(|e| {
-                serde_json::json!({
-                    "ts": e.ts, "event_type": e.event_type, "actor": e.actor,
+        let db = self.db.clone();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, true).map_err(domain_err)?;
+            let hist = ptask_core::event_log::history_for_task(&db, &t.id, 50)
+                .map_err(domain_err)?
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "ts": e.ts, "event_type": e.event_type, "actor": e.actor,
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        let mut v = task_json(&t);
-        v["history"] = serde_json::json!(hist);
-        // Open prerequisites: non-empty means task_done will be refused.
-        let blockers = ptask_core::tasks::open_blockers(&self.db, &t.id).map_err(domain_err)?;
-        v["blocked_by"] = serde_json::json!(blockers);
-        json_ok(&v)
+                .collect::<Vec<_>>();
+            let mut v = task_json(&t);
+            v["history"] = serde_json::json!(hist);
+            // Open prerequisites: non-empty means task_done will be refused.
+            let blockers = ptask_core::tasks::open_blockers(&db, &t.id).map_err(domain_err)?;
+            v["blocked_by"] = serde_json::json!(blockers);
+            json_ok(&v)
+        })
+        .await
     }
 
     #[tool(
@@ -334,23 +365,27 @@ impl PtaskMcp {
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
     ) -> Result<CallToolResult, McpError> {
-        let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, false).map_err(domain_err)?;
-        let outcome =
-            ptask_core::tasks::mark_done(&self.db, &t, &self.ctx()).map_err(domain_err)?;
-        self.rescore();
-        match outcome {
-            ptask_core::tasks::DoneOutcome::Completed => json_ok(&serde_json::json!({
-                "ok": true, "pt_id": t.pt_id, "status": "done"
-            })),
-            ptask_core::tasks::DoneOutcome::Advanced { next_deadline } => {
-                json_ok(&serde_json::json!({
-                    "ok": true,
-                    "pt_id": t.pt_id,
-                    "status": "advanced",
-                    "next_deadline": next_deadline,
-                }))
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            let outcome = ptask_core::tasks::mark_done(&db, &t, &ctx).map_err(domain_err)?;
+            rescore_db(&db);
+            match outcome {
+                ptask_core::tasks::DoneOutcome::Completed => json_ok(&serde_json::json!({
+                    "ok": true, "pt_id": t.pt_id, "status": "done"
+                })),
+                ptask_core::tasks::DoneOutcome::Advanced { next_deadline } => {
+                    json_ok(&serde_json::json!({
+                        "ok": true,
+                        "pt_id": t.pt_id,
+                        "status": "advanced",
+                        "next_deadline": next_deadline,
+                    }))
+                }
             }
-        }
+        })
+        .await
     }
 
     #[tool(description = "Dismiss a task (won't-do; distill won't resurrect it).")]
@@ -358,10 +393,15 @@ impl PtaskMcp {
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
     ) -> Result<CallToolResult, McpError> {
-        let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, false).map_err(domain_err)?;
-        ptask_core::tasks::dismiss(&self.db, &t.id, &self.ctx()).map_err(domain_err)?;
-        self.rescore();
-        json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "status": "dismissed"}))
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            ptask_core::tasks::dismiss(&db, &t.id, &ctx).map_err(domain_err)?;
+            rescore_db(&db);
+            json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "status": "dismissed"}))
+        })
+        .await
     }
 
     #[tool(
@@ -379,33 +419,37 @@ impl PtaskMcp {
             labels_remove,
         }): Parameters<EditArg>,
     ) -> Result<CallToolResult, McpError> {
-        let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, true).map_err(domain_err)?;
+        let db = self.db.clone();
         let ctx = self.ctx();
-        if title.is_none()
-            && description.is_none()
-            && priority.is_none()
-            && deadline.is_none()
-            && labels_add.is_empty()
-            && labels_remove.is_empty()
-        {
-            return Err(McpError::invalid_params("no fields to edit", None));
-        }
-        if priority.is_some_and(|p| !(1..=5).contains(&p)) {
-            return Err(McpError::invalid_params("priority must be 1..5", None));
-        }
-        let edit = ptask_core::tasks::TaskEdit {
-            title: title.as_deref(),
-            description: description.as_deref(),
-            priority,
-            deadline: deadline
-                .as_deref()
-                .map(|d| if d.trim().is_empty() { None } else { Some(d) }),
-            labels_add: &labels_add,
-            labels_remove: &labels_remove,
-        };
-        ptask_core::tasks::edit_atomic(&self.db, &t.id, edit, &ctx).map_err(domain_err)?;
-        self.rescore();
-        json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id}))
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, true).map_err(domain_err)?;
+            if title.is_none()
+                && description.is_none()
+                && priority.is_none()
+                && deadline.is_none()
+                && labels_add.is_empty()
+                && labels_remove.is_empty()
+            {
+                return Err(McpError::invalid_params("no fields to edit", None));
+            }
+            if priority.is_some_and(|p| !(1..=5).contains(&p)) {
+                return Err(McpError::invalid_params("priority must be 1..5", None));
+            }
+            let edit = ptask_core::tasks::TaskEdit {
+                title: title.as_deref(),
+                description: description.as_deref(),
+                priority,
+                deadline: deadline
+                    .as_deref()
+                    .map(|d| if d.trim().is_empty() { None } else { Some(d) }),
+                labels_add: &labels_add,
+                labels_remove: &labels_remove,
+            };
+            ptask_core::tasks::edit_atomic(&db, &t.id, edit, &ctx).map_err(domain_err)?;
+            rescore_db(&db);
+            json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id}))
+        })
+        .await
     }
 
     #[tool(
@@ -415,9 +459,15 @@ impl PtaskMcp {
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
     ) -> Result<CallToolResult, McpError> {
-        let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, false).map_err(domain_err)?;
-        ptask_core::tasks::claim(&self.db, &t.id, &self.ctx()).map_err(domain_err)?;
-        json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "claimed_by": self.actor}))
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        let actor = self.actor.clone();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            ptask_core::tasks::claim(&db, &t.id, &ctx).map_err(domain_err)?;
+            json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "claimed_by": actor}))
+        })
+        .await
     }
 
     #[tool(
@@ -427,11 +477,16 @@ impl PtaskMcp {
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
     ) -> Result<CallToolResult, McpError> {
-        let t = ptask_core::tasks::resolve_for_lookup(&self.db, &id, false).map_err(domain_err)?;
-        ptask_core::tasks::promote(&self.db, &t.id, &self.ctx()).map_err(domain_err)?;
-        json_ok(&serde_json::json!({
-            "ok": true, "pt_id": t.pt_id, "kind": "ship", "deliverable": "pr"
-        }))
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            ptask_core::tasks::promote(&db, &t.id, &ctx).map_err(domain_err)?;
+            json_ok(&serde_json::json!({
+                "ok": true, "pt_id": t.pt_id, "kind": "ship", "deliverable": "pr"
+            }))
+        })
+        .await
     }
 
     #[tool(
@@ -441,22 +496,26 @@ impl PtaskMcp {
         &self,
         Parameters(DependArg { task, on, remove }): Parameters<DependArg>,
     ) -> Result<CallToolResult, McpError> {
-        let from =
-            ptask_core::tasks::resolve_for_lookup(&self.db, &task, true).map_err(domain_err)?;
-        let to = ptask_core::tasks::resolve_for_lookup(&self.db, &on, true).map_err(domain_err)?;
-        if remove {
-            ptask_core::tasks::remove_dependency(&self.db, &from.id, &to.id, &self.ctx())
-                .map_err(domain_err)?;
-        } else {
-            ptask_core::tasks::add_dependency(&self.db, &from.id, &to.id, &self.ctx())
-                .map_err(domain_err)?;
-        }
-        self.rescore();
-        let blockers = ptask_core::tasks::open_blockers(&self.db, &from.id).map_err(domain_err)?;
-        json_ok(&serde_json::json!({
-            "ok": true, "task": from.pt_id, "depends_on": to.pt_id,
-            "removed": remove, "blocked_by": blockers,
-        }))
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let from = ptask_core::tasks::resolve_for_lookup(&db, &task, true).map_err(domain_err)?;
+            let to = ptask_core::tasks::resolve_for_lookup(&db, &on, true).map_err(domain_err)?;
+            if remove {
+                ptask_core::tasks::remove_dependency(&db, &from.id, &to.id, &ctx)
+                    .map_err(domain_err)?;
+            } else {
+                ptask_core::tasks::add_dependency(&db, &from.id, &to.id, &ctx)
+                    .map_err(domain_err)?;
+            }
+            rescore_db(&db);
+            let blockers = ptask_core::tasks::open_blockers(&db, &from.id).map_err(domain_err)?;
+            json_ok(&serde_json::json!({
+                "ok": true, "task": from.pt_id, "depends_on": to.pt_id,
+                "removed": remove, "blocked_by": blockers,
+            }))
+        })
+        .await
     }
 
     #[tool(
@@ -471,48 +530,54 @@ impl PtaskMcp {
             client_key,
         }): Parameters<CaptureArg>,
     ) -> Result<CallToolResult, McpError> {
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            return Err(McpError::invalid_params("text must be non-empty", None));
-        }
-        let source = source.unwrap_or_else(|| "mcp".into());
-        let source_file = client_key
-            .clone()
-            .unwrap_or_else(|| format!("mcp://{}", self.actor));
-        let (row, duplicate) =
-            ptask_core::raw_items::insert_idempotent(&self.db, &text, &source, &source_file)
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        let actor = self.actor.clone();
+        on_blocking(move || {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                return Err(McpError::invalid_params("text must be non-empty", None));
+            }
+            let source = source.unwrap_or_else(|| "mcp".into());
+            let source_file = client_key
+                .clone()
+                .unwrap_or_else(|| format!("mcp://{actor}"));
+            let (row, duplicate) =
+                ptask_core::raw_items::insert_idempotent(&db, &text, &source, &source_file)
+                    .map_err(domain_err)?;
+            let mut out = serde_json::json!({"id": row.id, "duplicate": duplicate});
+            if !duplicate && severity.is_some_and(|s| s >= 3) {
+                let sev = severity.unwrap();
+                let new = ptask_core::NewTask {
+                    title: text
+                        .lines()
+                        .next()
+                        .unwrap_or(&text)
+                        .chars()
+                        .take(200)
+                        .collect(),
+                    description: text.clone(),
+                    priority: if sev >= 4 { 5 } else { 4 },
+                    deadline: None,
+                    source_type: "incident".into(),
+                    ai_confidence: 1.0,
+                    ai_reasoning: format!("mcp fast-lane capture severity {sev}"),
+                };
+                let t = ptask_core::tasks::create_with_extensions(
+                    &db,
+                    new,
+                    ptask_core::Extensions::default(),
+                    &ctx,
+                )
                 .map_err(domain_err)?;
-        let mut out = serde_json::json!({"id": row.id, "duplicate": duplicate});
-        if !duplicate && severity.is_some_and(|s| s >= 3) {
-            let sev = severity.unwrap();
-            let new = ptask_core::NewTask {
-                title: text
-                    .lines()
-                    .next()
-                    .unwrap_or(&text)
-                    .chars()
-                    .take(200)
-                    .collect(),
-                description: text.clone(),
-                priority: if sev >= 4 { 5 } else { 4 },
-                deadline: None,
-                source_type: "incident".into(),
-                ai_confidence: 1.0,
-                ai_reasoning: format!("mcp fast-lane capture severity {sev}"),
-            };
-            let t = ptask_core::tasks::create_with_extensions(
-                &self.db,
-                new,
-                ptask_core::Extensions::default(),
-                &self.ctx(),
-            )
-            .map_err(domain_err)?;
-            ptask_core::raw_items::mark_processed(&self.db, row.id).map_err(domain_err)?;
-            self.rescore();
-            out["task_uuid"] = serde_json::json!(t.id);
-            out["pt_id"] = serde_json::json!(t.pt_id);
-        }
-        json_ok(&out)
+                ptask_core::raw_items::mark_processed(&db, row.id).map_err(domain_err)?;
+                rescore_db(&db);
+                out["task_uuid"] = serde_json::json!(t.id);
+                out["pt_id"] = serde_json::json!(t.pt_id);
+            }
+            json_ok(&out)
+        })
+        .await
     }
 
     #[tool(description = "Full-text search (FTS5) over task titles + descriptions, any status.")]
@@ -520,35 +585,38 @@ impl PtaskMcp {
         &self,
         Parameters(SearchArg { query, limit }): Parameters<SearchArg>,
     ) -> Result<CallToolResult, McpError> {
-        let q = query.trim().to_string();
-        if q.is_empty() {
-            return Err(McpError::invalid_params("query must be non-empty", None));
-        }
-        let limit = limit.unwrap_or(20).clamp(1, 100) as i64;
-        let rows: Vec<serde_json::Value> = self
-            .db
-            .with_conn(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT t.id, t.pt_id, t.title, t.status_v2, t.priority
-                     FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
-                     WHERE tasks_fts MATCH ?1
-                     ORDER BY rank LIMIT ?2",
-                )?;
-                let rows = stmt
-                    .query_map((&q, limit), |r| {
-                        Ok(serde_json::json!({
-                            "id": r.get::<_, String>(0)?,
-                            "pt_id": r.get::<_, Option<String>>(1)?,
-                            "title": r.get::<_, String>(2)?,
-                            "status": r.get::<_, String>(3)?,
-                            "priority": r.get::<_, i64>(4)?,
-                        }))
-                    })?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .map_err(domain_err)?;
-        json_ok(&rows)
+        let db = self.db.clone();
+        on_blocking(move || {
+            let q = query.trim().to_string();
+            if q.is_empty() {
+                return Err(McpError::invalid_params("query must be non-empty", None));
+            }
+            let limit = limit.unwrap_or(20).clamp(1, 100) as i64;
+            let rows: Vec<serde_json::Value> = db
+                .with_conn(|c| {
+                    let mut stmt = c.prepare(
+                        "SELECT t.id, t.pt_id, t.title, t.status_v2, t.priority
+                         FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
+                         WHERE tasks_fts MATCH ?1
+                         ORDER BY rank LIMIT ?2",
+                    )?;
+                    let rows = stmt
+                        .query_map((&q, limit), |r| {
+                            Ok(serde_json::json!({
+                                "id": r.get::<_, String>(0)?,
+                                "pt_id": r.get::<_, Option<String>>(1)?,
+                                "title": r.get::<_, String>(2)?,
+                                "status": r.get::<_, String>(3)?,
+                                "priority": r.get::<_, i64>(4)?,
+                            }))
+                        })?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    Ok(rows)
+                })
+                .map_err(domain_err)?;
+            json_ok(&rows)
+        })
+        .await
     }
 
     #[tool(
@@ -558,8 +626,12 @@ impl PtaskMcp {
         &self,
         Parameters(DigestArg { days }): Parameters<DigestArg>,
     ) -> Result<CallToolResult, McpError> {
-        let v = ptask_core::digest::build(&self.db, days.unwrap_or(7)).map_err(domain_err)?;
-        json_ok(&v)
+        let db = self.db.clone();
+        on_blocking(move || {
+            let v = ptask_core::digest::build(&db, days.unwrap_or(7)).map_err(domain_err)?;
+            json_ok(&v)
+        })
+        .await
     }
 }
 
