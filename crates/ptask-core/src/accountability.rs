@@ -12,7 +12,9 @@
 //!   2  deferred   — telegram only
 //!   3  escalated  — telegram + email
 //!   4  critical   — telegram + email
-//!   5  blocked    — email only; task.status flips to 'blocked'
+//!   5  final      — email only; the ladder stops here. Status is NOT
+//!                   changed: auto-flipping to 'blocked' hid real work from
+//!                   the pending views (33 tasks, 2026-07..09).
 //!
 //! Transitions:
 //!
@@ -266,37 +268,6 @@ fn set_escalation_level(db: &Db, task_uuid: &str, level: i64) -> Result<()> {
         Some(task_uuid),
         "task.escalated",
         &serde_json::json!({ "task_uuid": task_uuid, "level": level }),
-        &crate::event_log::EventCtx::system("accountability"),
-    )?;
-    tx.commit()?;
-    Ok(())
-}
-
-fn set_status(db: &Db, task_uuid: &str, status: &str) -> Result<()> {
-    let mut conn = db.get()?;
-    let tx = conn.transaction()?;
-    let now = crate::dates::format_iso(&crate::dates::now_in_operator_tz()?);
-    let v2 = match status {
-        "blocked" => "blocked",
-        "pending" => "todo",
-        "delayed" => "snoozed",
-        other => other,
-    };
-    tx.execute(
-        "UPDATE tasks SET status=?1, status_v2=?4, updated_at=?2 WHERE id=?3",
-        params![status, now, task_uuid, v2],
-    )?;
-    tx.execute(
-        "INSERT INTO interactions (task_id, action, ts, details)
-         VALUES (?1, 'status_change', ?2, ?3)",
-        params![task_uuid, now, format!("status → {}", status)],
-    )?;
-    crate::event_log::record_in_conn(
-        &tx,
-        &format!("local:{}", uuid::Uuid::new_v4()),
-        Some(task_uuid),
-        "task.updated",
-        &serde_json::json!({ "task_uuid": task_uuid, "status": status }),
         &crate::event_log::EventCtx::system("accountability"),
     )?;
     tx.commit()?;
@@ -569,9 +540,6 @@ pub async fn run_check_at<D: Dispatch>(
             if ok && !cfg.dry_run {
                 log_notification(db, &task.id, channel, level, &message)?;
             }
-        }
-        if level == 5 && !cfg.dry_run {
-            set_status(db, &task.id, "blocked")?;
         }
         if dispatched.telegram_sent || dispatched.email_sent {
             if !cfg.dry_run {
@@ -1078,6 +1046,49 @@ mod tests {
         assert_eq!(report.dispatched[0].level, 3);
         assert_eq!(report.budget_used_before, DAILY_BUDGET_MAX);
         assert_eq!(report.budget_used_after, DAILY_BUDGET_MAX);
+    }
+
+    #[tokio::test]
+    async fn level_five_escalation_does_not_block_the_task() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        let task_uuid = aged_task_before(&db, "final escalation", 30, &anchor);
+        let last =
+            crate::dates::format_iso(&anchor.checked_sub(jiff::Span::new().hours(8 * 24)).unwrap());
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET escalation_level=4, last_reminded=?1, level_changed_at=?1 WHERE id=?2",
+                params![last, &task_uuid],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let cfg = DispatchCfg {
+            smtp_host: Some("smtp.example.test".into()),
+            smtp_user: Some("hal@puretensor.ai".into()),
+            smtp_pass: Some("secret".into()),
+            notify_email: Some("heimir@example.test".into()),
+            dry_run: false,
+            ..Default::default()
+        };
+        let report = run_check_at(&db, &cfg, &SendOk, &anchor).await.unwrap();
+        assert_eq!(report.dispatched.len(), 1);
+        assert_eq!(report.dispatched[0].level, 5);
+        let (level, status): (i64, String) = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT escalation_level, status FROM tasks WHERE id=?1",
+                    [&task_uuid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(level, 5);
+        assert_eq!(
+            status, "pending",
+            "level 5 must not hide the task as blocked"
+        );
     }
 
     #[tokio::test]
