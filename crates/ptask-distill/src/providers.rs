@@ -470,7 +470,34 @@ fn strip_markdown_fence(content: &str) -> &str {
     rest.strip_suffix("```").unwrap_or(rest).trim()
 }
 
-fn openai_request_body(model: &str, prompt: &str, schema: serde_json::Value) -> serde_json::Value {
+/// Prompts share Gemini's OpenAPI-style schemas (`"OBJECT"`, `"BOOLEAN"`).
+/// OpenAI `json_schema` needs JSON Schema type names — vLLM 0.26.x 500s on
+/// the uppercase forms (distill failed closed 2026-09-22). Rewrite only the
+/// values of `type` keys; property names are left untouched.
+fn to_json_schema_types(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, child) in map.iter_mut() {
+                match (k.as_str(), child) {
+                    ("type", serde_json::Value::String(t)) => *t = t.to_ascii_lowercase(),
+                    ("properties", serde_json::Value::Object(props)) => {
+                        props.values_mut().for_each(to_json_schema_types)
+                    }
+                    (_, child) => to_json_schema_types(child),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(to_json_schema_types),
+        _ => {}
+    }
+}
+
+fn openai_request_body(
+    model: &str,
+    prompt: &str,
+    mut schema: serde_json::Value,
+) -> serde_json::Value {
+    to_json_schema_types(&mut schema);
     serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -839,6 +866,42 @@ mod tests {
             "request unexpectedly included min_p"
         );
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn openai_schema_uses_lowercase_json_schema_types() {
+        // vLLM (0.26.x, xgrammar) 500s on Gemini's uppercase OpenAPI type
+        // names — distill failed closed for hours on 2026-09-22.
+        let body = openai_request_body(
+            "m",
+            "p",
+            serde_json::json!({
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "idx": {"type": "INTEGER"},
+                        "keep": {"type": "BOOLEAN"},
+                        "confidence": {"type": "NUMBER"},
+                        "reason": {"type": "STRING"}
+                    },
+                    "required": ["idx", "keep"]
+                }
+            }),
+        );
+        let schema = &body["response_format"]["json_schema"]["schema"];
+        assert_eq!(schema["type"], "array");
+        assert_eq!(schema["items"]["type"], "object");
+        let props = &schema["items"]["properties"];
+        assert_eq!(props["idx"]["type"], "integer");
+        assert_eq!(props["keep"]["type"], "boolean");
+        assert_eq!(props["confidence"]["type"], "number");
+        assert_eq!(props["reason"]["type"], "string");
+        // Property names are data, not type names — never rewritten.
+        assert_eq!(
+            schema["items"]["required"],
+            serde_json::json!(["idx", "keep"])
+        );
     }
 
     #[test]
