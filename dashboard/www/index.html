@@ -275,6 +275,45 @@ button.chip{font-family:var(--font);cursor:pointer}
 .due.soon{background:rgba(255,159,67,.18);color:var(--p4t)}
 .age{color:var(--dim);font-size:10px}
 
+/* approvals inbox — operator decisions for agent-requested actions */
+.ap-list{display:flex;flex-direction:column;gap:10px}
+.ap-card{
+  background:var(--card-bg);backdrop-filter:var(--backdrop);
+  border:var(--card-border);border-left:4px solid var(--p4);
+  border-radius:var(--radius);padding:14px 16px;
+  box-shadow:var(--shadow);
+}
+[data-theme="lcars"] .ap-card{border-radius:4px 18px 18px 4px;border-left:10px solid var(--p4)}
+.ap-hd{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:11px;color:var(--muted);margin-bottom:6px}
+.ap-kind{
+  display:inline-flex;align-items:center;padding:2px 7px;border-radius:6px;
+  background:var(--panel2);color:var(--p4t);font-size:10px;font-weight:800;
+  letter-spacing:.06em;text-transform:uppercase;
+}
+.ap-id{font-weight:700;font-variant-numeric:tabular-nums;color:var(--text)}
+.ap-who{color:var(--accent-t);font-weight:600}
+.ap-card h3{font-size:14px;font-weight:600;line-height:1.35;margin:0 0 8px;overflow-wrap:anywhere}
+.ap-meta{font-size:12px;opacity:.7;margin:2px 0 4px}
+.ap-rnote{font-size:13px;opacity:.85;font-style:italic;margin:4px 0}
+.ap-rnote:empty{display:none}
+.ap-body{
+  white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;
+  font-size:12px;color:var(--muted);line-height:1.45;font-family:var(--font);
+  max-height:7.5em;overflow:auto;overscroll-behavior:contain;
+  background:var(--panel2);padding:8px 10px;border-radius:10px;margin:0 0 10px;
+}
+.ap-act{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.ap-note{
+  flex:1 1 160px;min-width:0;min-height:40px;padding:8px 12px;
+  background:var(--panel);border:var(--card-border);color:var(--text);
+  border-radius:10px;font-family:var(--font);font-size:13px;
+}
+.ap-note:focus{outline:none;border-color:var(--accent);box-shadow:var(--glow)}
+.ap-act .mbtn{min-height:40px}
+.ap-rej{color:var(--p5t);border-color:var(--p5t)}
+.ap-rej:hover{background:rgba(255,59,92,.12);border-color:var(--p5t)}
+#approvals.has-pending .ct{color:var(--p4t);font-weight:800}
+
 .btn-done{
   margin-left:auto;cursor:pointer;background:transparent;border:1px solid var(--border);
   color:var(--muted);border-radius:6px;width:24px;height:24px;font-size:13px;line-height:1;
@@ -745,6 +784,7 @@ button,[role="button"]{touch-action:manipulation}
   .phone .hdr-sub .themes{display:none}
   /* panes */
   body.phone main>section{display:none}
+  body.phone[data-view="crit"] #approvals,
   body.phone[data-view="crit"] #critical-sec,
   body.phone[data-view="lanes"] #lanes-sec,
   body.phone[data-view="recent"] #recent-sec,
@@ -830,7 +870,10 @@ button,[role="button"]{touch-action:manipulation}
   .drawer.open{transform:none}
   .drawer h3{font-size:16px;line-height:1.35;overflow-wrap:anywhere}
   .drawer .ddesc{font-size:13px;overflow-wrap:anywhere}
-  .ccard h3,.tcard .tt,.modal-body{overflow-wrap:anywhere}
+  .ccard h3,.tcard .tt,.modal-body,.ap-card h3,.ap-body{overflow-wrap:anywhere}
+  .ap-card{padding:12px 14px}
+  .ap-note{flex:1 1 100%;font-size:16px;min-height:44px}
+  .ap-act .mbtn{flex:1 1 40%;min-height:44px;padding:12px 10px;font-size:13px}
   .drawer .devt{font-size:12px}
   .dclose{top:12px;right:12px;width:32px;height:32px}
   /* composer: top-anchored so Title/Description sit above the keyboard;
@@ -867,6 +910,7 @@ button,[role="button"]{touch-action:manipulation}
   <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 4.5V8l2.6 1.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-hourglass" viewBox="0 0 16 16"><path d="M4 2h8M4 14h8M5 2c0 3.5 3 4.5 3 6s-3 2.5-3 6M11 2c0 3.5-3 4.5-3 6s3 2.5 3 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-dots" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="12.5" cy="8" r="1.5" fill="currentColor"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 16 16"><path d="M2 5.2h12v8.3H2zM2 5.2l6 4.6 6-4.6M2 13.5l3.4-3.2h5.2L14 13.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
 </svg>
 <a href="#main" class="skip">Skip to dashboard</a>
 <div id="authGate" class="auth-gate" role="dialog" aria-modal="true" aria-labelledby="authTitle">
@@ -931,6 +975,11 @@ button,[role="button"]{touch-action:manipulation}
   <!-- a <div>, deliberately: body.phone main>section{display:none} hides every
        pane but the active one, and the capture result must survive that -->
   <div class="capres" id="capres" role="status" aria-live="polite" hidden></div>
+
+  <section id="approvals">
+    <div class="sec-h"><h2><svg class="ic" aria-hidden="true"><use href="#i-inbox"/></svg> Approvals</h2><div class="ln"></div><span class="ct" id="ap-ct"></span></div>
+    <div class="ap-list" id="ap-list"><div class="ph">loading…</div></div>
+  </section>
 
   <section id="critical-sec">
     <div class="sec-h"><h2><svg class="ic" aria-hidden="true"><use href="#i-warn"/></svg> Critical Now</h2><div class="ln"></div><span class="ct" id="crit-ct"></span></div>
@@ -1349,6 +1398,8 @@ document.addEventListener('click',e=>{
   else if(kind==='cap-restore'){ capRestore(); }
   else if(kind==='cap-domain'){ capFlipDomain(); }
   else if(kind==='cap-edit'){ capEdit(); }
+  else if(kind==='ap-approve'){ if(id) decideApproval(id,'approve'); }
+  else if(kind==='ap-reject'){ if(id) decideApproval(id,'reject'); }
 });
 
 /* ---- phone app shell (≤640px): one pane at a time behind the bottom tab
@@ -2123,6 +2174,116 @@ function renderHeat(h){
   $('#heat').innerHTML=html;
 }
 
+/* approvals inbox — body is agent-authored, so it is assigned via textContent */
+function renderApprovals(items){
+  const list=Array.isArray(items)?items:[];
+  const n=list.length;
+  const ct=$('#ap-ct'); if(ct) ct.textContent=n? (n+' pending') : 'none pending';
+  const sec=$('#approvals'); if(sec) sec.classList.toggle('has-pending', n>0);
+  const host=$('#ap-list'); if(!host) return;
+  const notes={};
+  host.querySelectorAll('.ap-card').forEach(c=>{
+    const inp=c.querySelector('.ap-note');
+    if(inp&&inp.value&&c.dataset.id) notes[c.dataset.id]=inp.value;
+  });
+  host.replaceChildren();
+  if(!n){
+    const ph=document.createElement('div');
+    ph.className='ph';
+    ph.textContent='no pending approvals';
+    host.appendChild(ph);
+    return;
+  }
+  list.forEach(item=>{
+    const id=String(item&&item.id||'');
+    const card=document.createElement('div');
+    card.className='ap-card';
+    card.dataset.id=id;
+    const hd=document.createElement('div');
+    hd.className='ap-hd';
+    const kind=document.createElement('span'); kind.className='ap-kind'; kind.textContent=item.kind||'';
+    const apid=document.createElement('span'); apid.className='ap-id'; apid.textContent=id;
+    const who=document.createElement('span'); who.className='ap-who'; who.textContent=item.requester||'';
+    const age=document.createElement('span'); age.className='age'; age.textContent=relTime(item.created_at);
+    hd.append(kind, apid, who, age);
+    const title=document.createElement('h3');
+    title.textContent=item.title||'';
+    // What the operator approves is the stored payload (preview is rendered by pTask FROM it);
+    // the requester's prose is shown separately and labelled.
+    const meta=document.createElement('div');
+    meta.className='ap-meta';
+    meta.textContent=(item.payload_stored
+      ? ((item.payload_name||item.payload_kind||'payload')+' · '+(item.payload_bytes||0)+' B')
+      : 'payload not stored (digest only)')+' · sha256 '+String(item.digest||'').slice(0,12);
+    const body=document.createElement('pre');
+    body.className='ap-body';
+    body.textContent=item.preview||'';
+    const rnote=document.createElement('p');
+    rnote.className='ap-rnote';
+    rnote.textContent=item.request_note ? ('Requester note: '+item.request_note) : '';
+    const actions=document.createElement('div');
+    actions.className='ap-act';
+    const note=document.createElement('input');
+    note.className='ap-note';
+    note.type='text';
+    note.maxLength=2000;
+    note.placeholder='optional note';
+    note.setAttribute('aria-label','optional note for '+id);
+    if(notes[id]) note.value=notes[id];
+    const approve=document.createElement('button');
+    approve.type='button';
+    approve.className='mbtn primary';
+    approve.dataset.act='ap-approve';
+    approve.textContent='Approve';
+    const reject=document.createElement('button');
+    reject.type='button';
+    reject.className='mbtn ap-rej';
+    reject.dataset.act='ap-reject';
+    reject.textContent='Reject';
+    actions.append(note, approve, reject);
+    card.append(hd, title, meta, body, rnote, actions);
+    host.appendChild(card);
+  });
+}
+async function loadApprovals(force){
+  const active=document.activeElement;
+  if(!force && active && active.classList && active.classList.contains('ap-note')) return;
+  try{
+    const data=await api('/api/approvals');
+    renderApprovals(Array.isArray(data)?data:[]);
+  }catch(e){
+    if(e.auth) return;
+    const host=$('#ap-list'); if(!host) return;
+    host.replaceChildren();
+    const ph=document.createElement('div');
+    ph.className='ph';
+    ph.textContent='approvals unavailable: '+(e.message||'error');
+    host.appendChild(ph);
+  }
+}
+async function decideApproval(id, verb){
+  const card=document.querySelector('.ap-card[data-id="'+CSS.escape(id)+'"]');
+  const noteEl=card&&card.querySelector('.ap-note');
+  const note=noteEl?noteEl.value:'';
+  const payload={};
+  if(note) payload.note=note;
+  if(card) card.querySelectorAll('button').forEach(b=>b.disabled=true);
+  try{
+    const r=await fetch('/api/approvals/'+encodeURIComponent(id)+'/'+verb,{
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+    });
+    const j=await r.json().catch(()=>({}));
+    if(r.status===401){ showLogin('Your session has expired.'); return; }
+    const word=verb==='approve'?'approved':'rejected';
+    if(r.ok && j.ok) toast('\u2713 '+id+' '+word);
+    else toast('\u2717 '+(j.error||j.message||'failed'));
+    await loadApprovals(true);
+  }catch(e){
+    toast('\u2717 '+e.message);
+    if(card) card.querySelectorAll('button').forEach(b=>b.disabled=false);
+  }
+}
+
 /* ---- v2.3: task cache + selection model + keyboard triage ---- */
 /* _pendingAll/_recentAll are the raw payloads; _tasks is the domain-filtered
    pending view every panel renders from. */
@@ -2309,6 +2470,7 @@ async function load(force){
     $('#sbar').classList.add('err'); $('#live-lbl').textContent='STALE';
     $('#status').textContent='⚠ connection lost ('+e.message+')'+(_lastGood?' — showing data from '+_lastGood:'')+' · retrying';
   }
+  loadApprovals(force);
 }
 applyPhone();         // phone shell (panes + tab bar) before first data
 let _appStarted=false;
