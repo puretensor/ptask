@@ -11,6 +11,7 @@
 //! Tools return compact JSON text — the consumer is a model, not a human.
 
 use ptask_core::Db;
+use ptask_core::config::DispatchCfg;
 use ptask_core::event_log::EventCtx;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -167,12 +168,59 @@ pub struct DigestArg {
     pub days: Option<i64>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ApprovalRequestArg {
+    /// email | ebay | spend | destroy | external | budget | other
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// UTF-8 payload stored as a file.
+    #[serde(default)]
+    pub payload: Option<String>,
+    /// JSON object, canonicalised (sorted keys, compact) and stored; the digest covers the
+    /// canonical bytes. Advertised as an object so every MCP client can see and fill it.
+    #[serde(default)]
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub payload_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub digest: Option<String>,
+    #[serde(default)]
+    pub payload_name: Option<String>,
+    #[serde(default)]
+    pub task: Option<String>,
+    #[serde(default)]
+    pub expires_in: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct ApprovalListArg {
+    /// pending (default) | approved | rejected | withdrawn | expired | all
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ApprovalIdArg {
+    /// AP-n or the row uuid.
+    pub id: String,
+}
+
 // --------------------------------------------------------------- handler
+
+/// Telegram notify settings for MCP-originated approval requests.
+#[derive(Clone, Default)]
+pub struct McpNotify {
+    pub cfg: DispatchCfg,
+    pub dash_url: Option<String>,
+    pub tg_buttons: bool,
+}
 
 #[derive(Clone)]
 pub struct PtaskMcp {
     db: Db,
     actor: String,
+    notify: McpNotify,
     #[allow(dead_code)]
     tool_router: ToolRouter<PtaskMcp>,
 }
@@ -183,8 +231,14 @@ impl PtaskMcp {
         Self {
             db,
             actor,
+            notify: McpNotify::default(),
             tool_router: Self::tool_router(),
         }
+    }
+
+    pub fn with_notify(mut self, notify: McpNotify) -> Self {
+        self.notify = notify;
+        self
     }
 
     fn ctx(&self) -> EventCtx {
@@ -634,6 +688,111 @@ impl PtaskMcp {
         })
         .await
     }
+
+    #[tool(
+        description = "Request operator approval for an exact payload. Agents request; only the operator decides. Supply exactly one of payload (UTF-8 file), payload_json, or digest."
+    )]
+    async fn approval_request(
+        &self,
+        Parameters(arg): Parameters<ApprovalRequestArg>,
+    ) -> Result<CallToolResult, McpError> {
+        use ptask_core::approvals::{self, ApprovalError, PayloadSource, RequestInput};
+        let n = arg.payload.is_some() as u8
+            + arg.payload_json.is_some() as u8
+            + arg.digest.is_some() as u8;
+        if n != 1 {
+            return Err(McpError::invalid_params(
+                "exactly one of payload, payload_json, digest is required",
+                None,
+            ));
+        }
+        let payload = if let Some(text) = arg.payload {
+            let bytes = text.into_bytes();
+            if bytes.len() > approvals::MAX_PAYLOAD_BYTES {
+                return Err(domain_err(ApprovalError::Invalid(format!(
+                    "payload exceeds {} bytes (256 KiB); use --digest for large payloads",
+                    approvals::MAX_PAYLOAD_BYTES
+                ))));
+            }
+            PayloadSource::File {
+                bytes,
+                name: arg.payload_name,
+                reference: None,
+            }
+        } else if let Some(value) = arg.payload_json {
+            approvals::payload_from_json_value(&value).map_err(domain_err)?
+        } else {
+            approvals::payload_from_digest(arg.digest.as_deref().unwrap_or(""))
+                .map_err(domain_err)?
+        };
+        let input = RequestInput {
+            kind: arg.kind,
+            title: arg.title,
+            request_note: arg.note,
+            payload,
+            task_pt_id: arg.task,
+            expires_in: arg.expires_in,
+        };
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        let notify = self.notify.clone();
+        let outcome =
+            on_blocking(move || approvals::request(&db, input, &ctx).map_err(domain_err)).await?;
+        if outcome.created {
+            let _ = ptask_notify::notify_approval(
+                &self.db,
+                &notify.cfg,
+                notify.dash_url.as_deref(),
+                notify.tg_buttons,
+                &outcome.approval,
+            )
+            .await;
+        }
+        let ap = ptask_core::approvals::get(&self.db, &outcome.approval.uuid)
+            .unwrap_or(outcome.approval);
+        json_ok(&ap.to_json(None))
+    }
+
+    #[tool(description = "List approvals. Default status is pending, oldest first.")]
+    async fn approval_list(
+        &self,
+        Parameters(ApprovalListArg { status }): Parameters<ApprovalListArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        on_blocking(move || {
+            let items = ptask_core::approvals::list(&db, status.as_deref()).map_err(domain_err)?;
+            json_ok(&items.iter().map(|a| a.to_json(None)).collect::<Vec<_>>())
+        })
+        .await
+    }
+
+    #[tool(description = "Show one approval (AP-n) including payload preview.")]
+    async fn approval_status(
+        &self,
+        Parameters(ApprovalIdArg { id }): Parameters<ApprovalIdArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        on_blocking(move || {
+            let ap = ptask_core::approvals::get(&db, &id).map_err(domain_err)?;
+            let events = ptask_core::approvals::events(&db, &ap.uuid).map_err(domain_err)?;
+            json_ok(&ap.to_json(Some(&events)))
+        })
+        .await
+    }
+
+    #[tool(description = "Withdraw a pending approval you requested. Does not decide.")]
+    async fn approval_withdraw(
+        &self,
+        Parameters(ApprovalIdArg { id }): Parameters<ApprovalIdArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let ap = ptask_core::approvals::withdraw(&db, &id, &ctx).map_err(domain_err)?;
+            json_ok(&ap.to_json(None))
+        })
+        .await
+    }
 }
 
 #[tool_handler]
@@ -654,9 +813,10 @@ impl ServerHandler for PtaskMcp {
 
 /// Serve the MCP handler over stdio — `pt mcp`. Blocks until the client
 /// disconnects.
-pub async fn serve_stdio(db: Db, actor: String) -> anyhow::Result<()> {
+pub async fn serve_stdio(db: Db, actor: String, notify: McpNotify) -> anyhow::Result<()> {
     use rmcp::ServiceExt;
     let service = PtaskMcp::new(db, actor)
+        .with_notify(notify)
         .serve(rmcp::transport::stdio())
         .await?;
     service.waiting().await?;

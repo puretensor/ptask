@@ -27,6 +27,9 @@ pub enum Error {
     #[error("{0}")]
     Blocked(String),
 
+    #[error(transparent)]
+    Approval(#[from] crate::approvals::ApprovalError),
+
     #[error("{0}")]
     Other(String),
 }

@@ -10,9 +10,172 @@
 //! live send is wanted.
 
 use ptask_core::accountability::{Dispatch, NudgeRequest};
+use ptask_core::approvals::Approval;
 use ptask_core::config::DispatchCfg;
-use ptask_core::{Error, Result};
+use ptask_core::{Db, Error, Result};
 use tracing::warn;
+
+/// One Telegram inline-keyboard button. Accountability nudges use
+/// [`InlineButton::Callback`]; approval messages may mix in URL buttons.
+#[derive(Debug, Clone)]
+pub enum InlineButton {
+    Callback { text: String, data: String },
+    Url { text: String, url: String },
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn excerpt(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i >= max {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Body + keyboard for an approval Telegram ping.
+pub fn approval_telegram_message(
+    ap: &Approval,
+    dash_url: Option<&str>,
+    tap_buttons: bool,
+) -> (String, Vec<Vec<InlineButton>>) {
+    let preview = excerpt(&ap.preview(), 800);
+    let note = ap.request_note.as_deref().unwrap_or("").trim();
+    let digest_prefix: String = ap.digest.chars().take(12).collect();
+    let mut text = format!(
+        "<b>{}</b> · {} · {}\nRequester: {}\nDigest: {}…\n\nPreview:\n{}",
+        html_escape(&ap.ap_id()),
+        html_escape(&ap.kind),
+        html_escape(&ap.title),
+        html_escape(&ap.requester),
+        html_escape(&digest_prefix),
+        html_escape(&preview),
+    );
+    if !note.is_empty() {
+        text.push_str("\n\nRequester's note:\n");
+        text.push_str(&html_escape(note));
+    }
+    let mut keyboard: Vec<Vec<InlineButton>> = Vec::new();
+    if let Some(base) = dash_url.map(str::trim).filter(|s| !s.is_empty()) {
+        let url = format!("{base}/#approvals");
+        keyboard.push(vec![InlineButton::Url {
+            text: "Open inbox".into(),
+            url,
+        }]);
+    }
+    if tap_buttons {
+        keyboard.push(vec![
+            InlineButton::Callback {
+                text: "Approve".into(),
+                data: format!("ptapprove:{}", ap.ap_id()),
+            },
+            InlineButton::Callback {
+                text: "Reject".into(),
+                data: format!("ptreject:{}", ap.ap_id()),
+            },
+        ]);
+    }
+    (text, keyboard)
+}
+
+/// Send `text` with an arbitrary inline keyboard. `Ok(true)` on HTTP 2xx.
+pub async fn send_telegram_markup(
+    cfg: &DispatchCfg,
+    text: &str,
+    keyboard: &[Vec<InlineButton>],
+) -> Result<bool> {
+    let (Some(token), Some(chat)) = (cfg.telegram_token.as_deref(), cfg.telegram_chat_id) else {
+        return Ok(false);
+    };
+    let base = cfg
+        .telegram_api_base
+        .as_deref()
+        .unwrap_or("https://api.telegram.org");
+    let url = format!("{}/bot{}/sendMessage", base, token);
+    let mut body = serde_json::json!({"chat_id": chat, "text": text, "parse_mode": "HTML"});
+    if !keyboard.is_empty() {
+        let rows: Vec<Vec<serde_json::Value>> = keyboard
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|b| match b {
+                        InlineButton::Callback { text, data } => {
+                            serde_json::json!({"text": text, "callback_data": data})
+                        }
+                        InlineButton::Url { text, url } => {
+                            serde_json::json!({"text": text, "url": url})
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        body["reply_markup"] = serde_json::json!({"inline_keyboard": rows});
+    }
+    let client = reqwest::Client::new();
+    match client
+        .post(url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => Ok(true),
+        Ok(r) => {
+            warn!(target: "ptask::notify", status = %r.status(), "telegram send failed");
+            Ok(false)
+        }
+        Err(e) => {
+            log_telegram_send_error(&e);
+            Ok(false)
+        }
+    }
+}
+
+/// Best-effort ping for one approval. Success stamps `notified_at`. Failure
+/// never fails the request that triggered it.
+pub async fn notify_approval(
+    db: &Db,
+    cfg: &DispatchCfg,
+    dash_url: Option<&str>,
+    tap_buttons: bool,
+    ap: &Approval,
+) -> Result<bool> {
+    if cfg.dry_run || !cfg.telegram_configured() {
+        return Ok(false);
+    }
+    let (text, keyboard) = approval_telegram_message(ap, dash_url, tap_buttons);
+    let ok = send_telegram_markup(cfg, &text, &keyboard).await?;
+    if ok {
+        ptask_core::approvals::mark_notified(db, &ap.uuid)?;
+    }
+    Ok(ok)
+}
+
+/// Sweep pending rows with `notified_at` NULL. Used by `pt approval notify`
+/// and `pt accountability run`.
+pub async fn notify_pending(
+    db: &Db,
+    cfg: &DispatchCfg,
+    dash_url: Option<&str>,
+    tap_buttons: bool,
+) -> Result<usize> {
+    let pending = ptask_core::approvals::pending_unnotified(db)?;
+    let mut n = 0usize;
+    for ap in pending {
+        if notify_approval(db, cfg, dash_url, tap_buttons, &ap).await? {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
 
 /// Production dispatcher: reqwest for Telegram + HAL, lettre for SMTP.
 #[derive(Debug, Default, Clone, Copy)]
@@ -44,41 +207,20 @@ impl Dispatch for HttpDispatch {
         text: &str,
         buttons: &[(String, String)],
     ) -> Result<bool> {
-        let (Some(token), Some(chat)) = (cfg.telegram_token.as_deref(), cfg.telegram_chat_id)
-        else {
-            return Ok(false);
+        let keyboard: Vec<Vec<InlineButton>> = if buttons.is_empty() {
+            Vec::new()
+        } else {
+            vec![
+                buttons
+                    .iter()
+                    .map(|(label, data)| InlineButton::Callback {
+                        text: label.clone(),
+                        data: data.clone(),
+                    })
+                    .collect(),
+            ]
         };
-        let base = cfg
-            .telegram_api_base
-            .as_deref()
-            .unwrap_or("https://api.telegram.org");
-        let url = format!("{}/bot{}/sendMessage", base, token);
-        let mut body = serde_json::json!({"chat_id": chat, "text": text, "parse_mode": "HTML"});
-        if !buttons.is_empty() {
-            let row: Vec<serde_json::Value> = buttons
-                .iter()
-                .map(|(label, data)| serde_json::json!({"text": label, "callback_data": data}))
-                .collect();
-            body["reply_markup"] = serde_json::json!({"inline_keyboard": [row]});
-        }
-        let client = reqwest::Client::new();
-        match client
-            .post(url)
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => Ok(true),
-            Ok(r) => {
-                warn!(target: "ptask::notify", status = %r.status(), "telegram send failed");
-                Ok(false)
-            }
-            Err(e) => {
-                log_telegram_send_error(&e);
-                Ok(false)
-            }
-        }
+        send_telegram_markup(cfg, text, &keyboard).await
     }
 
     /// Send a single email via SMTP. CC is mandatory (CLAUDE.md). Returns

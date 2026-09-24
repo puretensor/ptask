@@ -5,9 +5,11 @@ provenance links, idempotent capture, and a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 13 tools (`task_next / task_list / task_add /
+Two transports, one handler, 17 tools (`task_next / task_list / task_add /
 task_show / task_done / task_dismiss / task_edit / task_claim / task_promote /
-task_depend / task_capture / task_search / task_digest`):
+task_depend / task_capture / task_search / task_digest` plus
+`approval_request / approval_list / approval_status / approval_withdraw` —
+agents request, they never decide; see [`approvals.md`](approvals.md)):
 
 - **streamable-HTTP** at `http://127.0.0.1:9501/mcp` (or your `PTASK_SYNC_URL`),
   bearer-gated to a named write token. Per-request identity cannot reach rmcp

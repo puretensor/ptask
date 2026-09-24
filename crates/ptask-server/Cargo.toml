@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [dependencies]
 ptask-core = { workspace = true }
+ptask-notify = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }

@@ -18,7 +18,7 @@ pub mod webhooks;
 use anyhow::Result;
 use axum::Router;
 use ptask_core::Db;
-use ptask_core::config::{AuthConfig, DashConfig, WebhookConfig};
+use ptask_core::config::{AuthConfig, Config, DashConfig, DispatchCfg, WebhookConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -31,6 +31,9 @@ pub struct AppState {
     pub auth: Arc<AuthConfig>,
     pub webhooks: Arc<WebhookConfig>,
     pub dash: Arc<DashConfig>,
+    pub notify: Arc<DispatchCfg>,
+    pub tg_forwarders: Arc<Vec<String>>,
+    pub tg_approval_buttons: bool,
 }
 
 impl AppState {
@@ -40,11 +43,30 @@ impl AppState {
             auth: Arc::new(auth),
             webhooks: Arc::new(webhooks),
             dash: Arc::new(DashConfig::default()),
+            notify: Arc::new(DispatchCfg::default()),
+            tg_forwarders: Arc::new(vec!["nexus".into()]),
+            tg_approval_buttons: false,
         }
     }
 
     pub fn with_dash(mut self, dash: DashConfig) -> Self {
         self.dash = Arc::new(dash);
+        self
+    }
+
+    pub fn with_notify(
+        mut self,
+        notify: DispatchCfg,
+        tg_forwarders: Vec<String>,
+        tg_approval_buttons: bool,
+    ) -> Self {
+        self.notify = Arc::new(notify);
+        self.tg_forwarders = Arc::new(if tg_forwarders.is_empty() {
+            vec!["nexus".into()]
+        } else {
+            tg_forwarders
+        });
+        self.tg_approval_buttons = tg_approval_buttons;
         self
     }
 }
@@ -103,8 +125,13 @@ pub fn router(state: AppState) -> Router {
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
     let mcp_db = state.db.clone();
+    let mcp_notify = mcp::McpNotify {
+        cfg: (*state.notify).clone(),
+        dash_url: state.dash.url.clone(),
+        tg_buttons: state.tg_approval_buttons,
+    };
     let mcp_service = StreamableHttpService::new(
-        move || Ok(mcp::PtaskMcp::new(mcp_db.clone(), "hal".into())),
+        move || Ok(mcp::PtaskMcp::new(mcp_db.clone(), "hal".into()).with_notify(mcp_notify.clone())),
         LocalSessionManager::default().into(),
         // rmcp's DNS-rebinding host allowlist defaults to localhost-only,
         // but this mount binds the tailnet IP and sits behind the hal
@@ -126,6 +153,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::email::router())
         .merge(routes::sync::router())
         .merge(routes::tg::router())
+        .merge(routes::approvals::router())
         .merge(routes::read::router())
         .merge(routes::metrics::router())
         .merge(routes::webhook_git::router())
@@ -137,18 +165,18 @@ pub fn router(state: AppState) -> Router {
 /// Run the server on `addr` until SIGINT / SIGTERM. Blocks the current task.
 /// `auth`/`webhooks` come from the entrypoint's one `Config::from_env()` —
 /// the server itself never reads the process environment.
-pub async fn serve(
-    db: Db,
-    addr: SocketAddr,
-    auth_cfg: AuthConfig,
-    webhook_cfg: WebhookConfig,
-    dash_cfg: DashConfig,
-) -> Result<()> {
-    if let Err(e) = auth::validate_bind_auth(&addr, &auth_cfg, &dash_cfg) {
+pub async fn serve(db: Db, addr: SocketAddr, config: Config) -> Result<()> {
+    if let Err(e) = auth::validate_bind_auth(&addr, &config.auth, &config.dash) {
         anyhow::bail!(e);
     }
-    auth::warn_if_unconfigured(&auth_cfg);
-    let state = AppState::new(db, auth_cfg, webhook_cfg).with_dash(dash_cfg);
+    auth::warn_if_unconfigured(&config.auth);
+    let state = AppState::new(db, config.auth, config.webhooks)
+        .with_dash(config.dash)
+        .with_notify(
+            config.notify,
+            config.tg_forwarders,
+            config.tg_approval_buttons,
+        );
     let app = router(state);
     info!(target: "ptask::server", %addr, "starting pt serve");
     let listener = TcpListener::bind(addr).await?;

@@ -132,7 +132,7 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.19.2"
+VERSION = "0.20.0"
 DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
 DASH_DOMAINS = parse_domains(os.environ.get("PTASK_DASH_DOMAINS"))
 DASH_DEFAULT_DOMAIN = resolve_default_domain(

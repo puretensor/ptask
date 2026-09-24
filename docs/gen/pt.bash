@@ -22,6 +22,12 @@ _pt() {
             pt,add)
                 cmd="pt__subcmd__add"
                 ;;
+            pt,approval)
+                cmd="pt__subcmd__approval"
+                ;;
+            pt,approve)
+                cmd="pt__subcmd__approve"
+                ;;
             pt,backfill)
                 cmd="pt__subcmd__backfill"
                 ;;
@@ -94,6 +100,9 @@ _pt() {
             pt,reap)
                 cmd="pt__subcmd__reap"
                 ;;
+            pt,reject)
+                cmd="pt__subcmd__reject"
+                ;;
             pt,remote)
                 cmd="pt__subcmd__remote"
                 ;;
@@ -151,11 +160,83 @@ _pt() {
             pt__subcmd__accountability__subcmd__help,run)
                 cmd="pt__subcmd__accountability__subcmd__help__subcmd__run"
                 ;;
+            pt__subcmd__approval,consume)
+                cmd="pt__subcmd__approval__subcmd__consume"
+                ;;
+            pt__subcmd__approval,decide)
+                cmd="pt__subcmd__approval__subcmd__decide"
+                ;;
+            pt__subcmd__approval,expire)
+                cmd="pt__subcmd__approval__subcmd__expire"
+                ;;
+            pt__subcmd__approval,help)
+                cmd="pt__subcmd__approval__subcmd__help"
+                ;;
+            pt__subcmd__approval,list)
+                cmd="pt__subcmd__approval__subcmd__list"
+                ;;
+            pt__subcmd__approval,notify)
+                cmd="pt__subcmd__approval__subcmd__notify"
+                ;;
+            pt__subcmd__approval,payload)
+                cmd="pt__subcmd__approval__subcmd__payload"
+                ;;
+            pt__subcmd__approval,request)
+                cmd="pt__subcmd__approval__subcmd__request"
+                ;;
+            pt__subcmd__approval,show)
+                cmd="pt__subcmd__approval__subcmd__show"
+                ;;
+            pt__subcmd__approval,verify)
+                cmd="pt__subcmd__approval__subcmd__verify"
+                ;;
+            pt__subcmd__approval,withdraw)
+                cmd="pt__subcmd__approval__subcmd__withdraw"
+                ;;
+            pt__subcmd__approval__subcmd__help,consume)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__consume"
+                ;;
+            pt__subcmd__approval__subcmd__help,decide)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__decide"
+                ;;
+            pt__subcmd__approval__subcmd__help,expire)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__expire"
+                ;;
+            pt__subcmd__approval__subcmd__help,help)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__help"
+                ;;
+            pt__subcmd__approval__subcmd__help,list)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__list"
+                ;;
+            pt__subcmd__approval__subcmd__help,notify)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__notify"
+                ;;
+            pt__subcmd__approval__subcmd__help,payload)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__payload"
+                ;;
+            pt__subcmd__approval__subcmd__help,request)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__request"
+                ;;
+            pt__subcmd__approval__subcmd__help,show)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__show"
+                ;;
+            pt__subcmd__approval__subcmd__help,verify)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__verify"
+                ;;
+            pt__subcmd__approval__subcmd__help,withdraw)
+                cmd="pt__subcmd__approval__subcmd__help__subcmd__withdraw"
+                ;;
             pt__subcmd__help,accountability)
                 cmd="pt__subcmd__help__subcmd__accountability"
                 ;;
             pt__subcmd__help,add)
                 cmd="pt__subcmd__help__subcmd__add"
+                ;;
+            pt__subcmd__help,approval)
+                cmd="pt__subcmd__help__subcmd__approval"
+                ;;
+            pt__subcmd__help,approve)
+                cmd="pt__subcmd__help__subcmd__approve"
                 ;;
             pt__subcmd__help,backfill)
                 cmd="pt__subcmd__help__subcmd__backfill"
@@ -229,6 +310,9 @@ _pt() {
             pt__subcmd__help,reap)
                 cmd="pt__subcmd__help__subcmd__reap"
                 ;;
+            pt__subcmd__help,reject)
+                cmd="pt__subcmd__help__subcmd__reject"
+                ;;
             pt__subcmd__help,remote)
                 cmd="pt__subcmd__help__subcmd__remote"
                 ;;
@@ -276,6 +360,36 @@ _pt() {
                 ;;
             pt__subcmd__help__subcmd__accountability,run)
                 cmd="pt__subcmd__help__subcmd__accountability__subcmd__run"
+                ;;
+            pt__subcmd__help__subcmd__approval,consume)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__consume"
+                ;;
+            pt__subcmd__help__subcmd__approval,decide)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__decide"
+                ;;
+            pt__subcmd__help__subcmd__approval,expire)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__expire"
+                ;;
+            pt__subcmd__help__subcmd__approval,list)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__list"
+                ;;
+            pt__subcmd__help__subcmd__approval,notify)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__notify"
+                ;;
+            pt__subcmd__help__subcmd__approval,payload)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__payload"
+                ;;
+            pt__subcmd__help__subcmd__approval,request)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__request"
+                ;;
+            pt__subcmd__help__subcmd__approval,show)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__show"
+                ;;
+            pt__subcmd__help__subcmd__approval,verify)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__verify"
+                ;;
+            pt__subcmd__help__subcmd__approval,withdraw)
+                cmd="pt__subcmd__help__subcmd__approval__subcmd__withdraw"
                 ;;
             pt__subcmd__help__subcmd__remote,add)
                 cmd="pt__subcmd__help__subcmd__remote__subcmd__add"
@@ -506,7 +620,7 @@ _pt() {
 
     case "${cmd}" in
         pt)
-            opts="-h -V --db --json --idempotency-key --color --no-color --help --version add list done priority edit reopen show dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
+            opts="-h -V --db --json --idempotency-key --color --no-color --help --version add list done priority edit reopen show dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token approval approve reject backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -662,6 +776,566 @@ _pt() {
                     ;;
                 --deliverable)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval)
+            opts="-h --db --json --idempotency-key --color --no-color --help request list show payload withdraw verify consume expire notify decide help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__consume)
+            opts="-h --payload-file --payload-json --digest --db --json --idempotency-key --color --no-color --help <ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --payload-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --payload-json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --digest)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__decide)
+            opts="-h --note --via --db --json --idempotency-key --color --no-color --help <ID> <DECISION>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --note)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --via)
+                    COMPREPLY=($(compgen -W "dashboard" -- "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__expire)
+            opts="-h --db --json --idempotency-key --color --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help)
+            opts="request list show payload withdraw verify consume expire notify decide help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__consume)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__decide)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__expire)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__notify)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__payload)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__request)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__show)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__verify)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__help__subcmd__withdraw)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__list)
+            opts="-h --status --db --json --idempotency-key --color --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --status)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__notify)
+            opts="-h --db --json --idempotency-key --color --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__payload)
+            opts="-h --db --json --idempotency-key --color --no-color --help <ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__request)
+            opts="-h --kind --title --note --note-file --payload-file --payload-json --digest --task --expires-in --db --json --idempotency-key --color --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --kind)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --title)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --note)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --note-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --payload-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --payload-json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --digest)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --task)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --expires-in)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__show)
+            opts="-h --db --json --idempotency-key --color --no-color --help <ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__verify)
+            opts="-h --payload-file --payload-json --digest --db --json --idempotency-key --color --no-color --help <ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --payload-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --payload-json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --digest)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approval__subcmd__withdraw)
+            opts="-h --db --json --idempotency-key --color --no-color --help <ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__approve)
+            opts="-h --note --via --db --json --idempotency-key --color --no-color --help <ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --note)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --via)
+                    COMPREPLY=($(compgen -W "dashboard" -- "${cur}"))
                     return 0
                     ;;
                 --db)
@@ -1088,7 +1762,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help)
-            opts="add list done priority edit reopen show dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token backfill gen-manpage gen-completions help"
+            opts="add list done priority edit reopen show dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token approval approve reject backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1130,6 +1804,174 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval)
+            opts="request list show payload withdraw verify consume expire notify decide"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__consume)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__decide)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__expire)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__notify)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__payload)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__request)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__show)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__verify)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approval__subcmd__withdraw)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__approve)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1466,6 +2308,20 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help__subcmd__reap)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__reject)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2296,6 +3152,40 @@ _pt() {
                 return 0
             fi
             case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__reject)
+            opts="-h --note --via --db --json --idempotency-key --color --no-color --help <ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --note)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --via)
+                    COMPREPLY=($(compgen -W "dashboard" -- "${cur}"))
+                    return 0
+                    ;;
                 --db)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
