@@ -14,6 +14,7 @@ use ptask_core::{Db, Extensions, NewTask, dag, priority, pt_id, quickadd, tasks,
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+mod approvals;
 mod remote;
 mod ui;
 
@@ -146,6 +147,13 @@ enum Command {
     /// Manage named scoped API tokens (create/list/revoke).
     #[command(subcommand)]
     Token(TokenCommand),
+    /// Approval inbox: agents request, the operator decides, executors consume.
+    #[command(subcommand)]
+    Approval(approvals::ApprovalCommand),
+    /// Approve a pending approval request (operator only).
+    Approve(approvals::DecideArgs),
+    /// Reject a pending approval request (operator only).
+    Reject(approvals::DecideArgs),
     /// One-shot backfill PT-N for any tasks lacking one.
     Backfill,
     /// Generate the `pt(1)` manpage to stdout.
@@ -762,6 +770,10 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     if let Err(e) = run() {
+        if let Some(code) = approvals::exit_code(&e) {
+            eprintln!("{}", ui::section("error", ui::Ink::Red, &format!("{e:#}")));
+            std::process::exit(code);
+        }
         eprintln!("{}", ui::section("error", ui::Ink::Red, &format!("{e:#}")));
         std::process::exit(1);
     }
@@ -780,7 +792,10 @@ fn run() -> Result<()> {
     // Lightweight tracing: env-controlled, off by default.
     let filter = tracing_subscriber::EnvFilter::try_from_env("PTASK_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 
     let command = cli.command;
 
@@ -833,6 +848,25 @@ fn run() -> Result<()> {
                 Some(Command::Log(a)) => cmd_log(&db, a),
                 Some(Command::Undo) => cmd_undo(&db),
                 Some(Command::Token(c)) => cmd_token(&db, c),
+                Some(Command::Approval(c)) => cmd_approval(&db, c),
+                Some(Command::Approve(a)) => approvals::cmd_decide(
+                    &db,
+                    &a.id,
+                    ptask_core::approvals::Decision::Approve,
+                    a.note.as_deref(),
+                    a.via,
+                    cli_ctx(),
+                    json_mode(),
+                ),
+                Some(Command::Reject(a)) => approvals::cmd_decide(
+                    &db,
+                    &a.id,
+                    ptask_core::approvals::Decision::Reject,
+                    a.note.as_deref(),
+                    a.via,
+                    cli_ctx(),
+                    json_mode(),
+                ),
                 Some(Command::Backfill) => cmd_backfill(&db),
                 None if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
                     ptask_tui::run(db)
@@ -1733,7 +1767,15 @@ fn cmd_mcp(db: Db) -> Result<()> {
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    rt.block_on(ptask_server::mcp::serve_stdio(db, config.actor))
+    rt.block_on(ptask_server::mcp::serve_stdio(
+        db,
+        config.actor,
+        ptask_server::mcp::McpNotify {
+            cfg: config.notify,
+            dash_url: config.dash.url,
+            tg_buttons: config.tg_approval_buttons,
+        },
+    ))
 }
 
 fn cmd_digest(db: &Db, a: DigestArgs) -> Result<()> {
@@ -1922,13 +1964,7 @@ fn cmd_serve(db: Db, a: ServeArgs) -> Result<()> {
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    rt.block_on(ptask_server::serve(
-        db,
-        addr,
-        config.auth,
-        config.webhooks,
-        config.dash,
-    ))
+    rt.block_on(ptask_server::serve(db, addr, config))
 }
 
 fn cmd_bot(db: Db) -> Result<()> {
@@ -1957,11 +1993,10 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                 .enable_all()
                 .build()
                 .context("building tokio runtime")?;
-            let report = rt.block_on(ptask_core::accountability::run_check(
-                &db,
-                &cfg,
-                &ptask_notify::HttpDispatch,
-            ))?;
+            let report = rt.block_on(async {
+                let _ = approvals::notify_pending_async(&db).await;
+                ptask_core::accountability::run_check(&db, &cfg, &ptask_notify::HttpDispatch).await
+            })?;
             if report.quiet_hours {
                 println!(
                     "{}",
@@ -2596,6 +2631,27 @@ fn cmd_undo(db: &Db) -> Result<()> {
         )
     );
     Ok(())
+}
+
+fn cmd_approval(db: &Db, c: approvals::ApprovalCommand) -> Result<()> {
+    match c {
+        approvals::ApprovalCommand::Request(a) => {
+            approvals::cmd_request(db, a, cli_ctx(), json_mode())
+        }
+        approvals::ApprovalCommand::List(a) => approvals::cmd_list(db, a, json_mode()),
+        approvals::ApprovalCommand::Show(a) => approvals::cmd_show(db, a, json_mode()),
+        approvals::ApprovalCommand::Payload(a) => approvals::cmd_payload(db, a),
+        approvals::ApprovalCommand::Withdraw(a) => {
+            approvals::cmd_withdraw(db, a, cli_ctx(), json_mode())
+        }
+        approvals::ApprovalCommand::Verify(a) => approvals::cmd_verify(db, a),
+        approvals::ApprovalCommand::Consume(a) => approvals::cmd_consume(db, a, cli_ctx()),
+        approvals::ApprovalCommand::Expire => approvals::cmd_expire(db, cli_ctx()),
+        approvals::ApprovalCommand::Notify => approvals::cmd_notify(db),
+        approvals::ApprovalCommand::Decide(a) => {
+            approvals::cmd_long_decide(db, a, cli_ctx(), json_mode())
+        }
+    }
 }
 
 fn cmd_token(db: &Db, c: TokenCommand) -> Result<()> {

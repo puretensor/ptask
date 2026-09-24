@@ -145,6 +145,7 @@ mod tests {
                 ("pt_api_tokens", "table"),
                 ("task_links", "table"),
                 ("task_labels", "table"),
+                ("approvals", "table"),
             ] {
                 let exists: i64 = c
                     .query_row(

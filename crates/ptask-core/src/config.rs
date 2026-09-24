@@ -25,6 +25,12 @@ pub struct Config {
     pub webhooks: WebhookConfig,
     pub distill: DistillConfig,
     pub dash: DashConfig,
+    /// Named HTTP clients allowed to forward Telegram approval taps
+    /// (`$PTASK_TG_FORWARDERS`, comma-separated, default `nexus`).
+    pub tg_forwarders: Vec<String>,
+    /// When true, approval Telegram messages include tap-to-decide
+    /// callback buttons (`$PTASK_TG_APPROVAL_BUTTONS=1`).
+    pub tg_approval_buttons: bool,
 }
 
 /// Triage-cockpit surface served by `pt serve` (v2.3.0 — absorbed from the
@@ -46,6 +52,9 @@ pub struct DashConfig {
     /// (`$PTASK_DASH_FRAME_ANCESTOR`). When unset or invalid, dashboard
     /// documents retain the fail-closed `X-Frame-Options: DENY` policy.
     pub frame_ancestor: Option<String>,
+    /// Public dashboard origin (`$PTASK_DASH_URL`), used as the approval
+    /// Telegram URL-button target. None = omit the button.
+    pub url: Option<String>,
 }
 
 /// API-token material for `pt serve` (enforce-if-configured).
@@ -193,8 +202,27 @@ impl Config {
                 voice_shim_url: env_nonempty("PTASK_VOICE_SHIM_URL")
                     .unwrap_or_else(|| "http://127.0.0.1:9510".into()),
                 frame_ancestor: env_nonempty("PTASK_DASH_FRAME_ANCESTOR"),
+                url: env_nonempty("PTASK_DASH_URL"),
             },
+            tg_forwarders: parse_forwarders(env_nonempty("PTASK_TG_FORWARDERS")),
+            tg_approval_buttons: env_truthy("PTASK_TG_APPROVAL_BUTTONS"),
         }
+    }
+}
+
+fn parse_forwarders(raw: Option<String>) -> Vec<String> {
+    let parsed = raw
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if parsed.is_empty() {
+        vec!["nexus".into()]
+    } else {
+        parsed
     }
 }
 

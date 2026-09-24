@@ -1080,6 +1080,252 @@ esac
     ;;
 esac
 ;;
+(approval)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_pt__subcmd__approval_commands" \
+"*::: :->approval" \
+&& ret=0
+
+    case $state in
+    (approval)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-approval-command-$line[1]:"
+        case $line[1] in
+            (request)
+_arguments "${_arguments_options[@]}" : \
+'--kind=[email | ebay | spend | destroy | external | budget | other]:KIND:_default' \
+'--title=[Short operator-facing title]:TITLE:_default' \
+'--note=[Requester'\''s note (always labelled as such; never mixed into preview)]:NOTE:_default' \
+'--note-file=[Read the requester'\''s note from a file]:NOTE_FILE:_files' \
+'--payload-file=[Store this file as the bound payload (max 256 KiB)]:PAYLOAD_FILE:_files' \
+'--payload-json=[Store canonical JSON as the bound payload]:PAYLOAD_JSON:_default' \
+'--digest=[Bind to a digest without storing the payload]:DIGEST:_default' \
+'--task=[Optional linked task (PT-n)]:TASK:_default' \
+'--expires-in=[Auto-expire after this duration, e.g. 1s, 15m, 2h, 7d]:EXPIRES_IN:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'--status=[pending (default) | approved | rejected | withdrawn | expired | all]:STATUS:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- AP-n (or the row uuid):_default' \
+&& ret=0
+;;
+(payload)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- AP-n (or the row uuid):_default' \
+&& ret=0
+;;
+(withdraw)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- AP-n (or the row uuid):_default' \
+&& ret=0
+;;
+(verify)
+_arguments "${_arguments_options[@]}" : \
+'--payload-file=[]:PAYLOAD_FILE:_files' \
+'--payload-json=[]:PAYLOAD_JSON:_default' \
+'--digest=[]:DIGEST:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- AP-n (or the row uuid):_default' \
+&& ret=0
+;;
+(consume)
+_arguments "${_arguments_options[@]}" : \
+'--payload-file=[]:PAYLOAD_FILE:_files' \
+'--payload-json=[]:PAYLOAD_JSON:_default' \
+'--digest=[]:DIGEST:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- AP-n (or the row uuid):_default' \
+&& ret=0
+;;
+(expire)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(notify)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(decide)
+_arguments "${_arguments_options[@]}" : \
+'--note=[]:NOTE:_default' \
+'--via=[]:VIA:(dashboard)' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- AP-n (or the row uuid):_default' \
+':decision -- approve | reject:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__approval__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-approval-help-command-$line[1]:"
+        case $line[1] in
+            (request)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(payload)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(withdraw)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(verify)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(consume)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(expire)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(notify)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(decide)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(approve)
+_arguments "${_arguments_options[@]}" : \
+'--note=[]:NOTE:_default' \
+'--via=[Record decided_via=dashboard (also allows a non-TTY stdin)]:VIA:(dashboard)' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- AP-n (or the row uuid):_default' \
+&& ret=0
+;;
+(reject)
+_arguments "${_arguments_options[@]}" : \
+'--note=[]:NOTE:_default' \
+'--via=[Record decided_via=dashboard (also allows a non-TTY stdin)]:VIA:(dashboard)' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- AP-n (or the row uuid):_default' \
+&& ret=0
+;;
 (backfill)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
@@ -1426,6 +1672,70 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(approval)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__help__subcmd__approval_commands" \
+"*::: :->approval" \
+&& ret=0
+
+    case $state in
+    (approval)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-help-approval-command-$line[1]:"
+        case $line[1] in
+            (request)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(payload)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(withdraw)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(verify)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(consume)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(expire)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(notify)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(decide)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(approve)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reject)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (backfill)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1491,6 +1801,9 @@ _pt_commands() {
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
 'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
+'approval:Approval inbox\: agents request, the operator decides, executors consume' \
+'approve:Approve a pending approval request (operator only)' \
+'reject:Reject a pending approval request (operator only)' \
 'backfill:One-shot backfill PT-N for any tasks lacking one' \
 'gen-manpage:Generate the \`pt(1)\` manpage to stdout' \
 'gen-completions:Generate shell completions (bash/zsh/fish) to stdout' \
@@ -1533,6 +1846,150 @@ _pt__subcmd__accountability__subcmd__run_commands() {
 _pt__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'pt add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval_commands] )) ||
+_pt__subcmd__approval_commands() {
+    local commands; commands=(
+'request:Request operator approval for an exact payload' \
+'list:List approvals (default\: pending, oldest first)' \
+'show:Show one approval, including journal events' \
+'payload:Write the stored payload bytes to stdout' \
+'withdraw:Withdraw a pending request (requester only)' \
+'verify:Check that an approval is approved and the payload still matches' \
+'consume:Verify and latch the approval as consumed (exactly once)' \
+'expire:Mark pending rows past expires_at as expired' \
+'notify:Send Telegram pings for pending un-notified requests' \
+'decide:Approve or reject a pending request (operator only)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt approval commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__consume_commands] )) ||
+_pt__subcmd__approval__subcmd__consume_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval consume commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__decide_commands] )) ||
+_pt__subcmd__approval__subcmd__decide_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval decide commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__expire_commands] )) ||
+_pt__subcmd__approval__subcmd__expire_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval expire commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help_commands] )) ||
+_pt__subcmd__approval__subcmd__help_commands() {
+    local commands; commands=(
+'request:Request operator approval for an exact payload' \
+'list:List approvals (default\: pending, oldest first)' \
+'show:Show one approval, including journal events' \
+'payload:Write the stored payload bytes to stdout' \
+'withdraw:Withdraw a pending request (requester only)' \
+'verify:Check that an approval is approved and the payload still matches' \
+'consume:Verify and latch the approval as consumed (exactly once)' \
+'expire:Mark pending rows past expires_at as expired' \
+'notify:Send Telegram pings for pending un-notified requests' \
+'decide:Approve or reject a pending request (operator only)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt approval help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__consume_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__consume_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help consume commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__decide_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__decide_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help decide commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__expire_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__expire_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help expire commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__help_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__list_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__notify_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__notify_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help notify commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__payload_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__payload_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help payload commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__request_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__request_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help request commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__show_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__verify_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__verify_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help verify commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__help__subcmd__withdraw_commands] )) ||
+_pt__subcmd__approval__subcmd__help__subcmd__withdraw_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval help withdraw commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__list_commands] )) ||
+_pt__subcmd__approval__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__notify_commands] )) ||
+_pt__subcmd__approval__subcmd__notify_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval notify commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__payload_commands] )) ||
+_pt__subcmd__approval__subcmd__payload_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval payload commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__request_commands] )) ||
+_pt__subcmd__approval__subcmd__request_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval request commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__show_commands] )) ||
+_pt__subcmd__approval__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__verify_commands] )) ||
+_pt__subcmd__approval__subcmd__verify_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval verify commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approval__subcmd__withdraw_commands] )) ||
+_pt__subcmd__approval__subcmd__withdraw_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approval withdraw commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__approve_commands] )) ||
+_pt__subcmd__approve_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt approve commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__backfill_commands] )) ||
 _pt__subcmd__backfill_commands() {
@@ -1644,6 +2101,9 @@ _pt__subcmd__help_commands() {
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
 'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
+'approval:Approval inbox\: agents request, the operator decides, executors consume' \
+'approve:Approve a pending approval request (operator only)' \
+'reject:Reject a pending approval request (operator only)' \
 'backfill:One-shot backfill PT-N for any tasks lacking one' \
 'gen-manpage:Generate the \`pt(1)\` manpage to stdout' \
 'gen-completions:Generate shell completions (bash/zsh/fish) to stdout' \
@@ -1667,6 +2127,77 @@ _pt__subcmd__help__subcmd__accountability__subcmd__run_commands() {
 _pt__subcmd__help__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'pt help add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval_commands] )) ||
+_pt__subcmd__help__subcmd__approval_commands() {
+    local commands; commands=(
+'request:Request operator approval for an exact payload' \
+'list:List approvals (default\: pending, oldest first)' \
+'show:Show one approval, including journal events' \
+'payload:Write the stored payload bytes to stdout' \
+'withdraw:Withdraw a pending request (requester only)' \
+'verify:Check that an approval is approved and the payload still matches' \
+'consume:Verify and latch the approval as consumed (exactly once)' \
+'expire:Mark pending rows past expires_at as expired' \
+'notify:Send Telegram pings for pending un-notified requests' \
+'decide:Approve or reject a pending request (operator only)' \
+    )
+    _describe -t commands 'pt help approval commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__consume_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__consume_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval consume commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__decide_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__decide_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval decide commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__expire_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__expire_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval expire commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__list_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval list commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__notify_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__notify_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval notify commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__payload_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__payload_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval payload commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__request_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__request_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval request commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__show_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__verify_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__verify_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval verify commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approval__subcmd__withdraw_commands] )) ||
+_pt__subcmd__help__subcmd__approval__subcmd__withdraw_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approval withdraw commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__approve_commands] )) ||
+_pt__subcmd__help__subcmd__approve_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help approve commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__backfill_commands] )) ||
 _pt__subcmd__help__subcmd__backfill_commands() {
@@ -1787,6 +2318,11 @@ _pt__subcmd__help__subcmd__promote_commands() {
 _pt__subcmd__help__subcmd__reap_commands() {
     local commands; commands=()
     _describe -t commands 'pt help reap commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__reject_commands] )) ||
+_pt__subcmd__help__subcmd__reject_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help reject commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__remote_commands] )) ||
 _pt__subcmd__help__subcmd__remote_commands() {
@@ -2043,6 +2579,11 @@ _pt__subcmd__promote_commands() {
 _pt__subcmd__reap_commands() {
     local commands; commands=()
     _describe -t commands 'pt reap commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__reject_commands] )) ||
+_pt__subcmd__reject_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt reject commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__remote_commands] )) ||
 _pt__subcmd__remote_commands() {

@@ -54,6 +54,7 @@ if missing or extra:
 base_expected = {
     "tasks", "interactions", "notifications", "raw_items",
     "canonical_tasks", "ingested_files", "daily_budget",
+    "approvals",
 }
 base_present = {
     row[0]

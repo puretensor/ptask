@@ -25,10 +25,15 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize)]
 pub struct CallbackReq {
-    /// Raw callback_data: `ptdone:<uuid>` | `ptsnooze:<uuid>` | `ptdismiss:<uuid>`.
+    /// Raw callback_data: `ptdone:<uuid>` | `ptsnooze:<uuid>` | `ptdismiss:<uuid>`
+    /// or `ptapprove:AP-n` / `ptreject:AP-n`.
     pub data: String,
     /// Telegram callback query id — the idempotency key for this tap.
     pub callback_id: String,
+    /// Telegram user/chat id of the person who tapped. Required for
+    /// approval verbs (must match the configured operator chat).
+    #[serde(default)]
+    pub from_id: Option<i64>,
 }
 
 fn err(status: StatusCode, msg: &str) -> axum::response::Response {
@@ -48,18 +53,23 @@ fn callback_blocking(
     headers: HeaderMap,
     req: CallbackReq,
 ) -> axum::response::Response {
-    if let Err(resp) = crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Write) {
-        return resp;
-    }
-    let Some((verb, uuid)) = req.data.split_once(':') else {
+    let identity = match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Write) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let Some((verb, rest)) = req.data.split_once(':') else {
         return err(StatusCode::BAD_REQUEST, "malformed callback data");
     };
+    if matches!(verb, "ptapprove" | "ptreject") {
+        return approval_callback(&state, &identity, verb, rest, &req);
+    }
     if !matches!(verb, "ptdone" | "ptsnooze" | "ptdismiss") {
         return err(StatusCode::BAD_REQUEST, "unknown callback verb");
     }
     if req.callback_id.is_empty() {
         return err(StatusCode::BAD_REQUEST, "callback_id must be non-empty");
     }
+    let uuid = rest;
 
     let event_uuid = format!("tg-cb:{}", req.callback_id);
     let already: bool = match state.db.with_conn(|c| {
@@ -131,6 +141,80 @@ fn callback_blocking(
             )
                 .into_response()
         }
+        Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, &format!("{}", e)),
+    }
+}
+
+fn approval_callback(
+    state: &AppState,
+    identity: &ptask_core::tokens::Identity,
+    verb: &str,
+    ap_id: &str,
+    req: &CallbackReq,
+) -> axum::response::Response {
+    if req.callback_id.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "callback_id must be non-empty");
+    }
+    let allowed = state.tg_forwarders.iter().any(|n| n == &identity.client_id);
+    let operator_chat = state.notify.telegram_chat_id;
+    let from_ok = match (req.from_id, operator_chat) {
+        (Some(from), Some(chat)) => from == chat,
+        _ => false,
+    };
+    if !allowed || !from_ok {
+        return err(
+            StatusCode::FORBIDDEN,
+            "approval taps require a configured forwarder and the operator chat id",
+        );
+    }
+
+    let event_uuid = format!("tg-cb:{}", req.callback_id);
+    let already: bool = match state.db.with_conn(|c| {
+        Ok(c.query_row(
+            "SELECT COUNT(*) FROM pt_event_log WHERE uuid = ?1",
+            [&event_uuid],
+            |r| r.get::<_, i64>(0),
+        )?)
+    }) {
+        Ok(n) => n > 0,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)),
+    };
+    if already {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true, "duplicate": true, "verb": verb, "id": ap_id,
+            })),
+        )
+            .into_response();
+    }
+
+    let decision = match verb {
+        "ptapprove" => ptask_core::approvals::Decision::Approve,
+        "ptreject" => ptask_core::approvals::Decision::Reject,
+        _ => return err(StatusCode::BAD_REQUEST, "unknown callback verb"),
+    };
+    let ctx = EventCtx {
+        actor: "operator@telegram".into(),
+        source: "tg-callback".into(),
+        event_uuid: Some(event_uuid),
+    };
+    match ptask_core::approvals::decide(
+        &state.db,
+        ap_id,
+        decision,
+        ptask_core::approvals::DecidedVia::Telegram,
+        None,
+        &ctx,
+    ) {
+        Ok(ap) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true, "verb": verb, "id": ap.ap_id(), "status": ap.status,
+                "message": format!("{} {} by the operator", ap.ap_id(), ap.status),
+            })),
+        )
+            .into_response(),
         Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, &format!("{}", e)),
     }
 }

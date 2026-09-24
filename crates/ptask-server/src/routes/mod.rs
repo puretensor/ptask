@@ -1,5 +1,6 @@
 //! HTTP route modules. Each file is one cluster of related endpoints.
 
+pub mod approvals;
 pub mod base;
 pub mod capture;
 pub mod dashboard;
