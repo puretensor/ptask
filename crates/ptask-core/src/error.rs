@@ -30,6 +30,9 @@ pub enum Error {
     #[error(transparent)]
     Approval(#[from] crate::approvals::ApprovalError),
 
+    #[error(transparent)]
+    Goal(#[from] crate::goals::GoalError),
+
     #[error("{0}")]
     Other(String),
 }

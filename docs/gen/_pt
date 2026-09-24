@@ -142,6 +142,18 @@ _arguments "${_arguments_options[@]}" : \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
 && ret=0
 ;;
+(context)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
 (dismiss)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
@@ -1298,6 +1310,196 @@ esac
     ;;
 esac
 ;;
+(goal)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_pt__subcmd__goal_commands" \
+"*::: :->goal" \
+&& ret=0
+
+    case $state in
+    (goal)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-goal-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+'--why=[Why this goal exists]:WHY:_default' \
+'--parent=[Parent goal (\`G-n\`)]:PARENT:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':title -- Goal title:_default' \
+&& ret=0
+;;
+(ls)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--all[Include achieved and abandoned goals]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- `G-n` or the row uuid:_default' \
+&& ret=0
+;;
+(link)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':task -- Task handle (`PT-n`):_default' \
+':goal -- Goal (`G-n`):_default' \
+&& ret=0
+;;
+(unlink)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':task -- Task handle (`PT-n`):_default' \
+&& ret=0
+;;
+(set-parent)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- Goal to move (`G-n`):_default' \
+':parent -- New parent (`G-n`):_default' \
+&& ret=0
+;;
+(done)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- `G-n` or the row uuid:_default' \
+&& ret=0
+;;
+(abandon)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- `G-n` or the row uuid:_default' \
+&& ret=0
+;;
+(orphans)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__goal__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-goal-help-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ls)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(link)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(unlink)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set-parent)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(done)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(abandon)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(orphans)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (approve)
 _arguments "${_arguments_options[@]}" : \
 '--note=[]:NOTE:_default' \
@@ -1397,6 +1599,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(context)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1728,6 +1934,58 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
+(goal)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__help__subcmd__goal_commands" \
+"*::: :->goal" \
+&& ret=0
+
+    case $state in
+    (goal)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-help-goal-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ls)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(link)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(unlink)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set-parent)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(done)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(abandon)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(orphans)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (approve)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1771,6 +2029,7 @@ _pt_commands() {
 'edit:Edit task fields' \
 'reopen:Reopen a completed/dismissed task (status → pending)' \
 'show:Show one task'\''s full row + side-table detail' \
+'context:Markdown worker brief\: title, why-chain, blockers' \
 'dismiss:Dismiss a task (soft close, status → dismissed; reversible via reopen)' \
 'rm:Delete a task permanently (hard delete + tombstone)' \
 'next:Show ready-to-start tasks (all dependencies done)' \
@@ -1802,6 +2061,7 @@ _pt_commands() {
 'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
 'approval:Approval inbox\: agents request, the operator decides, executors consume' \
+'goal:Goal tree\: mission ancestry for tasks' \
 'approve:Approve a pending approval request (operator only)' \
 'reject:Reject a pending approval request (operator only)' \
 'backfill:One-shot backfill PT-N for any tasks lacking one' \
@@ -2011,6 +2271,11 @@ _pt__subcmd__bulk_commands() {
     local commands; commands=()
     _describe -t commands 'pt bulk commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__context_commands] )) ||
+_pt__subcmd__context_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt context commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__delegate_commands] )) ||
 _pt__subcmd__delegate_commands() {
     local commands; commands=()
@@ -2061,6 +2326,133 @@ _pt__subcmd__gen-manpage_commands() {
     local commands; commands=()
     _describe -t commands 'pt gen-manpage commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__goal_commands] )) ||
+_pt__subcmd__goal_commands() {
+    local commands; commands=(
+'add:Create a goal' \
+'ls:List goals in tree order (parent before children, siblings by seq)' \
+'show:Show one goal\: ancestors, children, tasks, subtree rollup' \
+'link:Direct-link a task to a goal' \
+'unlink:Remove a task'\''s direct goal link (inheritance remains)' \
+'set-parent:Move a goal under a new parent (rejects self and cycles)' \
+'done:Mark a goal achieved' \
+'abandon:Mark a goal abandoned' \
+'orphans:List open tasks with no effective goal' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt goal commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__abandon_commands] )) ||
+_pt__subcmd__goal__subcmd__abandon_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal abandon commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__add_commands] )) ||
+_pt__subcmd__goal__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__done_commands] )) ||
+_pt__subcmd__goal__subcmd__done_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal done commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help_commands] )) ||
+_pt__subcmd__goal__subcmd__help_commands() {
+    local commands; commands=(
+'add:Create a goal' \
+'ls:List goals in tree order (parent before children, siblings by seq)' \
+'show:Show one goal\: ancestors, children, tasks, subtree rollup' \
+'link:Direct-link a task to a goal' \
+'unlink:Remove a task'\''s direct goal link (inheritance remains)' \
+'set-parent:Move a goal under a new parent (rejects self and cycles)' \
+'done:Mark a goal achieved' \
+'abandon:Mark a goal abandoned' \
+'orphans:List open tasks with no effective goal' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt goal help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__abandon_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__abandon_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help abandon commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__add_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__done_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__done_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help done commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__help_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__link_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__link_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help link commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__ls_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__ls_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help ls commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__orphans_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__orphans_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help orphans commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__set-parent_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__set-parent_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help set-parent commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__show_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__help__subcmd__unlink_commands] )) ||
+_pt__subcmd__goal__subcmd__help__subcmd__unlink_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal help unlink commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__link_commands] )) ||
+_pt__subcmd__goal__subcmd__link_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal link commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__ls_commands] )) ||
+_pt__subcmd__goal__subcmd__ls_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal ls commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__orphans_commands] )) ||
+_pt__subcmd__goal__subcmd__orphans_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal orphans commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__set-parent_commands] )) ||
+_pt__subcmd__goal__subcmd__set-parent_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal set-parent commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__show_commands] )) ||
+_pt__subcmd__goal__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__goal__subcmd__unlink_commands] )) ||
+_pt__subcmd__goal__subcmd__unlink_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt goal unlink commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help_commands] )) ||
 _pt__subcmd__help_commands() {
     local commands; commands=(
@@ -2071,6 +2463,7 @@ _pt__subcmd__help_commands() {
 'edit:Edit task fields' \
 'reopen:Reopen a completed/dismissed task (status → pending)' \
 'show:Show one task'\''s full row + side-table detail' \
+'context:Markdown worker brief\: title, why-chain, blockers' \
 'dismiss:Dismiss a task (soft close, status → dismissed; reversible via reopen)' \
 'rm:Delete a task permanently (hard delete + tombstone)' \
 'next:Show ready-to-start tasks (all dependencies done)' \
@@ -2102,6 +2495,7 @@ _pt__subcmd__help_commands() {
 'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
 'approval:Approval inbox\: agents request, the operator decides, executors consume' \
+'goal:Goal tree\: mission ancestry for tasks' \
 'approve:Approve a pending approval request (operator only)' \
 'reject:Reject a pending approval request (operator only)' \
 'backfill:One-shot backfill PT-N for any tasks lacking one' \
@@ -2219,6 +2613,11 @@ _pt__subcmd__help__subcmd__bulk_commands() {
     local commands; commands=()
     _describe -t commands 'pt help bulk commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__context_commands] )) ||
+_pt__subcmd__help__subcmd__context_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help context commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__delegate_commands] )) ||
 _pt__subcmd__help__subcmd__delegate_commands() {
     local commands; commands=()
@@ -2268,6 +2667,66 @@ _pt__subcmd__help__subcmd__gen-completions_commands() {
 _pt__subcmd__help__subcmd__gen-manpage_commands() {
     local commands; commands=()
     _describe -t commands 'pt help gen-manpage commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal_commands] )) ||
+_pt__subcmd__help__subcmd__goal_commands() {
+    local commands; commands=(
+'add:Create a goal' \
+'ls:List goals in tree order (parent before children, siblings by seq)' \
+'show:Show one goal\: ancestors, children, tasks, subtree rollup' \
+'link:Direct-link a task to a goal' \
+'unlink:Remove a task'\''s direct goal link (inheritance remains)' \
+'set-parent:Move a goal under a new parent (rejects self and cycles)' \
+'done:Mark a goal achieved' \
+'abandon:Mark a goal abandoned' \
+'orphans:List open tasks with no effective goal' \
+    )
+    _describe -t commands 'pt help goal commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal__subcmd__abandon_commands] )) ||
+_pt__subcmd__help__subcmd__goal__subcmd__abandon_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help goal abandon commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal__subcmd__add_commands] )) ||
+_pt__subcmd__help__subcmd__goal__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help goal add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal__subcmd__done_commands] )) ||
+_pt__subcmd__help__subcmd__goal__subcmd__done_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help goal done commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal__subcmd__link_commands] )) ||
+_pt__subcmd__help__subcmd__goal__subcmd__link_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help goal link commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal__subcmd__ls_commands] )) ||
+_pt__subcmd__help__subcmd__goal__subcmd__ls_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help goal ls commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal__subcmd__orphans_commands] )) ||
+_pt__subcmd__help__subcmd__goal__subcmd__orphans_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help goal orphans commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal__subcmd__set-parent_commands] )) ||
+_pt__subcmd__help__subcmd__goal__subcmd__set-parent_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help goal set-parent commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal__subcmd__show_commands] )) ||
+_pt__subcmd__help__subcmd__goal__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help goal show commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__goal__subcmd__unlink_commands] )) ||
+_pt__subcmd__help__subcmd__goal__subcmd__unlink_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help goal unlink commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__help_commands] )) ||
 _pt__subcmd__help__subcmd__help_commands() {

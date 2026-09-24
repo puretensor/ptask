@@ -146,6 +146,7 @@ mod tests {
                 ("task_links", "table"),
                 ("task_labels", "table"),
                 ("approvals", "table"),
+                ("goals", "table"),
             ] {
                 let exists: i64 = c
                     .query_row(
@@ -187,6 +188,7 @@ mod tests {
                 "canonical_tasks",
                 "ingested_files",
                 "daily_budget",
+                "goals",
             ] {
                 let exists: i64 = c
                     .query_row(

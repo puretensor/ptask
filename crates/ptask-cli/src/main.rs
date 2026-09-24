@@ -15,6 +15,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 mod approvals;
+mod goals;
 mod remote;
 mod ui;
 
@@ -77,6 +78,8 @@ enum Command {
     Reopen(ReopenArgs),
     /// Show one task's full row + side-table detail.
     Show(ShowArgs),
+    /// Markdown worker brief: title, why-chain, blockers.
+    Context(ContextArgs),
     /// Dismiss a task (soft close, status → dismissed; reversible via reopen).
     Dismiss(DismissArgs),
     /// Delete a task permanently (hard delete + tombstone).
@@ -150,6 +153,9 @@ enum Command {
     /// Approval inbox: agents request, the operator decides, executors consume.
     #[command(subcommand)]
     Approval(approvals::ApprovalCommand),
+    /// Goal tree: mission ancestry for tasks.
+    #[command(subcommand)]
+    Goal(goals::GoalCommand),
     /// Approve a pending approval request (operator only).
     Approve(approvals::DecideArgs),
     /// Reject a pending approval request (operator only).
@@ -684,6 +690,12 @@ struct ShowArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct ContextArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+}
+
+#[derive(clap::Args, Debug)]
 struct DismissArgs {
     /// PT-N (e.g. PT-42), bare integer (42), or title substring.
     query: String,
@@ -819,6 +831,7 @@ fn run() -> Result<()> {
                 Some(Command::Edit(a)) => cmd_edit(&db, a),
                 Some(Command::Reopen(a)) => cmd_reopen(&db, a),
                 Some(Command::Show(a)) => cmd_show(&db, a),
+                Some(Command::Context(a)) => cmd_context(&db, a),
                 Some(Command::Dismiss(a)) => cmd_dismiss(&db, a),
                 Some(Command::Rm(a)) => cmd_rm(&db, a),
                 Some(Command::Next(a)) => cmd_next(&db, a),
@@ -849,6 +862,7 @@ fn run() -> Result<()> {
                 Some(Command::Undo) => cmd_undo(&db),
                 Some(Command::Token(c)) => cmd_token(&db, c),
                 Some(Command::Approval(c)) => cmd_approval(&db, c),
+                Some(Command::Goal(c)) => goals::run(&db, c, cli_ctx(), json_mode()),
                 Some(Command::Approve(a)) => approvals::cmd_decide(
                     &db,
                     &a.id,
@@ -1321,7 +1335,42 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
     } else {
         tasks::open_blockers(db, &t.id).unwrap_or_default()
     };
-    print_lines(render_show(&t, Some(&d), &blocked));
+    let eg = ptask_core::goals::effective_goal(db, &t.id)?;
+    if json_mode() {
+        let mut v = serde_json::to_value(&t)?;
+        v["goal_chain"] = ptask_core::goals::chain_json(&eg.chain);
+        v["goal_source"] = serde_json::json!(eg.source.as_str());
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    print_lines(render_show(&t, Some(&d), &blocked, &eg.chain));
+    Ok(())
+}
+
+fn cmd_context(db: &Db, a: ContextArgs) -> Result<()> {
+    let t = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
+    if json_mode() {
+        let brief = ptask_core::goals::task_context(db, &t)?;
+        let v = serde_json::json!({
+            "pt_id": brief.pt_id,
+            "title": brief.title,
+            "description": brief.description,
+            "goal_source": brief.source.as_str(),
+            "why": brief.why_chain.iter().map(|g| serde_json::json!({
+                "id": g.g_id(),
+                "title": g.title,
+                "why": g.why,
+            })).collect::<Vec<_>>(),
+            "blockers": brief.blockers.iter().map(|b| serde_json::json!({
+                "pt_id": b.pt_id,
+                "title": b.title,
+            })).collect::<Vec<_>>(),
+            "markdown": ptask_core::goals::context_markdown(db, &t)?,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    print!("{}", ptask_core::goals::context_markdown(db, &t)?);
     Ok(())
 }
 
@@ -1332,6 +1381,7 @@ fn render_show(
     t: &ptask_core::Task,
     d: Option<&tasks::TaskDetail>,
     blocked: &[String],
+    why_chain: &[ptask_core::goals::Goal],
 ) -> Vec<String> {
     let pt = t.pt_id.as_deref().unwrap_or_else(|| short_id(&t.id));
     let mut out = ui::headline(
@@ -1392,6 +1442,16 @@ fn render_show(
             ui::Ink::Amber,
             &format!("cannot close until done: {}", blocked.join(", ")),
         ));
+    }
+    if !why_chain.is_empty() {
+        out.push(String::new());
+        out.push(ui::section("why", ui::Ink::Magenta, ""));
+        for g in why_chain {
+            match g.why.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(why) => out.push(format!("  {}: {why}", g.title)),
+                None => out.push(format!("  {}", g.title)),
+            }
+        }
     }
     if !t.description.is_empty() {
         out.push(String::new());
@@ -2942,7 +3002,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             // Rich side-table detail (best-effort: a pre-v1.9 server has no
             // /detail route, so just skip it and keep the base row).
             let d = client.detail(&t.id).ok();
-            print_lines(render_show(&t, d.as_ref(), &[]));
+            print_lines(render_show(&t, d.as_ref(), &[], &[]));
             Ok(())
         }
         RemoteCommand::Next(a) => {

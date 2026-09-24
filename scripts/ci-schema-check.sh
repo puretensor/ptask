@@ -55,6 +55,7 @@ base_expected = {
     "tasks", "interactions", "notifications", "raw_items",
     "canonical_tasks", "ingested_files", "daily_budget",
     "approvals",
+    "goals",
 }
 base_present = {
     row[0]

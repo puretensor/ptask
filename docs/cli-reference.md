@@ -64,7 +64,35 @@ immediately so the task re-enters `pt next` ordering.
 ### `pt show <query>`
 
 Print one task's full row plus side-table detail: labels, project, duration,
-dependencies (`deps on` / `blocks`), and recurrence.
+dependencies (`deps on` / `blocks`), and recurrence. Global `--json` emits the
+task object plus `goal_chain` (`[{id, title, why}, ...]` leaf→root) and
+`goal_source` (`direct` | `parent` | `none`). Human output includes a short
+Why block when a chain exists.
+
+### `pt context <query>`
+
+Markdown worker brief for dispatch: task title, description, a Why section
+listing the goal chain root→leaf (each with its why), and open blockers
+(PT id + title). Succeeds with no Why section when the task has no goal.
+See [goals.md](goals.md).
+
+## Goals
+
+```
+pt goal add TITLE [--why W] [--parent G-n]
+pt goal ls [--all]
+pt goal show G-n
+pt goal link PT-n G-n
+pt goal unlink PT-n
+pt goal set-parent G-n G-m
+pt goal done G-n          # status → achieved
+pt goal abandon G-n
+pt goal orphans           # open tasks with no effective goal
+```
+
+All honour `--json`. Tree order is parent before children, siblings by seq.
+`set-parent` refuses self and cycles. Walks are cycle-safe (stop on a
+repeated node, depth cap 16). Full model: [goals.md](goals.md).
 
 ### `pt dismiss <query>`
 
