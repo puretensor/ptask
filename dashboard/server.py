@@ -23,6 +23,10 @@ Endpoints
   POST /api/tasks  {title, description?, priority?, deadline?}
                                 -> shells `pt add [--priority=] [--description=]
                                    [--deadline=] -- "<title>"`
+  GET  /api/approvals?status=   -> `pt --json approval ls --status <s>`
+                                   (status whitelist; default pending)
+  POST /api/approvals/AP-n/approve|reject {note?}
+                                -> `pt approve|reject AP-n --via dashboard [--note]`
   POST /api/voice  (raw audio body) -> Whisper STT + Bedrock Claude draft
                                 -> {transcript, fields:{title,description,priority,
                                    deadline,labels,domain,reason}} for the
@@ -209,7 +213,12 @@ TASK_COLS = [
 ]
 
 _ID_RE = re.compile(r"^(PT-\d+|[0-9a-fA-F-]{8,36})$")
+_AP_ID_RE = re.compile(r"^AP-[0-9]+$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+APPROVAL_STATUSES = frozenset({
+    "pending", "approved", "rejected", "withdrawn", "expired", "all",
+})
+APPROVAL_NOTE_MAX = 2000
 
 
 def parse_bind(bind: str) -> tuple[str, int]:
@@ -588,6 +597,54 @@ def pt_exec(args: list[str]) -> tuple[bool, str]:
     try:
         out = subprocess.run([PT_BIN, *args], capture_output=True, text=True,
                              timeout=20, env=env)
+        ok = out.returncode == 0
+        return ok, (out.stdout + out.stderr).strip()
+    except Exception as e:  # noqa: BLE001
+        return False, f"exec error: {e}"
+
+
+def _pt_dashboard_env(*, actor: str | None = None) -> dict[str, str]:
+    """Env for dashboard-originated pt children.
+
+    Operator decisions must not inherit CLAUDECODE (pt refuses approve/reject
+    when that marker is set). PTASK_ACTOR is the sidecar's own actor, or
+    "dashboard" when the process was launched without one.
+    """
+    env = dict(os.environ)
+    env["PATH"] = str(HOME / ".cargo" / "bin") + ":" + env.get("PATH", "")
+    env.pop("CLAUDECODE", None)
+    if actor is not None:
+        env["PTASK_ACTOR"] = actor
+    return env
+
+
+def pt_json(args: list[str]) -> tuple[bool, object, str]:
+    """Run pt and parse stdout as JSON. stderr is never mixed into the payload."""
+    try:
+        out = subprocess.run(
+            [PT_BIN, *args], capture_output=True, text=True, timeout=20,
+            env=_pt_dashboard_env(),
+        )
+    except Exception as e:  # noqa: BLE001
+        return False, None, f"exec error: {e}"
+    if out.returncode != 0:
+        return False, None, (out.stderr or out.stdout).strip() or "pt failed"
+    try:
+        return True, json.loads(out.stdout), ""
+    except json.JSONDecodeError:
+        return False, None, "invalid json from pt"
+
+
+def pt_decide(verb: str, ap_id: str, note: str | None) -> tuple[bool, str]:
+    args = [verb, ap_id, "--via", "dashboard"]
+    if note is not None:
+        args += ["--note", note]
+    actor = os.environ.get("PTASK_ACTOR") or "dashboard"
+    try:
+        out = subprocess.run(
+            [PT_BIN, *args], capture_output=True, text=True, timeout=20,
+            env=_pt_dashboard_env(actor=actor),
+        )
         ok = out.returncode == 0
         return ok, (out.stdout + out.stderr).strip()
     except Exception as e:  # noqa: BLE001
@@ -1108,6 +1165,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"items": q_timeline()})
             if path == "/api/heatmap":
                 return self._json(q_heatmap())
+            if path == "/api/approvals":
+                status = (qs.get("status", ["pending"])[0])
+                if status not in APPROVAL_STATUSES:
+                    raise ValueError(
+                        "status must be one of: " + ", ".join(sorted(APPROVAL_STATUSES))
+                    )
+                ok, data, msg = pt_json(
+                    ["--json", "approval", "ls", "--status", status]
+                )
+                if not ok:
+                    return self._json({"error": msg}, 500)
+                return self._json(data)
             if path == "/api/stream":
                 return self._stream()
             m = re.match(r"^/api/tasks/([^/]+)/events$", path)
@@ -1181,6 +1250,26 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_json_body()
         if body is None:
             return
+
+        m = re.match(r"^/api/approvals/([^/]+)/(approve|reject)$", u.path)
+        if m:
+            ap_id, verb = m.group(1), m.group(2)
+            if not _AP_ID_RE.fullmatch(ap_id):
+                return self._json({"error": "bad id"}, 400)
+            if not isinstance(body, dict):
+                return self._json({"error": "note must be a string"}, 400)
+            note = body.get("note", _UNSET)
+            note_arg = None
+            if note is not _UNSET:
+                if not isinstance(note, str) or len(note) > APPROVAL_NOTE_MAX:
+                    return self._json({"error": "note must be a string (max 2000)"}, 400)
+                note_arg = note
+            ok, msg = pt_decide(verb, ap_id, note_arg)
+            if ok:
+                return self._json({"ok": True, "message": msg})
+            if msg.startswith("exec error:"):
+                return self._json({"ok": False, "message": msg}, 500)
+            return self._json({"ok": False, "message": msg}, 409)
 
         m = re.match(r"^/api/tasks/([^/]+)/done$", u.path)
         if m:
