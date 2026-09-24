@@ -16,6 +16,7 @@ pub mod digest;
 pub mod error;
 pub mod event_log;
 pub mod filter;
+pub mod goals;
 pub mod magic_words;
 pub mod migrations;
 pub mod ordering;

@@ -58,6 +58,17 @@ fn task_json(t: &ptask_core::tasks::Task) -> serde_json::Value {
     })
 }
 
+fn with_goals(
+    db: &Db,
+    t: &ptask_core::tasks::Task,
+    mut v: serde_json::Value,
+) -> Result<serde_json::Value, McpError> {
+    let eg = ptask_core::goals::effective_goal(db, &t.id).map_err(domain_err)?;
+    v["goal_chain"] = ptask_core::goals::chain_json(&eg.chain);
+    v["goal_source"] = serde_json::json!(eg.source.as_str());
+    Ok(v)
+}
+
 // ------------------------------------------------------------------ args
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -206,6 +217,27 @@ pub struct ApprovalIdArg {
     pub id: String,
 }
 
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct GoalListArg {
+    /// Include achieved and abandoned goals (default: active only).
+    #[serde(default)]
+    pub all: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GoalIdArg {
+    /// G-n or the row uuid.
+    pub id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GoalLinkArg {
+    /// Task handle: PT-N, uuid, or title substring.
+    pub task: String,
+    /// Goal handle: G-n or uuid.
+    pub goal: String,
+}
+
 // --------------------------------------------------------------- handler
 
 /// Telegram notify settings for MCP-originated approval requests.
@@ -265,7 +297,11 @@ impl PtaskMcp {
         on_blocking(move || {
             let tasks = ptask_core::dag::next_ready(&db, limit.unwrap_or(10).clamp(1, 100))
                 .map_err(domain_err)?;
-            json_ok(&tasks.iter().map(task_json).collect::<Vec<_>>())
+            let mut out = Vec::with_capacity(tasks.len());
+            for t in &tasks {
+                out.push(with_goals(&db, t, task_json(t))?);
+            }
+            json_ok(&out)
         })
         .await
     }
@@ -402,7 +438,7 @@ impl PtaskMcp {
                     })
                 })
                 .collect::<Vec<_>>();
-            let mut v = task_json(&t);
+            let mut v = with_goals(&db, &t, task_json(&t))?;
             v["history"] = serde_json::json!(hist);
             // Open prerequisites: non-empty means task_done will be refused.
             let blockers = ptask_core::tasks::open_blockers(&db, &t.id).map_err(domain_err)?;
@@ -519,7 +555,9 @@ impl PtaskMcp {
         on_blocking(move || {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
             ptask_core::tasks::claim(&db, &t.id, &ctx).map_err(domain_err)?;
-            json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "claimed_by": actor}))
+            let mut v = serde_json::json!({"ok": true, "pt_id": t.pt_id, "claimed_by": actor});
+            v = with_goals(&db, &t, v)?;
+            json_ok(&v)
         })
         .await
     }
@@ -790,6 +828,60 @@ impl PtaskMcp {
         on_blocking(move || {
             let ap = ptask_core::approvals::withdraw(&db, &id, &ctx).map_err(domain_err)?;
             json_ok(&ap.to_json(None))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List goals in tree order (parent before children, siblings by seq). Default: active only; all=true includes achieved and abandoned."
+    )]
+    async fn goal_list(
+        &self,
+        Parameters(GoalListArg { all }): Parameters<GoalListArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        on_blocking(move || {
+            let items = ptask_core::goals::list(&db, all).map_err(domain_err)?;
+            json_ok(
+                &items
+                    .iter()
+                    .map(ptask_core::goals::GoalListItem::to_json)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Show one goal (G-n): ancestors, children, tasks whose effective goal is this one, and open/done rollup over the subtree."
+    )]
+    async fn goal_show(
+        &self,
+        Parameters(GoalIdArg { id }): Parameters<GoalIdArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        on_blocking(move || {
+            let shown = ptask_core::goals::show(&db, &id).map_err(domain_err)?;
+            json_ok(&shown.to_json())
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Link a task to a goal (direct). Subtasks inherit via parent_uuid when they have no direct link. Arguments: task (PT-n), goal (G-n)."
+    )]
+    async fn goal_link(
+        &self,
+        Parameters(GoalLinkArg { task, goal }): Parameters<GoalLinkArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::goals::link(&db, &task, &goal, &ctx).map_err(domain_err)?;
+            let mut v = task_json(&t);
+            v["ok"] = serde_json::json!(true);
+            v["goal"] = serde_json::json!(goal);
+            json_ok(&with_goals(&db, &t, v)?)
         })
         .await
     }
