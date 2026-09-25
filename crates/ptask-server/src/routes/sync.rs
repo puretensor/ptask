@@ -370,32 +370,12 @@ fn apply_command(
                 .get("text")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("task_create: args.text required"))?;
-            let q = ptask_core::quickadd::parse(text)?;
-            let new = ptask_core::NewTask {
-                title: q.title.clone(),
-                description: q.description.clone(),
-                priority: q.priority.unwrap_or(2),
-                deadline: q.deadline.clone(),
-                source_type: cmd
-                    .args
-                    .get("source_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("sync")
-                    .into(),
-                ai_confidence: 1.0,
-                ai_reasoning: String::new(),
-            };
-            let ext = ptask_core::Extensions {
-                labels: q.labels.clone(),
-                kind: None,
-                deliverable: None,
-                project: q.project.clone(),
-                duration_min: q.duration_min,
-                planned_at: None,
-                energy: None,
-                recurrence: q.recurrence.clone(),
-                due_at: q.due.clone(),
-            };
+            let source_type = cmd
+                .args
+                .get("source_type")
+                .and_then(Value::as_str)
+                .unwrap_or("sync");
+            let (new, ext) = ptask_core::quickadd::parse(text)?.task_parts(source_type);
             let t =
                 tasks::create_with_extensions(&state.db, new, ext, &sync_ctx(actor, &cmd.uuid))?;
             let payload = serde_json::to_value(&t)?;

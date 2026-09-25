@@ -1341,6 +1341,23 @@ impl std::str::FromStr for TaskKind {
     }
 }
 
+/// A requested kind and deliverable, validated. A scout without a declared
+/// deliverable defaults to a report; ship keeps the historical "unset" so
+/// existing rows and new ones stay comparable.
+pub fn kind_and_deliverable(
+    kind: Option<&str>,
+    deliverable: Option<&str>,
+) -> Result<(Option<String>, Option<String>)> {
+    let kind = kind
+        .map(|k| k.parse::<TaskKind>().map(|k| k.as_str().to_string()))
+        .transpose()?;
+    let deliverable = match deliverable {
+        Some(d) => Some(validate_deliverable(d)?.to_string()),
+        None => (kind.as_deref() == Some("scout")).then(|| "report".to_string()),
+    };
+    Ok((kind, deliverable))
+}
+
 /// Valid `deliverable` values. `None` on rows that never declared one.
 pub fn validate_deliverable(d: &str) -> Result<&str> {
     match d {
@@ -3030,6 +3047,25 @@ mod tests {
         assert!(b.starts_with("feature/PT-1-"));
         // Slug is capped at 50 chars; total length therefore ~50+13.
         assert!(b.len() <= 50 + "feature/PT-1-".len());
+    }
+
+    #[test]
+    fn kind_and_deliverable_validates_and_defaults_scout_to_report() {
+        assert_eq!(kind_and_deliverable(None, None).unwrap(), (None, None));
+        assert_eq!(
+            kind_and_deliverable(Some("investigate"), None).unwrap(),
+            (Some("scout".into()), Some("report".into()))
+        );
+        assert_eq!(
+            kind_and_deliverable(Some("scout"), Some("pr")).unwrap(),
+            (Some("scout".into()), Some("pr".into()))
+        );
+        assert_eq!(
+            kind_and_deliverable(Some("ship"), None).unwrap(),
+            (Some("ship".into()), None)
+        );
+        assert!(kind_and_deliverable(Some("sideways"), None).is_err());
+        assert!(kind_and_deliverable(None, Some("essay")).is_err());
     }
 
     #[test]

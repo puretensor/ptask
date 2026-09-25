@@ -1047,26 +1047,16 @@ fn api_create_blocking(state: AppState, headers: HeaderMap, body: CreateBody) ->
         Ok(q) => q,
         Err(e) => return jerr(StatusCode::BAD_REQUEST, &e.to_string()),
     };
-    let new = ptask_core::NewTask {
-        title: q.title.clone(),
-        description: body.description.unwrap_or_else(|| q.description.clone()),
-        priority: body.priority.or(q.priority).unwrap_or(2),
-        deadline: body.deadline.or_else(|| q.deadline.clone()),
-        source_type: "manual".into(),
-        ai_confidence: 1.0,
-        ai_reasoning: String::new(),
-    };
-    let ext = ptask_core::Extensions {
-        labels: q.labels.clone(),
-        kind: None,
-        deliverable: None,
-        project: q.project.clone(),
-        duration_min: q.duration_min,
-        planned_at: None,
-        energy: None,
-        recurrence: q.recurrence.clone(),
-        due_at: q.due.clone(),
-    };
+    let (mut new, ext) = q.task_parts("manual");
+    if let Some(description) = body.description {
+        new.description = description;
+    }
+    if let Some(priority) = body.priority {
+        new.priority = priority;
+    }
+    if body.deadline.is_some() {
+        new.deadline = body.deadline;
+    }
     match ptask_core::tasks::create_with_extensions(&state.db, new, ext, &dash_ctx()) {
         Ok(t) => {
             rescore(&state);

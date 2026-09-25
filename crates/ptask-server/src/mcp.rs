@@ -344,46 +344,11 @@ impl PtaskMcp {
         let ctx = self.ctx();
         on_blocking(move || {
             let q = ptask_core::quickadd::parse(&text).map_err(domain_err)?;
-            let new = ptask_core::NewTask {
-                title: q.title.clone(),
-                description: q.description.clone(),
-                priority: q.priority.unwrap_or(2),
-                deadline: q.deadline.clone(),
-                source_type: "mcp".into(),
-                ai_confidence: 1.0,
-                ai_reasoning: reason.unwrap_or_default(),
-            };
-            let kind = match kind.as_deref() {
-                Some(k) => Some(
-                    k.parse::<ptask_core::tasks::TaskKind>()
-                        .map_err(domain_err)?
-                        .as_str()
-                        .to_string(),
-                ),
-                None => None,
-            };
-            let deliverable = match deliverable.as_deref() {
-                Some(d) => Some(
-                    ptask_core::tasks::validate_deliverable(d)
-                        .map_err(domain_err)?
-                        .to_string(),
-                ),
-                None => match kind.as_deref() {
-                    Some("scout") => Some("report".to_string()),
-                    _ => None,
-                },
-            };
-            let ext = ptask_core::Extensions {
-                labels: q.labels.clone(),
-                kind,
-                deliverable,
-                project: q.project.clone(),
-                duration_min: q.duration_min,
-                planned_at: None,
-                energy: None,
-                recurrence: q.recurrence.clone(),
-                due_at: q.due.clone(),
-            };
+            let (mut new, mut ext) = q.task_parts("mcp");
+            new.ai_reasoning = reason.unwrap_or_default();
+            (ext.kind, ext.deliverable) =
+                ptask_core::tasks::kind_and_deliverable(kind.as_deref(), deliverable.as_deref())
+                    .map_err(domain_err)?;
             let discovered_parent = discovered_from
                 .as_deref()
                 .map(|parent| ptask_core::tasks::resolve_for_lookup(&db, parent, true))
