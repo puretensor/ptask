@@ -1531,7 +1531,7 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
 }
 
 /// Add a `depends_on` edge: `from` cannot start until `to` is done.
-/// Rejects self-dependency and cycles (bounded walk — the graph is small).
+/// Rejects self-dependency and cycles.
 pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -> Result<()> {
     if from_uuid == to_uuid {
         return Err(crate::Error::Other("a task cannot depend on itself".into()));
@@ -1550,24 +1550,24 @@ pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -
     if exists != 2 {
         return Err(crate::Error::Other("both tasks must exist".into()));
     }
-    // Cycle check: is `from` reachable FROM `to` via depends_on edges?
-    let mut frontier = vec![to_uuid.to_string()];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(cur) = frontier.pop() {
-        if cur == from_uuid {
-            return Err(crate::Error::Other(
-                "dependency would create a cycle".into(),
-            ));
-        }
-        if !seen.insert(cur.clone()) || seen.len() > 10_000 {
-            continue;
-        }
-        let mut stmt =
-            tx.prepare("SELECT to_uuid FROM task_links WHERE from_uuid=?1 AND kind='depends_on'")?;
-        let next: Vec<String> = stmt
-            .query_map([&cur], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        frontier.extend(next);
+    // Cycle check: is `from` reachable FROM `to` via depends_on edges? One
+    // recursive query; UNION dedupes, so it terminates on any graph and no
+    // visit cap can let a deep chain skip the check.
+    let cycle: bool = tx.query_row(
+        "WITH RECURSIVE reach(id) AS (
+             SELECT ?1
+             UNION
+             SELECT l.to_uuid FROM task_links l JOIN reach r ON l.from_uuid = r.id
+             WHERE l.kind = 'depends_on'
+         )
+         SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?2)",
+        params![to_uuid, from_uuid],
+        |r| r.get(0),
+    )?;
+    if cycle {
+        return Err(crate::Error::Other(
+            "dependency would create a cycle".into(),
+        ));
     }
     tx.execute(
         "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
@@ -3014,6 +3014,36 @@ mod tests {
         assert!(b.starts_with("feature/PT-1-"));
         // Slug is capped at 50 chars; total length therefore ~50+13.
         assert!(b.len() <= 50 + "feature/PT-1-".len());
+    }
+
+    #[test]
+    fn add_dependency_rejects_a_cycle_past_any_chain_depth() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let a = create(&db, NewTask::minimal("aaa"), &ctx).unwrap();
+        let b = create(&db, NewTask::minimal("bbb"), &ctx).unwrap();
+        // b -> x0 -> ... -> x10049 -> a: deeper than the old 10k visit cap,
+        // which skipped the rest of the walk and let the closing edge in.
+        {
+            let conn = db.get().unwrap();
+            let mut ins = conn
+                .prepare(
+                    "INSERT INTO task_links (from_uuid, to_uuid, kind, created_at) \
+                     VALUES (?1, ?2, 'depends_on', '2026-01-01T00:00:00Z')",
+                )
+                .unwrap();
+            let hops: Vec<String> = (0..10_050).map(|i| format!("x{i}")).collect();
+            ins.execute([&b.id, &hops[0]]).unwrap();
+            for w in hops.windows(2) {
+                ins.execute([&w[0], &w[1]]).unwrap();
+            }
+            ins.execute([hops.last().unwrap(), &a.id]).unwrap();
+        }
+        let err = add_dependency(&db, &a.id, &b.id, &ctx).unwrap_err();
+        assert!(err.to_string().contains("cycle"), "{err}");
+        // An acyclic edge alongside the deep chain still goes in.
+        let c = create(&db, NewTask::minimal("ccc"), &ctx).unwrap();
+        add_dependency(&db, &c.id, &b.id, &ctx).unwrap();
     }
 
     #[test]
