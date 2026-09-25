@@ -16,20 +16,24 @@
 //!                   changed: auto-flipping to 'blocked' hid real work from
 //!                   the pending views (33 tasks, 2026-07..09).
 //!
-//! Transitions:
+//! Transitions (time at the current level, from `level_changed_at`):
 //!
-//!   0 → 1  age_days ≥ 2
-//!   1 → 2  dismissal_count ≥ 1
-//!   2 → 3  dismissal_count ≥ 3
-//!   3 → 4  last_reminded ≥ 48h ago
-//!   4 → 5  last_reminded ≥ 7 days ago
+//!   0 → 1  task age ≥ 2 days
+//!   1 → 2  ≥ 3 days at level 1
+//!   2 → 3  ≥ 4 days at level 2
+//!   3 → 4  ≥ 2 days at level 3
+//!   4 → 5  ≥ 7 days at level 4
+//!
+//! A new level is persisted only once its notice is delivered on some
+//! channel, so a dead or unconfigured channel cannot walk a task up the
+//! ladder unseen, and a failed level-5 email is retried rather than lost.
 //!
 //! Budgets:
 //!
 //!   - Daily budget: at most 3 Telegram sends per UTC day (counted in
 //!     `daily_budget`). Email is unbudgeted.
 //!   - Per-task cooldown: ≥ 4 hours between reminders.
-//!   - Quiet hours: 22:00 — 08:00 UTC (no sends).
+//!   - Quiet hours: 22:00 — 08:00 Europe/London (no sends).
 //!
 //! Message generation:
 //!
@@ -182,24 +186,23 @@ fn task_age_days(task: &EligibleTask, now: &Zoned) -> i64 {
 }
 
 fn should_advance(task: &EligibleTask, age_days: i64, now: &Zoned) -> bool {
-    let level = task.escalation_level;
-    let last = task.last_reminded.as_deref().and_then(parse_iso_to_utc);
-    let secs_since = |z: &Zoned| now.timestamp().as_second() - z.timestamp().as_second();
     // Time-at-level replaces the v1 dismissal_count gates, which had NO
     // writer anywhere in the codebase — levels 2-3 were unreachable for a
-    // year while the doc claimed a 6-level ladder.
+    // year while the doc claimed a 6-level ladder. Levels 3-4 used to gate
+    // on `last_reminded` age instead, but those levels email every 4h and
+    // each send restamps it, so 3 → 4 could never fire while email worked.
     let level_age_days = task
         .level_changed_at
         .as_deref()
         .and_then(parse_iso_to_utc)
-        .map(|z| secs_since(&z) / 86_400)
+        .map(|z| (now.timestamp().as_second() - z.timestamp().as_second()) / 86_400)
         .unwrap_or(age_days);
-    match level {
+    match task.escalation_level {
         0 => age_days >= 2,
         1 => level_age_days >= 3,
         2 => level_age_days >= 4,
-        3 => last.as_ref().is_some_and(|z| secs_since(z) >= 48 * 3600),
-        4 => last.as_ref().is_some_and(|z| secs_since(z) >= 7 * 86_400),
+        3 => level_age_days >= 2,
+        4 => level_age_days >= 7,
         _ => false,
     }
 }
@@ -231,15 +234,15 @@ fn fallback_message(task: &EligibleTask, level: i64, age_days: i64) -> String {
             age_days, task.title
         ),
         3 => format!(
-            "{}: deferred {}× over {} days. State the concrete consequence to yourself.",
-            task.title, task.dismissal_count, age_days
+            "{}: open {} days. State the concrete consequence to yourself.",
+            task.title, age_days
         ),
         4 => format!(
-            "{}: {} days open, deferred {}×. Action today or this becomes a blocker.",
-            task.title, age_days, task.dismissal_count
+            "{}: {} days open. Action today or this becomes a blocker.",
+            task.title, age_days
         ),
         5 => format!(
-            "{}: {} days dormant. Marked BLOCKED — fix it or kill it.",
+            "{}: {} days dormant. Final notice — fix it or kill it.",
             task.title, age_days
         ),
         _ => format!("Task pending {} days: {}", age_days, task.title),
@@ -249,12 +252,16 @@ fn fallback_message(task: &EligibleTask, level: i64, age_days: i64) -> String {
 /// Update tasks(escalation_level=N), log to interactions, and record an
 /// attributed `task.escalated` event — escalations used to be invisible to
 /// the journal (and thus to delta sync and the audit trail).
+///
+/// `updated_at` is deliberately untouched: it is the operator's "last
+/// touched" signal for neglect scoring and the reaper, and the engine
+/// escalating an ignored task is not a touch.
 fn set_escalation_level(db: &Db, task_uuid: &str, level: i64) -> Result<()> {
     let mut conn = db.get()?;
     let tx = conn.transaction()?;
     let now = crate::dates::format_iso(&crate::dates::now_in_operator_tz()?);
     tx.execute(
-        "UPDATE tasks SET escalation_level=?1, updated_at=?2, level_changed_at=?2 WHERE id=?3",
+        "UPDATE tasks SET escalation_level=?1, level_changed_at=?2 WHERE id=?3",
         params![level, now, task_uuid],
     )?;
     tx.execute(
@@ -418,7 +425,7 @@ pub async fn run_check_at<D: Dispatch>(
     let mut sent_telegrams = 0i64;
     let mut telegram_consecutive_failures = 0i64;
 
-    for mut task in eligible {
+    for task in eligible {
         let age_days = task_age_days(&task, &now_utc);
 
         let level_after_transition = if should_advance(&task, age_days, &now_utc) {
@@ -439,21 +446,10 @@ pub async fn run_check_at<D: Dispatch>(
             continue;
         }
 
-        if level_after_transition != task.escalation_level {
-            if !cfg.dry_run {
-                set_escalation_level(db, &task.id, level_after_transition)?;
-            }
-            task.escalation_level = level_after_transition;
-            info!(
-                target: "ptask::accountability",
-                task_uuid = %task.id,
-                level = level_after_transition,
-                dry_run = cfg.dry_run,
-                title = %task.title.chars().take(60).collect::<String>(),
-                "escalated"
-            );
-        }
-        let level = task.escalation_level;
+        // The new level is only persisted below, once its notice has been
+        // delivered on some channel.
+        let escalating = level_after_transition != task.escalation_level;
+        let level = level_after_transition;
 
         let composed = if cfg.hal_nudge_url.is_none() || cfg.dry_run {
             None
@@ -543,7 +539,20 @@ pub async fn run_check_at<D: Dispatch>(
         }
         if dispatched.telegram_sent || dispatched.email_sent {
             if !cfg.dry_run {
+                if escalating {
+                    set_escalation_level(db, &task.id, level)?;
+                }
                 stamp_reminder(db, &task.id, &now_utc)?;
+            }
+            if escalating {
+                info!(
+                    target: "ptask::accountability",
+                    task_uuid = %task.id,
+                    level,
+                    dry_run = cfg.dry_run,
+                    title = %task.title.chars().take(60).collect::<String>(),
+                    "escalated"
+                );
             }
             report.dispatched.push(dispatched);
         }
@@ -834,12 +843,13 @@ mod tests {
         // 2 → 3 after 4 days at level.
         assert!(should_advance(&mk(2, 4, 20, None), 20, &now));
         assert!(!should_advance(&mk(2, 3, 20, None), 20, &now));
-        // 3 → 4 after 48h since last reminder.
-        assert!(should_advance(&mk(3, 9, 20, Some(48 * 3600)), 20, &now));
-        assert!(!should_advance(&mk(3, 9, 20, Some(40 * 3600)), 20, &now));
-        // 4 → 5 after 7 days since last reminder.
-        assert!(should_advance(&mk(4, 20, 30, Some(7 * 86_400)), 30, &now));
-        assert!(!should_advance(&mk(4, 20, 30, Some(5 * 86_400)), 30, &now));
+        // 3 → 4 after 2 days at level, even though level 3 emails every
+        // 4h and so `last_reminded` is always recent.
+        assert!(should_advance(&mk(3, 2, 20, Some(4 * 3600)), 20, &now));
+        assert!(!should_advance(&mk(3, 1, 20, Some(48 * 3600)), 20, &now));
+        // 4 → 5 after 7 days at level.
+        assert!(should_advance(&mk(4, 7, 30, Some(4 * 3600)), 30, &now));
+        assert!(!should_advance(&mk(4, 6, 30, Some(7 * 86_400)), 30, &now));
         // Level 5 never advances.
         assert!(!should_advance(&mk(5, 99, 99, Some(99 * 86_400)), 99, &now));
     }
@@ -1020,10 +1030,11 @@ mod tests {
             increment_daily_budget(&db, &today).unwrap();
         }
         let task_uuid = aged_task_before(&db, "email escalation", 5, &anchor);
+        // Reached level 3 just now, so the run reminds at 3 without advancing.
         db.with_conn(|c| {
             c.execute(
-                "UPDATE tasks SET escalation_level=3 WHERE id=?1",
-                [&task_uuid],
+                "UPDATE tasks SET escalation_level=3, level_changed_at=?1 WHERE id=?2",
+                params![crate::dates::format_iso(&anchor), &task_uuid],
             )?;
             Ok(())
         })
@@ -1089,6 +1100,102 @@ mod tests {
             status, "pending",
             "level 5 must not hide the task as blocked"
         );
+    }
+
+    fn level_and_updated_at(db: &Db, task_uuid: &str) -> (i64, String) {
+        db.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT escalation_level, updated_at FROM tasks WHERE id=?1",
+                [task_uuid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap()
+    }
+
+    fn email_cfg() -> DispatchCfg {
+        DispatchCfg {
+            smtp_host: Some("smtp.example.test".into()),
+            smtp_user: Some("hal@puretensor.ai".into()),
+            smtp_pass: Some("secret".into()),
+            notify_email: Some("heimir@example.test".into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn level_three_reminded_every_four_hours_still_reaches_level_four() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        let task_uuid = aged_task_before(&db, "emailed every 4h", 20, &anchor);
+        let at = |h: i64| {
+            crate::dates::format_iso(&anchor.checked_sub(jiff::Span::new().hours(h)).unwrap())
+        };
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET escalation_level=3, level_changed_at=?1, last_reminded=?2
+                 WHERE id=?3",
+                params![at(49), at(4), &task_uuid],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let (_, updated_before) = level_and_updated_at(&db, &task_uuid);
+
+        let report = run_check_at(&db, &email_cfg(), &SendOk, &anchor)
+            .await
+            .unwrap();
+        assert_eq!(report.dispatched.len(), 1);
+        assert_eq!(report.dispatched[0].level, 4);
+        let (level, updated_after) = level_and_updated_at(&db, &task_uuid);
+        assert_eq!(level, 4);
+        assert_eq!(
+            updated_after, updated_before,
+            "an escalation is not an operator touch (neglect score, reaper)"
+        );
+    }
+
+    #[tokio::test]
+    async fn undelivered_escalation_is_not_persisted() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        let task_uuid = aged_task_before(&db, "email down", 30, &anchor);
+        let long_ago =
+            crate::dates::format_iso(&anchor.checked_sub(jiff::Span::new().hours(8 * 24)).unwrap());
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET escalation_level=4, last_reminded=?1, level_changed_at=?1
+                 WHERE id=?2",
+                params![long_ago, &task_uuid],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        // The level-5 email fails: the task must stay at 4 (still eligible,
+        // retried next run) instead of sitting at 5 with no notice sent.
+        let report = run_check_at(&db, &email_cfg(), &SendFail, &anchor)
+            .await
+            .unwrap();
+        assert!(report.dispatched.is_empty());
+        assert_eq!(level_and_updated_at(&db, &task_uuid).0, 4);
+        let escalations: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM interactions WHERE task_id=?1 AND action='escalation'",
+                    [&task_uuid],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(escalations, 0);
+
+        let report = run_check_at(&db, &email_cfg(), &SendOk, &anchor)
+            .await
+            .unwrap();
+        assert_eq!(report.dispatched.len(), 1);
+        assert_eq!(report.dispatched[0].level, 5);
+        assert_eq!(level_and_updated_at(&db, &task_uuid).0, 5);
     }
 
     #[tokio::test]
