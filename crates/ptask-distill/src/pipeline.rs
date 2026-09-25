@@ -146,6 +146,12 @@ struct Dedup {
     existing: Vec<(String, String)>,
     #[cfg(feature = "native-ml")]
     embedder: LazyEmbedder,
+    /// Embeddings of `existing`, index-aligned, computed once per run on the
+    /// first semantic check. Re-embedding the whole 30-day universe for every
+    /// candidate cost candidates x N MiniLM passes (one padded N-row batch
+    /// each) per run.
+    #[cfg(feature = "native-ml")]
+    existing_vecs: Option<Vec<Vec<f32>>>,
 }
 
 impl Dedup {
@@ -159,6 +165,8 @@ impl Dedup {
             existing: existing_tasks_since(db, &cutoff)?,
             #[cfg(feature = "native-ml")]
             embedder: LazyEmbedder::default(),
+            #[cfg(feature = "native-ml")]
+            existing_vecs: None,
         })
     }
 }
@@ -178,7 +186,11 @@ impl LazyEmbedder {
     fn get(&mut self) -> Option<&crate::embeddings::Embedder> {
         if !self.attempted {
             self.attempted = true;
-            self.inner = match crate::embeddings::Embedder::from_hf_cache() {
+            // Cache-only, like the capture fast lane (PT-2121/6): the
+            // downloading loader has no timeout, so a cold cache and a stalled
+            // huggingface.co hung the run until the unit's TimeoutStartSec
+            // instead of degrading to Jaccard.
+            self.inner = match crate::embeddings::Embedder::from_local_hf_cache() {
                 Ok(e) => Some(e),
                 Err(e) => {
                     warn!(target: "ptask::distill", error = %e, "embedder unavailable — Jaccard-only dedup this run");
@@ -188,6 +200,54 @@ impl LazyEmbedder {
         }
         self.inner.as_ref()
     }
+
+    /// Stop semantic dedup for the rest of the run (an embed call failed).
+    fn disable(&mut self) {
+        self.inner = None;
+    }
+}
+
+/// Embed batch for the per-run universe: bounds the padded attention
+/// tensor (batch x heads x L^2) instead of one N-row batch.
+#[cfg(feature = "native-ml")]
+const EMBED_BATCH: usize = 64;
+
+/// Closest existing task to a title, plus the title's own vector (kept so a
+/// created task can join the universe without a re-embed).
+#[cfg(feature = "native-ml")]
+#[derive(Default)]
+struct SemanticCheck {
+    /// Index into `Dedup::existing` and its cosine score.
+    best: Option<(usize, f32)>,
+    vec: Option<Vec<f32>>,
+}
+
+/// Empty when no embedder is available.
+#[cfg(feature = "native-ml")]
+fn semantic_match(dedup: &mut Dedup, title: &str) -> Result<SemanticCheck> {
+    let Some(embedder) = dedup.embedder.get() else {
+        return Ok(SemanticCheck::default());
+    };
+    if dedup.existing_vecs.is_none() {
+        let titles: Vec<&str> = dedup.existing.iter().map(|(_, t)| t.as_str()).collect();
+        let mut vecs = Vec::with_capacity(titles.len());
+        for batch in titles.chunks(EMBED_BATCH) {
+            vecs.extend(embedder.embed(batch)?);
+        }
+        dedup.existing_vecs = Some(vecs);
+    }
+    let vec = embedder
+        .embed(&[title])?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("embedder returned no vector"))?;
+    let best = dedup
+        .existing_vecs
+        .as_deref()
+        .and_then(|vecs| crate::semantic_dedup::best_match(&vec, vecs));
+    Ok(SemanticCheck {
+        best,
+        vec: Some(vec),
+    })
 }
 
 /// Mutable bookkeeping threaded through the chunk walk.
@@ -375,60 +435,50 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         // Semantic dedup: paraphrases of anything in the 30d universe
         // (including dismissed — that is the resurrection bug) skip.
         #[cfg(feature = "native-ml")]
-        {
-            let semantic_candidates: Vec<crate::semantic_dedup::Candidate> = dedup
-                .existing
-                .iter()
-                .map(|(id, title)| crate::semantic_dedup::Candidate {
-                    id: id.clone(),
-                    title: title.clone(),
-                })
-                .collect();
-            if let Some(embedder) = dedup.embedder.get() {
-                match crate::semantic_dedup::find_duplicate(
-                    embedder,
-                    &cand.title,
-                    &semantic_candidates,
-                    crate::semantic_dedup::DEFAULT_THRESHOLD,
+        let cand_vec = match semantic_match(dedup, &cand.title) {
+            Ok(SemanticCheck {
+                best: Some((idx, score)),
+                ..
+            }) if score >= crate::semantic_dedup::DEFAULT_THRESHOLD => {
+                let (dup_id, dup_title) = dedup.existing[idx].clone();
+                st.skipped += 1;
+                info!(
+                    target: "ptask::distill",
+                    title = %cand.title,
+                    matched = %dup_title,
+                    score,
+                    "dedup skip (semantic)"
+                );
+                let ev_uuid = format!(
+                    "distill-semantic-dup:{}",
+                    crate::temporal_dedup::text_hash(&cand.title)
+                );
+                let payload = serde_json::json!({
+                    "candidate_title": cand.title,
+                    "matched_task": dup_id,
+                    "matched_title": dup_title,
+                    "score": score,
+                });
+                if let Err(e) = event_log::record(
+                    db,
+                    &ev_uuid,
+                    Some(&dup_id),
+                    "distill.semantic_dedup",
+                    &payload,
+                    ctx,
                 ) {
-                    Ok(Some(dup)) => {
-                        st.skipped += 1;
-                        info!(
-                            target: "ptask::distill",
-                            title = %cand.title,
-                            matched = %dup.title,
-                            score = dup.score,
-                            "dedup skip (semantic)"
-                        );
-                        let ev_uuid = format!(
-                            "distill-semantic-dup:{}",
-                            crate::temporal_dedup::text_hash(&cand.title)
-                        );
-                        let payload = serde_json::json!({
-                            "candidate_title": cand.title,
-                            "matched_task": dup.id,
-                            "matched_title": dup.title,
-                            "score": dup.score,
-                        });
-                        if let Err(e) = event_log::record(
-                            db,
-                            &ev_uuid,
-                            Some(&dup.id),
-                            "distill.semantic_dedup",
-                            &payload,
-                            ctx,
-                        ) {
-                            warn!(target: "ptask::distill", error = %e, "semantic-dedup event failed");
-                        }
-                        continue;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        warn!(target: "ptask::distill", error = %e, "semantic dedup failed — failing open");
-                    }
+                    warn!(target: "ptask::distill", error = %e, "semantic-dedup event failed");
                 }
+                continue;
             }
-        }
+            Ok(check) => check.vec,
+            Err(e) => {
+                warn!(target: "ptask::distill", error = %e, "semantic dedup failed — Jaccard-only for the rest of this run");
+                dedup.embedder.disable();
+                dedup.existing_vecs = None;
+                None
+            }
+        };
         let title: String = cand.title.chars().take(200).collect();
         let new = NewTask {
             title: title.clone(),
@@ -451,6 +501,13 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         // A task created by an earlier chunk has to dedup a later chunk's
         // candidates too, or chunking would re-introduce the duplicates the
         // 30-day universe exists to prevent.
+        #[cfg(feature = "native-ml")]
+        match (dedup.existing_vecs.as_mut(), cand_vec) {
+            (Some(vecs), Some(vec)) => vecs.push(vec),
+            // Keep the cache index-aligned with `existing` or drop it.
+            (Some(_), None) => dedup.existing_vecs = None,
+            (None, _) => {}
+        }
         dedup.existing.push((created.id, title));
         st.created += 1;
     }
