@@ -204,6 +204,15 @@ fn parse_deadline(s: &str) -> Option<(String, f64)> {
     if s.is_empty() {
         return None;
     }
+    // A date-only deadline is due all day, as core `overdue` reads it; as
+    // midnight UTC it showed "0d over" from 00:00 on the due day itself.
+    if s.len() == 10
+        && let Ok(date) = s.parse::<ptask_core::jiff::civil::Date>()
+    {
+        let today = ptask_core::dates::now_in_operator_tz().ok()?.date();
+        let days = today.until(date).ok()?.get_days();
+        return Some((date.to_string(), f64::from(days)));
+    }
     let z = ptask_core::dates::parse_iso_to_utc(s).or_else(|| {
         // Date-only "YYYY-MM-DD" → midnight UTC. `s.get(..10)` is char-safe:
         // a raw `&s[..10]` panics when byte 10 lands inside a multi-byte scalar
@@ -1310,6 +1319,16 @@ mod tests {
         // Empty / junk resolve cleanly to None.
         assert_eq!(parse_deadline(""), None);
         assert_eq!(parse_deadline("not-a-date"), None);
+    }
+
+    #[test]
+    fn date_only_deadline_due_today_is_not_overdue() {
+        let today = ptask_core::dates::now_in_operator_tz().unwrap().date();
+        let (date, days) = parse_deadline(&today.to_string()).unwrap();
+        assert_eq!(date, today.to_string());
+        assert_eq!(days, 0.0);
+        let yesterday = today.yesterday().unwrap();
+        assert_eq!(parse_deadline(&yesterday.to_string()).unwrap().1, -1.0);
     }
 
     #[test]
