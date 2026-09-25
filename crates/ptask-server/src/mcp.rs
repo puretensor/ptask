@@ -722,35 +722,14 @@ impl PtaskMcp {
         &self,
         Parameters(arg): Parameters<ApprovalRequestArg>,
     ) -> Result<CallToolResult, McpError> {
-        use ptask_core::approvals::{self, ApprovalError, PayloadSource, RequestInput};
-        let n = arg.payload.is_some() as u8
-            + arg.payload_json.is_some() as u8
-            + arg.digest.is_some() as u8;
-        if n != 1 {
-            return Err(McpError::invalid_params(
-                "exactly one of payload, payload_json, digest is required",
-                None,
-            ));
-        }
-        let payload = if let Some(text) = arg.payload {
-            let bytes = text.into_bytes();
-            if bytes.len() > approvals::MAX_PAYLOAD_BYTES {
-                return Err(domain_err(ApprovalError::Invalid(format!(
-                    "payload exceeds {} bytes (256 KiB); use --digest for large payloads",
-                    approvals::MAX_PAYLOAD_BYTES
-                ))));
-            }
-            PayloadSource::File {
-                bytes,
-                name: arg.payload_name,
-                reference: None,
-            }
-        } else if let Some(value) = arg.payload_json {
-            approvals::payload_from_json_value(&value).map_err(domain_err)?
-        } else {
-            approvals::payload_from_digest(arg.digest.as_deref().unwrap_or(""))
-                .map_err(domain_err)?
-        };
+        use ptask_core::approvals::{self, RequestInput};
+        let payload = approvals::payload_from_wire(
+            arg.payload,
+            arg.payload_name,
+            arg.payload_json.as_ref(),
+            arg.digest.as_deref(),
+        )
+        .map_err(domain_err)?;
         let input = RequestInput {
             kind: arg.kind,
             title: arg.title,

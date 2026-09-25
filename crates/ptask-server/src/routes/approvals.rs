@@ -12,9 +12,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
-use ptask_core::approvals::{
-    self, ApprovalError, DecidedVia, Decision, PayloadSource, RequestInput,
-};
+use ptask_core::approvals::{self, ApprovalError, DecidedVia, Decision, RequestInput};
 use ptask_core::event_log::EventCtx;
 use ptask_core::tokens::Scope;
 use serde::Deserialize;
@@ -131,36 +129,6 @@ async fn get_one(
     .await
 }
 
-fn payload_from_create(req: &CreateReq) -> ptask_core::Result<PayloadSource> {
-    let n =
-        req.payload.is_some() as u8 + req.payload_json.is_some() as u8 + req.digest.is_some() as u8;
-    if n != 1 {
-        return Err(ptask_core::Error::Approval(ApprovalError::Invalid(
-            "exactly one of payload, payload_json, digest is required".into(),
-        )));
-    }
-    if let Some(text) = &req.payload {
-        let bytes = text.as_bytes().to_vec();
-        if bytes.len() > approvals::MAX_PAYLOAD_BYTES {
-            return Err(ptask_core::Error::Approval(ApprovalError::Invalid(
-                format!(
-                    "payload exceeds {} bytes (256 KiB); use --digest for large payloads",
-                    approvals::MAX_PAYLOAD_BYTES
-                ),
-            )));
-        }
-        return Ok(PayloadSource::File {
-            bytes,
-            name: req.payload_name.clone(),
-            reference: None,
-        });
-    }
-    if let Some(value) = &req.payload_json {
-        return approvals::payload_from_json_value(value);
-    }
-    approvals::payload_from_digest(req.digest.as_deref().unwrap_or(""))
-}
-
 async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -172,7 +140,13 @@ async fn create(
     let requested = crate::blocking::db_value(move || -> Result<_, Box<Response>> {
         let identity = crate::auth::authenticate(&st.db, &st.auth, &headers, Scope::Write)
             .map_err(Box::new)?;
-        let payload = payload_from_create(&req).map_err(|e| Box::new(err_resp(e)))?;
+        let payload = approvals::payload_from_wire(
+            req.payload,
+            req.payload_name,
+            req.payload_json.as_ref(),
+            req.digest.as_deref(),
+        )
+        .map_err(|e| Box::new(err_resp(e)))?;
         let input = RequestInput {
             kind: req.kind,
             title: req.title,

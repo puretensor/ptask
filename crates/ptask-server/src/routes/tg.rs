@@ -72,14 +72,8 @@ fn callback_blocking(
     let uuid = rest;
 
     let event_uuid = format!("tg-cb:{}", req.callback_id);
-    let already: bool = match state.db.with_conn(|c| {
-        Ok(c.query_row(
-            "SELECT COUNT(*) FROM pt_event_log WHERE uuid = ?1",
-            [&event_uuid],
-            |r| r.get::<_, i64>(0),
-        )?)
-    }) {
-        Ok(n) => n > 0,
+    let already = match ptask_core::event_log::get_by_uuid(&state.db, &event_uuid) {
+        Ok(found) => found.is_some(),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)),
     };
 
@@ -169,14 +163,8 @@ fn approval_callback(
     }
 
     let event_uuid = format!("tg-cb:{}", req.callback_id);
-    let already: bool = match state.db.with_conn(|c| {
-        Ok(c.query_row(
-            "SELECT COUNT(*) FROM pt_event_log WHERE uuid = ?1",
-            [&event_uuid],
-            |r| r.get::<_, i64>(0),
-        )?)
-    }) {
-        Ok(n) => n > 0,
+    let already = match ptask_core::event_log::get_by_uuid(&state.db, &event_uuid) {
+        Ok(found) => found.is_some(),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)),
     };
     if already {
