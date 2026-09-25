@@ -359,14 +359,17 @@ ln -sf ~/ptask/scripts/systemd/ptask-serve.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ptask-serve.service
 
-# The shipped unit binds the canonical host's Tailscale IP (not 0.0.0.0), so probe
-# it on that address rather than loopback.
-curl http://127.0.0.1:9501/healthz   # → ok
+# The unit binds $PTASK_SERVE_BIND from ~/puretensor-tasks/.env (the canonical
+# host's Tailscale IP in production; loopback only if unset). Probe the address
+# it actually binds: loopback does not answer a tailnet-only bind.
+BIND=$(sed -n 's/^PTASK_SERVE_BIND=//p' ~/puretensor-tasks/.env); BIND=${BIND:-127.0.0.1:9501}
+curl "http://$BIND/healthz"   # → ok
 curl -H "Authorization: Bearer $PTASK_API_TOKEN" \
-  http://127.0.0.1:9501/version       # → {"ptask_core":"<current version>"}
+  "http://$BIND/version"       # → {"ptask_core":"<current version>"}
 ```
 
-Fleet clients reach this via Tailscale at `http://127.0.0.1:9501`;
+Fleet clients reach this over Tailscale at the canonical host's tailnet
+address (`PTASK_SERVE_BIND`, e.g. `http://100.x.y.z:9501`);
 `/etc/profile.d/ptask.sh` sets `PTASK_SYNC_URL` everywhere. The unit binds
 that interface IP directly, keeping the API off the public/LAN NICs.
 Application-level auth is now fail-closed for non-loopback binds. Only use
