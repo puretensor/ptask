@@ -86,31 +86,47 @@ pub fn create(db: &Db, client_id: &str, scope: Scope) -> Result<String> {
     Ok(token)
 }
 
+/// How stale `last_used_at` may get before a successful resolve rewrites it.
+const LAST_USED_RESOLUTION_SECS: i64 = 300;
+
 /// Resolve a presented plain token to an identity. `None` = unknown or
-/// revoked. Touches `last_used_at` on success.
+/// revoked. Touches `last_used_at` on success, at most every
+/// [`LAST_USED_RESOLUTION_SECS`].
 pub fn resolve(db: &Db, presented: &str) -> Result<Option<Identity>> {
     let hash = hash_token(presented);
     let conn = db.get()?;
-    let row: Option<(String, String)> = conn
+    let row: Option<(String, String, Option<String>)> = conn
         .query_row(
-            "SELECT client_id, scopes FROM pt_api_tokens
+            "SELECT client_id, scopes, last_used_at FROM pt_api_tokens
              WHERE token_hash = ?1 AND revoked_at IS NULL",
             [&hash],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let Some((client_id, scopes)) = row else {
+    let Some((client_id, scopes, last_used)) = row else {
         return Ok(None);
     };
     let scope = Scope::parse(&scopes).unwrap_or(Scope::Read);
+    // Every authenticated request, reads and the MCP gate included, used to
+    // take the write lock here and could wait out busy_timeout behind a long
+    // writer. The staleness check must happen before the UPDATE: SQLite takes
+    // the write lock for an UPDATE even when its WHERE matches nothing.
+    let now = crate::dates::now_in_operator_tz()?;
+    let stale = last_used
+        .as_deref()
+        .and_then(crate::dates::parse_iso_to_utc)
+        .is_none_or(|t| {
+            now.timestamp().as_second() - t.timestamp().as_second() >= LAST_USED_RESOLUTION_SECS
+        });
     // Bookkeeping only: a write that cannot land (litestream restore, full disk,
     // a long writer holding the lock past busy_timeout) must not turn every
     // authenticated call — including pure reads and the MCP gate — into a 401.
-    let now = crate::dates::format_iso(&crate::dates::now_in_operator_tz()?);
-    if let Err(e) = conn.execute(
-        "UPDATE pt_api_tokens SET last_used_at = ?1 WHERE token_hash = ?2",
-        params![now, hash],
-    ) {
+    if stale
+        && let Err(e) = conn.execute(
+            "UPDATE pt_api_tokens SET last_used_at = ?1 WHERE token_hash = ?2",
+            params![crate::dates::format_iso(&now), hash],
+        )
+    {
         tracing::warn!(target: "ptask::tokens", error = %e, "last_used_at touch skipped");
     }
     Ok(Some(Identity { client_id, scope }))
@@ -174,6 +190,27 @@ mod tests {
         let infos = list(&db).unwrap();
         assert_eq!(infos.len(), 1);
         assert!(infos[0].revoked_at.is_some());
+    }
+
+    #[test]
+    fn resolve_touches_last_used_at_only_when_stale() {
+        let (_dir, db) = fresh_db();
+        let plain = create(&db, "hal", Scope::Read).unwrap();
+        let last_used = || list(&db).unwrap()[0].last_used_at.clone();
+        resolve(&db, &plain).unwrap().unwrap();
+        let first = last_used().expect("first use is recorded");
+        resolve(&db, &plain).unwrap().unwrap();
+        assert_eq!(last_used().unwrap(), first, "no write inside the window");
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE pt_api_tokens SET last_used_at = '2026-01-01T00:00:00+00:00'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        resolve(&db, &plain).unwrap().unwrap();
+        assert_ne!(last_used().unwrap(), "2026-01-01T00:00:00+00:00");
     }
 
     #[test]

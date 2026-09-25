@@ -646,6 +646,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_priority_batch_is_rescored_once_after_the_loop() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("rescore me"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let score = || -> f64 {
+            db.with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT priority_score FROM tasks WHERE id = ?1",
+                    [&t.id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+        };
+        let before = score();
+        let body = serde_json::json!({
+            "sync_token": "*",
+            "commands": [{
+                "type": "task_priority", "uuid": "prio-1",
+                "args": {"task_uuid": t.id, "priority": 5}
+            }]
+        });
+        let resp = post_sync(&app, &body).await;
+        assert_eq!(resp["sync_status"]["prio-1"], "ok");
+        assert!(
+            score() > before,
+            "priority change must reach priority_score"
+        );
+    }
+
+    #[tokio::test]
     async fn sync_round_trip_create_then_done() {
         let db = open_test_db();
         let app = router(AppState::new(

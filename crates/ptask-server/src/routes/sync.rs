@@ -242,11 +242,20 @@ async fn sync(
     }
     let mut status: BTreeMap<String, Value> = BTreeMap::new();
     let mut temp_map: BTreeMap<String, String> = BTreeMap::new();
+    // Priority, deadline and reopen feed the composite score. Rescore once
+    // after the batch (parity with local `pt priority`/`edit`/`reopen`), not
+    // once per command: each pass rewrites every active row under the write
+    // lock, and a 200-command batch paid for 200 of them.
+    let mut needs_rescore = false;
 
     // Apply commands sequentially. Each command's `uuid` is its idempotency
     // key — replays return "ok" without re-executing.
     for cmd in req.commands {
         let cmd_uuid = cmd.uuid.clone();
+        let rescores = matches!(
+            cmd.kind.as_str(),
+            "task_priority" | "task_edit" | "task_reopen"
+        );
         let cmd_state = state.clone();
         let actor = identity.client_id.clone();
         let outcome = match crate::blocking::db_value(move || apply_one(&cmd_state, &cmd, &actor))
@@ -280,6 +289,7 @@ async fn sync(
                 if let Some((temp_id, tu)) = temp {
                     temp_map.insert(temp_id, tu);
                 }
+                needs_rescore |= rescores;
                 // Outbound webhook fan-out (env-driven; no-op if unconfigured).
                 crate::webhooks::dispatch(
                     &state,
@@ -290,6 +300,15 @@ async fn sync(
                 .await;
                 status.insert(cmd_uuid, Value::String("ok".into()));
             }
+        }
+    }
+
+    if needs_rescore {
+        let db = state.db.clone();
+        match crate::blocking::db_value(move || ptask_core::scoring::run_once(&db, false)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => warn!(target: "ptask::sync", error = %e, "post-mutation rescore failed"),
+            Err(e) => warn!(target: "ptask::sync", error = %e, "post-mutation rescore aborted"),
         }
     }
 
@@ -421,12 +440,6 @@ fn apply_command(
                 .and_then(Value::as_i64)
                 .ok_or_else(|| anyhow::anyhow!("task_priority: args.priority required"))?;
             tasks::update_priority(&state.db, &task.id, priority, &sync_ctx(actor, &cmd.uuid))?;
-            // Priority feeds the composite priority_score; rescore best-effort so
-            // ordering / the dashboard reflect the change without waiting for the
-            // scoring timer (parity with the local `pt priority`).
-            if let Err(e) = ptask_core::scoring::run_once(&state.db, false) {
-                warn!(target: "ptask::sync", error = %e, "post-mutation rescore failed");
-            }
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -454,9 +467,6 @@ fn apply_command(
                 new_deadline,
                 &sync_ctx(actor, &cmd.uuid),
             )?;
-            if let Err(e) = ptask_core::scoring::run_once(&state.db, false) {
-                warn!(target: "ptask::sync", error = %e, "post-mutation rescore failed");
-            }
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -468,9 +478,6 @@ fn apply_command(
         "task_reopen" => {
             let task = resolve_task(state, &cmd.args)?;
             tasks::reopen(&state.db, &task.id, &sync_ctx(actor, &cmd.uuid))?;
-            if let Err(e) = ptask_core::scoring::run_once(&state.db, false) {
-                warn!(target: "ptask::sync", error = %e, "post-mutation rescore failed");
-            }
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
