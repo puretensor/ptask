@@ -115,8 +115,11 @@ success sets `notified_at`.
 sweep runs from `pt accountability run` so the existing 15-minute timer
 retries a failed ping.
 
-`pt approval expire` marks pending rows past `expires_at` as expired
-(idempotent).
+A pending request past `expires_at` cannot be decided: `approve`/`reject`
+flips it to `expired` and refuses. `pt accountability run` (the 15-minute
+timer) sweeps stale rows before pinging, and a re-request of an expired
+payload mints a fresh `AP-n` instead of returning the stale one.
+`pt approval expire` runs the same sweep on demand (idempotent).
 
 ## Surfaces
 

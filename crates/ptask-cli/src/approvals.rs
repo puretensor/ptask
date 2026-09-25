@@ -456,17 +456,6 @@ pub fn cmd_long_decide(db: &Db, a: LongDecideArgs, ctx: EventCtx, json: bool) ->
     cmd_decide(db, &a.id, decision, a.note.as_deref(), a.via, ctx, json)
 }
 
-pub async fn notify_pending_async(db: &Db) -> ptask_core::Result<usize> {
-    let cfg = Config::from_env();
-    ptask_notify::notify_pending(
-        db,
-        &cfg.notify,
-        cfg.dash.url.as_deref(),
-        cfg.tg_approval_buttons,
-    )
-    .await
-}
-
 fn emit_one(
     ap: approvals::Approval,
     events: Option<&[approvals::ApprovalEvent]>,

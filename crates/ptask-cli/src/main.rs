@@ -2045,7 +2045,12 @@ fn cmd_branch(db: &Db, a: BranchArgs) -> Result<()> {
 fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
     match c {
         AccountabilityCommand::Run(a) => {
-            let mut cfg = ptask_core::Config::from_env().notify;
+            let ptask_core::Config {
+                notify: mut cfg,
+                dash,
+                tg_approval_buttons,
+                ..
+            } = ptask_core::Config::from_env();
             if a.dry_run {
                 cfg.dry_run = true;
             }
@@ -2054,7 +2059,29 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                 .build()
                 .context("building tokio runtime")?;
             let report = rt.block_on(async {
-                let _ = approvals::notify_pending_async(&db).await;
+                // The 15-minute timer is the approval inbox's sweeper too:
+                // expire stale requests first so they are never pinged.
+                if !cfg.dry_run {
+                    let ctx = ptask_core::event_log::EventCtx::system("approvals");
+                    if let Err(e) = ptask_core::approvals::expire(&db, &ctx) {
+                        eprintln!(
+                            "{}",
+                            ui::section(
+                                "warning",
+                                ui::Ink::Amber,
+                                &format!("approval expiry sweep: {e}")
+                            )
+                        );
+                    }
+                }
+                // Same cfg as the ladder, so --dry-run covers the pings.
+                let _ = ptask_notify::notify_pending(
+                    &db,
+                    &cfg,
+                    dash.url.as_deref(),
+                    tg_approval_buttons,
+                )
+                .await;
                 ptask_core::accountability::run_check(&db, &cfg, &ptask_notify::HttpDispatch).await
             })?;
             if report.quiet_hours {
