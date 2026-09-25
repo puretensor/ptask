@@ -1358,6 +1358,73 @@ mod tests {
         assert!(id > 0);
     }
 
+    /// A hung subscriber no longer holds up `/sync`: delivery runs on its own
+    /// task, in order, and still reaches the live subscriber.
+    #[tokio::test]
+    async fn sync_returns_without_waiting_on_a_hung_webhook_subscriber() {
+        // Accepts connections (kernel backlog) and never answers: each send
+        // runs to the client's 10s timeout.
+        let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let live = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_url = format!("http://{}/hook", live.local_addr().unwrap());
+        tokio::spawn(async move {
+            let app = Router::new().route("/hook", axum::routing::post(|| async { "ok" }));
+            axum::serve(live, app).await.unwrap();
+        });
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            WebhookConfig {
+                outbound_urls: vec![
+                    live_url.clone(),
+                    format!("http://{}/hook", hung.local_addr().unwrap()),
+                ],
+                ..Default::default()
+            },
+        ));
+        let commands: Vec<serde_json::Value> = (0..3)
+            .map(|i| {
+                serde_json::json!({
+                    "type": "task_create", "uuid": format!("cmd-{i}"),
+                    "args": {"text": format!("hook task {i}")},
+                })
+            })
+            .collect();
+
+        let started = std::time::Instant::now();
+        post_sync(
+            &app,
+            &serde_json::json!({"sync_token": "*", "commands": commands}),
+        )
+        .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "/sync waited {:?} on subscribers",
+            started.elapsed()
+        );
+
+        let delivered = || {
+            db.with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM pt_webhook_log WHERE direction = 'out' AND source = ?1",
+                    [&live_url],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while delivered() == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            delivered(),
+            1,
+            "the first event reached the live subscriber"
+        );
+    }
+
     // Back-compat path: no token configured → scrape allowed.
     #[tokio::test(flavor = "current_thread")]
     async fn metrics_returns_prometheus_text() {
@@ -1388,6 +1455,48 @@ mod tests {
         assert!(s.contains("pt_raw_items_unprocessed "));
         assert!(s.contains("pt_event_log_cursor "));
         assert!(s.contains("pt_views_total "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn metrics_distill_age_uses_the_latest_instant_not_the_largest_string() {
+        // "10:30:00+01:00" is 09:30Z but the greater string; 09:45Z is later.
+        let db = open_test_db();
+        db.with_conn(|c| {
+            c.execute_batch(
+                "INSERT INTO pt_event_log (uuid, event_type, payload, ts) VALUES
+                   ('d1', 'distill.run', '{}', '2026-01-01T10:30:00+01:00'),
+                   ('d2', 'distill.run', '{}', '2026-01-01T09:45:00Z');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let app = router(AppState::new(db, Default::default(), Default::default()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        let age: i64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("pt_distill_last_success_age_seconds "))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let latest: jiff::Timestamp = "2026-01-01T09:45:00Z".parse().unwrap();
+        let expected = jiff::Timestamp::now().as_second() - latest.as_second();
+        assert!(
+            (age - expected).abs() < 60,
+            "age {age} vs expected {expected}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -10,7 +10,7 @@ mod ui;
 use anyhow::Result;
 use ptask_core::Db;
 
-pub use app::App;
+use app::App;
 
 /// Launch the TUI against `db`. Blocks until the user quits.
 pub fn run(db: Db) -> Result<()> {

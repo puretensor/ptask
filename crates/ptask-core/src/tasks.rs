@@ -229,8 +229,9 @@ pub fn create_with_extensions(
             crate::recurrence::Mode::Completion => "completion",
         };
         tx.execute(
-            "INSERT INTO pt_recurrence (task_uuid, rrule, mode, original_input, next_occurrence)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO pt_recurrence
+                 (task_uuid, rrule, mode, original_input, next_occurrence, anchor)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
             params![id, rec.rrule_str, mode_str, rec.original_input, next_occ],
         )?;
     }
@@ -636,6 +637,14 @@ pub enum DoneOutcome {
     Advanced { next_deadline: String },
 }
 
+struct RecurrenceRow {
+    mode: String,
+    original: String,
+    deadline: Option<String>,
+    status: String,
+    anchor: Option<String>,
+}
+
 /// Mark a task done. If the task has a `pt_recurrence` row, the deadline
 /// is advanced in-place and `status` stays `pending` (Todoist-style).
 /// Otherwise the task is set to `status='done'`. Either way an
@@ -662,20 +671,21 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     }
 
     // Look up the recurrence rule, if any.
-    let rec_row: Option<(String, String, Option<String>, String)> = tx
+    let rec_row: Option<RecurrenceRow> = tx
         .query_row(
-            "SELECT r.mode, r.original_input, t.deadline, t.status_v2
+            "SELECT r.mode, r.original_input, t.deadline, t.status_v2, r.anchor
              FROM pt_recurrence AS r
              JOIN tasks AS t ON t.id = r.task_uuid
              WHERE r.task_uuid = ?1",
             [&task.id],
             |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
+                Ok(RecurrenceRow {
+                    mode: r.get(0)?,
+                    original: r.get(1)?,
+                    deadline: r.get(2)?,
+                    status: r.get(3)?,
+                    anchor: r.get(4)?,
+                })
             },
         )
         .map(Some)
@@ -684,7 +694,14 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             other => Err(other),
         })?;
 
-    if let Some((mode_str, original, current_deadline, status)) = rec_row {
+    if let Some(RecurrenceRow {
+        mode: mode_str,
+        original,
+        deadline: current_deadline,
+        status,
+        anchor,
+    }) = rec_row
+    {
         // Resolve the current state inside this transaction: callers may
         // hold a Task from before another actor dismissed the recurrence.
         if matches!(status.as_str(), "done" | "dismissed") {
@@ -704,15 +721,20 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         } else {
             None
         };
-        // Pick the anchor for next_after based on mode:
-        //   Fixed      → from the current deadline (preserves cadence)
+        // Where the next occurrence counts from:
+        //   Fixed      → from the current deadline, or the operator-set anchor
+        //                for a plain monthly rule (preserves cadence)
         //   Completion → from now (drifts forward with completions)
-        let anchor: jiff::Zoned = match mode_str.as_str() {
-            "fixed" => match &current_deadline {
-                Some(d) => parse_iso_zoned(d)?,
-                None => completion_now.clone(),
-            },
-            "completion" => completion_now.clone(),
+        let mut next_z = match mode_str.as_str() {
+            "fixed" => {
+                let current = match &current_deadline {
+                    Some(d) => parse_iso_zoned(d)?,
+                    None => completion_now.clone(),
+                };
+                let anchor = anchor.as_deref().map(parse_iso_zoned).transpose()?;
+                crate::recurrence::next_fixed(&rec, anchor.as_ref(), &current, &completion_now)?
+            }
+            "completion" => crate::recurrence::next_after(&rec, &completion_now)?,
             other => {
                 return Err(crate::Error::Other(format!(
                     "recurrence: unknown mode in pt_recurrence: {:?}",
@@ -720,12 +742,6 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                 )));
             }
         };
-        let mut next_z = crate::recurrence::next_after(&rec, &anchor)?;
-        if mode_str == "fixed" {
-            while next_z <= completion_now {
-                next_z = crate::recurrence::next_after(&rec, &next_z)?;
-            }
-        }
         if mode_str == "completion"
             && let Some(time) = explicit_time.as_ref()
         {
@@ -994,7 +1010,7 @@ pub fn update_deadline(
     }
     if has_recurrence {
         tx.execute(
-            "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
+            "UPDATE pt_recurrence SET next_occurrence=?1, anchor=?1 WHERE task_uuid=?2",
             params![deadline, task_uuid],
         )?;
     }
@@ -1325,6 +1341,23 @@ impl std::str::FromStr for TaskKind {
     }
 }
 
+/// A requested kind and deliverable, validated. A scout without a declared
+/// deliverable defaults to a report; ship keeps the historical "unset" so
+/// existing rows and new ones stay comparable.
+pub fn kind_and_deliverable(
+    kind: Option<&str>,
+    deliverable: Option<&str>,
+) -> Result<(Option<String>, Option<String>)> {
+    let kind = kind
+        .map(|k| k.parse::<TaskKind>().map(|k| k.as_str().to_string()))
+        .transpose()?;
+    let deliverable = match deliverable {
+        Some(d) => Some(validate_deliverable(d)?.to_string()),
+        None => (kind.as_deref() == Some("scout")).then(|| "report".to_string()),
+    };
+    Ok((kind, deliverable))
+}
+
 /// Valid `deliverable` values. `None` on rows that never declared one.
 pub fn validate_deliverable(d: &str) -> Result<&str> {
     match d {
@@ -1531,7 +1564,7 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
 }
 
 /// Add a `depends_on` edge: `from` cannot start until `to` is done.
-/// Rejects self-dependency and cycles (bounded walk — the graph is small).
+/// Rejects self-dependency and cycles.
 pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -> Result<()> {
     if from_uuid == to_uuid {
         return Err(crate::Error::Other("a task cannot depend on itself".into()));
@@ -1550,24 +1583,24 @@ pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -
     if exists != 2 {
         return Err(crate::Error::Other("both tasks must exist".into()));
     }
-    // Cycle check: is `from` reachable FROM `to` via depends_on edges?
-    let mut frontier = vec![to_uuid.to_string()];
-    let mut seen = std::collections::HashSet::new();
-    while let Some(cur) = frontier.pop() {
-        if cur == from_uuid {
-            return Err(crate::Error::Other(
-                "dependency would create a cycle".into(),
-            ));
-        }
-        if !seen.insert(cur.clone()) || seen.len() > 10_000 {
-            continue;
-        }
-        let mut stmt =
-            tx.prepare("SELECT to_uuid FROM task_links WHERE from_uuid=?1 AND kind='depends_on'")?;
-        let next: Vec<String> = stmt
-            .query_map([&cur], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        frontier.extend(next);
+    // Cycle check: is `from` reachable FROM `to` via depends_on edges? One
+    // recursive query; UNION dedupes, so it terminates on any graph and no
+    // visit cap can let a deep chain skip the check.
+    let cycle: bool = tx.query_row(
+        "WITH RECURSIVE reach(id) AS (
+             SELECT ?1
+             UNION
+             SELECT l.to_uuid FROM task_links l JOIN reach r ON l.from_uuid = r.id
+             WHERE l.kind = 'depends_on'
+         )
+         SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?2)",
+        params![to_uuid, from_uuid],
+        |r| r.get(0),
+    )?;
+    if cycle {
+        return Err(crate::Error::Other(
+            "dependency would create a cycle".into(),
+        ));
     }
     tx.execute(
         "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
@@ -1715,7 +1748,7 @@ pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx)
     }
     if let Some(deadline) = edit.deadline {
         tx.execute(
-            "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
+            "UPDATE pt_recurrence SET next_occurrence=?1, anchor=?1 WHERE task_uuid=?2",
             params![deadline, task_uuid],
         )?;
         payload["deadline"] = serde_json::json!(deadline);
@@ -3017,6 +3050,55 @@ mod tests {
     }
 
     #[test]
+    fn kind_and_deliverable_validates_and_defaults_scout_to_report() {
+        assert_eq!(kind_and_deliverable(None, None).unwrap(), (None, None));
+        assert_eq!(
+            kind_and_deliverable(Some("investigate"), None).unwrap(),
+            (Some("scout".into()), Some("report".into()))
+        );
+        assert_eq!(
+            kind_and_deliverable(Some("scout"), Some("pr")).unwrap(),
+            (Some("scout".into()), Some("pr".into()))
+        );
+        assert_eq!(
+            kind_and_deliverable(Some("ship"), None).unwrap(),
+            (Some("ship".into()), None)
+        );
+        assert!(kind_and_deliverable(Some("sideways"), None).is_err());
+        assert!(kind_and_deliverable(None, Some("essay")).is_err());
+    }
+
+    #[test]
+    fn add_dependency_rejects_a_cycle_past_any_chain_depth() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let a = create(&db, NewTask::minimal("aaa"), &ctx).unwrap();
+        let b = create(&db, NewTask::minimal("bbb"), &ctx).unwrap();
+        // b -> x0 -> ... -> x10049 -> a: deeper than the old 10k visit cap,
+        // which skipped the rest of the walk and let the closing edge in.
+        {
+            let conn = db.get().unwrap();
+            let mut ins = conn
+                .prepare(
+                    "INSERT INTO task_links (from_uuid, to_uuid, kind, created_at) \
+                     VALUES (?1, ?2, 'depends_on', '2026-01-01T00:00:00Z')",
+                )
+                .unwrap();
+            let hops: Vec<String> = (0..10_050).map(|i| format!("x{i}")).collect();
+            ins.execute([&b.id, &hops[0]]).unwrap();
+            for w in hops.windows(2) {
+                ins.execute([&w[0], &w[1]]).unwrap();
+            }
+            ins.execute([hops.last().unwrap(), &a.id]).unwrap();
+        }
+        let err = add_dependency(&db, &a.id, &b.id, &ctx).unwrap_err();
+        assert!(err.to_string().contains("cycle"), "{err}");
+        // An acyclic edge alongside the deep chain still goes in.
+        let c = create(&db, NewTask::minimal("ccc"), &ctx).unwrap();
+        add_dependency(&db, &c.id, &b.id, &ctx).unwrap();
+    }
+
+    #[test]
     fn mark_done_refuses_while_a_dependency_is_open() {
         // Chain: t3 depends on t2 depends on t1.
         let (_dir, db) = fresh_db();
@@ -3337,6 +3419,49 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn monthly_recurrence_returns_to_its_anchor_day_after_a_short_month() {
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every month").unwrap();
+        let mut new = NewTask::minimal("month-end close");
+        new.deadline = Some("2099-01-31T09:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let mut days = Vec::new();
+        // mark_done reads the deadline inside its transaction.
+        for _ in 0..3 {
+            let DoneOutcome::Advanced { next_deadline } =
+                mark_done(&db, &t, &EventCtx::test()).unwrap()
+            else {
+                panic!("recurring task completed");
+            };
+            days.push(parse_iso_zoned(&next_deadline).unwrap().date().to_string());
+        }
+        // Chaining from the clamped Feb 28 gave 03-28 and 04-28.
+        assert_eq!(days, ["2099-02-28", "2099-03-31", "2099-04-30"]);
+
+        // An explicit deadline edit re-anchors the rule.
+        update_deadline(
+            &db,
+            &t.id,
+            Some("2099-06-30T09:00:00+00:00"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let DoneOutcome::Advanced { next_deadline } =
+            mark_done(&db, &t, &EventCtx::test()).unwrap()
+        else {
+            panic!("recurring task completed");
+        };
+        assert_eq!(
+            parse_iso_zoned(&next_deadline).unwrap().date().to_string(),
+            "2099-07-30"
+        );
     }
 
     #[test]

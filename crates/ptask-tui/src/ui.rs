@@ -253,15 +253,16 @@ fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App) {
         .collect();
     let total = app.tasks.len();
     let visible = app.visible().len();
+    let view = app.view.label();
     let title = match app.list_state.selected() {
         Some(i) if visible > 0 => {
             if visible == total {
-                format!(" pending  {}/{} ", i + 1, total)
+                format!(" {view}  {}/{} ", i + 1, total)
             } else {
-                format!(" pending  {}/{} ({} total) ", i + 1, visible, total)
+                format!(" {view}  {}/{} ({} total) ", i + 1, visible, total)
             }
         }
-        _ => format!(" pending  ({}/{}) ", visible, total),
+        _ => format!(" {view}  ({}/{}) ", visible, total),
     };
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)

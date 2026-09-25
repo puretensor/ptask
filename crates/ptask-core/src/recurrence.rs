@@ -228,6 +228,37 @@ pub fn next_after(rec: &Recurrence, after: &Zoned) -> Result<Zoned> {
         .map_err(|e| Error::Other(format!("recurrence advance: {}", e)))
 }
 
+/// Next fixed-mode occurrence: the first one strictly after both `current`
+/// (the deadline being completed) and `now`. A plain monthly rule counts
+/// whole intervals from `anchor`, so a month-end day clamped once (Jan 31 ->
+/// Feb 28) comes back (Mar 31) instead of chaining from the clamped date.
+/// Without an anchor, or for any other rule, it chains from `current`.
+pub fn next_fixed(
+    rec: &Recurrence,
+    anchor: Option<&Zoned>,
+    current: &Zoned,
+    now: &Zoned,
+) -> Result<Zoned> {
+    let floor = current.max(now);
+    if let (Freq::Monthly, true, Some(anchor)) = (rec.freq, rec.bymonthday.is_empty(), anchor) {
+        let n = i64::from(rec.interval);
+        for k in 1.. {
+            let next = jiff::Span::new()
+                .try_months(k * n)
+                .and_then(|span| anchor.checked_add(span))
+                .map_err(|e| Error::Other(format!("recurrence advance: {}", e)))?;
+            if next > *floor {
+                return Ok(next);
+            }
+        }
+    }
+    let mut next = next_after(rec, current)?;
+    while next <= *now {
+        next = next_after(rec, &next)?;
+    }
+    Ok(next)
+}
+
 fn next_weekday(after: &Zoned, days: &[Weekday]) -> Result<Zoned> {
     // Walk forward day-by-day up to 14 days (handles every-2-weeks edge fully).
     for delta in 1..=14 {
@@ -370,6 +401,26 @@ mod tests {
         let r = parse("every 5 days").unwrap();
         let n = next_after(&r, &anchor()).unwrap();
         assert_eq!(n.date(), date(2026, 5, 18));
+    }
+
+    #[test]
+    fn next_fixed_counts_months_from_the_anchor() {
+        let r = parse("every month").unwrap();
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        let at = |m, d| {
+            date(2026, m, d)
+                .at(9, 0, 0, 0)
+                .to_zoned(tz.clone())
+                .unwrap()
+        };
+        let (jan31, feb28, mar1) = (at(1, 31), at(2, 28), at(3, 1));
+        let anchored = next_fixed(&r, Some(&jan31), &feb28, &mar1).unwrap();
+        assert_eq!(anchored.date(), date(2026, 3, 31));
+        let chained = next_fixed(&r, None, &feb28, &mar1).unwrap();
+        assert_eq!(chained.date(), date(2026, 3, 28));
+        // Missed occurrences are skipped to the first one after now.
+        let late = next_fixed(&r, Some(&jan31), &feb28, &at(5, 2)).unwrap();
+        assert_eq!(late.date(), date(2026, 5, 31));
     }
 
     #[test]

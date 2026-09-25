@@ -37,7 +37,10 @@ On `pt done` for a recurring task, the engine advances the same row to its
 next `deadline`, preserving its UUID, PT-N and history:
 
 - `fixed`: advance from the **current deadline**, skipping missed occurrences
-  until the next deadline is after the completion time.
+  until the next deadline is after the completion time. A plain monthly rule
+  (`every month`, `every 2 months`) counts whole intervals from its anchor,
+  the deadline set at creation or by the last deadline edit, so a month-end
+  day survives short months: Jan 31 → Feb 28 → Mar 31.
 - `completion`: compute the next RRULE occurrence from **now**.
 
 The next occurrence is `status_v2='todo'` (legacy `status='pending'`) with
@@ -51,9 +54,10 @@ the new deadline; no new task is created.
 pt edit <PT-N> --deadline 2099-01-01   # move the next occurrence
 ```
 
-This also updates `pt_recurrence.next_occurrence`. Clearing the deadline on
-a recurring task is rejected. There is no `pt edit --recurrence` flag;
-create recurrence through quick-add, and dismiss the task to stop working it.
+This also updates `pt_recurrence.next_occurrence` and re-anchors a monthly
+rule on the new date. Clearing the deadline on a recurring task is rejected.
+There is no `pt edit --recurrence` flag; create recurrence through quick-add,
+and dismiss the task to stop working it.
 
 ## Storage
 
@@ -63,9 +67,11 @@ CREATE TABLE pt_recurrence (
     rrule           TEXT NOT NULL,            -- RFC 5545
     mode            TEXT NOT NULL,            -- 'fixed' | 'completion'
     original_input  TEXT NOT NULL,            -- 'every monday at 9am'
-    next_occurrence TEXT NOT NULL             -- ISO datetime UTC
+    next_occurrence TEXT NOT NULL,            -- ISO datetime UTC
+    anchor          TEXT                      -- V019: operator-set occurrence
 );
 ```
 
-`next_occurrence` is denormalised so `pt list 'today & recurring'` can
-filter without re-evaluating the RRULE on every read.
+`next_occurrence` mirrors the task's `deadline`, which is what filters and
+views read. `anchor` is NULL on rows created before V019; those keep
+advancing from the current deadline until their next deadline edit.

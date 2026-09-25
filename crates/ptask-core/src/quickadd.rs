@@ -49,6 +49,32 @@ pub struct QuickAdd {
     pub recurrence: Option<Recurrence>,
 }
 
+impl QuickAdd {
+    /// The row and extensions this quick-add creates, attributed to
+    /// `source_type`. Every create surface starts here and then sets its
+    /// explicit fields (CLI flags, request body) over the parsed ones.
+    pub fn task_parts(&self, source_type: &str) -> (crate::NewTask, crate::Extensions) {
+        let new = crate::NewTask {
+            title: self.title.clone(),
+            description: self.description.clone(),
+            priority: self.priority.unwrap_or(2),
+            deadline: self.deadline.clone(),
+            source_type: source_type.into(),
+            ai_confidence: 1.0,
+            ai_reasoning: String::new(),
+        };
+        let ext = crate::Extensions {
+            labels: self.labels.clone(),
+            project: self.project.clone(),
+            duration_min: self.duration_min,
+            recurrence: self.recurrence.clone(),
+            due_at: self.due.clone(),
+            ..Default::default()
+        };
+        (new, ext)
+    }
+}
+
 /// Parse a quick-add string against the operator-tz `now()` anchor.
 pub fn parse(input: &str) -> Result<QuickAdd> {
     parse_at(input, dates::now_in_operator_tz()?)
@@ -417,6 +443,23 @@ mod tests {
             q.deadline
         );
         assert_eq!(q.title, input);
+    }
+
+    #[test]
+    fn task_parts_carries_every_parsed_field() {
+        let q = parse_at("pay rent p1 @home #flat ~15m every month", anchor()).unwrap();
+        let (new, ext) = q.task_parts("tui");
+        assert_eq!(new.title, q.title);
+        assert_eq!(new.priority, 1);
+        assert_eq!(new.deadline, q.deadline);
+        assert_eq!(new.source_type, "tui");
+        assert_eq!(ext.labels, ["home"]);
+        assert_eq!(ext.project.as_deref(), Some("flat"));
+        assert_eq!(ext.duration_min, Some(15));
+        assert_eq!(ext.recurrence, q.recurrence);
+        assert!(ext.kind.is_none() && ext.deliverable.is_none());
+        let (new, _) = parse_at("plain", anchor()).unwrap().task_parts("mcp");
+        assert_eq!(new.priority, 2, "unset priority defaults to p2");
     }
 
     #[test]

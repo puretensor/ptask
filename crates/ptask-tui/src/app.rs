@@ -167,10 +167,6 @@ impl App {
             .and_then(|i| self.filtered.get(i).copied())
     }
 
-    pub fn selected(&self) -> Option<usize> {
-        self.list_state.selected()
-    }
-
     pub fn selected_task(&self) -> Option<&Task> {
         self.selected_task_index().and_then(|i| self.tasks.get(i))
     }
@@ -549,26 +545,7 @@ impl App {
                 return;
             }
         };
-        let new = ptask_core::NewTask {
-            title: q.title.clone(),
-            description: q.description.clone(),
-            priority: q.priority.unwrap_or(2),
-            deadline: q.deadline.clone(),
-            source_type: "tui".into(),
-            ai_confidence: 1.0,
-            ai_reasoning: String::new(),
-        };
-        let ext = ptask_core::Extensions {
-            labels: q.labels.clone(),
-            kind: None,
-            deliverable: None,
-            project: q.project.clone(),
-            duration_min: q.duration_min,
-            planned_at: None,
-            energy: None,
-            recurrence: q.recurrence.clone(),
-            due_at: q.due.clone(),
-        };
+        let (new, ext) = q.task_parts("tui");
         match tasks::create_with_extensions(&self.db, new, ext, &tui_ctx()) {
             Ok(t) => {
                 self.status_msg =

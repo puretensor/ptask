@@ -138,6 +138,13 @@ const CHUNK: usize = 25;
 /// consumed, so the next run starts from a strictly shorter queue.
 const MAX_PROVIDER_CALLS: usize = 64;
 
+/// Wall-clock ceiling on the chunk walk. A provider call can take ~92s (three
+/// 30s attempts plus backoff), so 64 slow calls ran ~97 min, while the unit
+/// kills the run at 30 min, before any row was marked processed, which threw
+/// the finished chunks away. No new call starts past this budget. The one in
+/// flight plus a consolidate still finishes well inside the unit timeout.
+const RUN_WALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
 /// Dedup universe for one run: everything active + anything touched in 30
 /// days (incl. done/dismissed — the operator said no once already). Shared
 /// across chunks and extended in place as tasks are created, so two chunks in
@@ -266,6 +273,8 @@ struct RunState {
     /// The first failure seen, un-bisected — the one worth reporting.
     first_error: Option<String>,
     calls: usize,
+    /// No new provider call starts after this instant.
+    stop_at: Option<std::time::Instant>,
     budget_exhausted: bool,
 }
 
@@ -360,7 +369,8 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
     if items.is_empty() {
         return;
     }
-    if st.calls >= MAX_PROVIDER_CALLS {
+    if st.calls >= MAX_PROVIDER_CALLS || st.stop_at.is_some_and(|t| std::time::Instant::now() >= t)
+    {
         st.budget_exhausted = true;
         return;
     }
@@ -535,6 +545,15 @@ pub fn run_native<P: LlmProvider + ?Sized>(
     provider: &P,
     batch: usize,
 ) -> Result<NativeReport> {
+    run_native_within(db, provider, batch, RUN_WALL_BUDGET)
+}
+
+fn run_native_within<P: LlmProvider + ?Sized>(
+    db: &Db,
+    provider: &P,
+    batch: usize,
+    wall_budget: std::time::Duration,
+) -> Result<NativeReport> {
     let start = std::time::Instant::now();
     let ctx = EventCtx::system("distill");
 
@@ -559,7 +578,10 @@ pub fn run_native<P: LlmProvider + ?Sized>(
     }
 
     let mut dedup = Dedup::load(db)?;
-    let mut st = RunState::default();
+    let mut st = RunState {
+        stop_at: Some(std::time::Instant::now() + wall_budget),
+        ..RunState::default()
+    };
     for chunk in items.chunks(CHUNK) {
         walk_chunk(db, provider, chunk, &mut dedup, &mut st, &ctx);
     }
@@ -567,8 +589,9 @@ pub fn run_native<P: LlmProvider + ?Sized>(
         warn!(
             target: "ptask::distill",
             calls = st.calls,
-            max = MAX_PROVIDER_CALLS,
-            "provider call budget exhausted — remaining rows deferred to the next run"
+            max_calls = MAX_PROVIDER_CALLS,
+            elapsed_s = start.elapsed().as_secs(),
+            "run budget exhausted — remaining rows deferred to the next run"
         );
     }
 
@@ -1169,6 +1192,46 @@ mod tests {
             0,
             "a database fault must not push a good capture toward quarantine"
         );
+    }
+
+    /// Past the wall-clock budget no new chunk starts, and the chunks that
+    /// finished are still marked processed before the run returns.
+    #[test]
+    fn the_wall_clock_budget_defers_later_chunks_and_keeps_finished_ones() {
+        struct SlowProvider(PoisonProvider);
+        impl LlmProvider for SlowProvider {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                self.0.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                self.0.consolidate(items)
+            }
+            fn preflight(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "slow-test"
+            }
+        }
+        let (_dir, db) = fresh_db();
+        let texts: Vec<String> = (0..CHUNK * 2)
+            .map(|i| format!("distinct capture number {i} about topic {}", i * 7919))
+            .collect();
+        for t in &texts {
+            ptask_core::raw_items::insert(&db, t, "test", "test://x").unwrap();
+        }
+        let provider = SlowProvider(PoisonProvider { poison: "\u{0}" });
+
+        let report =
+            run_native_within(&db, &provider, 200, std::time::Duration::from_millis(100)).unwrap();
+        assert_eq!(report.consumed, CHUNK, "only the first chunk ran");
+        assert_eq!(
+            ptask_core::raw_items::unprocessed_count(&db).unwrap(),
+            CHUNK as i64,
+            "the deferred chunk waits for the next run, uncharged"
+        );
+        assert_eq!(attempts(&db, &texts[CHUNK]), 0);
     }
 
     /// Chunking must not resurrect the duplicates the 30-day dedup universe

@@ -348,6 +348,49 @@ struct ScoringRow {
     active_dependents: i64,
 }
 
+/// One row's v2 components.
+struct V2Components {
+    urgency: f64,
+    manual: f64,
+    neglect: f64,
+    dependency: f64,
+    composite: f64,
+}
+
+fn v2_components(row: &ScoringRow, now: &Zoned) -> V2Components {
+    let created_at = parse_iso_to_utc(&row.created_at).unwrap_or_else(|| now.clone());
+    let deadline = row.deadline.as_deref().and_then(parse_iso_to_utc);
+    let urgency = urgency_score_v2(deadline.as_ref(), &created_at, row.priority, now);
+    let manual = manual_score(row.priority);
+    let updated = parse_iso_to_utc(&row.updated_at).unwrap_or_else(|| now.clone());
+    let neglect = neglect_score_v2(&updated, now);
+    let dependency = dependency_score_v2(row.active_dependents);
+    let composite = composite_score_v2(
+        urgency,
+        dependency,
+        neglect,
+        manual,
+        row.duration_min,
+        row.score_llm,
+    );
+    V2Components {
+        urgency,
+        manual,
+        neglect,
+        dependency,
+        composite,
+    }
+}
+
+/// Fresh v2 composite for every active task, computed in one pass without
+/// writing: `(task_uuid, composite)`.
+pub fn composites_v2(db: &Db, now: &Zoned) -> Result<Vec<(String, f64)>> {
+    Ok(load_scoring_rows(db)?
+        .iter()
+        .map(|row| (row.id.clone(), v2_components(row, now).composite))
+        .collect())
+}
+
 #[derive(Debug, Clone)]
 struct ScoreWrite {
     id: String,
@@ -410,11 +453,10 @@ pub fn run_once_at_mode(db: &Db, dry_run: bool, now: &Zoned, v2: bool) -> Result
     let mut scored = 0usize;
     let mut writes = Vec::with_capacity(rows.len());
     for row in &rows {
-        let created_at = parse_iso_to_utc(&row.created_at).unwrap_or_else(|| now.clone());
-        let deadline = row.deadline.as_deref().and_then(parse_iso_to_utc);
-
         let (urgency, manual, neglect, dep, composite) =
             if let Some((graph, centrality)) = v1_graph.as_ref() {
+                let created_at = parse_iso_to_utc(&row.created_at).unwrap_or_else(|| now.clone());
+                let deadline = row.deadline.as_deref().and_then(parse_iso_to_utc);
                 let urgency = urgency_score(deadline.as_ref(), &created_at, now);
                 let manual = manual_score(row.priority);
                 let interactions = load_interactions_14d(db, &row.id)?;
@@ -424,20 +466,8 @@ pub fn run_once_at_mode(db: &Db, dry_run: bool, now: &Zoned, v2: bool) -> Result
                 let composite = composite_score(urgency, dep, neglect, manual);
                 (urgency, manual, neglect, dep, composite)
             } else {
-                let urgency = urgency_score_v2(deadline.as_ref(), &created_at, row.priority, now);
-                let manual = manual_score(row.priority);
-                let updated = parse_iso_to_utc(&row.updated_at).unwrap_or_else(|| now.clone());
-                let neglect = neglect_score_v2(&updated, now);
-                let dep = dependency_score_v2(row.active_dependents);
-                let composite = composite_score_v2(
-                    urgency,
-                    dep,
-                    neglect,
-                    manual,
-                    row.duration_min,
-                    row.score_llm,
-                );
-                (urgency, manual, neglect, dep, composite)
+                let c = v2_components(row, now);
+                (c.urgency, c.manual, c.neglect, c.dependency, c.composite)
             };
 
         // Per task, so debug: every mutation-triggered rescore used to write
@@ -508,34 +538,20 @@ pub fn why(db: &Db, task_uuid: &str) -> Result<WhyBreakdown> {
     let mut scored: Vec<(String, f64)> = Vec::with_capacity(rows.len());
     let mut mine = None;
     for row in &rows {
-        let created = parse_iso_to_utc(&row.created_at).unwrap_or_else(|| now.clone());
-        let deadline = row.deadline.as_deref().and_then(parse_iso_to_utc);
-        let urgency = urgency_score_v2(deadline.as_ref(), &created, row.priority, &now);
-        let manual = manual_score(row.priority);
-        let updated = parse_iso_to_utc(&row.updated_at).unwrap_or_else(|| now.clone());
-        let neglect = neglect_score_v2(&updated, &now);
-        let dep = dependency_score_v2(row.active_dependents);
-        let composite = composite_score_v2(
-            urgency,
-            dep,
-            neglect,
-            manual,
-            row.duration_min,
-            row.score_llm,
-        );
-        scored.push((row.id.clone(), composite));
+        let c = v2_components(row, &now);
+        scored.push((row.id.clone(), c.composite));
         if row.id == task_uuid {
             mine = Some(WhyBreakdown {
                 task_uuid: row.id.clone(),
                 pt_id: None,
                 title: row.title.clone(),
-                urgency,
-                dependency: dep,
-                neglect,
-                manual,
+                urgency: c.urgency,
+                dependency: c.dependency,
+                neglect: c.neglect,
+                manual: c.manual,
                 effort_factor: effort_factor(row.duration_min),
                 score_llm: row.score_llm.clamp(-0.15, 0.15),
-                composite,
+                composite: c.composite,
                 weights: (W2_URGENCY, W2_DEPENDENCY, W2_NEGLECT, W2_MANUAL),
                 rank: 0,
                 of: 0,

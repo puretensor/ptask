@@ -306,9 +306,9 @@ fn decide_guardrails(via_dashboard: bool) -> Result<DecidedVia> {
 }
 
 pub fn cmd_request(db: &Db, a: RequestArgs, ctx: EventCtx, json: bool) -> Result<()> {
-    if a.note.is_some() && a.note_file.is_some() {
-        anyhow::bail!("pass only one of --note or --note-file");
-    }
+    // The note first: a --note/--note-file conflict fails before any payload
+    // file is read.
+    let request_note = note_text(a.note.as_deref(), a.note_file.as_ref())?;
     let payload = payload_source(
         a.payload_file.as_ref(),
         a.payload_json.as_deref(),
@@ -317,7 +317,7 @@ pub fn cmd_request(db: &Db, a: RequestArgs, ctx: EventCtx, json: bool) -> Result
     let input = RequestInput {
         kind: a.kind,
         title: a.title,
-        request_note: note_text(a.note.as_deref(), a.note_file.as_ref())?,
+        request_note,
         payload,
         task_pt_id: a.task,
         expires_in: a.expires_in,

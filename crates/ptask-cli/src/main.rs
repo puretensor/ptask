@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ptask_core::{Db, Extensions, NewTask, dag, priority, pt_id, quickadd, tasks, views};
+use ptask_core::{Db, dag, priority, pt_id, quickadd, tasks, views};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
@@ -811,12 +811,8 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     if let Err(e) = run() {
-        if let Some(code) = approvals::exit_code(&e) {
-            eprintln!("{}", ui::section("error", ui::Ink::Red, &format!("{e:#}")));
-            std::process::exit(code);
-        }
         eprintln!("{}", ui::section("error", ui::Ink::Red, &format!("{e:#}")));
-        std::process::exit(1);
+        std::process::exit(approvals::exit_code(&e).unwrap_or(1));
     }
 }
 
@@ -957,55 +953,19 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
     };
 
     // CLI flags override parsed values.
-    let priority = match a.priority.as_deref() {
-        Some(s) => priority::parse(s).map_err(anyhow::Error::msg)?,
-        None => q.priority.unwrap_or(2),
-    };
-    let description = a.description.clone().unwrap_or(q.description.clone());
-    let deadline = a.deadline.clone().or_else(|| q.deadline.clone());
-
-    let new = NewTask {
-        title: q.title.clone(),
-        description,
-        priority,
-        deadline,
-        source_type: "claude_code".into(),
-        ai_confidence: 1.0,
-        ai_reasoning: a.reason.unwrap_or_default(),
-    };
-    let kind = match a.kind.as_deref() {
-        Some(k) => Some(
-            k.parse::<tasks::TaskKind>()
-                .map_err(anyhow::Error::msg)?
-                .as_str()
-                .to_string(),
-        ),
-        None => None,
-    };
-    let deliverable = match a.deliverable.as_deref() {
-        Some(d) => Some(
-            tasks::validate_deliverable(d)
-                .map_err(anyhow::Error::msg)?
-                .to_string(),
-        ),
-        // A declared scout defaults to a report; ship keeps the historical
-        // "unset" so existing rows and new ones stay comparable.
-        None => match kind.as_deref() {
-            Some("scout") => Some("report".to_string()),
-            _ => None,
-        },
-    };
-    let ext = Extensions {
-        kind,
-        deliverable,
-        labels: q.labels.clone(),
-        project: q.project.clone(),
-        duration_min: q.duration_min,
-        planned_at: None,
-        energy: None,
-        recurrence: q.recurrence.clone(),
-        due_at: q.due.clone(),
-    };
+    let (mut new, mut ext) = q.task_parts("claude_code");
+    if let Some(s) = a.priority.as_deref() {
+        new.priority = priority::parse(s).map_err(anyhow::Error::msg)?;
+    }
+    if let Some(description) = a.description.clone() {
+        new.description = description;
+    }
+    if a.deadline.is_some() {
+        new.deadline = a.deadline.clone();
+    }
+    new.ai_reasoning = a.reason.unwrap_or_default();
+    (ext.kind, ext.deliverable) =
+        tasks::kind_and_deliverable(a.kind.as_deref(), a.deliverable.as_deref())?;
 
     let task = tasks::create_with_extensions(db, new, ext, &cli_ctx())?;
 
@@ -3411,13 +3371,10 @@ fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
     }
 }
 
-/// Top-20 rank comparison between the retired v1 formula and v2, computed
-/// side-by-side without writing either. The Phase-6 cutover evidence.
+/// Top-20 by a fresh v2 score, each row's move against the stored ordering
+/// (whatever the last scoring run wrote). Nothing is written.
 fn print_rank_diff(db: &Db) -> Result<()> {
     let now = ptask_core::dates::now_in_operator_tz().map_err(anyhow::Error::msg)?;
-    // Score under each mode into memory using dry runs + reading why()-style
-    // computation is heavier; simplest faithful approach: run v1 dry (logs
-    // only), then compute v2 breakdowns via why() per active task.
     let conn = db.get()?;
     let mut stmt = conn.prepare(
         "SELECT id, pt_id, title, priority_score FROM tasks
@@ -3428,28 +3385,30 @@ fn print_rank_diff(db: &Db) -> Result<()> {
         .collect::<std::result::Result<_, _>>()?;
     drop(stmt);
     drop(conn);
-    let mut v1_rank: Vec<(String, f64)> =
-        rows.iter().map(|(id, _, _, s)| (id.clone(), *s)).collect();
-    v1_rank.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let v1_pos: std::collections::HashMap<&String, usize> = v1_rank
+    let mut stored_rank: Vec<(&String, f64)> = rows.iter().map(|(id, _, _, s)| (id, *s)).collect();
+    stored_rank.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let stored_pos: std::collections::HashMap<&String, usize> = stored_rank
         .iter()
         .enumerate()
-        .map(|(i, (id, _))| (id, i + 1))
+        .map(|(i, (id, _))| (*id, i + 1))
         .collect();
 
-    let mut v2_scores = Vec::new();
-    for (id, pt, title, _) in &rows {
-        if let Ok(b) = ptask_core::scoring::why(db, id) {
-            v2_scores.push((id.clone(), pt.clone(), title.clone(), b.composite));
-        }
-    }
+    // One pass for every fresh score; per-task `why` rescored the whole set
+    // for each task.
+    let fresh: std::collections::HashMap<String, f64> =
+        ptask_core::scoring::composites_v2(db, &now)?
+            .into_iter()
+            .collect();
+    let mut v2_scores: Vec<(&String, &Option<String>, &String, f64)> = rows
+        .iter()
+        .filter_map(|(id, pt, title, _)| fresh.get(id).map(|s| (id, pt, title, *s)))
+        .collect();
     v2_scores.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
     print_lines(ui::headline(
         "ptask · rank diff",
         None,
-        "v2 top-20 vs current stored v1 ordering",
+        "fresh v2 top-20 vs the stored ordering",
     ));
-    let _ = now;
     let width = ui::term_width();
     let fixed = ui::table_width(&[
         ui::Column::new("", 3),
@@ -3469,7 +3428,7 @@ fn print_rank_diff(db: &Db) -> Result<()> {
         .take(20)
         .enumerate()
         .map(|(i, (id, pt, title, score))| {
-            let old = v1_pos.get(id).copied().unwrap_or(0);
+            let old = stored_pos.get(*id).copied().unwrap_or(0);
             let delta = old as i64 - (i as i64 + 1);
             let mv = match delta.signum() {
                 1 => ui::paint(&format!("↑{}", delta.abs()), ui::Ink::Green),

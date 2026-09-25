@@ -424,11 +424,17 @@ struct TasksQ {
     order: Option<String>,
 }
 
+// The GET reads below are blocking bodies too (a pooled connection plus a
+// full-table scan), so they run on the blocking pool like the writes.
 async fn api_tasks(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<TasksQ>,
 ) -> Response {
+    crate::blocking::db_response(move || api_tasks_blocking(state, headers, q)).await
+}
+
+fn api_tasks_blocking(state: AppState, headers: HeaderMap, q: TasksQ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -452,6 +458,10 @@ async fn api_critical(
     headers: HeaderMap,
     Query(q): Query<TasksQ>,
 ) -> Response {
+    crate::blocking::db_response(move || api_critical_blocking(state, headers, q)).await
+}
+
+fn api_critical_blocking(state: AppState, headers: HeaderMap, q: TasksQ) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -463,6 +473,10 @@ async fn api_critical(
 }
 
 async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    crate::blocking::db_response(move || api_stats_blocking(state, headers)).await
+}
+
+fn api_stats_blocking(state: AppState, headers: HeaderMap) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -589,6 +603,10 @@ async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
 }
 
 async fn api_timeline(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    crate::blocking::db_response(move || api_timeline_blocking(state, headers)).await
+}
+
+fn api_timeline_blocking(state: AppState, headers: HeaderMap) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -618,6 +636,10 @@ async fn api_timeline(State(state): State<AppState>, headers: HeaderMap) -> Resp
 }
 
 async fn api_heatmap(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    crate::blocking::db_response(move || api_heatmap_blocking(state, headers)).await
+}
+
+fn api_heatmap_blocking(state: AppState, headers: HeaderMap) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -666,12 +688,16 @@ async fn api_events(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    crate::blocking::db_response(move || api_events_blocking(state, headers, id)).await
+}
+
+fn api_events_blocking(state: AppState, headers: HeaderMap, id: String) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
-    let task = match ptask_core::tasks::resolve_for_lookup(&state.db, &id, true) {
+    let task = match resolve_task(&state, &id) {
         Ok(t) => t,
-        Err(_) => return jerr(StatusCode::NOT_FOUND, "task not found"),
+        Err(r) => return r,
     };
     match ptask_core::event_log::history_for_task(&state.db, &task.id, 200) {
         Ok(events) => {
@@ -693,7 +719,7 @@ async fn api_events(
 // -------------------------------------------------------------- writes
 
 #[allow(clippy::result_large_err)]
-fn resolve_active(state: &AppState, id: &str) -> Result<ptask_core::tasks::Task, Response> {
+fn resolve_task(state: &AppState, id: &str) -> Result<ptask_core::tasks::Task, Response> {
     ptask_core::tasks::resolve_for_lookup(&state.db, id, true)
         .map_err(|_| jerr(StatusCode::NOT_FOUND, "task not found"))
 }
@@ -732,7 +758,7 @@ fn act_done_blocking(state: AppState, headers: HeaderMap, id: String) -> Respons
     if !origin_ok(&headers) {
         return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
-    let task = match resolve_active(&state, &id) {
+    let task = match resolve_task(&state, &id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -768,7 +794,7 @@ fn act_dismiss_blocking(state: AppState, headers: HeaderMap, id: String) -> Resp
     if !origin_ok(&headers) {
         return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
-    let task = match resolve_active(&state, &id) {
+    let task = match resolve_task(&state, &id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -796,7 +822,7 @@ fn act_reopen_blocking(state: AppState, headers: HeaderMap, id: String) -> Respo
     if !origin_ok(&headers) {
         return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
-    let task = match resolve_active(&state, &id) {
+    let task = match resolve_task(&state, &id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -838,7 +864,7 @@ fn act_priority_blocking(
     if !(1..=5).contains(&body.level) {
         return jerr(StatusCode::BAD_REQUEST, "level must be an integer 1..5");
     }
-    let task = match resolve_active(&state, &id) {
+    let task = match resolve_task(&state, &id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -879,7 +905,7 @@ fn act_snooze_blocking(
         return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
     let days = body.days.unwrap_or(3).clamp(1, 90);
-    let task = match resolve_active(&state, &id) {
+    let task = match resolve_task(&state, &id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -945,7 +971,7 @@ fn act_edit_blocking(
     if !origin_ok(&headers) {
         return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
-    let task = match resolve_active(&state, &id) {
+    let task = match resolve_task(&state, &id) {
         Ok(t) => t,
         Err(r) => return r,
     };
@@ -1021,26 +1047,16 @@ fn api_create_blocking(state: AppState, headers: HeaderMap, body: CreateBody) ->
         Ok(q) => q,
         Err(e) => return jerr(StatusCode::BAD_REQUEST, &e.to_string()),
     };
-    let new = ptask_core::NewTask {
-        title: q.title.clone(),
-        description: body.description.unwrap_or_else(|| q.description.clone()),
-        priority: body.priority.or(q.priority).unwrap_or(2),
-        deadline: body.deadline.or_else(|| q.deadline.clone()),
-        source_type: "manual".into(),
-        ai_confidence: 1.0,
-        ai_reasoning: String::new(),
-    };
-    let ext = ptask_core::Extensions {
-        labels: q.labels.clone(),
-        kind: None,
-        deliverable: None,
-        project: q.project.clone(),
-        duration_min: q.duration_min,
-        planned_at: None,
-        energy: None,
-        recurrence: q.recurrence.clone(),
-        due_at: q.due.clone(),
-    };
+    let (mut new, ext) = q.task_parts("manual");
+    if let Some(description) = body.description {
+        new.description = description;
+    }
+    if let Some(priority) = body.priority {
+        new.priority = priority;
+    }
+    if body.deadline.is_some() {
+        new.deadline = body.deadline;
+    }
     match ptask_core::tasks::create_with_extensions(&state.db, new, ext, &dash_ctx()) {
         Ok(t) => {
             rescore(&state);
@@ -1077,16 +1093,16 @@ async fn api_stream(
     }
     let start = match q.cursor {
         Some(c) => c,
-        None => state
-            .db
-            .with_conn(|c| {
-                Ok(
-                    c.query_row("SELECT COALESCE(MAX(id),0) FROM pt_event_log", [], |r| {
-                        r.get::<_, i64>(0)
-                    })?,
-                )
-            })
-            .unwrap_or(0),
+        None => {
+            let db = state.db.clone();
+            match crate::blocking::db_value(move || ptask_core::event_log::current_cursor(&db))
+                .await
+            {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => return jerr(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+                Err(_) => return jerr(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+            }
+        }
     };
     let db = state.db.clone();
     let stream = futures_util::stream::unfold(start, move |cursor| {
@@ -1094,30 +1110,16 @@ async fn api_stream(
         async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                let batch: Vec<(i64, String, Option<String>, String)> = db
-                    .with_conn(|c| {
-                        let mut stmt = c.prepare(
-                            "SELECT id, event_type, actor, ts FROM pt_event_log \
-                             WHERE id > ?1 ORDER BY id LIMIT 100",
-                        )?;
-                        let rows = stmt
-                            .query_map([cursor], |r| {
-                                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                            })?
-                            .collect::<std::result::Result<Vec<_>, _>>()?;
-                        Ok(rows)
-                    })
-                    .unwrap_or_default();
-                if batch.is_empty() {
-                    continue;
-                }
-                let next = batch.last().map(|r| r.0).unwrap_or(cursor);
-                let events: Vec<serde_json::Value> = batch
-                    .into_iter()
-                    .map(|(id, et, actor, ts)| {
-                        serde_json::json!({"id": id, "event_type": et, "actor": actor, "ts": ts})
-                    })
-                    .collect();
+                let db = db.clone();
+                let polled = crate::blocking::db_value(move || journal_after(&db, cursor)).await;
+                let (next, events) = match polled {
+                    Ok(Ok(Some(batch))) => batch,
+                    Ok(Ok(None)) | Err(_) => continue,
+                    Ok(Err(e)) => {
+                        tracing::warn!(target: "ptask::dashboard", error = %e, "SSE journal poll failed");
+                        continue;
+                    }
+                };
                 let ev = Event::default()
                     .event("change")
                     .json_data(serde_json::json!({"cursor": next, "events": events}))
@@ -1129,6 +1131,34 @@ async fn api_stream(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// Up to 100 journal rows past `cursor`, oldest first, with the new cursor;
+/// `None` when nothing has been journaled since.
+fn journal_after(
+    db: &ptask_core::Db,
+    cursor: i64,
+) -> ptask_core::Result<Option<(i64, Vec<serde_json::Value>)>> {
+    db.with_conn(|c| {
+        let mut stmt = c.prepare_cached(
+            "SELECT id, event_type, actor, ts FROM pt_event_log \
+             WHERE id > ?1 ORDER BY id LIMIT 100",
+        )?;
+        let mut next = cursor;
+        let events = stmt
+            .query_map([cursor], |r| {
+                let id: i64 = r.get(0)?;
+                next = id;
+                Ok(serde_json::json!({
+                    "id": id,
+                    "event_type": r.get::<_, String>(1)?,
+                    "actor": r.get::<_, Option<String>>(2)?,
+                    "ts": r.get::<_, String>(3)?,
+                }))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((!events.is_empty()).then_some((next, events)))
+    })
 }
 
 // ------------------------------------------------------ static + voice
@@ -1311,6 +1341,24 @@ mod tests {
     };
     use ptask_core::config::DashConfig;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn sse_poll_returns_new_rows_and_advances_the_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("sse.db")).unwrap();
+        let start = ptask_core::event_log::current_cursor(&db).unwrap();
+        assert!(super::journal_after(&db, start).unwrap().is_none());
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("journaled"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        let (next, events) = super::journal_after(&db, start).unwrap().unwrap();
+        assert_eq!(next, ptask_core::event_log::current_cursor(&db).unwrap());
+        assert_eq!(events.last().unwrap()["id"], next);
+        assert!(super::journal_after(&db, next).unwrap().is_none());
+    }
 
     #[test]
     fn rejected_edit_leaves_dashboard_task_unchanged() {

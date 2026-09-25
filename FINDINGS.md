@@ -5,6 +5,50 @@ Running register of review findings. One verb per item: **fixed** (version), **d
 why). Companion ledger: `review-ledger.jsonl`; the Opus reader report this section was
 triaged from is archived at `~/reports/cc/fable-pass-2026-09/reports/report-ptask.md`.
 
+## 2026-09-25 — residue follow-up (3.34.0)
+
+Scope: the 3.33.0 residue below, plus what the follow-up read turned up. Every fix has a
+regression test. The cycle-check, recurrence-anchor, distill-budget, SSE and webhook tests
+were also run against the old code, and each fails there.
+
+### Fixed (3.34.0)
+
+| Area | Finding | Fix |
+|---|---|---|
+| Dashboard (Rust) | M1 residue: `api_tasks/critical/stats/timeline/heatmap/events`, the SSE start cursor and its 2 s poll ran pooled SQLite on the async workers. The poll swallowed read errors. | All on the blocking pool. The poll logs a failed read. |
+| Recurrence (V019) | `every month` from Jan 31 chained from the clamped Feb 28 and stayed on the 28th. | `pt_recurrence.anchor` holds the operator-set deadline (at creation or on an edit). A fixed plain-monthly rule counts whole intervals from it. Pre-V019 rows keep the old rule until their next deadline edit. |
+| Core | The dependency cycle walk re-prepared per node. Past 10,000 visited nodes it skipped the rest of the graph, so a cycle behind a deep chain was accepted. | One recursive CTE, no cap. |
+| Distill | Worst-case provider time (~97 min) exceeded the unit's 30-min kill, which lands before any row is marked processed, so finished chunks were redone. | No new provider call after 20 min of chunk work. The run closes out normally. |
+| Webhooks | Outbound delivery was awaited per event inside `/sync` and the git close webhook. At 10 s per hung URL, a 200-command batch could hold the request for over half an hour. | Each request streams its events to one background task that delivers them in order. The request never waits on a subscriber. Events already queued still go out if the client drops. |
+| Metrics | `MAX(ts)` compared ISO strings. With mixed offsets, the distill and notification age gauges read stale (`10:30+01:00` > `09:45Z`). | Compared as epoch seconds. |
+| Schema (V019) | Four indexes no query reads (`idx_pt_recurrence_next`, `idx_pt_webhook_log_source`, `idx_tasks_kind`, `idx_goals_status_seq`). | Dropped. |
+| CLI | `pt scoring run --diff` called `why` per task, and each call rescored every task (O(N²)). It labelled the stored ordering "v1". | One scoring pass (`scoring::composites_v2`), labelled as the stored ordering. |
+| TUI | The list title said "pending" on every saved view. | Shows the active view. |
+
+### Deleted
+
+- The quick-add → `NewTask` + `Extensions` builder, six copies. Replaced by
+  `QuickAdd::task_parts`.
+- Scout → report defaulting in the CLI and MCP. Replaced by
+  `tasks::kind_and_deliverable`.
+- The approvals wire-payload parser in the HTTP route and the MCP tool. Replaced by
+  `approvals::payload_from_wire`.
+- Duplicated code: two inline event-uuid lookups in `tg.rs`, the dashboard's cursor
+  query, `main()`'s second error branch and a double `--note` check.
+- Dead or unused code: `App::selected`, the `ptask_bot::{PtCommand, BotConfig}` and
+  `ptask_tui::App` re-exports, and a stale `dead_code` allow in `remote.rs`.
+- The dashboard sidecar's second deadline scan in `q_stats`.
+
+### Residue (recorded, not changed)
+
+- `ptask-notify` still builds a `reqwest::Client` per send. The reason from 3.33.0 stands.
+- Webhook signature rejects still write a fixed-size audit stub, as in 3.33.0.
+- `/api/critical`, `/api/timeline` and `/api/heatmap` are documented API
+  (`docs/sync-api.md`, `dashboard/README.md`) that the cockpit no longer calls. Whether
+  to remove them needs a check for external consumers on the host.
+- `due_within_7d` counts overdue tasks in the Python sidecar but not in `pt serve`. No
+  UI reads the key.
+
 ## 2026-09-25 — review pass (3.33.0)
 
 Scope: the whole tree (all seven crates, dashboard sidecar, scripts, units, workflows,

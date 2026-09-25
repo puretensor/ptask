@@ -344,46 +344,11 @@ impl PtaskMcp {
         let ctx = self.ctx();
         on_blocking(move || {
             let q = ptask_core::quickadd::parse(&text).map_err(domain_err)?;
-            let new = ptask_core::NewTask {
-                title: q.title.clone(),
-                description: q.description.clone(),
-                priority: q.priority.unwrap_or(2),
-                deadline: q.deadline.clone(),
-                source_type: "mcp".into(),
-                ai_confidence: 1.0,
-                ai_reasoning: reason.unwrap_or_default(),
-            };
-            let kind = match kind.as_deref() {
-                Some(k) => Some(
-                    k.parse::<ptask_core::tasks::TaskKind>()
-                        .map_err(domain_err)?
-                        .as_str()
-                        .to_string(),
-                ),
-                None => None,
-            };
-            let deliverable = match deliverable.as_deref() {
-                Some(d) => Some(
-                    ptask_core::tasks::validate_deliverable(d)
-                        .map_err(domain_err)?
-                        .to_string(),
-                ),
-                None => match kind.as_deref() {
-                    Some("scout") => Some("report".to_string()),
-                    _ => None,
-                },
-            };
-            let ext = ptask_core::Extensions {
-                labels: q.labels.clone(),
-                kind,
-                deliverable,
-                project: q.project.clone(),
-                duration_min: q.duration_min,
-                planned_at: None,
-                energy: None,
-                recurrence: q.recurrence.clone(),
-                due_at: q.due.clone(),
-            };
+            let (mut new, mut ext) = q.task_parts("mcp");
+            new.ai_reasoning = reason.unwrap_or_default();
+            (ext.kind, ext.deliverable) =
+                ptask_core::tasks::kind_and_deliverable(kind.as_deref(), deliverable.as_deref())
+                    .map_err(domain_err)?;
             let discovered_parent = discovered_from
                 .as_deref()
                 .map(|parent| ptask_core::tasks::resolve_for_lookup(&db, parent, true))
@@ -722,35 +687,14 @@ impl PtaskMcp {
         &self,
         Parameters(arg): Parameters<ApprovalRequestArg>,
     ) -> Result<CallToolResult, McpError> {
-        use ptask_core::approvals::{self, ApprovalError, PayloadSource, RequestInput};
-        let n = arg.payload.is_some() as u8
-            + arg.payload_json.is_some() as u8
-            + arg.digest.is_some() as u8;
-        if n != 1 {
-            return Err(McpError::invalid_params(
-                "exactly one of payload, payload_json, digest is required",
-                None,
-            ));
-        }
-        let payload = if let Some(text) = arg.payload {
-            let bytes = text.into_bytes();
-            if bytes.len() > approvals::MAX_PAYLOAD_BYTES {
-                return Err(domain_err(ApprovalError::Invalid(format!(
-                    "payload exceeds {} bytes (256 KiB); use --digest for large payloads",
-                    approvals::MAX_PAYLOAD_BYTES
-                ))));
-            }
-            PayloadSource::File {
-                bytes,
-                name: arg.payload_name,
-                reference: None,
-            }
-        } else if let Some(value) = arg.payload_json {
-            approvals::payload_from_json_value(&value).map_err(domain_err)?
-        } else {
-            approvals::payload_from_digest(arg.digest.as_deref().unwrap_or(""))
-                .map_err(domain_err)?
-        };
+        use ptask_core::approvals::{self, RequestInput};
+        let payload = approvals::payload_from_wire(
+            arg.payload,
+            arg.payload_name,
+            arg.payload_json.as_ref(),
+            arg.digest.as_deref(),
+        )
+        .map_err(domain_err)?;
         let input = RequestInput {
             kind: arg.kind,
             title: arg.title,

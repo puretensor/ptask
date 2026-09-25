@@ -247,6 +247,8 @@ async fn sync(
     // once per command: each pass rewrites every active row under the write
     // lock, and a 200-command batch paid for 200 of them.
     let mut needs_rescore = false;
+    // Outbound webhook fan-out (env-driven; no-op if unconfigured).
+    let outbox = crate::webhooks::Outbox::start(&state);
 
     // Apply commands sequentially. Each command's `uuid` is its idempotency
     // key — replays return "ok" without re-executing.
@@ -290,14 +292,11 @@ async fn sync(
                     temp_map.insert(temp_id, tu);
                 }
                 needs_rescore |= rescores;
-                // Outbound webhook fan-out (env-driven; no-op if unconfigured).
-                crate::webhooks::dispatch(
-                    &state,
-                    &payload.event_type,
-                    task_uuid.as_deref(),
-                    &payload.payload,
-                )
-                .await;
+                outbox.send(crate::webhooks::OutboundEvent {
+                    event_type: payload.event_type,
+                    task_uuid,
+                    payload: payload.payload,
+                });
                 status.insert(cmd_uuid, Value::String("ok".into()));
             }
         }
@@ -370,32 +369,12 @@ fn apply_command(
                 .get("text")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("task_create: args.text required"))?;
-            let q = ptask_core::quickadd::parse(text)?;
-            let new = ptask_core::NewTask {
-                title: q.title.clone(),
-                description: q.description.clone(),
-                priority: q.priority.unwrap_or(2),
-                deadline: q.deadline.clone(),
-                source_type: cmd
-                    .args
-                    .get("source_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("sync")
-                    .into(),
-                ai_confidence: 1.0,
-                ai_reasoning: String::new(),
-            };
-            let ext = ptask_core::Extensions {
-                labels: q.labels.clone(),
-                kind: None,
-                deliverable: None,
-                project: q.project.clone(),
-                duration_min: q.duration_min,
-                planned_at: None,
-                energy: None,
-                recurrence: q.recurrence.clone(),
-                due_at: q.due.clone(),
-            };
+            let source_type = cmd
+                .args
+                .get("source_type")
+                .and_then(Value::as_str)
+                .unwrap_or("sync");
+            let (new, ext) = ptask_core::quickadd::parse(text)?.task_parts(source_type);
             let t =
                 tasks::create_with_extensions(&state.db, new, ext, &sync_ctx(actor, &cmd.uuid))?;
             let payload = serde_json::to_value(&t)?;

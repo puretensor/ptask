@@ -4,8 +4,8 @@
 //! These expose server-side state the `/sync` delta can't carry: the DAG-ready
 //! ordering (`depends_on` edges aren't in the wire `Task` shape) and a task's
 //! side-table detail (labels/project/deps/recurrence via `load_detail`). Gated
-//! by the same read token as `/metrics` — open when `PTASK_API_TOKEN` is unset,
-//! enforced once it's configured.
+//! like `/metrics`: open only while neither `PTASK_API_TOKEN` nor
+//! `PTASK_METRICS_TOKEN` is set; configuring either requires a read-scope token.
 
 use crate::AppState;
 use axum::Router;

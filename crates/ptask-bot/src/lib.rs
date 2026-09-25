@@ -30,8 +30,8 @@ use anyhow::{Context, Result};
 use ptask_core::Db;
 use tracing::{info, warn};
 
-pub use commands::PtCommand;
-pub use config::BotConfig;
+use commands::PtCommand;
+use config::BotConfig;
 
 /// Run the bot until cancelled (Ctrl-C). Blocks the current async task.
 pub async fn run(db: Db) -> Result<()> {

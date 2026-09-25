@@ -457,19 +457,17 @@ def q_stats():
                 "added_robot": added_robot,
                 "done": done,
             }
-        # deadlines in the next 7 days (count)
-        due_soon = 0
+        # Deadlines due within 7 days (overdue included) and overdue, from
+        # one scan of the pending deadlines.
+        due_soon = overdue = 0
         for r in con.execute("SELECT deadline FROM tasks WHERE status='pending' "
                              "AND deadline IS NOT NULL AND deadline!=''"):
             dl = _parse_deadline(r[0])
-            if dl and dl[1] is not None and -3650 < dl[1] <= 7:
+            if not dl or dl[1] is None:
+                continue
+            if -3650 < dl[1] <= 7:
                 due_soon += 1
-        # overdue count
-        overdue = 0
-        for r in con.execute("SELECT deadline FROM tasks WHERE status='pending' "
-                             "AND deadline IS NOT NULL AND deadline!=''"):
-            dl = _parse_deadline(r[0])
-            if dl and dl[1] is not None and dl[1] < 0:
+            if dl[1] < 0:
                 overdue += 1
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

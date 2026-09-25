@@ -1022,6 +1022,29 @@ pub fn payload_from_json_value(value: &serde_json::Value) -> Result<PayloadSourc
     Ok(PayloadSource::Json(canonicalize_json(value)?))
 }
 
+/// The payload of an HTTP or MCP approval request: exactly one of inline
+/// UTF-8 text (`name` labels it), a JSON value, or a digest. The size cap is
+/// enforced by [`request`], like every other source.
+pub fn payload_from_wire(
+    text: Option<String>,
+    name: Option<String>,
+    json: Option<&serde_json::Value>,
+    digest: Option<&str>,
+) -> Result<PayloadSource> {
+    match (text, json, digest) {
+        (Some(text), None, None) => Ok(PayloadSource::File {
+            bytes: text.into_bytes(),
+            name,
+            reference: None,
+        }),
+        (None, Some(value), None) => payload_from_json_value(value),
+        (None, None, Some(hex)) => payload_from_digest(hex),
+        _ => Err(Error::Approval(ApprovalError::Invalid(
+            "exactly one of payload, payload_json, digest is required".into(),
+        ))),
+    }
+}
+
 pub fn payload_from_digest(hex: &str) -> Result<PayloadSource> {
     let hex = hex.trim();
     if !is_digest_hex(hex) {
@@ -1054,6 +1077,22 @@ mod tests {
             name: Some("x.txt".into()),
             reference: Some("x.txt".into()),
         }
+    }
+
+    #[test]
+    fn wire_payload_takes_exactly_one_source() {
+        let v = serde_json::json!({"a": 1});
+        assert!(payload_from_wire(None, None, None, None).is_err());
+        assert!(payload_from_wire(Some("x".into()), None, Some(&v), None).is_err());
+        assert!(matches!(
+            payload_from_wire(Some("x".into()), Some("n.txt".into()), None, None),
+            Ok(PayloadSource::File { name: Some(n), .. }) if n == "n.txt"
+        ));
+        assert!(matches!(
+            payload_from_wire(None, None, Some(&v), None),
+            Ok(PayloadSource::Json(_))
+        ));
+        assert!(payload_from_wire(None, None, None, Some("nothex")).is_err());
     }
 
     #[test]

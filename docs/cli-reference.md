@@ -132,7 +132,7 @@ Print a Linear-style branch name for the matched task, e.g.
 ```
 pt scoring run            # composite v2 (growth urgency, real neglect, link deps, effort)
 pt scoring run --v1       # legacy v1 formula
-pt scoring run --diff     # rank diff v1 vs v2 (top movers) without writing
+pt scoring run --diff     # fresh top-20 vs the stored ordering, then the run
 pt scoring run --dry-run  # compute, print, don't write
 pt why PT-42              # component breakdown: urgency/neglect/dependency/effort/llm + rank
 ```
