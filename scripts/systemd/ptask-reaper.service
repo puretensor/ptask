@@ -2,9 +2,13 @@
 Description=pTask reaper — dismiss stale machine-generated tasks (reversible)
 Documentation=https://github.com/puretensor/ptask
 After=network-online.target
+OnFailure=ptask-failure-alert@%n.service
 
 [Service]
 Type=oneshot
+# Same env as distill/accountability: PTASK_WAL_AUTOCHECKPOINT (litestream)
+# and PTASK_DB reach every writer, not only some.
+EnvironmentFile=%h/puretensor-tasks/.env
 ExecStart=%h/.cargo/bin/pt reap
 Nice=15
 IOSchedulingClass=best-effort

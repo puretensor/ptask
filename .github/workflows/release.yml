@@ -94,6 +94,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history + tags for `git describe`; the default shallow clone
+          # made the previous-tag lookup fail and the fallback root commit is
+          # the shallow tip, so "Commits since previous tag" was always empty.
+          fetch-depth: 0
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -118,7 +123,7 @@ jobs:
             ## pTask ${{ github.ref_name }}
 
             Single-binary release.
-            - `pt-x86_64-unknown-linux-gnu` — Linux x86_64 (glibc ≥ 2.35, x86-64-v3 baseline)
+            - `pt-x86_64-unknown-linux-gnu` — Linux x86_64 (glibc ≥ 2.39, x86-64-v3 baseline)
             - `pt-aarch64-unknown-linux-gnu` — Linux arm64 (mon3)
 
             ### Verifying

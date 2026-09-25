@@ -15,3 +15,6 @@ IOSchedulingPriority=7
 # Keep stderr/stdout, journald captures it.
 StandardOutput=journal
 StandardError=journal
+# A oneshot has no start timeout by default: a hang never fails the unit,
+# so OnFailure never fires and later nightly runs never start.
+TimeoutStartSec=30min

@@ -64,6 +64,8 @@
       - ptask-scoring.timer
       - ptask-reaper.service
       - ptask-reaper.timer
+      - ptask-export.service
+      - ptask-export.timer
       - ptask-failure-alert@.service
       - ptask-restore-verify.service
       - ptask-restore-verify.timer
@@ -185,6 +187,7 @@
         - ptask-accountability.timer
         - ptask-scoring.timer
         - ptask-reaper.timer
+        - ptask-export.timer
         - ptask-restore-verify.timer
       when: ptask_is_canonical
 
@@ -209,6 +212,7 @@
         - ptask-accountability.timer
         - ptask-scoring.timer
         - ptask-reaper.timer
+        - ptask-export.timer
         - ptask-restore-verify.timer
       when: not ptask_is_canonical
       failed_when: false

@@ -49,18 +49,23 @@ finally:
 PY
 SIZE=$(stat -c%s "$TMP")
 
+# Every ssh/scp gets a connect timeout and keepalives: a hung CephFS mount or
+# a dead peer otherwise blocks forever, the oneshot never fails, and
+# OnFailure never alerts (the unit also carries TimeoutStartSec).
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+
 remote_host="${REMOTE%%:*}"
 remote_dir="${REMOTE#*:}"
 
-ssh -o BatchMode=yes "$remote_host" "mkdir -p '$remote_dir'"
-scp -q "$TMP" "$REMOTE/ptask-tasks-$DATE.db"
+ssh "${SSH_OPTS[@]}" "$remote_host" "mkdir -p '$remote_dir'"
+scp -q "${SSH_OPTS[@]}" "$TMP" "$REMOTE/ptask-tasks-$DATE.db"
 
 # Retention prune. `-mtime +N` means strictly older than N days.
-ssh -o BatchMode=yes "$remote_host" \
+ssh "${SSH_OPTS[@]}" "$remote_host" \
     "find '$remote_dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' \
      -mtime +$((RETAIN_DAYS - 1)) -delete"
 
-REMAINING=$(ssh -o BatchMode=yes "$remote_host" \
+REMAINING=$(ssh "${SSH_OPTS[@]}" "$remote_host" \
     "find '$remote_dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' | wc -l")
 
 echo "ptask-backup: ok ${REMOTE}/ptask-tasks-${DATE}.db (${SIZE} bytes, ${REMAINING} backups retained)"
@@ -69,12 +74,12 @@ echo "ptask-backup: ok ${REMOTE}/ptask-tasks-${DATE}.db (${SIZE} bytes, ${REMAIN
 if [ "$OFFSITE" != "none" ]; then
     offsite_host="${OFFSITE%%:*}"
     offsite_dir="${OFFSITE#*:}"
-    ssh -o BatchMode=yes -o ConnectTimeout=15 "$offsite_host" "mkdir -p '$offsite_dir'"
-    scp -q "$TMP" "$OFFSITE/ptask-tasks-$DATE.db"
-    ssh -o BatchMode=yes "$offsite_host" \
+    ssh "${SSH_OPTS[@]}" "$offsite_host" "mkdir -p '$offsite_dir'"
+    scp -q "${SSH_OPTS[@]}" "$TMP" "$OFFSITE/ptask-tasks-$DATE.db"
+    ssh "${SSH_OPTS[@]}" "$offsite_host" \
         "find '$offsite_dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' \
          -mtime +$((RETAIN_DAYS - 1)) -delete"
-    OFF_REMAINING=$(ssh -o BatchMode=yes "$offsite_host" \
+    OFF_REMAINING=$(ssh "${SSH_OPTS[@]}" "$offsite_host" \
         "find '$offsite_dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' | wc -l")
     echo "ptask-backup: offsite ok ${OFFSITE}/ptask-tasks-${DATE}.db (${OFF_REMAINING} retained)"
 fi
