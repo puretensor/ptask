@@ -19,31 +19,35 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    // Same enforce-if-configured gate as the write routes: /metrics leaks
-    // task/store counts. When PTASK_API_TOKEN is unset this returns None and
-    // the scrape is served (back-compat); when set, a missing/wrong token 401s.
-    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
-        return resp;
-    }
-    let (status, body) = match render(&state.db) {
-        Ok(body) => (StatusCode::OK, body),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "# pt_metrics_render_error: {}\n",
-                e.to_string().replace('\n', " ")
+    // ~12 queries plus the token check: off the async workers.
+    crate::blocking::db_response(move || {
+        // Same enforce-if-configured gate as the write routes: /metrics leaks
+        // task/store counts. When PTASK_API_TOKEN is unset this returns None and
+        // the scrape is served (back-compat); when set, a missing/wrong token 401s.
+        if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
+            return resp;
+        }
+        let (status, body) = match render(&state.db) {
+            Ok(body) => (StatusCode::OK, body),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "# pt_metrics_render_error: {}\n",
+                    e.to_string().replace('\n', " ")
+                ),
             ),
-        ),
-    };
-    (
-        status,
-        [(
-            header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        body,
-    )
-        .into_response()
+        };
+        (
+            status,
+            [(
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
+            body,
+        )
+            .into_response()
+    })
+    .await
 }
 
 fn render(db: &Db) -> ptask_core::Result<String> {

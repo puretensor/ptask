@@ -281,11 +281,6 @@ impl PtaskMcp {
         }
     }
 
-    #[allow(dead_code)]
-    fn rescore(&self) {
-        rescore_db(&self.db);
-    }
-
     #[tool(
         description = "DAG-ready tasks in priority order (every dependency done, not snoozed). THE call for 'what should I work on'. Returns compact task JSON."
     )]
@@ -786,8 +781,12 @@ impl PtaskMcp {
             )
             .await;
         }
-        let ap = ptask_core::approvals::get(&self.db, &outcome.approval.uuid)
-            .unwrap_or(outcome.approval);
+        let db = self.db.clone();
+        let uuid = outcome.approval.uuid.clone();
+        let ap = match on_blocking(move || approvals::get(&db, &uuid).map_err(domain_err)).await {
+            Ok(ap) => ap,
+            Err(_) => outcome.approval,
+        };
         json_ok(&ap.to_json(None))
     }
 

@@ -64,34 +64,37 @@ async fn list(
     headers: HeaderMap,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
-        return resp;
-    }
-    let limit = params.limit.clamp(1, MAX_NEXT_LIMIT);
-    let expr = match params.filter.as_deref().map(ptask_core::filter::parse) {
-        Some(Ok(e)) => Some(e),
-        Some(Err(e)) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("filter: {e}")})),
-            )
-                .into_response();
+    crate::blocking::db_response(move || {
+        if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
+            return resp;
         }
-        None => None,
-    };
-    let status = if params.status == "all" {
-        None
-    } else {
-        Some(params.status.as_str())
-    };
-    match ptask_core::tasks::list_with_filter(&state.db, expr.as_ref(), status, None, limit) {
-        Ok(tasks) => Json(serde_json::json!({ "tasks": tasks })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
-    }
+        let limit = params.limit.clamp(1, MAX_NEXT_LIMIT);
+        let expr = match params.filter.as_deref().map(ptask_core::filter::parse) {
+            Some(Ok(e)) => Some(e),
+            Some(Err(e)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("filter: {e}")})),
+                )
+                    .into_response();
+            }
+            None => None,
+        };
+        let status = if params.status == "all" {
+            None
+        } else {
+            Some(params.status.as_str())
+        };
+        match ptask_core::tasks::list_with_filter(&state.db, expr.as_ref(), status, None, limit) {
+            Ok(tasks) => Json(serde_json::json!({ "tasks": tasks })).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response(),
+        }
+    })
+    .await
 }
 
 /// `GET /next?limit=N` — DAG-ready tasks (every `depends_on` predecessor done),
@@ -101,18 +104,21 @@ async fn next(
     headers: HeaderMap,
     Query(params): Query<NextParams>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
-        return resp;
-    }
-    let limit = params.limit.clamp(1, MAX_NEXT_LIMIT);
-    match ptask_core::dag::next_ready(&state.db, limit) {
-        Ok(tasks) => Json(serde_json::json!({ "tasks": tasks })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("{e}") })),
-        )
-            .into_response(),
-    }
+    crate::blocking::db_response(move || {
+        if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
+            return resp;
+        }
+        let limit = params.limit.clamp(1, MAX_NEXT_LIMIT);
+        match ptask_core::dag::next_ready(&state.db, limit) {
+            Ok(tasks) => Json(serde_json::json!({ "tasks": tasks })).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("{e}") })),
+            )
+                .into_response(),
+        }
+    })
+    .await
 }
 
 /// `GET /detail/{uuid}` — side-table detail for one task by UUID (labels,
@@ -123,17 +129,20 @@ async fn detail(
     headers: HeaderMap,
     Path(uuid): Path<String>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
-        return resp;
-    }
-    match ptask_core::tasks::load_detail(&state.db, &uuid) {
-        Ok(d) => Json(d).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": format!("{e}") })),
-        )
-            .into_response(),
-    }
+    crate::blocking::db_response(move || {
+        if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
+            return resp;
+        }
+        match ptask_core::tasks::load_detail(&state.db, &uuid) {
+            Ok(d) => Json(d).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("{e}") })),
+            )
+                .into_response(),
+        }
+    })
+    .await
 }
 
 /// `GET /resolve?query=...&include_terminal=false` — resolve a PT-N, bare
@@ -144,17 +153,24 @@ async fn resolve(
     headers: HeaderMap,
     Query(params): Query<ResolveParams>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
-        return resp;
-    }
-    match ptask_core::tasks::resolve_for_lookup(&state.db, &params.query, params.include_terminal) {
-        Ok(task) => Json(serde_json::json!({ "task": task })).into_response(),
-        Err(e) => (
-            resolve_error_status(&e),
-            Json(serde_json::json!({ "error": format!("{e}") })),
-        )
-            .into_response(),
-    }
+    crate::blocking::db_response(move || {
+        if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
+            return resp;
+        }
+        match ptask_core::tasks::resolve_for_lookup(
+            &state.db,
+            &params.query,
+            params.include_terminal,
+        ) {
+            Ok(task) => Json(serde_json::json!({ "task": task })).into_response(),
+            Err(e) => (
+                resolve_error_status(&e),
+                Json(serde_json::json!({ "error": format!("{e}") })),
+            )
+                .into_response(),
+        }
+    })
+    .await
 }
 
 fn resolve_error_status(e: &ptask_core::Error) -> StatusCode {
