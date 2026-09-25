@@ -765,6 +765,26 @@ fn cli_idempotency_key() -> Option<String> {
     CLI_IDEMPOTENCY.get().cloned().flatten()
 }
 
+/// Attribution for one task of a multi-task command. The event log's uuid
+/// is unique, so a shared `--idempotency-key` failed the second task; each
+/// task gets `key:task_uuid`, deterministic so a retry replays per task.
+fn task_ctx(task_uuid: &str) -> ptask_core::event_log::EventCtx {
+    let ctx = cli_ctx();
+    match ctx.event_uuid.as_deref() {
+        Some(key) => ctx.with_uuid(format!("{key}:{task_uuid}")),
+        None => ctx,
+    }
+}
+
+/// True when this mutation's idempotency key already landed: the retry
+/// reports success instead of re-applying (or tripping the unique index).
+fn already_applied(db: &Db, ctx: &ptask_core::event_log::EventCtx) -> Result<bool> {
+    Ok(match ctx.event_uuid.as_deref() {
+        Some(uuid) => ptask_core::event_log::get_by_uuid(db, uuid)?.is_some(),
+        None => false,
+    })
+}
+
 fn remote_client(url: Option<&str>) -> Result<remote::RemoteClient> {
     let client = match url {
         Some(u) => remote::RemoteClient::with_url(u)?,
@@ -1103,11 +1123,49 @@ fn print_lines(lines: Vec<String>) {
 }
 
 fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
+    let multi = a.queries.len() > 1;
     let mut results = Vec::new();
+    let mut failed = 0usize;
     for query in &a.queries {
-        let task = tasks::resolve(db, query).map_err(anyhow::Error::msg)?;
-        let outcome = tasks::mark_done(db, &task, &cli_ctx())?;
+        // One task's failure (blocked, not found) no longer abandons the
+        // rest of the list half-applied; every failure is reported.
+        let task = match tasks::resolve(db, query) {
+            Ok(t) => t,
+            Err(e) => {
+                failed += 1;
+                report_done_failure(&mut results, query, &e.to_string());
+                continue;
+            }
+        };
+        let ctx = if multi { task_ctx(&task.id) } else { cli_ctx() };
         let pt = task.pt_id.clone().unwrap_or_default();
+        if already_applied(db, &ctx)? {
+            if !json_mode() {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Ok,
+                        "replayed",
+                        &pt,
+                        &task.title,
+                        "idempotency key already applied"
+                    )
+                );
+            }
+            results.push(serde_json::json!({
+                "pt_id": pt, "task_uuid": task.id, "title": task.title,
+                "outcome": "replayed"
+            }));
+            continue;
+        }
+        let outcome = match tasks::mark_done(db, &task, &ctx) {
+            Ok(o) => o,
+            Err(e) => {
+                failed += 1;
+                report_done_failure(&mut results, query, &e.to_string());
+                continue;
+            }
+        };
         match &outcome {
             tasks::DoneOutcome::Completed => {
                 if !json_mode() {
@@ -1144,7 +1202,20 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
     if json_mode() {
         println!("{}", serde_json::to_string_pretty(&results)?);
     }
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} task(s) not completed", a.queries.len());
+    }
     Ok(())
+}
+
+fn report_done_failure(results: &mut Vec<serde_json::Value>, query: &str, error: &str) {
+    if !json_mode() {
+        eprintln!(
+            "{}",
+            ui::section("error", ui::Ink::Red, &format!("{query}: {error}"))
+        );
+    }
+    results.push(serde_json::json!({ "query": query, "outcome": "error", "error": error }));
 }
 
 fn cmd_priority(db: &Db, a: PriorityArgs) -> Result<()> {
@@ -1152,17 +1223,21 @@ fn cmd_priority(db: &Db, a: PriorityArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
     let old = task.priority;
     if old == level {
-        println!(
-            "{}",
-            ui::outcome(
-                ui::Status::Mute,
-                "unchanged",
-                task.pt_id.as_deref().unwrap_or(""),
-                &task.title,
-                &format!("already {} ({})", level, priority::label(level))
-            )
+        return emit(
+            &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "priority": level, "changed": false}),
+            || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Mute,
+                        "unchanged",
+                        task.pt_id.as_deref().unwrap_or(""),
+                        &task.title,
+                        &format!("already {} ({})", level, priority::label(level))
+                    )
+                )
+            },
         );
-        return Ok(());
     }
     tasks::update_priority(db, &task.id, level, &cli_ctx())?;
     // priority feeds manual_score -> the composite priority_score, so recompute
@@ -1182,24 +1257,31 @@ fn cmd_priority(db: &Db, a: PriorityArgs) -> Result<()> {
             String::new()
         }
     };
-    println!(
-        "{}",
-        ui::outcome(
-            ui::Status::Changed,
-            "priority",
-            task.pt_id.as_deref().unwrap_or(""),
-            &task.title,
-            &format!(
-                "{} ({}) → {} ({}){}",
-                old,
-                priority::label(old),
-                level,
-                priority::label(level),
-                note
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id,
+            "priority": level, "previous": old, "changed": true
+        }),
+        || {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Changed,
+                    "priority",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    &format!(
+                        "{} ({}) → {} ({}){}",
+                        old,
+                        priority::label(old),
+                        level,
+                        priority::label(level),
+                        note
+                    )
+                )
             )
-        )
-    );
-    Ok(())
+        },
+    )
 }
 
 fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
@@ -1273,17 +1355,21 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     if !a.unlabel.is_empty() {
         parts.push(format!("-{}", a.unlabel.join(" -")));
     }
-    println!(
-        "{}",
-        ui::outcome(
-            ui::Status::Changed,
-            "edited",
-            task.pt_id.as_deref().unwrap_or(""),
-            &task.title,
-            &format!("{}{}", parts.join(" + "), note)
-        )
-    );
-    Ok(())
+    emit(
+        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "edited": parts}),
+        || {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Changed,
+                    "edited",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    &format!("{}{}", parts.join(" + "), note)
+                )
+            )
+        },
+    )
 }
 
 fn cmd_reopen(db: &Db, a: ReopenArgs) -> Result<()> {
@@ -1305,17 +1391,21 @@ fn cmd_reopen(db: &Db, a: ReopenArgs) -> Result<()> {
             String::new()
         }
     };
-    println!(
-        "{}",
-        ui::outcome(
-            ui::Status::Changed,
-            "reopened",
-            task.pt_id.as_deref().unwrap_or(""),
-            &task.title,
-            &format!("→ pending{note}")
-        )
-    );
-    Ok(())
+    emit(
+        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "todo"}),
+        || {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Changed,
+                    "reopened",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    &format!("→ pending{note}")
+                )
+            )
+        },
+    )
 }
 
 /// Short display handle for a task with no PT-N: the first 8 chars of its id.
@@ -1472,23 +1562,32 @@ fn render_show(
 fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
     tasks::dismiss(db, &task.id, &cli_ctx())?;
-    println!(
-        "{}",
-        ui::outcome(
-            ui::Status::Mute,
-            "dismissed",
-            task.pt_id.as_deref().unwrap_or(""),
-            &task.title,
-            ""
-        )
-    );
-    Ok(())
+    emit(
+        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "dismissed"}),
+        || {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Mute,
+                    "dismissed",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    ""
+                )
+            )
+        },
+    )
 }
 
 fn cmd_rm(db: &Db, a: RmArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
     let pt = task.pt_id.as_deref().unwrap_or("").to_string();
     if !a.yes {
+        // No confirmation possible (piped, agent, --json): refuse loudly.
+        // Printing "aborted" and exiting 0 read as success to a caller.
+        if json_mode() || !std::io::stdin().is_terminal() {
+            anyhow::bail!("refusing to delete {pt} without --yes (no TTY to confirm)");
+        }
         use std::io::Write;
         print!(
             "{}",
@@ -1504,16 +1603,19 @@ fn cmd_rm(db: &Db, a: RmArgs) -> Result<()> {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).ok();
         if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            println!("{}", ui::empty("aborted"));
-            return Ok(());
+            anyhow::bail!("aborted: {pt} not deleted");
         }
     }
     tasks::delete_task(db, &task.id, &cli_ctx())?;
-    println!(
-        "{}",
-        ui::outcome(ui::Status::Bad, "deleted", &pt, &task.title, "permanent")
-    );
-    Ok(())
+    emit(
+        &serde_json::json!({"pt_id": pt, "task_uuid": task.id, "deleted": true}),
+        || {
+            println!(
+                "{}",
+                ui::outcome(ui::Status::Bad, "deleted", &pt, &task.title, "permanent")
+            )
+        },
+    )
 }
 
 fn cmd_next(db: &Db, a: NextArgs) -> Result<()> {
@@ -2456,30 +2558,57 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
         println!("{}", ui::note("dry run — nothing applied"));
         return Ok(());
     }
-    let ctx = cli_ctx();
-    for t in &matches {
-        if let Some(prio) = a.set_priority.as_deref() {
-            let level = priority::parse(prio).map_err(anyhow::Error::msg)?;
-            tasks::update_priority(db, &t.id, level, &ctx)?;
-        } else if a.done {
-            match tasks::mark_done(db, t, &ctx)? {
-                tasks::DoneOutcome::Completed => {}
-                tasks::DoneOutcome::Advanced { next_deadline } => {
-                    println!(
-                        "{}",
-                        ui::outcome(
-                            ui::Status::Changed,
-                            "advanced",
-                            t.pt_id.as_deref().unwrap_or("-"),
-                            &t.title,
-                            &format!("next {next_deadline}")
-                        )
-                    );
+    let level = a
+        .set_priority
+        .as_deref()
+        .map(priority::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    // Apply to every match; a failing task (e.g. blocked by another match)
+    // is reported and the rest still land, instead of stopping half-done.
+    let mut pending: Vec<&ptask_core::Task> = matches.iter().collect();
+    let mut failures: Vec<(String, String)> = Vec::new();
+    // Two passes for --done: a task blocked by a later match succeeds once
+    // its prerequisite has been completed in the first pass.
+    for pass in 0..2 {
+        let mut retry = Vec::new();
+        for t in pending {
+            let ctx = task_ctx(&t.id);
+            if already_applied(db, &ctx)? {
+                continue;
+            }
+            let applied = if let Some(level) = level {
+                tasks::update_priority(db, &t.id, level, &ctx).map(|_| ())
+            } else if a.done {
+                tasks::mark_done(db, t, &ctx).map(|outcome| {
+                    if let tasks::DoneOutcome::Advanced { next_deadline } = outcome {
+                        println!(
+                            "{}",
+                            ui::outcome(
+                                ui::Status::Changed,
+                                "advanced",
+                                t.pt_id.as_deref().unwrap_or("-"),
+                                &t.title,
+                                &format!("next {next_deadline}")
+                            )
+                        );
+                    }
+                })
+            } else {
+                tasks::dismiss(db, &t.id, &ctx)
+            };
+            if let Err(e) = applied {
+                if pass == 0 && a.done && matches!(e, ptask_core::Error::Blocked(_)) {
+                    retry.push(t);
+                } else {
+                    failures.push((
+                        t.pt_id.clone().unwrap_or_else(|| t.id.clone()),
+                        e.to_string(),
+                    ));
                 }
             }
-        } else if a.dismiss {
-            tasks::dismiss(db, &t.id, &ctx)?;
         }
+        pending = retry;
     }
     match ptask_core::scoring::run_once(db, false) {
         Ok(r) => println!(
@@ -2498,6 +2627,19 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
                 &format!("{} task(s) · rescore failed: {e}", matches.len())
             )
         ),
+    }
+    for (pt, e) in &failures {
+        eprintln!(
+            "{}",
+            ui::section("error", ui::Ink::Red, &format!("{pt}: {e}"))
+        );
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "{} of {} task(s) not applied",
+            failures.len(),
+            matches.len()
+        );
     }
     Ok(())
 }
@@ -2578,7 +2720,6 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
         return Ok(());
     }
 
-    let ctx = cli_ctx();
     println!(
         "{}",
         ui::note("[k]eep  [d]one  [x] dismiss  [s]nooze 1w  [q]uit")
@@ -2605,31 +2746,42 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         match line.trim() {
+            // A refused action (e.g. done on a blocked task) is reported and
+            // the sweep continues; it used to end the whole session.
             "d" => {
-                let t = tasks::resolve_for_lookup(db, uuid, true).map_err(anyhow::Error::msg)?;
-                match tasks::mark_done(db, &t, &ctx)? {
-                    tasks::DoneOutcome::Completed => {
+                let done = tasks::resolve_for_lookup(db, uuid, true)
+                    .and_then(|t| tasks::mark_done(db, &t, &task_ctx(uuid)));
+                match done {
+                    Ok(tasks::DoneOutcome::Completed) => {
                         println!("      {}", ui::pill(ui::Status::Ok, "done"))
                     }
-                    tasks::DoneOutcome::Advanced { next_deadline } => {
+                    Ok(tasks::DoneOutcome::Advanced { next_deadline }) => {
                         println!(
                             "      {}",
                             ui::pill(ui::Status::Changed, &format!("advanced to {next_deadline}"))
                         )
                     }
+                    Err(e) => println!("      {}", ui::pill(ui::Status::Bad, &e.to_string())),
                 }
             }
-            "x" => {
-                tasks::dismiss(db, uuid, &ctx)?;
-                println!("      {}", ui::pill(ui::Status::Mute, "dismissed"));
-            }
+            "x" => match tasks::dismiss(db, uuid, &task_ctx(uuid)) {
+                Ok(()) => println!("      {}", ui::pill(ui::Status::Mute, "dismissed")),
+                Err(e) => println!("      {}", ui::pill(ui::Status::Bad, &e.to_string())),
+            },
             "s" => {
                 let until = ptask_core::dates::now_in_operator_tz()
                     .map_err(anyhow::Error::msg)?
                     .checked_add(ptask_core::jiff::Span::new().days(7))
                     .map_err(|e| anyhow::anyhow!("snooze math: {e}"))?;
-                tasks::snooze(db, uuid, &ptask_core::dates::format_iso(&until), &ctx)?;
-                println!("      {}", ui::pill(ui::Status::Mute, "snoozed 1 week"));
+                match tasks::snooze(
+                    db,
+                    uuid,
+                    &ptask_core::dates::format_iso(&until),
+                    &task_ctx(uuid),
+                ) {
+                    Ok(_) => println!("      {}", ui::pill(ui::Status::Mute, "snoozed 1 week")),
+                    Err(e) => println!("      {}", ui::pill(ui::Status::Bad, &e.to_string())),
+                }
             }
             "q" => break,
             _ => {}
@@ -2706,18 +2858,25 @@ fn summarize_payload(payload: &str) -> String {
 
 fn cmd_undo(db: &Db) -> Result<()> {
     let out = tasks::undo_last(db, &cli_ctx()).map_err(anyhow::Error::msg)?;
-    println!(
-        "{}",
-        ui::section(
-            "undo",
-            ui::Ink::Green,
-            &format!(
-                "{} · reversed event #{}",
-                out.description, out.reversed_event_id
+    emit(
+        &serde_json::json!({
+            "description": out.description,
+            "reversed_event_id": out.reversed_event_id
+        }),
+        || {
+            println!(
+                "{}",
+                ui::section(
+                    "undo",
+                    ui::Ink::Green,
+                    &format!(
+                        "{} · reversed event #{}",
+                        out.description, out.reversed_event_id
+                    )
+                )
             )
-        )
-    );
-    Ok(())
+        },
+    )
 }
 
 fn cmd_approval(db: &Db, c: approvals::ApprovalCommand) -> Result<()> {
