@@ -259,15 +259,17 @@ fn effective_severity(req: &CaptureReq, source: &str) -> Option<i64> {
         return Some(s);
     }
     if source.starts_with("puresentinel:incident:") {
-        if let Some(idx) = req.text.find("sev") {
-            let tail = &req.text[idx + 3..];
-            let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = digits.parse::<i64>() {
-                return Some(n);
-            }
-        }
+        // First `sev` followed by digits: an earlier word ("several OSDs
+        // down [puresentinel sev4]") must not hide the marker.
+        let marked = req.text.match_indices("sev").find_map(|(idx, _)| {
+            let digits: String = req.text[idx + 3..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse::<i64>().ok()
+        });
         // Incident source without a parsable marker still counts as critical.
-        return Some(3);
+        return Some(marked.unwrap_or(3));
     }
     None
 }
@@ -311,7 +313,8 @@ fn capture_blocking(
     // The insert itself is the idempotency check now: one statement, no race.
     // Recovered incidents are a new episode: the unique key is scoped to the
     // episode so a later identical capture can create work again.
-    let is_incident = effective_severity(&req, &source).is_some_and(|s| s >= 3);
+    let severity = effective_severity(&req, &source);
+    let is_incident = severity.is_some_and(|s| s >= 3);
     let capture_key = req
         .client_key
         .as_deref()
@@ -392,7 +395,6 @@ fn capture_blocking(
         };
 
     // ---- critical fast lane -------------------------------------------------
-    let severity = effective_severity(&req, &source);
     let mut task_uuid = None;
     let mut pt_id = None;
     if let Some(sev) = severity.filter(|s| *s >= 3) {
@@ -594,4 +596,48 @@ fn capture_blocking(
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn incident(text: &str) -> Option<i64> {
+        let req = CaptureReq {
+            text: text.into(),
+            source: None,
+            source_file: None,
+            severity: None,
+            client_key: None,
+        };
+        effective_severity(&req, "puresentinel:incident:ceph")
+    }
+
+    #[test]
+    fn severity_marker_is_found_past_an_earlier_sev_word() {
+        assert_eq!(incident("several OSDs down [puresentinel sev4]"), Some(4));
+        assert_eq!(incident("[puresentinel sev5] mon quorum lost"), Some(5));
+    }
+
+    #[test]
+    fn incident_without_a_marker_is_still_critical() {
+        assert_eq!(incident("severe latency on fox-n1"), Some(3));
+    }
+
+    #[test]
+    fn explicit_severity_wins_and_non_incidents_have_none() {
+        let req = CaptureReq {
+            text: "[puresentinel sev5]".into(),
+            source: None,
+            source_file: None,
+            severity: Some(2),
+            client_key: None,
+        };
+        assert_eq!(effective_severity(&req, "puresentinel:incident:x"), Some(2));
+        let req = CaptureReq {
+            severity: None,
+            ..req
+        };
+        assert_eq!(effective_severity(&req, "telegram"), None);
+    }
 }
