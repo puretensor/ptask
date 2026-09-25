@@ -142,6 +142,19 @@ pub fn create_with_extensions(
     ext: Extensions,
     ctx: &EventCtx,
 ) -> Result<Task> {
+    // Every edit path validates a deadline; create stored any text, so
+    // `--deadline "next friday"` read as overdue forever (julianday NULL)
+    // and made a recurring task uncompletable.
+    let mut new = new;
+    new.deadline = new
+        .deadline
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_owned);
+    if let Some(d) = new.deadline.as_deref() {
+        parse_iso_zoned(d)?;
+    }
     let id = Uuid::new_v4().to_string();
     let now = iso_now();
 
@@ -309,8 +322,18 @@ pub fn list_with_filter_sorted(
         bound.extend(compiled.params);
     }
     if let Some(s) = status {
-        bound.push(rusqlite::types::Value::Text(s.to_string()));
-        conds.push(format!("t.status = ?{}", bound.len()));
+        // Legacy words filter the legacy column (unchanged); the v2-only
+        // states every surface displays (`todo`, `in_progress`, ...) used to
+        // hit `t.status` too and silently match nothing.
+        let (col, val) = match s {
+            "pending" | "delayed" | "done" | "dismissed" | "blocked" => ("t.status", s.to_string()),
+            other => (
+                "t.status_v2",
+                crate::status::Status::parse(other)?.as_str().to_string(),
+            ),
+        };
+        bound.push(rusqlite::types::Value::Text(val));
+        conds.push(format!("{col} = ?{}", bound.len()));
     }
     if let Some(p) = priority_filter {
         bound.push(rusqlite::types::Value::Integer(p));
@@ -701,7 +724,15 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         let rec = crate::recurrence::parse(&original)
             .map_err(|e| crate::Error::Other(format!("re-parse recurrence: {}", e)))?;
         let completion_now = crate::dates::now_in_operator_tz()?;
-        let explicit_time = recurrence_time_of_day(&original, &completion_now)?;
+        // Only completion mode re-applies the time of day. Rows stored before
+        // quick-add rejected unparseable times ("at 9") must stay completable.
+        let explicit_time = if mode_str == "completion" {
+            recurrence_time_of_day(&original, &completion_now)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
         // Pick the anchor for next_after based on mode:
         //   Fixed      → from the current deadline (preserves cadence)
         //   Completion → from now (drifts forward with completions)
@@ -1621,6 +1652,11 @@ pub struct TaskEdit<'a> {
 /// Apply selected fields, side tables, interactions and one attributed event
 /// in one transaction. A rejected field or late database error changes nothing.
 pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx) -> Result<()> {
+    // Blank or padded deadlines normalise like update_deadline: "" clears.
+    let mut edit = edit;
+    edit.deadline = edit
+        .deadline
+        .map(|d| d.map(str::trim).filter(|d| !d.is_empty()));
     let has_text = edit.title.is_some() || edit.description.is_some();
     let has_labels = !edit.labels_add.is_empty() || !edit.labels_remove.is_empty();
     if !has_text && edit.priority.is_none() && edit.deadline.is_none() && !has_labels {
@@ -2779,6 +2815,69 @@ mod tests {
     }
 
     #[test]
+    fn create_rejects_an_unparseable_deadline_and_drops_a_blank_one() {
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("renew cert");
+        new.deadline = Some("next friday".into());
+        assert!(create(&db, new, &EventCtx::test()).is_err());
+        let mut new = NewTask::minimal("renew cert");
+        new.deadline = Some("  ".into());
+        let t = create(&db, new, &EventCtx::test()).unwrap();
+        assert!(t.deadline.is_none());
+    }
+
+    #[test]
+    fn edit_atomic_blank_deadline_clears() {
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("x");
+        new.deadline = Some("2026-10-01".into());
+        let t = create(&db, new, &EventCtx::test()).unwrap();
+        let edit = TaskEdit {
+            title: None,
+            description: None,
+            priority: None,
+            deadline: Some(Some("  ")),
+            labels_add: &[],
+            labels_remove: &[],
+        };
+        edit_atomic(&db, &t.id, edit, &EventCtx::test()).unwrap();
+        let deadline: Option<String> = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT deadline FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert!(deadline.is_none());
+    }
+
+    #[test]
+    fn list_filters_by_v2_status_names() {
+        let (_dir, db) = fresh_db();
+        let a = create(&db, NewTask::minimal("started"), &EventCtx::test()).unwrap();
+        create(&db, NewTask::minimal("not started"), &EventCtx::test()).unwrap();
+        start(&db, &a.id, &EventCtx::test()).unwrap();
+        let rows = list_with_filter(&db, None, Some("in_progress"), None, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, a.id);
+        assert_eq!(
+            list_with_filter(&db, None, Some("todo"), None, 50)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_with_filter(&db, None, Some("pending"), None, 50)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(list_with_filter(&db, None, Some("pendng"), None, 50).is_err());
+    }
+
+    #[test]
     fn update_deadline_blank_on_recurring_hits_the_recurrence_guard() {
         // Normalising blank→clear must route into the recurring-task guard and
         // its actionable message, not into the parse error it used to raise.
@@ -3136,6 +3235,29 @@ mod tests {
                 );
                 claim(&db, &task.id, &ctx).expect("new occurrence must be claimable");
             }
+        }
+    }
+
+    #[test]
+    fn recurring_row_with_an_unparseable_time_is_still_completable() {
+        // Quick-add used to store "every monday at 9" (interim rejects
+        // "today 9") and mark_done re-parsed it with `?`, so every close
+        // failed and the task could only be dismissed.
+        let (_dir, db) = fresh_db();
+        for input in ["every monday at 9", "every! day at noon"] {
+            let rec = crate::recurrence::parse(input).unwrap();
+            let mut new = NewTask::minimal("standup");
+            new.deadline = Some("2026-09-28T09:00:00+01:00".into());
+            let ext = Extensions {
+                recurrence: Some(rec),
+                ..Default::default()
+            };
+            let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+            let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
+            assert!(
+                matches!(outcome, DoneOutcome::Advanced { .. }),
+                "{input}: {outcome:?}"
+            );
         }
     }
 

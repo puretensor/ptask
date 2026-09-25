@@ -59,8 +59,15 @@ pub fn parse(input: &str) -> Result<QuickAdd> {
 pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     let mut out = QuickAdd::default();
 
-    // Description: everything after `//` (greedy, includes spaces).
-    let (head, desc) = match input.find("//") {
+    // Description: everything after a `//` that starts a token (greedy,
+    // includes spaces). A `//` inside a word is text: `https://host/p`
+    // used to become title "… https:" + description "host/p …", eating
+    // every marker after the URL.
+    let desc_at = input
+        .match_indices("//")
+        .map(|(i, _)| i)
+        .find(|&i| i == 0 || input[..i].ends_with(char::is_whitespace));
+    let (head, desc) = match desc_at {
         Some(idx) => (
             input[..idx].trim_end().to_string(),
             input[idx + 2..].trim().to_string(),
@@ -72,7 +79,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     // Tokenize the head by whitespace, honouring double-quoted spans:
     // words inside "..." are literal title text, never parsed as markers
     // or date phrases. (Note: the `//` description split above runs first,
-    // so a quoted `//` still starts the description.)
+    // so a quoted token-leading `//` still starts the description.)
     let (raw, literal) = tokenize_quoted(&head);
     let mut idx = 0usize;
     let mut title_words: Vec<&str> = Vec::new();
@@ -297,7 +304,14 @@ fn try_recurrence_match(
 
     let rec = recurrence::parse(&phrase).ok()?;
     let (_rule_part, time_part) = recurrence::split_time_suffix(&phrase);
-    let time = time_part.and_then(|t| dates::parse_at(&format!("today {}", t), now.clone()).ok());
+    // An unparseable time ("at 9", "at noon") keeps the phrase as title
+    // text, like any other ambiguous phrase. Accepting the rule while
+    // dropping the time stored an `original_input` that mark_done re-parsed
+    // and failed on, so the task could never be completed.
+    let time = match time_part {
+        Some(t) => Some(dates::parse_at(&format!("today {}", t), now.clone()).ok()?),
+        None => None,
+    };
     Some((rec, time, end - start, phrase))
 }
 
@@ -707,6 +721,27 @@ mod tests {
         // The `//` consumes everything after it including any apparent tokens.
         assert_eq!(q.description, "long\n description with words");
         assert_eq!(q.title, "title here");
+    }
+
+    #[test]
+    fn recurrence_with_an_unparseable_time_is_not_accepted() {
+        let q = parse_at("Standup every monday at 9", anchor()).unwrap();
+        assert!(q.recurrence.is_none(), "{:?}", q.recurrence);
+        let q = parse_at("Standup every monday at 9am", anchor()).unwrap();
+        assert!(q.recurrence.is_some());
+    }
+
+    #[test]
+    fn url_in_title_does_not_start_the_description() {
+        let q = parse_at(
+            "Review https://github.com/o/r/pull/12 p4 #fleet //check CI",
+            anchor(),
+        )
+        .unwrap();
+        assert_eq!(q.title, "Review https://github.com/o/r/pull/12");
+        assert_eq!(q.priority, Some(4));
+        assert_eq!(q.project.as_deref(), Some("fleet"));
+        assert_eq!(q.description, "check CI");
     }
 
     #[test]

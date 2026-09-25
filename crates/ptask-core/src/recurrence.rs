@@ -71,10 +71,14 @@ pub fn split_time_suffix(input: &str) -> (&str, Option<&str>) {
 pub fn parse(input: &str) -> Result<Recurrence> {
     let trimmed = input.trim();
     let (rule, _time) = split_time_suffix(trimmed);
-    let (mode, rest) = if let Some(r) = rule.strip_prefix("every!") {
-        (Mode::Completion, r.trim())
-    } else if let Some(r) = rule.strip_prefix("every") {
-        (Mode::Fixed, r.trim())
+    // Case-insensitive like quick-add's keyword match: "Every Monday" used
+    // to reach here, fail the prefix strip, and drop the recurrence.
+    // (ASCII lowercasing keeps byte offsets, so slicing `rule` is safe.)
+    let rule_lower = rule.to_ascii_lowercase();
+    let (mode, rest) = if rule_lower.starts_with("every!") {
+        (Mode::Completion, rule["every!".len()..].trim())
+    } else if rule_lower.starts_with("every") {
+        (Mode::Fixed, rule["every".len()..].trim())
     } else {
         (Mode::Fixed, rule)
     };
@@ -208,19 +212,20 @@ fn build(
 
 /// Compute the next occurrence strictly after `after`.
 pub fn next_after(rec: &Recurrence, after: &Zoned) -> Result<Zoned> {
-    match rec.freq {
-        Freq::Daily => after
-            .checked_add(jiff::Span::new().days(rec.interval as i64))
-            .map_err(|e| Error::Other(format!("recurrence advance: {}", e))),
-        Freq::Weekly if !rec.bydays.is_empty() => next_weekday(after, &rec.bydays),
-        Freq::Weekly => after
-            .checked_add(jiff::Span::new().weeks(rec.interval as i64))
-            .map_err(|e| Error::Other(format!("recurrence advance: {}", e))),
-        Freq::Monthly if !rec.bymonthday.is_empty() => next_monthday(after, &rec.bymonthday),
-        Freq::Monthly => after
-            .checked_add(jiff::Span::new().months(rec.interval as i64))
-            .map_err(|e| Error::Other(format!("recurrence advance: {}", e))),
-    }
+    let n = i64::from(rec.interval);
+    // try_*: the infallible Span setters panic past jiff's unit bounds, and
+    // the interval is user input ("every 9999999 days").
+    let span = match rec.freq {
+        Freq::Weekly if !rec.bydays.is_empty() => return next_weekday(after, &rec.bydays),
+        Freq::Monthly if !rec.bymonthday.is_empty() => {
+            return next_monthday(after, &rec.bymonthday);
+        }
+        Freq::Daily => jiff::Span::new().try_days(n),
+        Freq::Weekly => jiff::Span::new().try_weeks(n),
+        Freq::Monthly => jiff::Span::new().try_months(n),
+    };
+    span.and_then(|span| after.checked_add(span))
+        .map_err(|e| Error::Other(format!("recurrence advance: {}", e)))
 }
 
 fn next_weekday(after: &Zoned, days: &[Weekday]) -> Result<Zoned> {
@@ -407,5 +412,29 @@ mod tests {
         let n = next_after(&r, &anchor()).unwrap();
         assert_eq!(n.date().month(), 6);
         assert_eq!(n.date().day(), 13);
+    }
+
+    #[test]
+    fn capitalised_every_is_still_a_recurrence() {
+        let r = parse("Every Monday").unwrap();
+        assert_eq!(r.freq, Freq::Weekly);
+        assert_eq!(r.bydays, vec![Weekday::Monday]);
+        assert_eq!(parse("EVERY! Day").unwrap().mode, Mode::Completion);
+    }
+
+    #[test]
+    fn huge_interval_is_an_error_not_a_panic() {
+        let now = jiff::civil::date(2026, 9, 25)
+            .at(12, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .unwrap();
+        for input in [
+            "every 9999999 days",
+            "every 9999999 weeks",
+            "every 9999999 months",
+        ] {
+            let rec = parse(input).unwrap();
+            assert!(next_after(&rec, &now).is_err(), "{input}");
+        }
     }
 }

@@ -50,7 +50,7 @@ Boolean expressions over field tokens.
 | Token | Predicate |
 |---|---|
 | `today` | `deadline = today` or due today |
-| `overdue` | `deadline < today AND status != 'done'` |
+| `overdue` | `deadline < today`, not done or dismissed |
 | `no date` | `deadline IS NULL` |
 | `recurring` | row has a `pt_recurrence` entry |
 | `p1`..`p5` | exact priority match |

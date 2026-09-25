@@ -159,23 +159,16 @@ async fn handle_list(bot: &Bot, chat_id: ChatId, db: &Db, filter: &str) -> Resul
             }
         }
     };
-    let rows = match ptask_core::tasks::list_with_filter(
-        db,
-        expr.as_ref(),
-        if expr.is_some() {
-            None
-        } else {
-            Some("pending")
-        },
-        None,
-        20,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            send(bot, chat_id, format!("list failed: {}", e)).await?;
-            return Ok(());
-        }
-    };
+    // Open tasks only, filter or not: the DSL has no status predicate, so a
+    // filter with no status let done/dismissed rows crowd out open ones.
+    let rows =
+        match ptask_core::tasks::list_with_filter(db, expr.as_ref(), Some("pending"), None, 20) {
+            Ok(r) => r,
+            Err(e) => {
+                send(bot, chat_id, format!("list failed: {}", e)).await?;
+                return Ok(());
+            }
+        };
     if rows.is_empty() {
         send(bot, chat_id, "no tasks").await?;
         return Ok(());

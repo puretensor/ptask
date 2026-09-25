@@ -1057,8 +1057,8 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
         .map(priority::parse)
         .transpose()
         .map_err(anyhow::Error::msg)?;
-    // When a filter is supplied, default status to "all" so the DSL is
-    // authoritative. Explicit -s still wins if the user typed one.
+    // `-s` applies with or without a filter (default pending); `-s all`
+    // lifts it.
     let status_filter = if a.status == "all" {
         None
     } else {
