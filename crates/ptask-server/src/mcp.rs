@@ -404,14 +404,7 @@ impl PtaskMcp {
                 .map_err(domain_err)?;
             }
             rescore_db(&db);
-            let mut v = task_json(&t);
-            if !q.warnings.is_empty() {
-                // Non-fatal quick-add caveats (e.g. a date phrase that resolved to
-                // the past). PT-1267 backdated a deadline silently because these
-                // were dropped on the MCP path — agents must see them.
-                v["warnings"] = serde_json::json!(q.warnings);
-            }
-            json_ok(&v)
+            json_ok(&task_json(&t))
         })
         .await
     }

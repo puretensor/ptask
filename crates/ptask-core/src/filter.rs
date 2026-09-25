@@ -184,7 +184,7 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
     })
 }
 
-fn escape_like(input: &str) -> String {
+pub(crate) fn escape_like(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         if matches!(ch, '\\' | '%' | '_') {

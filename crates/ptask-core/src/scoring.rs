@@ -36,7 +36,7 @@ use crate::error::Result;
 use jiff::Zoned;
 use rusqlite::params;
 use std::collections::{HashMap, HashSet, VecDeque};
-use tracing::info;
+use tracing::debug;
 
 /// Composite weights — mirror Python.
 pub const W_URGENCY: f64 = 0.30;
@@ -390,15 +390,22 @@ pub fn run_once_at_mode(db: &Db, dry_run: bool, now: &Zoned, v2: bool) -> Result
         });
     }
 
-    let pairs: Vec<(String, Vec<String>)> = rows
-        .iter()
-        .map(|r| {
-            let deps: Vec<String> = serde_json::from_str(&r.depends_on).unwrap_or_default();
-            (r.id.clone(), deps)
-        })
-        .collect();
-    let graph = DepGraph::from_pairs(&pairs);
-    let centrality = graph.betweenness_centrality();
+    // The dependency graph, Brandes centrality and the per-task interaction
+    // queries feed only the legacy v1 formula. run_once follows every MCP
+    // and /sync mutation, so the default v2 path used to pay for all three
+    // (O(V^2) String-keyed maps plus N queries) and discard them.
+    let v1_graph = (!v2).then(|| {
+        let pairs: Vec<(String, Vec<String>)> = rows
+            .iter()
+            .map(|r| {
+                let deps: Vec<String> = serde_json::from_str(&r.depends_on).unwrap_or_default();
+                (r.id.clone(), deps)
+            })
+            .collect();
+        let graph = DepGraph::from_pairs(&pairs);
+        let centrality = graph.betweenness_centrality();
+        (graph, centrality)
+    });
 
     let mut scored = 0usize;
     let mut writes = Vec::with_capacity(rows.len());
@@ -406,34 +413,36 @@ pub fn run_once_at_mode(db: &Db, dry_run: bool, now: &Zoned, v2: bool) -> Result
         let created_at = parse_iso_to_utc(&row.created_at).unwrap_or_else(|| now.clone());
         let deadline = row.deadline.as_deref().and_then(parse_iso_to_utc);
 
-        let interactions = load_interactions_14d(db, &row.id)?;
+        let (urgency, manual, neglect, dep, composite) =
+            if let Some((graph, centrality)) = v1_graph.as_ref() {
+                let urgency = urgency_score(deadline.as_ref(), &created_at, now);
+                let manual = manual_score(row.priority);
+                let interactions = load_interactions_14d(db, &row.id)?;
+                let neglect = neglect_score(&interactions, now);
+                let cent = *centrality.get(&row.id).unwrap_or(&0.0);
+                let dep = dependency_score(cent, graph.descendants_count(&row.id));
+                let composite = composite_score(urgency, dep, neglect, manual);
+                (urgency, manual, neglect, dep, composite)
+            } else {
+                let urgency = urgency_score_v2(deadline.as_ref(), &created_at, row.priority, now);
+                let manual = manual_score(row.priority);
+                let updated = parse_iso_to_utc(&row.updated_at).unwrap_or_else(|| now.clone());
+                let neglect = neglect_score_v2(&updated, now);
+                let dep = dependency_score_v2(row.active_dependents);
+                let composite = composite_score_v2(
+                    urgency,
+                    dep,
+                    neglect,
+                    manual,
+                    row.duration_min,
+                    row.score_llm,
+                );
+                (urgency, manual, neglect, dep, composite)
+            };
 
-        let (urgency, manual, neglect, dep, composite) = if v2 {
-            let urgency = urgency_score_v2(deadline.as_ref(), &created_at, row.priority, now);
-            let manual = manual_score(row.priority);
-            let updated = parse_iso_to_utc(&row.updated_at).unwrap_or_else(|| now.clone());
-            let neglect = neglect_score_v2(&updated, now);
-            let dep = dependency_score_v2(row.active_dependents);
-            let composite = composite_score_v2(
-                urgency,
-                dep,
-                neglect,
-                manual,
-                row.duration_min,
-                row.score_llm,
-            );
-            (urgency, manual, neglect, dep, composite)
-        } else {
-            let urgency = urgency_score(deadline.as_ref(), &created_at, now);
-            let manual = manual_score(row.priority);
-            let neglect = neglect_score(&interactions, now);
-            let cent = *centrality.get(&row.id).unwrap_or(&0.0);
-            let dep = dependency_score(cent, graph.descendants_count(&row.id));
-            let composite = composite_score(urgency, dep, neglect, manual);
-            (urgency, manual, neglect, dep, composite)
-        };
-
-        info!(
+        // Per task, so debug: every mutation-triggered rescore used to write
+        // one info line per active task to the journal.
+        debug!(
             target: "ptask::scoring",
             task_uuid = %row.id,
             title = %row.title.chars().take(60).collect::<String>(),

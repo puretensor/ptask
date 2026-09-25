@@ -25,24 +25,6 @@ pub fn current_counter(conn: &rusqlite::Connection) -> Result<i64> {
     Ok(n)
 }
 
-/// Mint a fresh PT-N. Advances the counter and stamps the task row.
-/// Caller supplies the `task_uuid`; row must already exist in `tasks`.
-pub fn mint_for(conn: &mut rusqlite::Connection, task_uuid: &str) -> Result<String> {
-    let tx = conn.transaction()?;
-    let n: i64 = tx.query_row(
-        "UPDATE pt_counters SET value = value + 1 WHERE name='pt_id' RETURNING value",
-        [],
-        |r| r.get(0),
-    )?;
-    let pt_id = format_pt_id(n);
-    tx.execute(
-        "UPDATE tasks SET pt_id = ?2, created_by_pt = 1 WHERE id = ?1",
-        params![task_uuid, pt_id],
-    )?;
-    tx.commit()?;
-    Ok(pt_id)
-}
-
 /// Resolve a PT-N string to the underlying `tasks.id` UUID.
 pub fn lookup_uuid(conn: &rusqlite::Connection, pt_id: &str) -> Result<String> {
     let uuid: Option<String> = conn
@@ -176,26 +158,6 @@ mod tests {
             Ok(())
         })
         .unwrap();
-    }
-
-    #[test]
-    fn mint_for_advances_counter() {
-        let (_dir, db) = setup_db_with_tasks(&[("uuid-a", "first", "2026-01-01T00:00:00Z")]);
-        backfill_all(&db).unwrap();
-
-        let mut conn = db.get().unwrap();
-        // Add a fresh row to `tasks` then mint.
-        conn.execute(
-            "INSERT INTO tasks (id, title, created_at, updated_at)
-             VALUES ('uuid-new', 'new', '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z')",
-            [],
-        )
-        .unwrap();
-        let pt_id = mint_for(&mut conn, "uuid-new").unwrap();
-        assert_eq!(pt_id, "PT-2");
-
-        let uuid = lookup_uuid(&conn, "PT-2").unwrap();
-        assert_eq!(uuid, "uuid-new");
     }
 
     #[test]

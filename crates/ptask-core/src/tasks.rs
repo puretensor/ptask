@@ -7,8 +7,8 @@
 use crate::error::Result;
 use crate::event_log::EventCtx;
 use crate::ordering::SortKey;
+use crate::pt_id;
 use crate::storage::Db;
-use crate::{priority, pt_id};
 use jiff::Zoned;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -315,10 +315,9 @@ pub fn list_with_filter_sorted(
     if let Some(expr) = filter_expr {
         let now = crate::dates::now_in_operator_tz()?;
         let compiled = crate::filter::to_sql(expr, &now)?;
-        // Shift the filter's positional placeholders to start after our offset.
-        let shift = bound.len();
-        let shifted = renumber_placeholders(&compiled.where_clause, shift);
-        conds.push(shifted);
+        // The filter binds first, so its ?1..?k placeholders line up with
+        // `bound` as-is; status/priority below number theirs after it.
+        conds.push(compiled.where_clause);
         bound.extend(compiled.params);
     }
     if let Some(s) = status {
@@ -355,34 +354,6 @@ pub fn list_with_filter_sorted(
     let rows = stmt.query_map(params_refs.as_slice(), row_to_task)?;
     let out: Vec<Task> = rows.collect::<std::result::Result<_, _>>()?;
     Ok(out)
-}
-
-/// Shift positional `?N` placeholders in `sql` by `shift` so they don't
-/// collide with externally-bound parameters that precede them.
-fn renumber_placeholders(sql: &str, shift: usize) -> String {
-    if shift == 0 {
-        return sql.to_string();
-    }
-    let mut out = String::with_capacity(sql.len() + 4);
-    let bytes = sql.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'?' {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > i + 1 {
-                let n: usize = sql[i + 1..j].parse().unwrap();
-                out.push_str(&format!("?{}", n + shift));
-                i = j;
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
 }
 
 /// List tasks (optionally filtered by status + priority). Mirrors Python `get_tasks`.
@@ -502,7 +473,7 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
          ORDER BY {}",
         SortKey::default().sql()
     ))?;
-    let pat = format!("%{}%", escape_like_pattern(&q.to_ascii_lowercase()));
+    let pat = format!("%{}%", crate::filter::escape_like(&q.to_ascii_lowercase()));
     let rows: Vec<Task> = stmt
         .query_map([&pat], row_to_task)?
         .collect::<std::result::Result<_, _>>()?;
@@ -618,7 +589,7 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
     sql.push_str(&format!(" ORDER BY {}", SortKey::default().sql()));
 
     let mut stmt = conn.prepare(&sql)?;
-    let pat = format!("%{}%", escape_like_pattern(&q.to_ascii_lowercase()));
+    let pat = format!("%{}%", crate::filter::escape_like(&q.to_ascii_lowercase()));
     let rows: Vec<Task> = stmt
         .query_map([&pat], row_to_task)?
         .collect::<std::result::Result<_, _>>()?;
@@ -878,7 +849,10 @@ fn recurrence_time_of_day(original: &str, now: &jiff::Zoned) -> Result<Option<ji
 
 /// Replace the time-of-day of `date_z` with the time-of-day of `time_z`,
 /// keeping `date_z`'s timezone.
-fn combine_date_with_time(date_z: &jiff::Zoned, time_z: &jiff::Zoned) -> Result<jiff::Zoned> {
+pub(crate) fn combine_date_with_time(
+    date_z: &jiff::Zoned,
+    time_z: &jiff::Zoned,
+) -> Result<jiff::Zoned> {
     let tz = date_z.time_zone().clone();
     let civil = date_z.date().at(
         time_z.hour(),
@@ -889,11 +863,6 @@ fn combine_date_with_time(date_z: &jiff::Zoned, time_z: &jiff::Zoned) -> Result<
     civil
         .to_zoned(tz)
         .map_err(|e| crate::Error::Other(format!("combine date+time: {}", e)))
-}
-
-/// Status label formatter for CLI parity with Python output.
-pub fn priority_label(p: i64) -> &'static str {
-    priority::label(p)
 }
 
 /// Build a Linear-style branch name from a PT-N + title.
@@ -2016,17 +1985,6 @@ fn iso_now() -> String {
     } else {
         format!("{base}.{micros:06}+00:00")
     }
-}
-
-fn escape_like_pattern(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 #[cfg(test)]

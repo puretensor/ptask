@@ -1,5 +1,5 @@
-//! Central configuration — the ONE module that reads the process
-//! environment.
+//! Central configuration — the module that reads the process environment
+//! (the only other read is storage's `PTASK_WAL_AUTOCHECKPOINT` pragma).
 //!
 //! Every binary entrypoint calls [`Config::from_env`] exactly once and
 //! threads the pieces to where they're used (axum `AppState`, the

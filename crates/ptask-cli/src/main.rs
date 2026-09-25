@@ -946,9 +946,6 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
     } else {
         quickadd::parse(&a.title).map_err(anyhow::Error::msg)?
     };
-    for w in &q.warnings {
-        eprintln!("{}", ui::section("warning", ui::Ink::Amber, w));
-    }
 
     // CLI flags override parsed values.
     let priority = match a.priority.as_deref() {
@@ -1015,7 +1012,6 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         duration_min: Option<i64>,
         reminder: Option<String>,
         recurrence: Option<String>,
-        warnings: Vec<String>,
     }
     let out = AddOutput {
         task,
@@ -1024,7 +1020,6 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         duration_min: q.duration_min,
         reminder: q.reminder.clone(),
         recurrence: q.recurrence.as_ref().map(|r| r.original_input.clone()),
-        warnings: q.warnings.clone(),
     };
 
     emit(&out, || {

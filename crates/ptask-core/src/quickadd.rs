@@ -46,8 +46,6 @@ pub struct QuickAdd {
     /// Parsed recurrence rule, if the input contained an `every` / `every!`
     /// clause. The deadline above is the first occurrence.
     pub recurrence: Option<Recurrence>,
-    /// Non-fatal parse caveats the surface should echo to the operator.
-    pub warnings: Vec<String>,
 }
 
 /// Parse a quick-add string against the operator-tz `now()` anchor.
@@ -325,7 +323,7 @@ fn first_recurrence_deadline(
         return Ok(first);
     };
 
-    let today = combine_date_with_time(now, time)?;
+    let today = crate::tasks::combine_date_with_time(now, time)?;
     let can_occur_today = match rec.freq {
         recurrence::Freq::Daily => rec.interval == 1,
         recurrence::Freq::Weekly => rec.bydays.contains(&now.weekday()),
@@ -335,22 +333,7 @@ fn first_recurrence_deadline(
         return Ok(today);
     }
 
-    combine_date_with_time(&first, time)
-}
-
-/// Replace the time-of-day of `date_z` with the time-of-day of `time_z`,
-/// keeping `date_z`'s timezone.
-fn combine_date_with_time(date_z: &Zoned, time_z: &Zoned) -> Result<Zoned> {
-    let tz = date_z.time_zone().clone();
-    let civil = date_z.date().at(
-        time_z.hour(),
-        time_z.minute(),
-        time_z.second(),
-        time_z.subsec_nanosecond(),
-    );
-    civil
-        .to_zoned(tz)
-        .map_err(|e| Error::Other(format!("combine date+time: {}", e)))
+    crate::tasks::combine_date_with_time(&first, time)
 }
 
 /// Tokens that signal a structural quick-add marker, never a date word.
@@ -418,7 +401,6 @@ mod tests {
             q.deadline
         );
         assert_eq!(q.title, input);
-        assert!(q.warnings.is_empty(), "warnings: {:?}", q.warnings);
     }
 
     #[test]
@@ -432,7 +414,6 @@ mod tests {
             q.deadline
         );
         assert_eq!(q.title, input);
-        assert!(q.warnings.is_empty(), "warnings: {:?}", q.warnings);
     }
 
     #[test]
@@ -477,7 +458,6 @@ mod tests {
         let q = parse_at("Plan \"May offsite\" kickoff", anchor()).unwrap();
         assert_eq!(q.title, "Plan May offsite kickoff");
         assert!(q.deadline.is_none(), "quoted month name must not be a date");
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -485,7 +465,6 @@ mod tests {
         let q = parse_at("Ship build tomorrow \"10am demo notes\"", anchor()).unwrap();
         assert_eq!(q.title, "Ship build tomorrow 10am demo notes");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -501,7 +480,6 @@ mod tests {
         let q = parse_at("Pay invoice yesterday", anchor()).unwrap();
         assert_eq!(q.title, "Pay invoice yesterday");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -511,7 +489,6 @@ mod tests {
         let q = parse_at("Plan May offsite", june).unwrap();
         assert_eq!(q.title, "Plan May offsite");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -519,7 +496,6 @@ mod tests {
         let q = parse_at("book flights Sat 18 Jul", anchor()).unwrap();
         assert_eq!(q.title, "book flights Sat 18 Jul");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -560,7 +536,6 @@ mod tests {
         let q = parse_at("Pay invoice tomorrow 10am", anchor()).unwrap();
         assert_eq!(q.title, "Pay invoice tomorrow 10am");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
