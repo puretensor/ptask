@@ -228,7 +228,7 @@ async fn handle_done(bot: &Bot, chat_id: ChatId, db: &Db, query: &str) -> Result
 }
 
 async fn handle_next(bot: &Bot, chat_id: ChatId, db: &Db, rest: &str) -> Result<()> {
-    let limit: usize = rest.trim().parse().unwrap_or(10);
+    let limit: usize = rest.trim().parse().unwrap_or(10).min(50);
     let rows = match ptask_core::dag::next_ready(db, limit) {
         Ok(r) => r,
         Err(e) => {

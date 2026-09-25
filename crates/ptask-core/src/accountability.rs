@@ -224,6 +224,13 @@ fn channels_for(level: i64) -> &'static [&'static str] {
     }
 }
 
+/// Escape text for a Telegram `parse_mode: HTML` message body.
+pub fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Loss-frame static message templates. Match `_LEVEL_PROMPTS` in
 /// `accountability/engine.py` semantically — short, factual, day-count first.
 fn fallback_message(task: &EligibleTask, level: i64, age_days: i64) -> String {
@@ -480,7 +487,10 @@ pub async fn run_check_at<D: Dispatch>(
                     {
                         false
                     } else {
-                        let prefixed = format!("<b>Task #{}:</b> {}", level, message);
+                        // parse_mode is HTML: a title like "Fix <br> in footer"
+                        // is a 400 from Telegram, and three in a row trip the
+                        // circuit breaker for every other nudge in the run.
+                        let prefixed = format!("<b>Task #{}:</b> {}", level, html_escape(&message));
                         let buttons = nudge_buttons(&task.id);
                         let r = if cfg.dry_run {
                             true
@@ -1196,6 +1206,49 @@ mod tests {
         assert_eq!(report.dispatched.len(), 1);
         assert_eq!(report.dispatched[0].level, 5);
         assert_eq!(level_and_updated_at(&db, &task_uuid).0, 5);
+    }
+
+    /// Records every Telegram body it is asked to send.
+    #[derive(Default)]
+    struct RecordTelegram(std::sync::Mutex<Vec<String>>);
+    impl Dispatch for RecordTelegram {
+        async fn send_telegram(
+            &self,
+            _cfg: &DispatchCfg,
+            text: &str,
+            _buttons: &[(String, String)],
+        ) -> Result<bool> {
+            self.0.lock().unwrap().push(text.to_string());
+            Ok(true)
+        }
+        async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {
+            Ok(true)
+        }
+        async fn compose_via_hal(&self, _cfg: &DispatchCfg, _req: &NudgeRequest) -> Option<String> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn telegram_nudge_escapes_the_title_for_html_parse_mode() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        aged_task_before(&db, "Fix <br> & <p> in the email footer", 2, &anchor);
+        let cfg = DispatchCfg {
+            telegram_token: Some("test".into()),
+            telegram_chat_id: Some(1),
+            ..Default::default()
+        };
+        let dispatch = RecordTelegram::default();
+        run_check_at(&db, &cfg, &dispatch, &anchor).await.unwrap();
+        let sent = dispatch.0.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].starts_with("<b>Task #1:</b> "));
+        assert!(
+            sent[0].contains("Fix &lt;br&gt; &amp; &lt;p&gt; in the email footer"),
+            "{}",
+            sent[0]
+        );
     }
 
     #[tokio::test]

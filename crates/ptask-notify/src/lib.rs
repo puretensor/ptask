@@ -9,7 +9,7 @@
 //! (`run_check_at`); these implementations assume real config and that a
 //! live send is wanted.
 
-use ptask_core::accountability::{Dispatch, NudgeRequest};
+use ptask_core::accountability::{Dispatch, NudgeRequest, html_escape};
 use ptask_core::approvals::Approval;
 use ptask_core::config::DispatchCfg;
 use ptask_core::{Db, Error, Result};
@@ -21,12 +21,6 @@ use tracing::warn;
 pub enum InlineButton {
     Callback { text: String, data: String },
     Url { text: String, url: String },
-}
-
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 fn excerpt(s: &str, max: usize) -> String {
@@ -47,21 +41,23 @@ pub fn approval_telegram_message(
     dash_url: Option<&str>,
     tap_buttons: bool,
 ) -> (String, Vec<Vec<InlineButton>>) {
+    // Every free-text field is bounded: Telegram rejects bodies over 4096
+    // characters, and a rejected ping stays unnotified on every sweep.
     let preview = excerpt(&ap.preview(), 800);
-    let note = ap.request_note.as_deref().unwrap_or("").trim();
+    let note = excerpt(ap.request_note.as_deref().unwrap_or("").trim(), 1500);
     let digest_prefix: String = ap.digest.chars().take(12).collect();
     let mut text = format!(
         "<b>{}</b> · {} · {}\nRequester: {}\nDigest: {}…\n\nPreview:\n{}",
         html_escape(&ap.ap_id()),
         html_escape(&ap.kind),
-        html_escape(&ap.title),
-        html_escape(&ap.requester),
+        html_escape(&excerpt(&ap.title, 200)),
+        html_escape(&excerpt(&ap.requester, 100)),
         html_escape(&digest_prefix),
         html_escape(&preview),
     );
     if !note.is_empty() {
         text.push_str("\n\nRequester's note:\n");
-        text.push_str(&html_escape(note));
+        text.push_str(&html_escape(&note));
     }
     let mut keyboard: Vec<Vec<InlineButton>> = Vec::new();
     if let Some(base) = dash_url.map(str::trim).filter(|s| !s.is_empty()) {
@@ -328,6 +324,44 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             LockedWriter(Arc::clone(&self.0))
         }
+    }
+
+    #[test]
+    fn approval_ping_stays_under_the_telegram_limit_and_escapes() {
+        let ap = Approval {
+            uuid: "u".into(),
+            seq: 7,
+            kind: "email".into(),
+            title: "<b>".repeat(2_000),
+            request_note: Some("&".repeat(5_000)),
+            payload: Some(vec![b'x'; 5_000]),
+            payload_kind: Some("file".into()),
+            payload_name: None,
+            payload_bytes: Some(5_000),
+            payload_ref: None,
+            digest: "ab".repeat(32),
+            requester: "hal".repeat(500),
+            task_uuid: None,
+            task_pt_id: None,
+            status: "pending".into(),
+            decided_by: None,
+            decided_via: None,
+            decision_note: None,
+            created_at: "2026-09-25T00:00:00+00:00".into(),
+            decided_at: None,
+            expires_at: None,
+            notified_at: None,
+            consumed_at: None,
+            consumed_by: None,
+        };
+        let (text, _) = approval_telegram_message(&ap, None, false);
+        // Telegram counts characters after entity parsing.
+        let rendered = text
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        assert!(rendered.chars().count() <= 4096, "{}", rendered.len());
+        assert!(!text.contains("<b><b>"), "title must be escaped");
     }
 
     /// Network-level failure surfaces as Ok(false), not Err — the run loop
