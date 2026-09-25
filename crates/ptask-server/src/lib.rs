@@ -1391,6 +1391,48 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn metrics_distill_age_uses_the_latest_instant_not_the_largest_string() {
+        // "10:30:00+01:00" is 09:30Z but the greater string; 09:45Z is later.
+        let db = open_test_db();
+        db.with_conn(|c| {
+            c.execute_batch(
+                "INSERT INTO pt_event_log (uuid, event_type, payload, ts) VALUES
+                   ('d1', 'distill.run', '{}', '2026-01-01T10:30:00+01:00'),
+                   ('d2', 'distill.run', '{}', '2026-01-01T09:45:00Z');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let app = router(AppState::new(db, Default::default(), Default::default()));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        let age: i64 = text
+            .lines()
+            .find_map(|l| l.strip_prefix("pt_distill_last_success_age_seconds "))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let latest: jiff::Timestamp = "2026-01-01T09:45:00Z".parse().unwrap();
+        let expected = jiff::Timestamp::now().as_second() - latest.as_second();
+        assert!(
+            (age - expected).abs() < 60,
+            "age {age} vs expected {expected}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn metrics_reports_render_failures_as_server_errors() {
         let db = open_test_db();
         db.with_conn(|conn| {

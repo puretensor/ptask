@@ -161,13 +161,14 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     // Age of the last SUCCESSFUL distill run (`distill.run` event). The
     // 2026-05 incident produced zero tasks for 7 weeks with no signal; the
     // alert rule fires when this exceeds ~26h (daily timer + slack).
-    // -1 = never ran. SQLite's strftime handles the mixed +01:00/UTC
-    // offsets these rows carry.
+    // -1 = never ran. Rows carry mixed +01:00/UTC offsets, so convert each
+    // to epoch before taking MAX: `strftime(MAX(ts))` picked the greatest
+    // *string*, and "10:30+01:00" (09:30Z) outranks a later "09:45Z".
     let distill_age: i64 = db
         .with_conn(|c| {
             let n: Option<i64> = c.query_row(
                 "SELECT CAST(strftime('%s','now') AS INTEGER)
-                        - CAST(strftime('%s', MAX(ts)) AS INTEGER)
+                        - MAX(CAST(strftime('%s', ts) AS INTEGER))
                  FROM pt_event_log WHERE event_type = 'distill.run'",
                 [],
                 |r| r.get(0),
@@ -261,7 +262,7 @@ fn render(db: &Db) -> ptask_core::Result<String> {
         let mut stmt = c.prepare(
             "SELECT channel,
                     CAST(strftime('%s','now') AS INTEGER)
-                    - CAST(strftime('%s', MAX(sent_at)) AS INTEGER)
+                    - MAX(CAST(strftime('%s', sent_at) AS INTEGER))
              FROM notifications GROUP BY channel",
         )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
