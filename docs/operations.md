@@ -97,6 +97,11 @@ loginctl enable-linger "$USER"
 Cadence: hourly with 300s jitter. `pt distill --batch 300` is the production
 service command; interactive runs can lower `--batch` for smoke tests.
 
+A run stops starting provider calls after 64 calls or 20 minutes of chunk
+work, whichever comes first, and marks what finished as processed. The unit's
+30-minute `TimeoutStartSec` therefore never kills a run mid-batch; rows left
+over wait for the next hourly run.
+
 ### Inspect
 
 ```bash
