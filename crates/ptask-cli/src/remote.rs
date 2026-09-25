@@ -466,7 +466,6 @@ struct SyncResp {
     resources: SyncResources,
     sync_status: BTreeMap<String, Value>,
     #[serde(default)]
-    #[allow(dead_code)]
     temp_id_mapping: BTreeMap<String, String>,
 }
 

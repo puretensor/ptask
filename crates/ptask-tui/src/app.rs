@@ -167,10 +167,6 @@ impl App {
             .and_then(|i| self.filtered.get(i).copied())
     }
 
-    pub fn selected(&self) -> Option<usize> {
-        self.list_state.selected()
-    }
-
     pub fn selected_task(&self) -> Option<&Task> {
         self.selected_task_index().and_then(|i| self.tasks.get(i))
     }
