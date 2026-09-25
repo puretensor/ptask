@@ -113,7 +113,13 @@ fn resolve_blocking(
         let ctx = EventCtx {
             actor: identity.client_id.clone(),
             source: "capture-resolve".into(),
-            event_uuid: Some(format!("capture-resolve:{}:{}", key, uuid)),
+            // Keyed on the task's updated_at too: a reopened task must be
+            // closable by the next recovery, and a fixed (key, task) uuid
+            // hit the event log's UNIQUE index so mark_done failed forever.
+            event_uuid: Some(format!(
+                "capture-resolve:{}:{}:{}",
+                key, uuid, task.updated_at
+            )),
         };
         match ptask_core::tasks::mark_done(&state.db, &task, &ctx) {
             Ok(_) => {
@@ -125,7 +131,7 @@ fn resolve_blocking(
                     "client_key": key,
                     "note": req.note,
                 });
-                let ev_uuid = format!("capture-resolve-note:{}:{}", key, uuid);
+                let ev_uuid = format!("capture-resolve-note:{}:{}:{}", key, uuid, task.updated_at);
                 if let Err(e) = ptask_core::event_log::record(
                     &state.db,
                     &ev_uuid,
@@ -210,15 +216,28 @@ fn capture_identity_action(
     CaptureIdentity::Duplicate
 }
 
+/// Is incident `key` still live on an open task? Either a task carries the
+/// key itself, or the fast lane merged a capture under this key onto
+/// another open incident (semantic match keeps that task's own
+/// capture_key, recording the absorbed key only on the occurrence event).
+/// Without the second arm every re-send of a merged incident read as
+/// "recovered" and minted a new raw_items episode plus an occurrence event,
+/// without bound.
 fn open_incident_for_key(db: &ptask_core::Db, key: &str) -> Result<bool, ptask_core::Error> {
     db.with_conn(|c| {
-        let n: i64 = c.query_row(
-            "SELECT COUNT(*) FROM tasks
-             WHERE capture_key = ?1 AND status_v2 NOT IN ('done','dismissed')",
+        Ok(c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks
+                           WHERE capture_key = ?1
+                             AND status_v2 NOT IN ('done','dismissed'))
+                 OR EXISTS(SELECT 1 FROM tasks t
+                           JOIN pt_event_log e ON e.task_uuid = t.id
+                           WHERE t.source_type = 'incident'
+                             AND t.status_v2 NOT IN ('done','dismissed')
+                             AND e.event_type = 'task.capture_occurrence'
+                             AND json_extract(e.payload, '$.client_key') = ?1)",
             [key],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
+            |r| r.get::<_, bool>(0),
+        )?)
     })
 }
 
@@ -301,10 +320,21 @@ fn capture_blocking(
             .into_response();
     }
     let source = req.source.clone().unwrap_or_else(|| "http".into());
+    // One normalised key for every use below. The raw value used to be
+    // stored and matched in some places and trimmed in others: an empty
+    // `client_key` was stored as capture_key '' and then exact-matched every
+    // later unrelated keyed-"" incident (dropping it as a duplicate), and a
+    // padded key was stored raw so /capture/resolve (trimmed) never closed it.
+    let capture_key: Option<String> = req
+        .client_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let source_file = req
         .source_file
         .clone()
-        .or_else(|| req.client_key.clone())
+        .or_else(|| capture_key.clone())
         .unwrap_or_else(|| "http://capture".into());
 
     // PT-1687 shipped the unique index on (source_file, text); the HTTP lane was
@@ -315,12 +345,7 @@ fn capture_blocking(
     // episode so a later identical capture can create work again.
     let severity = effective_severity(&req, &source);
     let is_incident = severity.is_some_and(|s| s >= 3);
-    let capture_key = req
-        .client_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let has_open_keyed_task = match capture_key {
+    let has_open_keyed_task = match capture_key.as_deref() {
         Some(key) => match open_incident_for_key(&state.db, key) {
             Ok(open) => open,
             Err(e) => {
@@ -426,7 +451,7 @@ fn capture_blocking(
             })
             .unwrap_or_default();
 
-        let exact = req.client_key.as_ref().and_then(|k| {
+        let exact = capture_key.as_ref().and_then(|k| {
             open_incidents
                 .iter()
                 .find(|(_, _, ck)| ck.as_deref() == Some(k.as_str()))
@@ -456,7 +481,7 @@ fn capture_blocking(
                          updated_at = ?1,
                          capture_key = COALESCE(capture_key, ?2)
                      WHERE id = ?3",
-                    rusqlite::params![now, req.client_key, existing_uuid],
+                    rusqlite::params![now, capture_key, existing_uuid],
                 )?;
                 Ok(())
             });
@@ -473,7 +498,7 @@ fn capture_blocking(
                         "score": score,
                         "severity": sev,
                         "raw_item_id": row.id,
-                        "client_key": req.client_key,
+                        "client_key": capture_key,
                         "title": title,
                     });
                     if let Err(e) = ptask_core::event_log::record(
@@ -550,7 +575,7 @@ fn capture_blocking(
             Ok(t) => {
                 task_uuid = Some(t.id.clone());
                 pt_id = t.pt_id.clone();
-                if let Some(key) = req.client_key.as_deref() {
+                if let Some(key) = capture_key.as_deref() {
                     let set = state.db.with_conn(|c| {
                         c.execute(
                             "UPDATE tasks SET capture_key = ?1 WHERE id = ?2",

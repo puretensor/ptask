@@ -539,6 +539,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blank_client_keys_do_not_merge_unrelated_incidents() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let mut tasks = Vec::new();
+        for text in ["ceph HEALTH_ERR on fox-n0", "tailscale down on mon1"] {
+            let body = serde_json::json!({"text": text, "severity": 4, "client_key": ""});
+            let (status, resp) = post_json(&app, "/capture", &body).await;
+            assert_eq!(status, StatusCode::CREATED, "{resp}");
+            assert_ne!(resp["duplicate"], true);
+            tasks.push(resp["task_uuid"].as_str().unwrap().to_string());
+        }
+        assert_ne!(tasks[0], tasks[1]);
+    }
+
+    #[tokio::test]
+    async fn resolve_closes_a_reopened_incident_again() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let body = serde_json::json!({
+            "text": "disk 95% on fox-n1", "severity": 3, "client_key": "disk-fox-n1",
+        });
+        let (_, created) = post_json(&app, "/capture", &body).await;
+        let uuid = created["task_uuid"].as_str().unwrap().to_string();
+        let resolve = serde_json::json!({"client_key": "disk-fox-n1"});
+        assert_eq!(
+            post_json(&app, "/capture/resolve", &resolve).await.1["closed"],
+            1
+        );
+
+        ptask_core::tasks::reopen(&db, &uuid, &EventCtx::test()).unwrap();
+        assert_eq!(
+            post_json(&app, "/capture/resolve", &resolve).await.1["closed"],
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn resend_of_a_key_merged_onto_an_open_incident_stays_a_duplicate() {
+        // The fast lane's semantic match folds a capture under key K onto an
+        // open incident Z and keeps Z's own capture_key; K is recorded only
+        // on Z's occurrence event. Simulate that state directly (the test
+        // build has no embedder), then re-send (T, K).
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let z = serde_json::json!({
+            "text": "ceph mon quorum lost", "severity": 4, "client_key": "ceph-quorum",
+        });
+        let (_, zr) = post_json(&app, "/capture", &z).await;
+        let z_uuid = zr["task_uuid"].as_str().unwrap().to_string();
+        ptask_core::raw_items::insert_idempotent(&db, "mons out of quorum", "http", "mon-quorum")
+            .unwrap();
+        ptask_core::event_log::record(
+            &db,
+            "capture-occurrence:merged",
+            Some(&z_uuid),
+            "task.capture_occurrence",
+            &serde_json::json!({"client_key": "mon-quorum", "matched_by": "semantic"}),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let raw_before = ptask_core::raw_items::unprocessed_count(&db).unwrap();
+
+        let resend = serde_json::json!({
+            "text": "mons out of quorum", "severity": 4, "client_key": "mon-quorum",
+        });
+        let (status, resp) = post_json(&app, "/capture", &resend).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["duplicate"], true);
+        assert_eq!(
+            ptask_core::raw_items::unprocessed_count(&db).unwrap(),
+            raw_before,
+            "no new #episode raw row while the absorbing incident is open"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_unknown_uuid_is_404_not_500() {
+        let app = router(AppState::new(
+            open_test_db(),
+            Default::default(),
+            Default::default(),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/resolve?query=0b7f0d2e-3c1a-4c9e-9d7e-2f1a5b6c7d8e")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn sync_round_trip_create_then_done() {
         let db = open_test_db();
         let app = router(AppState::new(

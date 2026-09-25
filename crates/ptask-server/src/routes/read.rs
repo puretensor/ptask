@@ -165,7 +165,8 @@ fn resolve_error_status(e: &ptask_core::Error) -> StatusCode {
         ptask_core::Error::Other(_) if msg == "empty task query" => StatusCode::BAD_REQUEST,
         ptask_core::Error::Other(_)
             if msg.starts_with("no active task matching")
-                || msg.starts_with("no task matching") =>
+                || msg.starts_with("no task matching")
+                || msg.starts_with("no task with uuid") =>
         {
             StatusCode::NOT_FOUND
         }
