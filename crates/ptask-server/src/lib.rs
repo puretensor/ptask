@@ -698,6 +698,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_with_a_cursor_past_the_journal_applies_and_returns_no_delta() {
+        // The remote CLI sends this for every mutation but add, instead of
+        // the full-sync "*" that serialised the whole table per command.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        for i in 0..3 {
+            ptask_core::tasks::create(
+                &db,
+                ptask_core::NewTask::minimal(format!("t{i}")),
+                &EventCtx::test(),
+            )
+            .unwrap();
+        }
+        let t = ptask_core::tasks::resolve_for_lookup(&db, "PT-1", true).unwrap();
+        let body = serde_json::json!({
+            "sync_token": "9223372036854775807",
+            "commands": [{"type": "task_done", "uuid": "done-1", "args": {"task_uuid": t.id}}]
+        });
+        let resp = post_sync(&app, &body).await;
+        assert_eq!(resp["sync_status"]["done-1"], "ok");
+        assert_eq!(resp["resources"]["tasks"].as_array().unwrap().len(), 0);
+        let done = ptask_core::tasks::resolve_for_lookup(&db, "PT-1", true).unwrap();
+        assert_eq!(done.status, "done");
+    }
+
+    #[tokio::test]
     async fn sync_round_trip_create_then_done() {
         let db = open_test_db();
         let app = router(AppState::new(

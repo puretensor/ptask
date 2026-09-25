@@ -785,6 +785,15 @@ fn already_applied(db: &Db, ctx: &ptask_core::event_log::EventCtx) -> Result<boo
     })
 }
 
+/// `pt remote list` filter with `-p` folded in as a DSL `pN` term.
+fn remote_list_filter(filter: Option<&str>, priority: Option<i64>) -> Option<String> {
+    match (filter, priority) {
+        (Some(f), Some(p)) => Some(format!("({f}) & p{p}")),
+        (None, Some(p)) => Some(format!("p{p}")),
+        (f, None) => f.map(str::to_string),
+    }
+}
+
 fn remote_client(url: Option<&str>) -> Result<remote::RemoteClient> {
     let client = match url {
         Some(u) => remote::RemoteClient::with_url(u)?,
@@ -3045,16 +3054,11 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 .map(priority::parse)
                 .transpose()
                 .context("parsing --priority")?;
-            let status_filter = if a.status == "all" {
-                None
-            } else {
-                Some(a.status.as_str())
-            };
-            let tasks_out = if a.filter.is_some() {
-                client.list_filtered(a.filter.as_deref(), &a.status, a.limit)?
-            } else {
-                client.list(status_filter, priority_filter, a.limit)?
-            };
+            // Server-side /list either way: -p used to be dropped whenever
+            // -f was given, and the unfiltered path downloaded every task and
+            // sorted newest-first instead of local `pt list`'s severity order.
+            let filter = remote_list_filter(a.filter.as_deref(), priority_filter);
+            let tasks_out = client.list_filtered(filter.as_deref(), &a.status, a.limit)?;
             if json_mode() {
                 println!("{}", serde_json::to_string_pretty(&tasks_out)?);
                 return Ok(());
@@ -3593,7 +3597,7 @@ fn cmd_backfill(db: &Db) -> Result<()> {
 mod tests {
     use super::{
         ExportArgs, cmd_export, delegation_command, gcalendar_path, git_has_staged_changes,
-        run_git_checked, short_id, stale_review_tasks,
+        remote_list_filter, run_git_checked, short_id, stale_review_tasks,
     };
 
     #[test]
@@ -3662,6 +3666,23 @@ mod tests {
 
         assert!(output.status.success());
         assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    }
+
+    #[test]
+    fn remote_list_folds_priority_into_the_filter() {
+        assert_eq!(remote_list_filter(None, None), None);
+        assert_eq!(
+            remote_list_filter(Some("today"), None).as_deref(),
+            Some("today")
+        );
+        assert_eq!(remote_list_filter(None, Some(4)).as_deref(), Some("p4"));
+        assert_eq!(
+            remote_list_filter(Some("today | overdue"), Some(1)).as_deref(),
+            Some("(today | overdue) & p1")
+        );
+        for f in ["p4", "(today | overdue) & p1"] {
+            ptask_core::filter::parse(f).unwrap();
+        }
     }
 
     #[test]
