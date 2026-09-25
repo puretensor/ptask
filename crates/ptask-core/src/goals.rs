@@ -333,7 +333,11 @@ fn would_cycle(
     let mut depth = 0usize;
     while let Some(id) = current {
         if depth >= MAX_WALK_DEPTH {
-            break;
+            // Fail closed: past the cap the walk cannot prove there is no
+            // cycle, and answering "no" let a deep chain be closed into one.
+            return Err(Error::Goal(GoalError::Cycle(format!(
+                "goal ancestry deeper than {MAX_WALK_DEPTH} levels; refusing to re-parent"
+            ))));
         }
         if id == goal_uuid {
             return Ok(true);
@@ -623,17 +627,17 @@ pub fn set_parent(db: &Db, id: &str, parent_id: &str, ctx: &EventCtx) -> Result<
             "cannot set a goal as its own parent".into(),
         )));
     }
-    {
-        let conn = db.get()?;
-        if would_cycle(&conn, &goal.uuid, &parent.uuid)? {
-            return Err(Error::Goal(GoalError::Cycle(
-                "cannot set parent: that would create a cycle".into(),
-            )));
-        }
-    }
     let now = now_iso()?;
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    // Check and write under one IMMEDIATE transaction: checked on a separate
+    // connection first, concurrent `set-parent A B` and `set-parent B A`
+    // could both pass and commit a cycle.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    if would_cycle(&tx, &goal.uuid, &parent.uuid)? {
+        return Err(Error::Goal(GoalError::Cycle(
+            "cannot set parent: that would create a cycle".into(),
+        )));
+    }
     tx.execute(
         "UPDATE goals SET parent_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![parent.uuid, now, goal.uuid],
@@ -709,9 +713,15 @@ pub fn link(db: &Db, task_query: &str, goal_id: &str, ctx: &EventCtx) -> Result<
         params![goal.uuid, now, task.id],
     )?;
     if let Some(old_uuid) = old {
+        // A relink records two events; with an idempotency key both used it
+        // and the second hit pt_event_log's unique uuid, failing the relink.
+        let unlink_ctx = match ctx.event_uuid.as_deref() {
+            Some(key) => ctx.with_uuid(format!("{key}:unlink")),
+            None => ctx.clone(),
+        };
         record_event(
             &tx,
-            ctx,
+            &unlink_ctx,
             &task.id,
             "task.goal_unlinked",
             serde_json::json!({
@@ -969,6 +979,35 @@ mod tests {
         assert!(matches!(err, Error::Goal(GoalError::Cycle(_))));
         set_parent(&db, &g3.g_id(), &g1.g_id(), &ctx()).unwrap();
         assert_eq!(get(&db, &g3.g_id()).unwrap().parent, Some(g1.g_id()));
+    }
+
+    #[test]
+    fn set_parent_fails_closed_past_the_walk_cap() {
+        let (_dir, db) = fresh();
+        let mut chain = vec![add(&db, "g0", None, None, &ctx()).unwrap()];
+        for i in 1..=MAX_WALK_DEPTH + 1 {
+            let parent = chain.last().unwrap().g_id();
+            chain.push(add(&db, &format!("g{i}"), None, Some(&parent), &ctx()).unwrap());
+        }
+        // Closing the deep chain into a loop must be refused, not waved
+        // through because the walk ran out of depth before reaching g0.
+        let err =
+            set_parent(&db, &chain[0].g_id(), &chain.last().unwrap().g_id(), &ctx()).unwrap_err();
+        assert!(matches!(err, Error::Goal(GoalError::Cycle(_))));
+        assert_eq!(get(&db, &chain[0].g_id()).unwrap().parent, None);
+    }
+
+    #[test]
+    fn relink_with_an_idempotency_key_records_both_events() {
+        let (_dir, db) = fresh();
+        let g1 = add(&db, "one", None, None, &ctx()).unwrap();
+        let g2 = add(&db, "two", None, None, &ctx()).unwrap();
+        let t = add_task(&db, "task");
+        let pt = t.pt_id.as_deref().unwrap();
+        link(&db, pt, &g1.g_id(), &ctx()).unwrap();
+        let keyed = ctx().with_uuid("retry-key");
+        link(&db, pt, &g2.g_id(), &keyed).unwrap();
+        assert_eq!(effective_goal(&db, &t.id).unwrap().chain[0].uuid, g2.uuid);
     }
 
     #[test]
