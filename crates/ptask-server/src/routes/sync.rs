@@ -247,6 +247,8 @@ async fn sync(
     // once per command: each pass rewrites every active row under the write
     // lock, and a 200-command batch paid for 200 of them.
     let mut needs_rescore = false;
+    // Outbound webhook fan-out (env-driven; no-op if unconfigured).
+    let outbox = crate::webhooks::Outbox::start(&state);
 
     // Apply commands sequentially. Each command's `uuid` is its idempotency
     // key — replays return "ok" without re-executing.
@@ -290,14 +292,11 @@ async fn sync(
                     temp_map.insert(temp_id, tu);
                 }
                 needs_rescore |= rescores;
-                // Outbound webhook fan-out (env-driven; no-op if unconfigured).
-                crate::webhooks::dispatch(
-                    &state,
-                    &payload.event_type,
-                    task_uuid.as_deref(),
-                    &payload.payload,
-                )
-                .await;
+                outbox.send(crate::webhooks::OutboundEvent {
+                    event_type: payload.event_type,
+                    task_uuid,
+                    payload: payload.payload,
+                });
                 status.insert(cmd_uuid, Value::String("ok".into()));
             }
         }

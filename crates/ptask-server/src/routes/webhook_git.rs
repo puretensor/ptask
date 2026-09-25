@@ -168,6 +168,7 @@ async fn handle(
     let mut closed: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut handled_pt_ids: HashSet<String> = HashSet::new();
+    let outbox = crate::webhooks::Outbox::start(state);
     for commit in &event.commits {
         let directives = magic_words::parse(&commit.message);
         if directives.is_empty() {
@@ -224,7 +225,11 @@ async fn handle(
                     payload,
                     result,
                 }) => {
-                    crate::webhooks::dispatch(state, event_type, Some(&task_uuid), &payload).await;
+                    outbox.send(crate::webhooks::OutboundEvent {
+                        event_type: event_type.into(),
+                        task_uuid: Some(task_uuid),
+                        payload,
+                    });
                     closed.push(result);
                 }
             }

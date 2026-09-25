@@ -8,9 +8,11 @@
 //!   { "event_type": "...", "task_uuid": "...?", "payload": {...}, "ts": "<iso>" }
 //! and header `X-PTask-Signature: sha256=<hex>` over the raw body bytes.
 //!
-//! The dispatch is awaited inline in the originating request — small fleet,
-//! few subscribers, easier to debug. Promote to a background queue if it
-//! ever bites.
+//! A request streams its committed events into an [`Outbox`]; one background
+//! task per request delivers them in order. Inline delivery made the request
+//! wait on every subscriber: a hung URL cost 10s per event, so a 200-command
+//! `/sync` could stall for over half an hour. Events already handed over
+//! still go out if the client disconnects mid-batch.
 
 use crate::AppState;
 use hmac::{Hmac, Mac};
@@ -22,10 +24,10 @@ use tracing::{info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Shared outbound client. Dispatch is awaited inline in the originating
-/// request, so a hung subscriber must not be able to stall `/sync` forever:
-/// reqwest's default client has NO timeout. Bound both connect and total
-/// request time, and reuse the client (connection pool) across dispatches.
+/// Shared outbound client. reqwest's default client has NO timeout, so a
+/// hung subscriber would hold the delivery task forever. Bound both connect
+/// and total request time, and reuse the client (connection pool) across
+/// dispatches.
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -49,9 +51,44 @@ pub fn sign(body: &[u8], secret: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// One journal event bound for the outbound subscribers.
+pub struct OutboundEvent {
+    pub event_type: String,
+    pub task_uuid: Option<String>,
+    pub payload: serde_json::Value,
+}
+
+/// One request's outbound queue. Delivery runs on its own task, so the
+/// request never waits on a subscriber and a dropped request still drains
+/// what it sent. A no-op when no URL is configured.
+pub struct Outbox(Option<tokio::sync::mpsc::UnboundedSender<OutboundEvent>>);
+
+impl Outbox {
+    pub fn start(state: &AppState) -> Self {
+        if state.webhooks.outbound_urls.is_empty() {
+            return Self(None);
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<OutboundEvent>();
+        let state = state.clone();
+        tokio::spawn(async move {
+            while let Some(e) = rx.recv().await {
+                dispatch(&state, &e.event_type, e.task_uuid.as_deref(), &e.payload).await;
+            }
+        });
+        Self(Some(tx))
+    }
+
+    pub fn send(&self, event: OutboundEvent) {
+        if let Some(tx) = &self.0 {
+            // The receiver lives until this sender drops.
+            let _ = tx.send(event);
+        }
+    }
+}
+
 /// Fan-out one event to every configured URL. Logs each attempt (sent or
-/// failed) to pt_webhook_log. No retries in v0.3.5.
-pub async fn dispatch(
+/// failed) to pt_webhook_log. No retries.
+async fn dispatch(
     state: &AppState,
     event_type: &str,
     task_uuid: Option<&str>,
