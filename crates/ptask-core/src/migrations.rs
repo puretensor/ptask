@@ -17,6 +17,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v019_adds_a_null_recurrence_anchor_and_drops_the_unused_indexes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = rusqlite::Connection::open(dir.path().join("t.db")).unwrap();
+        runner()
+            .set_grouped(true)
+            .set_target(refinery::Target::Version(18))
+            .run(&mut conn)
+            .unwrap();
+        conn.execute_batch(
+            "INSERT INTO tasks (id, title, created_at, updated_at)
+                 VALUES ('t1', 'task', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z');
+             INSERT INTO pt_recurrence (task_uuid, rrule, mode, original_input, next_occurrence)
+                 VALUES ('t1', 'FREQ=MONTHLY', 'fixed', 'every month', '2026-09-30');",
+        )
+        .unwrap();
+
+        run(&mut conn).unwrap();
+
+        let anchor: Option<String> = conn
+            .query_row("SELECT anchor FROM pt_recurrence", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(anchor, None);
+        let dropped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+                    'idx_pt_recurrence_next', 'idx_pt_webhook_log_source',
+                    'idx_tasks_kind', 'idx_goals_status_seq')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
     fn v018_keeps_approvals_and_tamper_triggers_and_drops_the_task_fk() {
         let dir = tempfile::tempdir().unwrap();
         let mut conn = rusqlite::Connection::open(dir.path().join("t.db")).unwrap();

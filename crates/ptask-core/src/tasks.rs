@@ -229,8 +229,9 @@ pub fn create_with_extensions(
             crate::recurrence::Mode::Completion => "completion",
         };
         tx.execute(
-            "INSERT INTO pt_recurrence (task_uuid, rrule, mode, original_input, next_occurrence)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO pt_recurrence
+                 (task_uuid, rrule, mode, original_input, next_occurrence, anchor)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
             params![id, rec.rrule_str, mode_str, rec.original_input, next_occ],
         )?;
     }
@@ -636,6 +637,14 @@ pub enum DoneOutcome {
     Advanced { next_deadline: String },
 }
 
+struct RecurrenceRow {
+    mode: String,
+    original: String,
+    deadline: Option<String>,
+    status: String,
+    anchor: Option<String>,
+}
+
 /// Mark a task done. If the task has a `pt_recurrence` row, the deadline
 /// is advanced in-place and `status` stays `pending` (Todoist-style).
 /// Otherwise the task is set to `status='done'`. Either way an
@@ -662,20 +671,21 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     }
 
     // Look up the recurrence rule, if any.
-    let rec_row: Option<(String, String, Option<String>, String)> = tx
+    let rec_row: Option<RecurrenceRow> = tx
         .query_row(
-            "SELECT r.mode, r.original_input, t.deadline, t.status_v2
+            "SELECT r.mode, r.original_input, t.deadline, t.status_v2, r.anchor
              FROM pt_recurrence AS r
              JOIN tasks AS t ON t.id = r.task_uuid
              WHERE r.task_uuid = ?1",
             [&task.id],
             |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
+                Ok(RecurrenceRow {
+                    mode: r.get(0)?,
+                    original: r.get(1)?,
+                    deadline: r.get(2)?,
+                    status: r.get(3)?,
+                    anchor: r.get(4)?,
+                })
             },
         )
         .map(Some)
@@ -684,7 +694,14 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             other => Err(other),
         })?;
 
-    if let Some((mode_str, original, current_deadline, status)) = rec_row {
+    if let Some(RecurrenceRow {
+        mode: mode_str,
+        original,
+        deadline: current_deadline,
+        status,
+        anchor,
+    }) = rec_row
+    {
         // Resolve the current state inside this transaction: callers may
         // hold a Task from before another actor dismissed the recurrence.
         if matches!(status.as_str(), "done" | "dismissed") {
@@ -704,15 +721,20 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         } else {
             None
         };
-        // Pick the anchor for next_after based on mode:
-        //   Fixed      → from the current deadline (preserves cadence)
+        // Where the next occurrence counts from:
+        //   Fixed      → from the current deadline, or the operator-set anchor
+        //                for a plain monthly rule (preserves cadence)
         //   Completion → from now (drifts forward with completions)
-        let anchor: jiff::Zoned = match mode_str.as_str() {
-            "fixed" => match &current_deadline {
-                Some(d) => parse_iso_zoned(d)?,
-                None => completion_now.clone(),
-            },
-            "completion" => completion_now.clone(),
+        let mut next_z = match mode_str.as_str() {
+            "fixed" => {
+                let current = match &current_deadline {
+                    Some(d) => parse_iso_zoned(d)?,
+                    None => completion_now.clone(),
+                };
+                let anchor = anchor.as_deref().map(parse_iso_zoned).transpose()?;
+                crate::recurrence::next_fixed(&rec, anchor.as_ref(), &current, &completion_now)?
+            }
+            "completion" => crate::recurrence::next_after(&rec, &completion_now)?,
             other => {
                 return Err(crate::Error::Other(format!(
                     "recurrence: unknown mode in pt_recurrence: {:?}",
@@ -720,12 +742,6 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                 )));
             }
         };
-        let mut next_z = crate::recurrence::next_after(&rec, &anchor)?;
-        if mode_str == "fixed" {
-            while next_z <= completion_now {
-                next_z = crate::recurrence::next_after(&rec, &next_z)?;
-            }
-        }
         if mode_str == "completion"
             && let Some(time) = explicit_time.as_ref()
         {
@@ -994,7 +1010,7 @@ pub fn update_deadline(
     }
     if has_recurrence {
         tx.execute(
-            "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
+            "UPDATE pt_recurrence SET next_occurrence=?1, anchor=?1 WHERE task_uuid=?2",
             params![deadline, task_uuid],
         )?;
     }
@@ -1715,7 +1731,7 @@ pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx)
     }
     if let Some(deadline) = edit.deadline {
         tx.execute(
-            "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
+            "UPDATE pt_recurrence SET next_occurrence=?1, anchor=?1 WHERE task_uuid=?2",
             params![deadline, task_uuid],
         )?;
         payload["deadline"] = serde_json::json!(deadline);
@@ -3367,6 +3383,49 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn monthly_recurrence_returns_to_its_anchor_day_after_a_short_month() {
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every month").unwrap();
+        let mut new = NewTask::minimal("month-end close");
+        new.deadline = Some("2099-01-31T09:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let mut days = Vec::new();
+        // mark_done reads the deadline inside its transaction.
+        for _ in 0..3 {
+            let DoneOutcome::Advanced { next_deadline } =
+                mark_done(&db, &t, &EventCtx::test()).unwrap()
+            else {
+                panic!("recurring task completed");
+            };
+            days.push(parse_iso_zoned(&next_deadline).unwrap().date().to_string());
+        }
+        // Chaining from the clamped Feb 28 gave 03-28 and 04-28.
+        assert_eq!(days, ["2099-02-28", "2099-03-31", "2099-04-30"]);
+
+        // An explicit deadline edit re-anchors the rule.
+        update_deadline(
+            &db,
+            &t.id,
+            Some("2099-06-30T09:00:00+00:00"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let DoneOutcome::Advanced { next_deadline } =
+            mark_done(&db, &t, &EventCtx::test()).unwrap()
+        else {
+            panic!("recurring task completed");
+        };
+        assert_eq!(
+            parse_iso_zoned(&next_deadline).unwrap().date().to_string(),
+            "2099-07-30"
+        );
     }
 
     #[test]
