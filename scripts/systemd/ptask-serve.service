@@ -4,16 +4,18 @@ Documentation=https://github.com/puretensor/ptask
 After=network-online.target
 Wants=network-online.target
 
-# Example unit binds loopback. For LAN/VPN clients, change --bind to a
-# private interface address (not 0.0.0.0) and set both PTASK_API_TOKEN and
+# Binds loopback by default. For LAN/VPN clients, set PTASK_SERVE_BIND in the
+# EnvironmentFile to a private interface address (not 0.0.0.0); it overrides
+# the Environment= default below, so a redeploy keeps the host's bind and set both PTASK_API_TOKEN and
 # PTASK_DASH_PASS in the EnvironmentFile. Only set
 # PTASK_ALLOW_UNAUTHENTICATED=1 for isolated tests.
 # To embed the authenticated dashboard in one trusted HTTPS parent, set
 # PTASK_DASH_FRAME_ANCESTOR to that exact origin. The default remains DENY.
 [Service]
 Type=simple
+Environment=PTASK_SERVE_BIND=127.0.0.1:9501
 EnvironmentFile=%h/puretensor-tasks/.env
-ExecStart=%h/.cargo/bin/pt serve --bind 127.0.0.1:9501
+ExecStart=%h/.cargo/bin/pt serve --bind ${PTASK_SERVE_BIND}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

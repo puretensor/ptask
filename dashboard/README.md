@@ -221,8 +221,15 @@ curl -s localhost:9510/healthz          # -> OK
 ```
 
 Public hostname `ptask.puretensor.ai` is routed via the existing k8s cloudflared
-tunnel (token mode) → `http://192.168.4.253:9510`, managed in the Cloudflare
-dashboard/API (DNS CNAME `ptask` → `<tunnel-id>.cfargotunnel.com`).
+tunnel (token mode) → the dashboard's tailnet bind (`PTASK_DASH_BIND`), managed
+in the Cloudflare dashboard/API (DNS CNAME `ptask` → `<tunnel-id>.cfargotunnel.com`).
+
+The connector pods reach the dashboard SNATed through their k8s node, so the
+peer address is a node's tailnet IP, not a pod IP. Set
+`PTASK_DASH_TRUSTED_PROXIES` to exactly the `/32`s of the nodes the connector
+can schedule on (measure with `ss -tn '( sport = :9510 )'` while requesting the
+public hostname). Never trust the whole tailnet range: any tailnet device could
+then forge `Cf-Connecting-Ip` and get a fresh lockout counter per guess.
 
 ## Rollback
 
