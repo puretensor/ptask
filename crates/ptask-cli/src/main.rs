@@ -1984,7 +1984,7 @@ fn shell_single_quote(value: &str) -> String {
 
 fn delegation_command(handle: &str, title: &str) -> String {
     let prompt = format!(
-        "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt capture a note explaining why."
+        "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt add the blocker as its own task, then pt depend {handle} --on <its PT-N>."
     );
     format!("claude -p {}", shell_single_quote(&prompt))
 }
@@ -3469,7 +3469,7 @@ mod tests {
             "audit $(printf SUBSTITUTED) `printf BACKTICK` O'Brien \\\nnext; printf INJECTED";
         let handle = "PT-42";
         let expected = format!(
-            "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt capture a note explaining why."
+            "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt add the blocker as its own task, then pt depend {handle} --on <its PT-N>."
         );
         let command = delegation_command(handle, title);
         let script = format!("claude() {{ printf '%s' \"$2\"; }}; {command}");
@@ -3487,7 +3487,7 @@ mod tests {
     fn delegation_command_quotes_the_complete_prompt() {
         assert_eq!(
             delegation_command("PT-7", "review Alan's quote"),
-            "claude -p 'Work the pTask task PT-7: review Alan'\"'\"'s quote. When done: pt done PT-7; if blocked, pt capture a note explaining why.'"
+            "claude -p 'Work the pTask task PT-7: review Alan'\"'\"'s quote. When done: pt done PT-7; if blocked, pt add the blocker as its own task, then pt depend PT-7 --on <its PT-N>.'"
         );
     }
 
