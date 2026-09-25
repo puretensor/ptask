@@ -9,7 +9,8 @@
 //! - `p1`..`p5`     — priority, native scale (p1=low, p2=normal, p3=high,
 //!   p4=urgent, p5=critical; defaults to "normal" / 2 if absent)
 //! - `~30m` `~2h` `~1d` — duration estimate in minutes
-//! - `!HH:MM`        — reminder time-of-day
+//! - `!HH:MM`        — reminder time-of-day (a valid time only; echoed by
+//!   `pt add`, not persisted)
 //! - `//rest of line` — everything after the `//` is the description
 //! - Future ISO date — an exact `YYYY-MM-DD` token. Other date-like prose is
 //!   kept as literal title text.
@@ -46,8 +47,6 @@ pub struct QuickAdd {
     /// Parsed recurrence rule, if the input contained an `every` / `every!`
     /// clause. The deadline above is the first occurrence.
     pub recurrence: Option<Recurrence>,
-    /// Non-fatal parse caveats the surface should echo to the operator.
-    pub warnings: Vec<String>,
 }
 
 /// Parse a quick-add string against the operator-tz `now()` anchor.
@@ -59,8 +58,15 @@ pub fn parse(input: &str) -> Result<QuickAdd> {
 pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     let mut out = QuickAdd::default();
 
-    // Description: everything after `//` (greedy, includes spaces).
-    let (head, desc) = match input.find("//") {
+    // Description: everything after a `//` that starts a token (greedy,
+    // includes spaces). A `//` inside a word is text: `https://host/p`
+    // used to become title "… https:" + description "host/p …", eating
+    // every marker after the URL.
+    let desc_at = input
+        .match_indices("//")
+        .map(|(i, _)| i)
+        .find(|&i| i == 0 || input[..i].ends_with(char::is_whitespace));
+    let (head, desc) = match desc_at {
         Some(idx) => (
             input[..idx].trim_end().to_string(),
             input[idx + 2..].trim().to_string(),
@@ -72,7 +78,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     // Tokenize the head by whitespace, honouring double-quoted spans:
     // words inside "..." are literal title text, never parsed as markers
     // or date phrases. (Note: the `//` description split above runs first,
-    // so a quoted `//` still starts the description.)
+    // so a quoted token-leading `//` still starts the description.)
     let (raw, literal) = tokenize_quoted(&head);
     let mut idx = 0usize;
     let mut title_words: Vec<&str> = Vec::new();
@@ -140,9 +146,11 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             continue;
         }
         // Reminder !HH:MM
+        // Only a real time of day: `!re:invoice` or `!note:` used to be
+        // swallowed out of the title as a "reminder" nothing stores.
         if let Some(rest) = tok.strip_prefix('!')
-            && !rest.is_empty()
-            && rest.contains(':')
+            && rest.len() <= 8
+            && rest.parse::<jiff::civil::Time>().is_ok()
         {
             out.reminder = Some(rest.to_string());
             idx += 1;
@@ -297,7 +305,14 @@ fn try_recurrence_match(
 
     let rec = recurrence::parse(&phrase).ok()?;
     let (_rule_part, time_part) = recurrence::split_time_suffix(&phrase);
-    let time = time_part.and_then(|t| dates::parse_at(&format!("today {}", t), now.clone()).ok());
+    // An unparseable time ("at 9", "at noon") keeps the phrase as title
+    // text, like any other ambiguous phrase. Accepting the rule while
+    // dropping the time stored an `original_input` that mark_done re-parsed
+    // and failed on, so the task could never be completed.
+    let time = match time_part {
+        Some(t) => Some(dates::parse_at(&format!("today {}", t), now.clone()).ok()?),
+        None => None,
+    };
     Some((rec, time, end - start, phrase))
 }
 
@@ -311,7 +326,7 @@ fn first_recurrence_deadline(
         return Ok(first);
     };
 
-    let today = combine_date_with_time(now, time)?;
+    let today = crate::tasks::combine_date_with_time(now, time)?;
     let can_occur_today = match rec.freq {
         recurrence::Freq::Daily => rec.interval == 1,
         recurrence::Freq::Weekly => rec.bydays.contains(&now.weekday()),
@@ -321,22 +336,7 @@ fn first_recurrence_deadline(
         return Ok(today);
     }
 
-    combine_date_with_time(&first, time)
-}
-
-/// Replace the time-of-day of `date_z` with the time-of-day of `time_z`,
-/// keeping `date_z`'s timezone.
-fn combine_date_with_time(date_z: &Zoned, time_z: &Zoned) -> Result<Zoned> {
-    let tz = date_z.time_zone().clone();
-    let civil = date_z.date().at(
-        time_z.hour(),
-        time_z.minute(),
-        time_z.second(),
-        time_z.subsec_nanosecond(),
-    );
-    civil
-        .to_zoned(tz)
-        .map_err(|e| Error::Other(format!("combine date+time: {}", e)))
+    crate::tasks::combine_date_with_time(&first, time)
 }
 
 /// Tokens that signal a structural quick-add marker, never a date word.
@@ -404,7 +404,6 @@ mod tests {
             q.deadline
         );
         assert_eq!(q.title, input);
-        assert!(q.warnings.is_empty(), "warnings: {:?}", q.warnings);
     }
 
     #[test]
@@ -418,7 +417,6 @@ mod tests {
             q.deadline
         );
         assert_eq!(q.title, input);
-        assert!(q.warnings.is_empty(), "warnings: {:?}", q.warnings);
     }
 
     #[test]
@@ -463,7 +461,6 @@ mod tests {
         let q = parse_at("Plan \"May offsite\" kickoff", anchor()).unwrap();
         assert_eq!(q.title, "Plan May offsite kickoff");
         assert!(q.deadline.is_none(), "quoted month name must not be a date");
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -471,7 +468,6 @@ mod tests {
         let q = parse_at("Ship build tomorrow \"10am demo notes\"", anchor()).unwrap();
         assert_eq!(q.title, "Ship build tomorrow 10am demo notes");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -487,7 +483,6 @@ mod tests {
         let q = parse_at("Pay invoice yesterday", anchor()).unwrap();
         assert_eq!(q.title, "Pay invoice yesterday");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -497,7 +492,6 @@ mod tests {
         let q = parse_at("Plan May offsite", june).unwrap();
         assert_eq!(q.title, "Plan May offsite");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -505,7 +499,6 @@ mod tests {
         let q = parse_at("book flights Sat 18 Jul", anchor()).unwrap();
         assert_eq!(q.title, "book flights Sat 18 Jul");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -546,7 +539,6 @@ mod tests {
         let q = parse_at("Pay invoice tomorrow 10am", anchor()).unwrap();
         assert_eq!(q.title, "Pay invoice tomorrow 10am");
         assert!(q.deadline.is_none());
-        assert!(q.warnings.is_empty());
     }
 
     #[test]
@@ -710,6 +702,27 @@ mod tests {
     }
 
     #[test]
+    fn recurrence_with_an_unparseable_time_is_not_accepted() {
+        let q = parse_at("Standup every monday at 9", anchor()).unwrap();
+        assert!(q.recurrence.is_none(), "{:?}", q.recurrence);
+        let q = parse_at("Standup every monday at 9am", anchor()).unwrap();
+        assert!(q.recurrence.is_some());
+    }
+
+    #[test]
+    fn url_in_title_does_not_start_the_description() {
+        let q = parse_at(
+            "Review https://github.com/o/r/pull/12 p4 #fleet //check CI",
+            anchor(),
+        )
+        .unwrap();
+        assert_eq!(q.title, "Review https://github.com/o/r/pull/12");
+        assert_eq!(q.priority, Some(4));
+        assert_eq!(q.project.as_deref(), Some("fleet"));
+        assert_eq!(q.description, "check CI");
+    }
+
+    #[test]
     fn multiple_labels() {
         let q = parse_at("ship release @ops @devops @oncall", anchor()).unwrap();
         assert_eq!(q.labels, vec!["ops", "devops", "oncall"]);
@@ -720,6 +733,10 @@ mod tests {
         let q = parse_at("call dentist !09:30", anchor()).unwrap();
         assert_eq!(q.reminder.as_deref(), Some("09:30"));
         assert_eq!(q.title, "call dentist");
+        // Not a time: title text, not a silently dropped "reminder".
+        let q = parse_at("Reply to Bob !re:invoice", anchor()).unwrap();
+        assert!(q.reminder.is_none());
+        assert_eq!(q.title, "Reply to Bob !re:invoice");
     }
 
     #[test]

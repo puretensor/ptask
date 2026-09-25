@@ -1,16 +1,9 @@
 //! Task dependency-graph queries.
 //!
-//! Phase-2 implementation focuses on the single killer query — "what's
-//! ready right now?" — i.e. pending tasks whose every dependency has
-//! `status='done'` (or which have no deps at all). Cycle detection,
-//! critical-path scoring, and downstream-fanout analysis are deferred to
-//! later phases; the `petgraph` workspace dep is in place for those.
-//!
-//! Schema reference: the existing Python `tasks` table stores deps as a
-//! JSON array of UUIDs in `depends_on` (default `'[]'`). Reverse edges
-//! live in `blocks_tasks`. We only read `depends_on` here — `blocks_tasks`
-//! is the operator-facing "who's blocked by me" view, not the prerequisite
-//! relation.
+//! The one query here is "what's ready right now?": open tasks with no
+//! `depends_on` edge (in `task_links`, since V010) to a prerequisite that is
+//! still open. A done or dismissed prerequisite counts as satisfied. Edge
+//! writes and the cycle check live in `tasks::add_dependency`.
 
 use crate::error::Result;
 use crate::storage::Db;
@@ -70,56 +63,6 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
         }
     }
 
-    Ok(out)
-}
-
-/// Diagnostic: list `(task, missing_deps[])` for pending tasks whose deps
-/// are unmet. Useful for `pt next --explain` (deferred).
-#[allow(dead_code)]
-pub fn pending_with_missing_deps(db: &Db) -> Result<Vec<(Task, Vec<String>)>> {
-    let conn = db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.pt_id, t.title, t.description, t.priority, t.status_v2 AS status,
-                t.created_at, t.updated_at, t.deadline, t.source_type, t.ai_reasoning,
-                t.kind, t.deliverable
-         FROM tasks t
-         WHERE t.status_v2 IN ('triage','backlog','todo','in_progress')
-           AND EXISTS (SELECT 1 FROM task_links l JOIN tasks d ON d.id = l.to_uuid
-                       WHERE l.from_uuid = t.id AND l.kind = 'depends_on'
-                         AND d.status_v2 NOT IN ('done','dismissed'))",
-    )?;
-    let tasks: Vec<Task> = stmt
-        .query_map([], |r| {
-            Ok(Task {
-                id: r.get(0)?,
-                pt_id: r.get(1)?,
-                title: r.get(2)?,
-                description: r.get(3).unwrap_or_default(),
-                priority: r.get(4)?,
-                status: r.get(5)?,
-                created_at: r.get(6)?,
-                updated_at: r.get(7)?,
-                deadline: r.get(8)?,
-                source_type: r.get(9)?,
-                ai_reasoning: r.get(10).unwrap_or_default(),
-                kind: r.get(11).unwrap_or_else(|_| "ship".to_string()),
-                deliverable: r.get(12).unwrap_or_default(),
-            })
-        })?
-        .collect::<std::result::Result<_, _>>()?;
-    drop(stmt);
-
-    let mut out = Vec::new();
-    for task in tasks {
-        let mut miss = conn.prepare(
-            "SELECT l.to_uuid FROM task_links l JOIN tasks d ON d.id = l.to_uuid
-             WHERE l.from_uuid = ?1 AND l.kind = 'depends_on' AND d.status_v2 NOT IN ('done','dismissed')",
-        )?;
-        let missing: Vec<String> = miss
-            .query_map([&task.id], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        out.push((task, missing));
-    }
     Ok(out)
 }
 
@@ -302,19 +245,5 @@ mod tests {
         .unwrap();
         let ready = next_ready(&db, 10).unwrap();
         assert_eq!(ready.len(), 1);
-    }
-
-    #[test]
-    fn pending_with_missing_deps_surfaces_blockers() {
-        let (_dir, db) = fresh_db();
-        let blocker =
-            crate::tasks::create(&db, NewTask::minimal("blocker"), &EventCtx::test()).unwrap();
-        let downstream =
-            crate::tasks::create(&db, NewTask::minimal("downstream"), &EventCtx::test()).unwrap();
-        set_deps(&db, &downstream.id, std::slice::from_ref(&blocker.id));
-        let pending = pending_with_missing_deps(&db).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].0.title, "downstream");
-        assert_eq!(pending[0].1, vec![blocker.id]);
     }
 }

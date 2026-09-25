@@ -171,7 +171,7 @@ pub fn warn_if_unconfigured(auth: &AuthConfig) {
 /// to avoid leaking the token via response-timing. Length difference short
 /// circuits (an attacker already learns length from other channels), but equal
 /// length inputs are always fully scanned.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

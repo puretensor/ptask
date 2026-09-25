@@ -92,20 +92,23 @@ async fn list(
     headers: HeaderMap,
     Query(params): Query<ListParams>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
-        return resp;
-    }
-    let status = params
-        .status
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    match approvals::list(&state.db, status) {
-        Ok(items) => {
-            Json(items.iter().map(|a| a.to_json(None)).collect::<Vec<_>>()).into_response()
+    crate::blocking::db_response(move || {
+        if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
+            return resp;
         }
-        Err(e) => err_resp(e),
-    }
+        let status = params
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match approvals::list(&state.db, status) {
+            Ok(items) => {
+                Json(items.iter().map(|a| a.to_json(None)).collect::<Vec<_>>()).into_response()
+            }
+            Err(e) => err_resp(e),
+        }
+    })
+    .await
 }
 
 async fn get_one(
@@ -113,16 +116,19 @@ async fn get_one(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
-        return resp;
-    }
-    match approvals::get(&state.db, &id) {
-        Ok(ap) => {
-            let events = approvals::events(&state.db, &ap.uuid).unwrap_or_default();
-            Json(ap.to_json(Some(&events))).into_response()
+    crate::blocking::db_response(move || {
+        if let Some(resp) = crate::auth::require_read_token(&state.db, &state.auth, &headers) {
+            return resp;
         }
-        Err(e) => err_resp(e),
-    }
+        match approvals::get(&state.db, &id) {
+            Ok(ap) => {
+                let events = approvals::events(&state.db, &ap.uuid).unwrap_or_default();
+                Json(ap.to_json(Some(&events))).into_response()
+            }
+            Err(e) => err_resp(e),
+        }
+    })
+    .await
 }
 
 fn payload_from_create(req: &CreateReq) -> ptask_core::Result<PayloadSource> {
@@ -160,36 +166,36 @@ async fn create(
     headers: HeaderMap,
     Json(req): Json<CreateReq>,
 ) -> impl IntoResponse {
-    let identity = match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Write) {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
-    let payload = match payload_from_create(&req) {
-        Ok(p) => p,
-        Err(e) => return err_resp(e),
-    };
-    let input = RequestInput {
-        kind: req.kind,
-        title: req.title,
-        request_note: req.note,
-        payload,
-        task_pt_id: req.task,
-        expires_in: req.expires_in,
-    };
-    let ctx = ctx_for(&identity.client_id, "api");
-    let db = state.db.clone();
-    let outcome =
-        match crate::blocking::db_value(move || approvals::request(&db, input, &ctx)).await {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => return err_resp(e),
-            Err(_) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "internal error"})),
-                )
-                    .into_response();
-            }
+    // Token check (a write: it stamps last_used_at) and the insert run on
+    // the blocking pool together; only the Telegram ping stays async.
+    let st = state.clone();
+    let requested = crate::blocking::db_value(move || -> Result<_, Box<Response>> {
+        let identity = crate::auth::authenticate(&st.db, &st.auth, &headers, Scope::Write)
+            .map_err(Box::new)?;
+        let payload = payload_from_create(&req).map_err(|e| Box::new(err_resp(e)))?;
+        let input = RequestInput {
+            kind: req.kind,
+            title: req.title,
+            request_note: req.note,
+            payload,
+            task_pt_id: req.task,
+            expires_in: req.expires_in,
         };
+        let ctx = ctx_for(&identity.client_id, "api");
+        approvals::request(&st.db, input, &ctx).map_err(|e| Box::new(err_resp(e)))
+    })
+    .await;
+    let outcome = match requested {
+        Ok(Ok(o)) => o,
+        Ok(Err(resp)) => return *resp,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response();
+        }
+    };
     let created = outcome.created;
     if created {
         let _ = ptask_notify::notify_approval(
@@ -201,10 +207,11 @@ async fn create(
         )
         .await;
     }
+    let db = state.db.clone();
     let uuid = outcome.approval.uuid.clone();
-    let ap = match approvals::get(&state.db, &uuid) {
-        Ok(ap) => ap,
-        Err(_) => outcome.approval,
+    let ap = match crate::blocking::db_value(move || approvals::get(&db, &uuid)).await {
+        Ok(Ok(ap)) => ap,
+        _ => outcome.approval,
     };
     let status = if created {
         StatusCode::CREATED
@@ -219,15 +226,19 @@ async fn withdraw(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let identity = match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Write) {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
-    let ctx = ctx_for(&identity.client_id, "api");
-    match approvals::withdraw(&state.db, &id, &ctx) {
-        Ok(ap) => Json(ap.to_json(None)).into_response(),
-        Err(e) => err_resp(e),
-    }
+    crate::blocking::db_response(move || {
+        let identity =
+            match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Write) {
+                Ok(id) => id,
+                Err(resp) => return resp,
+            };
+        let ctx = ctx_for(&identity.client_id, "api");
+        match approvals::withdraw(&state.db, &id, &ctx) {
+            Ok(ap) => Json(ap.to_json(None)).into_response(),
+            Err(e) => err_resp(e),
+        }
+    })
+    .await
 }
 
 async fn decide(
@@ -236,24 +247,28 @@ async fn decide(
     Path(id): Path<String>,
     Json(req): Json<DecideReq>,
 ) -> impl IntoResponse {
-    let identity = match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Admin) {
-        Ok(id) => id,
-        Err(resp) => return resp,
-    };
-    let decision = match Decision::parse(&req.decision) {
-        Ok(d) => d,
-        Err(e) => return err_resp(e.into()),
-    };
-    let ctx = ctx_for(&identity.client_id, "api");
-    match approvals::decide(
-        &state.db,
-        &id,
-        decision,
-        DecidedVia::Api,
-        req.note.as_deref(),
-        &ctx,
-    ) {
-        Ok(ap) => Json(ap.to_json(None)).into_response(),
-        Err(e) => err_resp(e),
-    }
+    crate::blocking::db_response(move || {
+        let identity =
+            match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Admin) {
+                Ok(id) => id,
+                Err(resp) => return resp,
+            };
+        let decision = match Decision::parse(&req.decision) {
+            Ok(d) => d,
+            Err(e) => return err_resp(e.into()),
+        };
+        let ctx = ctx_for(&identity.client_id, "api");
+        match approvals::decide(
+            &state.db,
+            &id,
+            decision,
+            DecidedVia::Api,
+            req.note.as_deref(),
+            &ctx,
+        ) {
+            Ok(ap) => Json(ap.to_json(None)).into_response(),
+            Err(e) => err_resp(e),
+        }
+    })
+    .await
 }

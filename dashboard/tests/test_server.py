@@ -1,12 +1,15 @@
 import base64
 import http.client
+import io
 import json
 import os
 import sqlite3
 import tempfile
 import threading
 import unittest
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import server
@@ -81,6 +84,92 @@ class ReadmeDefaultsTests(unittest.TestCase):
             'os.environ.get("PTASK_VOICE_FALLBACK_MODEL", "nemotron-lightning")',
             src,
         )
+
+
+class ThrottleKeyTests(unittest.TestCase):
+    """Behind cloudflared every internet client shares the connector's
+    address; only a configured proxy's Cf-Connecting-Ip is believed."""
+
+    TRUSTED = server.parse_trusted_proxies("10.42.0.0/16, 192.168.4.10")
+
+    def test_untrusted_peer_keys_on_itself_even_with_the_header(self):
+        headers = {"Cf-Connecting-Ip": "203.0.113.9"}
+        self.assertEqual(server.throttle_key("100.64.1.2", headers, self.TRUSTED), "100.64.1.2")
+
+    def test_trusted_proxy_keys_on_the_forwarded_client(self):
+        headers = {"Cf-Connecting-Ip": "203.0.113.9"}
+        self.assertEqual(server.throttle_key("10.42.3.4", headers, self.TRUSTED), "203.0.113.9")
+        self.assertEqual(server.throttle_key("192.168.4.10", headers, self.TRUSTED), "203.0.113.9")
+
+    def test_trusted_proxy_without_header_falls_back_to_peer(self):
+        self.assertEqual(server.throttle_key("10.42.3.4", {}, self.TRUSTED), "10.42.3.4")
+
+    def test_default_trusts_nobody(self):
+        self.assertEqual(server.parse_trusted_proxies(""), ())
+
+
+class DeadlineTests(unittest.TestCase):
+    def test_date_only_deadline_due_today_is_not_overdue(self):
+        today = server._operator_today()
+        self.assertEqual(server._parse_deadline(today.isoformat()), (today.isoformat(), 0.0))
+        yesterday = date.fromordinal(today.toordinal() - 1)
+        self.assertEqual(server._parse_deadline(yesterday.isoformat())[1], -1.0)
+
+    def test_timestamps_still_parse(self):
+        self.assertEqual(server._parse_deadline("2026-01-01T09:00:00Z")[0], "2026-01-01")
+        self.assertIsNone(server._parse_deadline("not-a-date"))
+
+
+class JournalCursorTests(unittest.TestCase):
+    def test_cursor_tracks_the_event_log_and_tolerates_absence(self):
+        con = sqlite3.connect(":memory:")
+        self.assertIsNone(server.journal_cursor(con))  # no table yet
+        self.assertIsNone(server.journal_cursor(None))
+        con.execute("CREATE TABLE pt_event_log (id INTEGER PRIMARY KEY)")
+        self.assertEqual(server.journal_cursor(con), 0)
+        con.execute("INSERT INTO pt_event_log (id) VALUES (7)")
+        self.assertEqual(server.journal_cursor(con), 7)
+
+
+class ReadJsonBodyTests(unittest.TestCase):
+    """Login reads the body before auth, so the length checks are the only
+    bound an unauthenticated client meets (PT-2121 finding 10)."""
+
+    @staticmethod
+    def _handler(length, payload):
+        codes = []
+        handler = SimpleNamespace(
+            headers={"Content-Length": length},
+            rfile=io.BytesIO(payload),
+            _json=lambda body, code: codes.append(code),
+        )
+        return handler, codes
+
+    def test_negative_content_length_is_rejected_without_reading(self):
+        handler, codes = self._handler("-1", b" " * (server.MAX_POST_BYTES + 1))
+        self.assertIsNone(server.Handler._read_json_body(handler))
+        self.assertEqual(codes, [400])
+        self.assertTrue(handler.rfile.read(), "read(-1) would have drained the body")
+
+    def test_oversized_content_length_is_413(self):
+        handler, codes = self._handler(str(server.MAX_POST_BYTES + 1), b"x")
+        self.assertIsNone(server.Handler._read_json_body(handler))
+        self.assertEqual(codes, [413])
+
+    def test_non_object_or_undecodable_bodies_get_a_400(self):
+        for raw in (b"[]", b"1", b"null", b'"\xff"', b"\xff\xfe"):
+            handler, codes = self._handler(str(len(raw)), raw)
+            self.assertIsNone(server.Handler._read_json_body(handler), raw)
+            self.assertEqual(codes, [400], raw)
+
+    def test_object_body_is_returned(self):
+        raw = b'{"password":1}'
+        handler, codes = self._handler(str(len(raw)), raw)
+        self.assertEqual(server.Handler._read_json_body(handler), {"password": 1})
+        self.assertEqual(codes, [])
+
+    def test_request_socket_has_a_timeout(self):
+        self.assertNotIn(getattr(server.Handler, "timeout", None), (None, 0))
 
 
 class AuthTests(unittest.TestCase):

@@ -10,13 +10,10 @@
 pub mod pipeline;
 pub mod providers;
 pub mod temporal_dedup;
-pub mod types;
 
 // The candle-backed embedding stack and its consumers. The production binary
 // enables this through ptask-cli's `native-ml` feature; default dev builds keep
 // it optional to avoid pulling the largest dependency subtree into every check.
-#[cfg(feature = "native-ml")]
-pub mod clustering;
 #[cfg(feature = "native-ml")]
 pub mod embeddings;
 #[cfg(feature = "native-ml")]

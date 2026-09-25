@@ -224,7 +224,7 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | Verb | Use |
 |---|---|
 | `pt remote add "..." [--url ...]` | quick-add on the remote canonical |
-| `pt remote list [-s STATUS -p P -n N]` | full-sync + client-side filter |
+| `pt remote list [-s STATUS -p P -n N]` | server-side `GET /list` (severity order, like local `pt list`); `-p` is folded into the filter |
 | `pt remote done <query>` | server-side `/resolve` + `task_done` |
 | `pt remote priority <query> <level>` (alias `pri`) | server-side `/resolve` + `task_priority` (+ server rescore) |
 | `pt remote edit <query> [--deadline ISO \| --clear-deadline] [--title T] [--desc D]` (alias `update`) | server-side `/resolve` + `task_edit` (deadline) and/or `task_retext` (title/desc) |

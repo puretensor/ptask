@@ -58,15 +58,6 @@ impl SortKey {
         }
     }
 
-    /// `ORDER BY` fragment for queries that select from `tasks` unaliased.
-    pub const fn sql_bare(self) -> &'static str {
-        match self {
-            SortKey::Severity => "priority DESC, priority_score DESC, created_at DESC, id DESC",
-            SortKey::Score => "priority_score DESC, priority DESC, created_at DESC, id DESC",
-            SortKey::Created => "created_at DESC, id DESC",
-        }
-    }
-
     /// Parse a CLI/query-string value. Case-insensitive; `priority` is accepted
     /// as a synonym for `severity` because that is the column's name.
     pub fn parse(input: &str) -> Result<Self> {
@@ -95,11 +86,10 @@ mod tests {
     fn severity_orders_priority_before_score() {
         // The regression this module exists to prevent: the composite score
         // must never be the leading term of the severity ordering.
-        for sql in [SortKey::Severity.sql(), SortKey::Severity.sql_bare()] {
-            let p = sql.find("priority DESC").expect("orders by priority");
-            let s = sql.find("priority_score DESC").expect("tiebreaks on score");
-            assert!(p < s, "severity sort must lead with priority: {sql}");
-        }
+        let sql = SortKey::Severity.sql();
+        let p = sql.find("priority DESC").expect("orders by priority");
+        let s = sql.find("priority_score DESC").expect("tiebreaks on score");
+        assert!(p < s, "severity sort must lead with priority: {sql}");
     }
 
     #[test]
@@ -107,11 +97,6 @@ mod tests {
         // A non-total ORDER BY makes pagination and test assertions flaky.
         for k in SortKey::ALL {
             assert!(k.sql().ends_with("t.id DESC"), "{} not total", k.as_str());
-            assert!(
-                k.sql_bare().ends_with("id DESC"),
-                "{} not total",
-                k.as_str()
-            );
         }
     }
 

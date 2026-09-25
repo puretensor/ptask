@@ -170,6 +170,7 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_DASH_SESSION_STORE` | `~/.local/state/ptask-dashboard/sessions.json` | restart-persistent SHA-256 session-token store |
 | `PTASK_DASH_SECURE_COOKIE` | `1` | add `Secure` to the HttpOnly, SameSite=Strict browser cookie |
 | `PTASK_DASH_WWW` | `./www` | static dir |
+| `PTASK_DASH_TRUSTED_PROXIES` | _(unset)_ | comma-separated IPs/CIDRs (the cloudflared connector) whose `Cf-Connecting-Ip` keys the login throttle; unset keys on the TCP peer |
 | `PTASK_STT_URL` | `http://127.0.0.1:9000/transcribe` | voice STT endpoint (local Whisper); accepts `-F audio=@` |
 | `PTASK_VOICE_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model for voice→task extraction |
 | `PTASK_VOICE_REGION` | `$AWS_DEFAULT_REGION` or `us-east-1` | Bedrock region (keyless, IAM via `~/.aws`) |
@@ -244,6 +245,13 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.20.1** — The login throttle keyed on the TCP peer, which behind the cloudflared
+  tunnel is the connector for every internet client: five bad guesses from anyone locked
+  the operator out. `Cf-Connecting-Ip` is now believed from `PTASK_DASH_TRUSTED_PROXIES`
+  only (the v0.17.1 note below described this as already true; it was not). A JSON body
+  that is not an object (or not UTF-8) gets a 400 instead of a dropped connection. A
+  date-only deadline is due all day (no "0d over" on the due date). `/api/stream` emits
+  `change` when the journal grows, not on a blind 15 s tick.
 - **v0.17.1 / pTask v3.22.1** — The failed-login throttle is bounded. Its key is the
   caller's own address (`Cf-Connecting-Ip` behind Cloudflare), so a host with a routed
   IPv6 /64 could mint unlimited keys, and the table was swept with an O(table) rebuild

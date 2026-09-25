@@ -133,7 +133,7 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             // of `overdue` silently. Surface it instead: a deadline we can't
             // read is a deadline we can't prove is in the future.
             format!(
-                "(t.deadline IS NOT NULL AND t.status != 'done' AND \
+                "(t.deadline IS NOT NULL AND t.status NOT IN ('done','dismissed') AND \
                  (julianday(t.deadline) IS NULL OR \
                   (length(t.deadline) = 10 AND substr(t.deadline,1,10) < ?{today}) OR \
                   (length(t.deadline) > 10 \
@@ -184,7 +184,7 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
     })
 }
 
-fn escape_like(input: &str) -> String {
+pub(crate) fn escape_like(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         if matches!(ch, '\\' | '%' | '_') {
@@ -652,7 +652,8 @@ mod tests {
                ('later today time', '2026-05-13T18:00:00+01:00', 'pending'),
                ('past mixed offset', '2026-05-13T10:30:00Z', 'pending'),
                ('future mixed offset', '2026-05-13T11:30:00Z', 'pending'),
-               ('done yesterday', '2026-05-12', 'done');",
+               ('done yesterday', '2026-05-12', 'done'),
+               ('dismissed yesterday', '2026-05-12', 'dismissed');",
         )
         .unwrap();
         let sql = to_sql(&ast("overdue"), &anchor()).unwrap();

@@ -332,33 +332,36 @@ pub fn render_preview(payload: Option<&[u8]>, kind: Option<&str>, stored: bool) 
 
 pub fn parse_expires_in(spec: &str) -> Result<String> {
     let spec = spec.trim();
-    if spec.len() < 2 {
-        return Err(Error::Approval(ApprovalError::Invalid(format!(
-            "invalid --expires-in {spec:?}; use <n>{{s|m|h|d}}"
-        ))));
-    }
-    let (n_str, unit) = spec.split_at(spec.len() - 1);
-    let n: i64 = n_str.parse().map_err(|_| {
+    let invalid = || {
         Error::Approval(ApprovalError::Invalid(format!(
             "invalid --expires-in {spec:?}; use <n>{{s|m|h|d}}"
         )))
-    })?;
+    };
+    // Split on the last char, not the last byte: "5日" must be an error,
+    // not a panic on a non-char-boundary split.
+    let unit = spec.chars().next_back().ok_or_else(invalid)?;
+    let n: i64 = spec[..spec.len() - unit.len_utf8()]
+        .parse()
+        .map_err(|_| invalid())?;
     if n < 0 {
         return Err(Error::Approval(ApprovalError::Invalid(
             "--expires-in must be non-negative".into(),
         )));
     }
+    // The infallible Span setters panic past jiff's unit bounds
+    // ("99999999d" from an HTTP or MCP caller).
     let span = match unit {
-        "s" => jiff::Span::new().seconds(n),
-        "m" => jiff::Span::new().minutes(n),
-        "h" => jiff::Span::new().hours(n),
-        "d" => jiff::Span::new().days(n),
-        _ => {
-            return Err(Error::Approval(ApprovalError::Invalid(format!(
-                "invalid --expires-in {spec:?}; use <n>{{s|m|h|d}}"
-            ))));
-        }
-    };
+        's' => jiff::Span::new().try_seconds(n),
+        'm' => jiff::Span::new().try_minutes(n),
+        'h' => jiff::Span::new().try_hours(n),
+        'd' => jiff::Span::new().try_days(n),
+        _ => return Err(invalid()),
+    }
+    .map_err(|e| {
+        Error::Approval(ApprovalError::Invalid(format!(
+            "--expires-in out of range: {e}"
+        )))
+    })?;
     let now = dates::now_in_operator_tz()?;
     let until = now.checked_add(span).map_err(|e| {
         Error::Approval(ApprovalError::Invalid(format!("expires-in overflow: {e}")))
@@ -649,6 +652,10 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    // A pending row past its expiry must not satisfy the digest dedupe:
+    // the caller would get back a request the operator can no longer
+    // decide, and the partial unique index would refuse a fresh one.
+    expire(db, &EventCtx::system("approvals"))?;
     if let Some(existing) = get_pending_by_digest(db, &digest)? {
         return Ok(RequestOutcome {
             approval: existing,
@@ -738,16 +745,28 @@ pub fn decide(
             "decider (actor) must not be empty".into(),
         )));
     }
-    let now = dates::format_iso(&dates::now_in_operator_tz()?);
+    let now_z = dates::now_in_operator_tz()?;
+    let now = dates::format_iso(&now_z);
     let note = note.map(str::trim).filter(|s| !s.is_empty());
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    // IMMEDIATE: a deferred transaction that reads first gets SQLITE_BUSY
+    // on the write upgrade without waiting out busy_timeout.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current = get_in_conn(&tx, id)?;
     if current.status != "pending" {
         return Err(Error::Approval(ApprovalError::Conflict(format!(
             "{} is {}, not pending",
             current.ap_id(),
             current.status
+        ))));
+    }
+    if is_past(current.expires_at.as_deref(), &now_z) {
+        mark_expired(&tx, &current, &now, &EventCtx::system("approvals"))?;
+        tx.commit()?;
+        return Err(Error::Approval(ApprovalError::Conflict(format!(
+            "{} expired at {}, not pending",
+            current.ap_id(),
+            current.expires_at.as_deref().unwrap_or_default()
         ))));
     }
     if current.requester == decider {
@@ -789,7 +808,7 @@ pub fn withdraw(db: &Db, id: &str, ctx: &EventCtx) -> Result<Approval> {
     let actor = ctx.actor.trim();
     let now = dates::format_iso(&dates::now_in_operator_tz()?);
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current = get_in_conn(&tx, id)?;
     if current.status != "pending" {
         return Err(Error::Approval(ApprovalError::Conflict(format!(
@@ -893,35 +912,50 @@ pub fn expire(db: &Db, ctx: &EventCtx) -> Result<usize> {
     let pending = list(db, Some("pending"))?;
     let mut n = 0usize;
     for ap in pending {
-        let Some(exp) = ap.expires_at.as_deref() else {
-            continue;
-        };
-        let Some(z) = dates::parse_iso_to_utc(exp) else {
-            continue;
-        };
-        if z.timestamp() > now.timestamp() {
+        if !is_past(ap.expires_at.as_deref(), &now) {
             continue;
         }
         let mut conn = db.get()?;
-        let tx = conn.transaction()?;
-        let changed = tx.execute(
-            "UPDATE approvals SET status = 'expired', decided_at = ?1
-             WHERE id = ?2 AND status = 'pending'",
-            params![now_iso, ap.uuid],
-        )?;
-        if changed == 1 {
-            record_event(
-                &tx,
-                ctx,
-                &ap.uuid,
-                "approval.expired",
-                serde_json::json!({"approval_id": ap.ap_id()}),
-            )?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if mark_expired(&tx, &ap, &now_iso, ctx)? {
             n += 1;
         }
         tx.commit()?;
     }
     Ok(n)
+}
+
+/// True when `expires_at` parses and is at or before `now`. Unparseable or
+/// absent means "never expires".
+fn is_past(expires_at: Option<&str>, now: &jiff::Zoned) -> bool {
+    expires_at
+        .and_then(dates::parse_iso_to_utc)
+        .is_some_and(|z| z.timestamp() <= now.timestamp())
+}
+
+/// Flip one pending row to expired inside `tx`. False if it was no longer
+/// pending.
+fn mark_expired(
+    tx: &rusqlite::Transaction<'_>,
+    ap: &Approval,
+    now_iso: &str,
+    ctx: &EventCtx,
+) -> Result<bool> {
+    let changed = tx.execute(
+        "UPDATE approvals SET status = 'expired', decided_at = ?1
+         WHERE id = ?2 AND status = 'pending'",
+        params![now_iso, ap.uuid],
+    )?;
+    if changed == 1 {
+        record_event(
+            tx,
+            ctx,
+            &ap.uuid,
+            "approval.expired",
+            serde_json::json!({"approval_id": ap.ap_id()}),
+        )?;
+    }
+    Ok(changed == 1)
 }
 
 pub fn mark_notified(db: &Db, uuid: &str) -> Result<()> {
@@ -1056,6 +1090,56 @@ mod tests {
         assert!(a.created && !b.created);
         assert_eq!(a.approval.ap_id(), b.approval.ap_id());
         assert_eq!(a.approval.digest, sha256_hex(b"hello"));
+    }
+
+    fn expiring(expires_in: &str) -> RequestInput {
+        RequestInput {
+            kind: "email".into(),
+            title: "Send before the deadline".into(),
+            request_note: None,
+            payload: file_src(b"time-bound"),
+            task_pt_id: None,
+            expires_in: Some(expires_in.into()),
+        }
+    }
+
+    #[test]
+    fn deciding_past_expiry_expires_instead_of_approving() {
+        let (_d, db) = fresh();
+        let ap = request(&db, expiring("0s"), &ctx("hal")).unwrap().approval;
+        let err = decide(
+            &db,
+            &ap.ap_id(),
+            Decision::Approve,
+            DecidedVia::Dashboard,
+            None,
+            &ctx("operator"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expired"), "{err}");
+        assert_eq!(get(&db, &ap.ap_id()).unwrap().status, "expired");
+    }
+
+    #[test]
+    fn re_request_after_expiry_mints_a_fresh_pending_row() {
+        let (_d, db) = fresh();
+        let first = request(&db, expiring("0s"), &ctx("hal")).unwrap();
+        let second = request(&db, expiring("1h"), &ctx("hal")).unwrap();
+        assert!(
+            second.created,
+            "a stale pending row must not satisfy dedupe"
+        );
+        assert_ne!(first.approval.ap_id(), second.approval.ap_id());
+        assert_eq!(get(&db, &first.approval.ap_id()).unwrap().status, "expired");
+        assert_eq!(second.approval.status, "pending");
+    }
+
+    #[test]
+    fn parse_expires_in_rejects_instead_of_panicking() {
+        for bad in ["", "d", "5日", "é", "99999999d", "-1h", "5w"] {
+            assert!(parse_expires_in(bad).is_err(), "{bad:?}");
+        }
+        assert!(parse_expires_in(" 90m ").is_ok());
     }
 
     #[test]

@@ -112,7 +112,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      # No rust-cache: cargo-deny compiles nothing, and the cache's save step
+      # prunes target/ in this runner's shared workspace.
       - name: install cargo-deny
         run: |
           cargo deny --version 2>/dev/null | grep -q '0\.19\.9' \

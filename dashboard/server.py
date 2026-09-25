@@ -49,11 +49,15 @@ Config (env)
                    ~/.local/state/ptask-dashboard/sessions.json)
   PTASK_DASH_SECURE_COOKIE  add Secure to the browser cookie (default true)
   PTASK_DASH_WWW   static dir (default ./www next to this file)
+  PTASK_DASH_TRUSTED_PROXIES  comma-separated IPs/CIDRs whose
+                   Cf-Connecting-Ip header names the real client for the
+                   login throttle (the cloudflared connector). Default: none.
 """
 from __future__ import annotations
 
 import base64
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -63,7 +67,7 @@ import tempfile
 import threading
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -136,7 +140,41 @@ LOGIN_ATTEMPT_DELAY = 0.250
 SESSIONS = SessionStore(SESSION_STORE_PATH)
 LOGIN_THROTTLE = LoginThrottle()
 
-VERSION = "0.20.0"
+
+def parse_trusted_proxies(raw: str) -> tuple:
+    """Parse PTASK_DASH_TRUSTED_PROXIES into ip_network objects."""
+    nets = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part:
+            nets.append(ipaddress.ip_network(part, strict=False))
+    return tuple(nets)
+
+
+TRUSTED_PROXIES = parse_trusted_proxies(os.environ.get("PTASK_DASH_TRUSTED_PROXIES", ""))
+
+
+def throttle_key(peer: str, headers, trusted=None) -> str:
+    """The client the login throttle counts against.
+
+    Behind the cloudflared tunnel every internet client arrives from the
+    connector's address, so keying on the TCP peer let five bad guesses from
+    anyone lock the operator out. Cf-Connecting-Ip is believed only from a
+    configured proxy; from anyone else it is attacker-chosen and would mint
+    a fresh key per guess.
+    """
+    trusted = TRUSTED_PROXIES if trusted is None else trusted
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if any(addr in net for net in trusted):
+        forwarded = (headers.get("Cf-Connecting-Ip") or "").strip()
+        if forwarded:
+            return forwarded
+    return peer
+
+VERSION = "0.20.1"
 DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
 DASH_DOMAINS = parse_domains(os.environ.get("PTASK_DASH_DOMAINS"))
 DASH_DEFAULT_DOMAIN = resolve_default_domain(
@@ -261,6 +299,20 @@ def connect():
     return con
 
 
+STREAM_POLL_SECS = 3.0
+STREAM_KEEPALIVE_SECS = 15.0
+
+
+def journal_cursor(con) -> int | None:
+    """Highest pt_event_log id, or None when the journal cannot be read."""
+    if con is None:
+        return None
+    try:
+        return con.execute("SELECT COALESCE(MAX(id), 0) FROM pt_event_log").fetchone()[0]
+    except sqlite3.Error:
+        return None
+
+
 def _age_days(created_at: str) -> float | None:
     if not created_at:
         return None
@@ -280,11 +332,29 @@ def _age_days(created_at: str) -> float | None:
     return None
 
 
+def _operator_today() -> date:
+    """Today in the operator's zone (core dates::OPERATOR_TZ)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Europe/London")).date()
+    except Exception:  # noqa: BLE001 - no tzdata: UTC is the old behaviour
+        return datetime.now(timezone.utc).date()
+
+
 def _parse_deadline(s: str):
     """Return (date_iso, days_until) for mixed date / ISO-tz formats, else None."""
     if not s:
         return None
-    s = s.strip().replace("Z", "+00:00")
+    s = s.strip()
+    # A date-only deadline is due all day, as core `overdue` reads it; as
+    # midnight UTC it showed "0d over" from 00:00 on the due day itself.
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        try:
+            d = date.fromisoformat(s)
+        except ValueError:
+            return None
+        return d.isoformat(), float((d - _operator_today()).days)
+    s = s.replace("Z", "+00:00")
     dt = None
     for parse in (
         lambda x: datetime.fromisoformat(x),
@@ -990,7 +1060,7 @@ class Handler(BaseHTTPRequestHandler):
         hdr = self.headers.get("Authorization", "")
         if hdr.startswith("Basic "):
             # Same lockout as the login form: this path was guessable at request speed.
-            client = self.client_address[0]
+            client = throttle_key(self.client_address[0], self.headers)
             if LOGIN_THROTTLE.locked_for(client):
                 return False
             try:
@@ -1045,10 +1115,16 @@ class Handler(BaseHTTPRequestHandler):
             return None
         raw = self.rfile.read(n) if n else b""
         try:
-            return json.loads(raw or b"{}")
-        except json.JSONDecodeError:
+            body = json.loads(raw or b"{}")
+        except ValueError:  # JSONDecodeError and UnicodeDecodeError alike
             self._json({"error": "bad json"}, 400)
             return None
+        # Every route reads fields off an object; `[]`, `1` or `null` used to
+        # raise (or return None, read as "already answered") with no response.
+        if not isinstance(body, dict):
+            self._json({"error": "json body must be an object"}, 400)
+            return None
+        return body
 
     def _handle_voice(self, create: bool = False):
         """Raw audio body → Whisper STT → LLM draft → fields.
@@ -1109,17 +1185,42 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+        # Emit `change` only when the journal grows (as the Rust route does).
+        # A blind 15 s tick made every open tab refetch stats, every pending
+        # task and the approvals subprocess four times a minute on an idle
+        # board, and still showed real changes up to 15 s late.
+        con = None
+        try:
+            con = connect()
+        except sqlite3.Error:
+            pass
+        last = journal_cursor(con)
+        idle = 0.0
         try:
             self.wfile.write(b"retry: 15000\n\n")
             self.wfile.flush()
             while True:
-                self.wfile.write(
-                    f"event: change\ndata: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n\n".encode()
-                )
+                time.sleep(STREAM_POLL_SECS)
+                idle += STREAM_POLL_SECS
+                cur = journal_cursor(con)
+                # Unreadable journal: fall back to the old periodic nudge.
+                changed = cur != last if cur is not None else idle >= STREAM_KEEPALIVE_SECS
+                if changed:
+                    last = cur if cur is not None else last
+                    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                    self.wfile.write(f"event: change\ndata: {stamp}\n\n".encode())
+                    idle = 0.0
+                elif idle >= STREAM_KEEPALIVE_SECS:
+                    self.wfile.write(b": keepalive\n\n")
+                    idle = 0.0
+                else:
+                    continue
                 self.wfile.flush()
-                time.sleep(15)
         except (BrokenPipeError, ConnectionResetError):
             return
+        finally:
+            if con is not None:
+                con.close()
 
     # -- routes --
     def do_GET(self):
@@ -1202,7 +1303,7 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_json_body()
             if body is None:
                 return
-            client = self.client_address[0]
+            client = throttle_key(self.client_address[0], self.headers)
             time.sleep(LOGIN_ATTEMPT_DELAY)
             remaining = LOGIN_THROTTLE.locked_for(client)
             if remaining:

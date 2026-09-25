@@ -34,6 +34,8 @@ pub struct AppState {
     pub notify: Arc<DispatchCfg>,
     pub tg_forwarders: Arc<Vec<String>>,
     pub tg_approval_buttons: bool,
+    /// Failed-Basic-auth lockout for the dashboard routes.
+    pub dash_throttle: Arc<routes::dashboard::BasicThrottle>,
 }
 
 impl AppState {
@@ -46,6 +48,7 @@ impl AppState {
             notify: Arc::new(DispatchCfg::default()),
             tg_forwarders: Arc::new(vec!["nexus".into()]),
             tg_approval_buttons: false,
+            dash_throttle: Arc::default(),
         }
     }
 
@@ -149,7 +152,12 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(routes::base::router())
         .merge(routes::capture::router())
-        .merge(routes::dashboard::router())
+        .merge(
+            routes::dashboard::router().route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                routes::dashboard::basic_throttle,
+            )),
+        )
         .merge(routes::email::router())
         .merge(routes::sync::router())
         .merge(routes::tg::router())
@@ -180,9 +188,13 @@ pub async fn serve(db: Db, addr: SocketAddr, config: Config) -> Result<()> {
     let app = router(state);
     info!(target: "ptask::server", %addr, "starting pt serve");
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Peer addresses key the dashboard's failed-auth throttle.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     info!(target: "ptask::server", "pt serve stopped");
     Ok(())
 }
@@ -468,6 +480,251 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// POST a JSON body and return the status plus the parsed response.
+    async fn post_json(
+        app: &Router,
+        uri: &str,
+        body: &serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn keyed_incident_recaptured_after_resolve_opens_a_new_episode() {
+        // PT-2121 finding 8: the V014 identity index made a recovered incident
+        // that recurs with the same key + text a dead duplicate, so the second
+        // outage never became work.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let incident = serde_json::json!({
+            "text": "ceph HEALTH_ERR on fox-n0",
+            "source": "puresentinel:incident:ceph",
+            "severity": 4,
+            "client_key": "incident-ceph-fox-n0",
+        });
+
+        let (status, first) = post_json(&app, "/capture", &incident).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let first_task = first["task_uuid"].as_str().unwrap().to_string();
+
+        // Still open: a re-send is delivery idempotency, not a new outage.
+        let (status, replay) = post_json(&app, "/capture", &incident).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["duplicate"], true);
+
+        let (status, resolved) = post_json(
+            &app,
+            "/capture/resolve",
+            &serde_json::json!({"client_key": "incident-ceph-fox-n0"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resolved["closed"], 1);
+
+        let (status, second) = post_json(&app, "/capture", &incident).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_ne!(second["duplicate"], true);
+        let second_task = second["task_uuid"].as_str().unwrap();
+        assert_ne!(second_task, first_task, "recurrence must be new work");
+    }
+
+    #[tokio::test]
+    async fn blank_client_keys_do_not_merge_unrelated_incidents() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let mut tasks = Vec::new();
+        for text in ["ceph HEALTH_ERR on fox-n0", "tailscale down on mon1"] {
+            let body = serde_json::json!({"text": text, "severity": 4, "client_key": ""});
+            let (status, resp) = post_json(&app, "/capture", &body).await;
+            assert_eq!(status, StatusCode::CREATED, "{resp}");
+            assert_ne!(resp["duplicate"], true);
+            tasks.push(resp["task_uuid"].as_str().unwrap().to_string());
+        }
+        assert_ne!(tasks[0], tasks[1]);
+    }
+
+    #[tokio::test]
+    async fn resolve_closes_a_reopened_incident_again() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let body = serde_json::json!({
+            "text": "disk 95% on fox-n1", "severity": 3, "client_key": "disk-fox-n1",
+        });
+        let (_, created) = post_json(&app, "/capture", &body).await;
+        let uuid = created["task_uuid"].as_str().unwrap().to_string();
+        let resolve = serde_json::json!({"client_key": "disk-fox-n1"});
+        assert_eq!(
+            post_json(&app, "/capture/resolve", &resolve).await.1["closed"],
+            1
+        );
+
+        ptask_core::tasks::reopen(&db, &uuid, &EventCtx::test()).unwrap();
+        assert_eq!(
+            post_json(&app, "/capture/resolve", &resolve).await.1["closed"],
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn resend_of_a_key_merged_onto_an_open_incident_stays_a_duplicate() {
+        // The fast lane's semantic match folds a capture under key K onto an
+        // open incident Z and keeps Z's own capture_key; K is recorded only
+        // on Z's occurrence event. Simulate that state directly (the test
+        // build has no embedder), then re-send (T, K).
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let z = serde_json::json!({
+            "text": "ceph mon quorum lost", "severity": 4, "client_key": "ceph-quorum",
+        });
+        let (_, zr) = post_json(&app, "/capture", &z).await;
+        let z_uuid = zr["task_uuid"].as_str().unwrap().to_string();
+        ptask_core::raw_items::insert_idempotent(&db, "mons out of quorum", "http", "mon-quorum")
+            .unwrap();
+        ptask_core::event_log::record(
+            &db,
+            "capture-occurrence:merged",
+            Some(&z_uuid),
+            "task.capture_occurrence",
+            &serde_json::json!({"client_key": "mon-quorum", "matched_by": "semantic"}),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let raw_before = ptask_core::raw_items::unprocessed_count(&db).unwrap();
+
+        let resend = serde_json::json!({
+            "text": "mons out of quorum", "severity": 4, "client_key": "mon-quorum",
+        });
+        let (status, resp) = post_json(&app, "/capture", &resend).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["duplicate"], true);
+        assert_eq!(
+            ptask_core::raw_items::unprocessed_count(&db).unwrap(),
+            raw_before,
+            "no new #episode raw row while the absorbing incident is open"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_unknown_uuid_is_404_not_500() {
+        let app = router(AppState::new(
+            open_test_db(),
+            Default::default(),
+            Default::default(),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/resolve?query=0b7f0d2e-3c1a-4c9e-9d7e-2f1a5b6c7d8e")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn sync_priority_batch_is_rescored_once_after_the_loop() {
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("rescore me"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let score = || -> f64 {
+            db.with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT priority_score FROM tasks WHERE id = ?1",
+                    [&t.id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+        };
+        let before = score();
+        let body = serde_json::json!({
+            "sync_token": "*",
+            "commands": [{
+                "type": "task_priority", "uuid": "prio-1",
+                "args": {"task_uuid": t.id, "priority": 5}
+            }]
+        });
+        let resp = post_sync(&app, &body).await;
+        assert_eq!(resp["sync_status"]["prio-1"], "ok");
+        assert!(
+            score() > before,
+            "priority change must reach priority_score"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_with_a_cursor_past_the_journal_applies_and_returns_no_delta() {
+        // The remote CLI sends this for every mutation but add, instead of
+        // the full-sync "*" that serialised the whole table per command.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        for i in 0..3 {
+            ptask_core::tasks::create(
+                &db,
+                ptask_core::NewTask::minimal(format!("t{i}")),
+                &EventCtx::test(),
+            )
+            .unwrap();
+        }
+        let t = ptask_core::tasks::resolve_for_lookup(&db, "PT-1", true).unwrap();
+        let body = serde_json::json!({
+            "sync_token": "9223372036854775807",
+            "commands": [{"type": "task_done", "uuid": "done-1", "args": {"task_uuid": t.id}}]
+        });
+        let resp = post_sync(&app, &body).await;
+        assert_eq!(resp["sync_status"]["done-1"], "ok");
+        assert_eq!(resp["resources"]["tasks"].as_array().unwrap().len(), 0);
+        let done = ptask_core::tasks::resolve_for_lookup(&db, "PT-1", true).unwrap();
+        assert_eq!(done.status, "done");
     }
 
     #[tokio::test]

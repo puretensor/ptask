@@ -3,8 +3,9 @@
 //! - `rusqlite` with the `bundled` feature: SQLite compiled into the binary.
 //! - `r2d2` pool with per-connection pragmas applied on acquire.
 //! - WAL journal mode (better concurrent reads), busy_timeout 30s, FK on.
-//! - Path resolution lives in `crate::config` — storage itself never
-//!   touches the process environment.
+//! - Path resolution lives in `crate::config`. The one environment read here
+//!   is the `PTASK_WAL_AUTOCHECKPOINT` pragma override (litestream), applied
+//!   per pooled connection.
 
 use crate::error::{Error, Result};
 use r2d2::Pool;

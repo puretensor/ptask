@@ -12,6 +12,13 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+/// `/sync` cursor past any event id: the delta comes back empty. Mutations
+/// that only need their `sync_status` send it instead of the full-sync `*`,
+/// which made the server serialise every task (done ones included) in
+/// answer to a single `pt remote done`. `add` still full-syncs to read back
+/// the row it created.
+const NO_DELTA_TOKEN: &str = "9223372036854775807";
+
 /// Endpoint URL — `${PTASK_SYNC_URL}` if set, else loopback.
 /// Tests inject via `RemoteClient::with_url`.
 pub fn default_url() -> String {
@@ -203,7 +210,7 @@ impl RemoteClient {
         let task = self.resolve(query, false)?;
         let cmd_uuid = self.command_uuid("");
         let req = json!({
-            "sync_token": "*",
+            "sync_token": NO_DELTA_TOKEN,
             "resource_types": ["tasks"],
             "commands": [{
                 "type": "task_done",
@@ -222,7 +229,7 @@ impl RemoteClient {
         let mut task = self.resolve(query, false)?;
         let cmd_uuid = self.command_uuid("");
         let req = json!({
-            "sync_token": "*",
+            "sync_token": NO_DELTA_TOKEN,
             "resource_types": ["tasks"],
             "commands": [{
                 "type": "task_priority",
@@ -273,7 +280,7 @@ impl RemoteClient {
         if commands.is_empty() {
             return Err(anyhow!("remote edit: nothing to change"));
         }
-        let req = json!({ "sync_token": "*", "resource_types": ["tasks"], "commands": commands });
+        let req = json!({ "sync_token": NO_DELTA_TOKEN, "resource_types": ["tasks"], "commands": commands });
         let resp = self.sync(&req)?;
         if title.is_some() || description.is_some() {
             ensure_ok(&resp.sync_status, &retext_uuid)?;
@@ -300,7 +307,7 @@ impl RemoteClient {
         let mut task = self.resolve(query, true)?;
         let cmd_uuid = self.command_uuid("");
         let req = json!({
-            "sync_token": "*",
+            "sync_token": NO_DELTA_TOKEN,
             "resource_types": ["tasks"],
             "commands": [{
                 "type": "task_reopen",
@@ -327,7 +334,7 @@ impl RemoteClient {
         let mut task = self.resolve(query, false)?;
         let cmd_uuid = self.command_uuid("");
         let req = json!({
-            "sync_token": "*",
+            "sync_token": NO_DELTA_TOKEN,
             "resource_types": ["tasks"],
             "commands": [{
                 "type": "task_dismiss",
@@ -405,7 +412,7 @@ impl RemoteClient {
         args.insert("task_uuid".into(), json!(task.id));
         args.extend(extra);
         let req = json!({
-            "sync_token": "*",
+            "sync_token": NO_DELTA_TOKEN,
             "resource_types": ["tasks"],
             "commands": [{
                 "type": command,
@@ -432,29 +439,6 @@ impl RemoteClient {
     pub fn detail(&self, task_uuid: &str) -> Result<ptask_core::tasks::TaskDetail> {
         let v = self.get_json(&format!("/detail/{task_uuid}"))?;
         serde_json::from_value(v).context("parse /detail")
-    }
-
-    /// `pt remote list` — full sync, then client-side filters (status,
-    /// priority, limit). Matches the local `pt list` UX so the operator
-    /// has parity from any node.
-    pub fn list(
-        &self,
-        status: Option<&str>,
-        priority: Option<i64>,
-        limit: usize,
-    ) -> Result<Vec<Task>> {
-        let req = json!({ "sync_token": "*", "resource_types": ["tasks"] });
-        let resp = self.sync(&req)?;
-        let mut out: Vec<Task> = resp
-            .resources
-            .tasks
-            .into_iter()
-            .filter(|t| list_status_keeps(&t.status, status))
-            .filter(|t| priority.is_none_or(|p| t.priority == p))
-            .collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        out.truncate(limit);
-        Ok(out)
     }
 
     /// Resolve a PT-N / bare-integer / title-substring query to a single task
@@ -499,51 +483,11 @@ fn ensure_ok(status: &BTreeMap<String, Value>, cmd_uuid: &str) -> Result<()> {
     }
 }
 
-/// Client-side status filter for `pt remote list`.
-///
-/// `/sync` serialises `status_v2` onto `Task.status` (`todo` for a newly
-/// created row). The CLI default is still the legacy token `"pending"`.
-/// Exact string compare against `"pending"` therefore drops every open task.
-fn list_status_keeps(task_status: &str, wanted: Option<&str>) -> bool {
-    match wanted {
-        None | Some("all") => true,
-        Some("pending") => match ptask_core::status::Status::parse(task_status) {
-            Ok(s) => s.legacy() == "pending",
-            // Pre-V010 `/sync` already put the legacy token on the wire.
-            Err(_) => task_status == "pending",
-        },
-        Some(s) => task_status == s,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
-
-    #[test]
-    fn remote_list_pending_keeps_status_v2_open_rows() {
-        // Production `/sync` returns status_v2 (`todo`), not the legacy
-        // `pending` column. Default `pt remote list` is `-s pending`.
-        assert!(
-            list_status_keeps("todo", Some("pending")),
-            "todo is legacy-pending and must survive pt remote list"
-        );
-        assert!(list_status_keeps("triage", Some("pending")));
-        assert!(list_status_keeps("backlog", Some("pending")));
-        assert!(list_status_keeps("in_progress", Some("pending")));
-        assert!(
-            list_status_keeps("pending", Some("pending")),
-            "pre-V010 wire shape still accepted"
-        );
-        assert!(!list_status_keeps("done", Some("pending")));
-        assert!(!list_status_keeps("dismissed", Some("pending")));
-        assert!(!list_status_keeps("snoozed", Some("pending")));
-        assert!(list_status_keeps("done", Some("all")));
-        assert!(list_status_keeps("todo", Some("todo")));
-        assert!(!list_status_keeps("todo", Some("done")));
-    }
 
     fn existing_tasks_json() -> Vec<Value> {
         vec![
@@ -763,17 +707,38 @@ mod tests {
     }
 
     #[test]
-    fn remote_list_full_sync_filters_locally() {
+    fn supplied_idempotency_key_is_reused_as_the_command_uuid() {
+        // PT-2121 findings 1-2: a retried `pt --idempotency-key K remote done`
+        // must send the same /sync command uuid so the server replays it.
         let server_rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .unwrap();
-        let (url, _calls) = server_rt.block_on(spawn_mock_sync());
-        let c = RemoteClient::with_url(&url).unwrap();
-        let only_p4 = c.list(Some("pending"), Some(4), 10).unwrap();
-        assert_eq!(only_p4.len(), 1);
-        assert_eq!(only_p4[0].pt_id.as_deref(), Some("PT-101"));
+        let (url, calls) = server_rt.block_on(spawn_mock_sync());
+        let c = RemoteClient::with_url(&url)
+            .unwrap()
+            .with_idempotency_key(Some("retry-probe".into()));
+        c.done("PT-100").unwrap();
+        c.done("PT-100").unwrap();
+        let uuids: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call["commands"][0]["uuid"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(uuids, ["retry-probe", "retry-probe"]);
+        assert_eq!(c.command_uuid("deadline"), "retry-probe:deadline");
+    }
+
+    #[test]
+    fn absent_or_blank_idempotency_key_mints_fresh_command_uuids() {
+        for key in [None, Some("  ".to_string())] {
+            let c = RemoteClient::with_url("http://127.0.0.1:9")
+                .unwrap()
+                .with_idempotency_key(key);
+            assert_ne!(c.command_uuid(""), c.command_uuid(""));
+        }
     }
 
     #[test]

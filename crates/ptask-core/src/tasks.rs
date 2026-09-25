@@ -7,8 +7,8 @@
 use crate::error::Result;
 use crate::event_log::EventCtx;
 use crate::ordering::SortKey;
+use crate::pt_id;
 use crate::storage::Db;
-use crate::{priority, pt_id};
 use jiff::Zoned;
 use rusqlite::OptionalExtension;
 use rusqlite::params;
@@ -142,11 +142,24 @@ pub fn create_with_extensions(
     ext: Extensions,
     ctx: &EventCtx,
 ) -> Result<Task> {
+    // Every edit path validates a deadline; create stored any text, so
+    // `--deadline "next friday"` read as overdue forever (julianday NULL)
+    // and made a recurring task uncompletable.
+    let mut new = new;
+    new.deadline = new
+        .deadline
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_owned);
+    if let Some(d) = new.deadline.as_deref() {
+        parse_iso_zoned(d)?;
+    }
     let id = Uuid::new_v4().to_string();
     let now = iso_now();
 
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
     // Mint PT-N first so the row insert is a single statement.
     let n: i64 = tx.query_row(
@@ -302,15 +315,24 @@ pub fn list_with_filter_sorted(
     if let Some(expr) = filter_expr {
         let now = crate::dates::now_in_operator_tz()?;
         let compiled = crate::filter::to_sql(expr, &now)?;
-        // Shift the filter's positional placeholders to start after our offset.
-        let shift = bound.len();
-        let shifted = renumber_placeholders(&compiled.where_clause, shift);
-        conds.push(shifted);
+        // The filter binds first, so its ?1..?k placeholders line up with
+        // `bound` as-is; status/priority below number theirs after it.
+        conds.push(compiled.where_clause);
         bound.extend(compiled.params);
     }
     if let Some(s) = status {
-        bound.push(rusqlite::types::Value::Text(s.to_string()));
-        conds.push(format!("t.status = ?{}", bound.len()));
+        // Legacy words filter the legacy column (unchanged); the v2-only
+        // states every surface displays (`todo`, `in_progress`, ...) used to
+        // hit `t.status` too and silently match nothing.
+        let (col, val) = match s {
+            "pending" | "delayed" | "done" | "dismissed" | "blocked" => ("t.status", s.to_string()),
+            other => (
+                "t.status_v2",
+                crate::status::Status::parse(other)?.as_str().to_string(),
+            ),
+        };
+        bound.push(rusqlite::types::Value::Text(val));
+        conds.push(format!("{col} = ?{}", bound.len()));
     }
     if let Some(p) = priority_filter {
         bound.push(rusqlite::types::Value::Integer(p));
@@ -332,34 +354,6 @@ pub fn list_with_filter_sorted(
     let rows = stmt.query_map(params_refs.as_slice(), row_to_task)?;
     let out: Vec<Task> = rows.collect::<std::result::Result<_, _>>()?;
     Ok(out)
-}
-
-/// Shift positional `?N` placeholders in `sql` by `shift` so they don't
-/// collide with externally-bound parameters that precede them.
-fn renumber_placeholders(sql: &str, shift: usize) -> String {
-    if shift == 0 {
-        return sql.to_string();
-    }
-    let mut out = String::with_capacity(sql.len() + 4);
-    let bytes = sql.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'?' {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > i + 1 {
-                let n: usize = sql[i + 1..j].parse().unwrap();
-                out.push_str(&format!("?{}", n + shift));
-                i = j;
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
 }
 
 /// List tasks (optionally filtered by status + priority). Mirrors Python `get_tasks`.
@@ -479,7 +473,7 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
          ORDER BY {}",
         SortKey::default().sql()
     ))?;
-    let pat = format!("%{}%", escape_like_pattern(&q.to_ascii_lowercase()));
+    let pat = format!("%{}%", crate::filter::escape_like(&q.to_ascii_lowercase()));
     let rows: Vec<Task> = stmt
         .query_map([&pat], row_to_task)?
         .collect::<std::result::Result<_, _>>()?;
@@ -595,7 +589,7 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
     sql.push_str(&format!(" ORDER BY {}", SortKey::default().sql()));
 
     let mut stmt = conn.prepare(&sql)?;
-    let pat = format!("%{}%", escape_like_pattern(&q.to_ascii_lowercase()));
+    let pat = format!("%{}%", crate::filter::escape_like(&q.to_ascii_lowercase()));
     let rows: Vec<Task> = stmt
         .query_map([&pat], row_to_task)?
         .collect::<std::result::Result<_, _>>()?;
@@ -650,7 +644,7 @@ pub enum DoneOutcome {
 /// commits in the same transaction as the status flip, attributed to `ctx`.
 pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let now = iso_now();
 
     // Dependency gate: a task with open `depends_on` prerequisites cannot
@@ -701,7 +695,15 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         let rec = crate::recurrence::parse(&original)
             .map_err(|e| crate::Error::Other(format!("re-parse recurrence: {}", e)))?;
         let completion_now = crate::dates::now_in_operator_tz()?;
-        let explicit_time = recurrence_time_of_day(&original, &completion_now)?;
+        // Only completion mode re-applies the time of day. Rows stored before
+        // quick-add rejected unparseable times ("at 9") must stay completable.
+        let explicit_time = if mode_str == "completion" {
+            recurrence_time_of_day(&original, &completion_now)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
         // Pick the anchor for next_after based on mode:
         //   Fixed      → from the current deadline (preserves cadence)
         //   Completion → from now (drifts forward with completions)
@@ -847,7 +849,10 @@ fn recurrence_time_of_day(original: &str, now: &jiff::Zoned) -> Result<Option<ji
 
 /// Replace the time-of-day of `date_z` with the time-of-day of `time_z`,
 /// keeping `date_z`'s timezone.
-fn combine_date_with_time(date_z: &jiff::Zoned, time_z: &jiff::Zoned) -> Result<jiff::Zoned> {
+pub(crate) fn combine_date_with_time(
+    date_z: &jiff::Zoned,
+    time_z: &jiff::Zoned,
+) -> Result<jiff::Zoned> {
     let tz = date_z.time_zone().clone();
     let civil = date_z.date().at(
         time_z.hour(),
@@ -858,11 +863,6 @@ fn combine_date_with_time(date_z: &jiff::Zoned, time_z: &jiff::Zoned) -> Result<
     civil
         .to_zoned(tz)
         .map_err(|e| crate::Error::Other(format!("combine date+time: {}", e)))
-}
-
-/// Status label formatter for CLI parity with Python output.
-pub fn priority_label(p: i64) -> &'static str {
-    priority::label(p)
 }
 
 /// Build a Linear-style branch name from a PT-N + title.
@@ -915,7 +915,7 @@ pub fn update_priority(db: &Db, task_uuid: &str, priority: i64, ctx: &EventCtx) 
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
         params![priority, now, task_uuid],
@@ -960,7 +960,7 @@ pub fn update_deadline(
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
     let has_recurrence_table = tx
         .query_row(
@@ -1027,7 +1027,7 @@ pub fn update_deadline(
 /// learn about the removal. Use with care.
 pub fn delete_task(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     delete_task_in_conn(&tx, task_uuid, ctx)?;
     tx.commit()?;
     Ok(())
@@ -1059,7 +1059,7 @@ fn delete_task_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCt
 /// neglect score reads as a reopen signal.
 pub fn reopen(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     reopen_in_conn(&tx, task_uuid, ctx)?;
     tx.commit()?;
     Ok(())
@@ -1108,7 +1108,7 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
 pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let status: Option<String> = tx
         .query_row("SELECT status FROM tasks WHERE id=?1", [task_uuid], |r| {
             r.get(0)
@@ -1230,7 +1230,7 @@ pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
 pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE tasks SET status_v2='in_progress', status='pending',
                           snoozed_until=NULL, updated_at=?1
@@ -1264,7 +1264,7 @@ pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
 pub fn claim(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE tasks SET status_v2='in_progress', status='pending', updated_at=?1
          WHERE id=?2 AND status_v2 IN ('triage','backlog','todo')",
@@ -1349,7 +1349,7 @@ pub fn set_kind(
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = match deliverable {
         Some(d) => tx.execute(
             "UPDATE tasks SET kind=?1, deliverable=?2, updated_at=?3 WHERE id=?4",
@@ -1391,7 +1391,7 @@ pub fn set_kind(
 pub fn promote(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current: Option<(String, String)> = tx
         .query_row(
             "SELECT kind, status_v2 FROM tasks WHERE id=?1",
@@ -1446,7 +1446,7 @@ pub fn snooze(db: &Db, task_uuid: &str, until_iso: &str, ctx: &EventCtx) -> Resu
     parse_iso_zoned(until_iso)?;
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE tasks SET status_v2='snoozed', status='delayed',
                           snoozed_until=?1, updated_at=?2
@@ -1501,7 +1501,7 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
     let mut woken = 0usize;
     for uuid in &expired {
         let mut conn = db.get()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let changed = tx.execute(
             "UPDATE tasks SET status_v2='todo', status='pending',
                               snoozed_until=NULL, updated_at=?1
@@ -1588,7 +1588,7 @@ pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -
 /// Remove a `depends_on` edge. Errors if the edge doesn't exist.
 pub fn remove_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let n = tx.execute(
         "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='depends_on'",
         params![from_uuid, to_uuid],
@@ -1621,6 +1621,11 @@ pub struct TaskEdit<'a> {
 /// Apply selected fields, side tables, interactions and one attributed event
 /// in one transaction. A rejected field or late database error changes nothing.
 pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx) -> Result<()> {
+    // Blank or padded deadlines normalise like update_deadline: "" clears.
+    let mut edit = edit;
+    edit.deadline = edit
+        .deadline
+        .map(|d| d.map(str::trim).filter(|d| !d.is_empty()));
     let has_text = edit.title.is_some() || edit.description.is_some();
     let has_labels = !edit.labels_add.is_empty() || !edit.labels_remove.is_empty();
     if !has_text && edit.priority.is_none() && edit.deadline.is_none() && !has_labels {
@@ -1767,7 +1772,7 @@ pub fn update_text(
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let exists = tx
         .query_row("SELECT 1 FROM tasks WHERE id=?1", [task_uuid], |_| Ok(()))
         .optional()?
@@ -1836,7 +1841,7 @@ pub fn modify_labels(
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let exists = tx
         .query_row("SELECT 1 FROM tasks WHERE id=?1", [task_uuid], |_| Ok(()))
         .optional()?
@@ -1980,17 +1985,6 @@ fn iso_now() -> String {
     } else {
         format!("{base}.{micros:06}+00:00")
     }
-}
-
-fn escape_like_pattern(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            out.push('\\');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 #[cfg(test)]
@@ -2779,6 +2773,93 @@ mod tests {
     }
 
     #[test]
+    fn mark_done_waits_out_a_concurrent_writer_instead_of_failing() {
+        // A deferred transaction that reads first cannot wait for the write
+        // lock: SQLite skips the busy handler on a read->write upgrade, so
+        // `pt done` failed with "database is locked" whenever the server's
+        // rescore held the lock. IMMEDIATE waits at BEGIN (busy_timeout).
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("x"), &EventCtx::test()).unwrap();
+        let mut writer = rusqlite::Connection::open(db.path()).unwrap();
+        let tx = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "UPDATE tasks SET updated_at = updated_at WHERE id = ?1",
+            [&t.id],
+        )
+        .unwrap();
+        let (db2, t2) = (db.clone(), t.clone());
+        let done = std::thread::spawn(move || mark_done(&db2, &t2, &EventCtx::test()));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        tx.commit().unwrap();
+        assert!(done.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn create_rejects_an_unparseable_deadline_and_drops_a_blank_one() {
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("renew cert");
+        new.deadline = Some("next friday".into());
+        assert!(create(&db, new, &EventCtx::test()).is_err());
+        let mut new = NewTask::minimal("renew cert");
+        new.deadline = Some("  ".into());
+        let t = create(&db, new, &EventCtx::test()).unwrap();
+        assert!(t.deadline.is_none());
+    }
+
+    #[test]
+    fn edit_atomic_blank_deadline_clears() {
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("x");
+        new.deadline = Some("2026-10-01".into());
+        let t = create(&db, new, &EventCtx::test()).unwrap();
+        let edit = TaskEdit {
+            title: None,
+            description: None,
+            priority: None,
+            deadline: Some(Some("  ")),
+            labels_add: &[],
+            labels_remove: &[],
+        };
+        edit_atomic(&db, &t.id, edit, &EventCtx::test()).unwrap();
+        let deadline: Option<String> = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT deadline FROM tasks WHERE id=?1", [&t.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert!(deadline.is_none());
+    }
+
+    #[test]
+    fn list_filters_by_v2_status_names() {
+        let (_dir, db) = fresh_db();
+        let a = create(&db, NewTask::minimal("started"), &EventCtx::test()).unwrap();
+        create(&db, NewTask::minimal("not started"), &EventCtx::test()).unwrap();
+        start(&db, &a.id, &EventCtx::test()).unwrap();
+        let rows = list_with_filter(&db, None, Some("in_progress"), None, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, a.id);
+        assert_eq!(
+            list_with_filter(&db, None, Some("todo"), None, 50)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_with_filter(&db, None, Some("pending"), None, 50)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(list_with_filter(&db, None, Some("pendng"), None, 50).is_err());
+    }
+
+    #[test]
     fn update_deadline_blank_on_recurring_hits_the_recurrence_guard() {
         // Normalising blank→clear must route into the recurring-task guard and
         // its actionable message, not into the parse error it used to raise.
@@ -3136,6 +3217,29 @@ mod tests {
                 );
                 claim(&db, &task.id, &ctx).expect("new occurrence must be claimable");
             }
+        }
+    }
+
+    #[test]
+    fn recurring_row_with_an_unparseable_time_is_still_completable() {
+        // Quick-add used to store "every monday at 9" (interim rejects
+        // "today 9") and mark_done re-parsed it with `?`, so every close
+        // failed and the task could only be dismissed.
+        let (_dir, db) = fresh_db();
+        for input in ["every monday at 9", "every! day at noon"] {
+            let rec = crate::recurrence::parse(input).unwrap();
+            let mut new = NewTask::minimal("standup");
+            new.deadline = Some("2026-09-28T09:00:00+01:00".into());
+            let ext = Extensions {
+                recurrence: Some(rec),
+                ..Default::default()
+            };
+            let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+            let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
+            assert!(
+                matches!(outcome, DoneOutcome::Advanced { .. }),
+                "{input}: {outcome:?}"
+            );
         }
     }
 

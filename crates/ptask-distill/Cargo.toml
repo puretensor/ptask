@@ -50,10 +50,6 @@ required-features = ["native-ml"]
 name = "sbert_parity"
 required-features = ["native-ml"]
 
-[[example]]
-name = "cluster_probe"
-required-features = ["native-ml"]
-
 [dev-dependencies]
 tempfile = "3"
 jiff = { workspace = true }

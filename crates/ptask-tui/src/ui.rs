@@ -159,15 +159,17 @@ fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 Span::raw(next.clone()),
             ]));
         }
+        // depends_on = this task's prerequisites (it is blocked BY them);
+        // blocks_tasks = tasks waiting on this one. The labels were swapped.
         if !detail.depends_on.is_empty() {
             lines.push(Line::from(vec![
-                Span::styled("blocks   ", Style::default().fg(Color::DarkGray)),
-                Span::raw(format!("{} dependency(s)", detail.depends_on.len())),
+                Span::styled("blocked  ", Style::default().fg(Color::DarkGray)),
+                Span::raw(format!("by {} prerequisite(s)", detail.depends_on.len())),
             ]));
         }
         if !detail.blocks_tasks.is_empty() {
             lines.push(Line::from(vec![
-                Span::styled("blocked  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("blocks   ", Style::default().fg(Color::DarkGray)),
                 Span::raw(format!("{} downstream", detail.blocks_tasks.len())),
             ]));
         }

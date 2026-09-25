@@ -4,6 +4,7 @@ OnFailure=ptask-failure-alert@%n.service
 
 [Service]
 Type=oneshot
+EnvironmentFile=%h/puretensor-tasks/.env
 ExecStart=%h/.cargo/bin/pt export --git
 Nice=15
 IOSchedulingClass=best-effort

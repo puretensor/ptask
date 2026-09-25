@@ -10,10 +10,12 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 DB="$TMPDIR/test.db"
 
-# Build the CLI in release mode and run backfill against a fresh file —
-# no pre-seeded schema; migrations must bootstrap everything.
-cargo build --release -p ptask-cli --locked
-PTASK_DB="$DB" ./target/release/pt backfill
+# Build the CLI and run backfill against a fresh file — no pre-seeded
+# schema; migrations must bootstrap everything. A debug build runs the same
+# embedded migrations; the release profile (thin LTO, codegen-units=1) only
+# added minutes of link time to this job.
+cargo build -p ptask-cli --locked
+PTASK_DB="$DB" ./target/debug/pt backfill
 
 python3 - "$DB" <<'PY'
 import sqlite3, sys

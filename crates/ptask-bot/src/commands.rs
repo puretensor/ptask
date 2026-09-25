@@ -27,7 +27,7 @@ pub enum PtCommand {
 impl PtCommand {
     pub fn descriptions() -> &'static str {
         "pTask commands. PT-N IDs are sticky — share them in any chat.\n\
-         /add <text> — Quick-add a new task. Inline tokens: @label #project p1..p5 ~Nm //desc, plus date phrases.\n\
+         /add <text> — Quick-add a new task. Inline tokens: @label #project p1..p5 ~Nm //desc, a YYYY-MM-DD deadline, every <rule>.\n\
          /list [filter] — List tasks. Optional Todoist-style filter DSL.\n\
          /done <query> — Mark done by PT-N or title substring. Recurring tasks advance in place.\n\
          /next [N] — DAG-ready tasks (all dependencies satisfied).\n\
@@ -82,7 +82,7 @@ pub async fn dispatch(bot: Bot, msg: Message, cmd: PtCommand, db: Db) -> Result<
     match cmd {
         PtCommand::Help => {
             let text = format!(
-                "{}\n\nExamples:\n  /add Buy bread tomorrow 10am @home p1 ~30m\n  /list today | overdue\n  /done PT-42\n  /next",
+                "{}\n\nExamples:\n  /add Buy bread 2026-10-02 @home p1 ~30m\n  /list today | overdue\n  /done PT-42\n  /next",
                 PtCommand::descriptions()
             );
             send(&bot, chat_id, text).await?;
@@ -159,23 +159,16 @@ async fn handle_list(bot: &Bot, chat_id: ChatId, db: &Db, filter: &str) -> Resul
             }
         }
     };
-    let rows = match ptask_core::tasks::list_with_filter(
-        db,
-        expr.as_ref(),
-        if expr.is_some() {
-            None
-        } else {
-            Some("pending")
-        },
-        None,
-        20,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            send(bot, chat_id, format!("list failed: {}", e)).await?;
-            return Ok(());
-        }
-    };
+    // Open tasks only, filter or not: the DSL has no status predicate, so a
+    // filter with no status let done/dismissed rows crowd out open ones.
+    let rows =
+        match ptask_core::tasks::list_with_filter(db, expr.as_ref(), Some("pending"), None, 20) {
+            Ok(r) => r,
+            Err(e) => {
+                send(bot, chat_id, format!("list failed: {}", e)).await?;
+                return Ok(());
+            }
+        };
     if rows.is_empty() {
         send(bot, chat_id, "no tasks").await?;
         return Ok(());
@@ -228,7 +221,7 @@ async fn handle_done(bot: &Bot, chat_id: ChatId, db: &Db, query: &str) -> Result
 }
 
 async fn handle_next(bot: &Bot, chat_id: ChatId, db: &Db, rest: &str) -> Result<()> {
-    let limit: usize = rest.trim().parse().unwrap_or(10);
+    let limit: usize = rest.trim().parse().unwrap_or(10).min(50);
     let rows = match ptask_core::dag::next_ready(db, limit) {
         Ok(r) => r,
         Err(e) => {

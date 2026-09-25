@@ -53,74 +53,29 @@ pub fn find_duplicate(
     if vecs.is_empty() || vecs[0].len() != EMBEDDING_DIM {
         return Err(anyhow!("embedder returned unexpected shape"));
     }
-    let new_vec = &vecs[0];
-    let mut best: Option<(usize, f32)> = None;
-    for (i, candidate_vec) in vecs.iter().enumerate().skip(1) {
-        let score = cosine(new_vec, candidate_vec);
-        match best {
-            Some((_, b)) if b >= score => {}
-            _ => best = Some((i - 1, score)),
-        }
-    }
-    Ok(best.and_then(|(idx, score)| {
-        if score >= threshold {
-            Some(Duplicate {
-                id: candidates[idx].id.clone(),
-                title: candidates[idx].title.clone(),
-                score,
-            })
-        } else {
-            None
-        }
+    let Some((idx, score)) = best_match(&vecs[0], &vecs[1..]) else {
+        return Ok(None);
+    };
+    Ok((score >= threshold).then(|| Duplicate {
+        id: candidates[idx].id.clone(),
+        title: candidates[idx].title.clone(),
+        score,
     }))
 }
 
-/// Bulk variant — for each new title, return its best duplicate (or `None`)
-/// against the candidate set. Embeds the new titles + candidates in a single
-/// batch and reuses the candidate vectors across the sweep.
-pub fn find_duplicates(
-    embedder: &Embedder,
-    new_titles: &[&str],
-    candidates: &[Candidate],
-    threshold: f32,
-) -> Result<Vec<Option<Duplicate>>> {
-    if new_titles.is_empty() {
-        return Ok(Vec::new());
-    }
-    if candidates.is_empty() {
-        return Ok(vec![None; new_titles.len()]);
-    }
-    let mut texts = Vec::with_capacity(new_titles.len() + candidates.len());
-    texts.extend_from_slice(new_titles);
-    texts.extend(candidates.iter().map(|c| c.title.as_str()));
-    let vecs = embedder.embed(&texts)?;
-
-    let n_new = new_titles.len();
-    let cand_vecs = &vecs[n_new..];
-
-    let mut out = Vec::with_capacity(n_new);
-    for new_vec in vecs.iter().take(n_new) {
-        let mut best: Option<(usize, f32)> = None;
-        for (i, cand_vec) in cand_vecs.iter().enumerate() {
-            let score = cosine(new_vec, cand_vec);
-            match best {
-                Some((_, b)) if b >= score => {}
-                _ => best = Some((i, score)),
-            }
+/// Index and cosine score of the vector in `against` closest to `vec`.
+/// Callers that check many titles against one universe embed the universe
+/// once and sweep it with this, instead of re-embedding it per title.
+pub fn best_match(vec: &[f32], against: &[Vec<f32>]) -> Option<(usize, f32)> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, other) in against.iter().enumerate() {
+        let score = cosine(vec, other);
+        match best {
+            Some((_, b)) if b >= score => {}
+            _ => best = Some((i, score)),
         }
-        out.push(best.and_then(|(idx, score)| {
-            if score >= threshold {
-                Some(Duplicate {
-                    id: candidates[idx].id.clone(),
-                    title: candidates[idx].title.clone(),
-                    score,
-                })
-            } else {
-                None
-            }
-        }));
     }
-    Ok(out)
+    best
 }
 
 /// Cosine similarity for L2-normalised vectors (= dot product). Falls back to
@@ -218,23 +173,6 @@ mod tests {
         assert!(out.is_some());
         let hit = out.unwrap();
         assert!(hit.score > 0.999, "got {}", hit.score);
-    }
-
-    #[test]
-    fn find_duplicates_batch_finds_per_new_title() {
-        let Some(e) = load_or_skip() else {
-            return;
-        };
-        let cands = vec![
-            cand("a", "buy a loaf of bread"),
-            cand("b", "investigate ceph mon quorum"),
-        ];
-        let news = &["purchase a loaf of bread", "stock market closed up today"];
-        let out = find_duplicates(&e, news, &cands, DEFAULT_THRESHOLD).unwrap();
-        assert_eq!(out.len(), 2);
-        assert!(out[0].is_some());
-        assert_eq!(out[0].as_ref().unwrap().id, "a");
-        assert!(out[1].is_none());
     }
 
     #[test]

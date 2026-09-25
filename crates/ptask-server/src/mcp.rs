@@ -281,11 +281,6 @@ impl PtaskMcp {
         }
     }
 
-    #[allow(dead_code)]
-    fn rescore(&self) {
-        rescore_db(&self.db);
-    }
-
     #[tool(
         description = "DAG-ready tasks in priority order (every dependency done, not snoozed). THE call for 'what should I work on'. Returns compact task JSON."
     )]
@@ -409,14 +404,7 @@ impl PtaskMcp {
                 .map_err(domain_err)?;
             }
             rescore_db(&db);
-            let mut v = task_json(&t);
-            if !q.warnings.is_empty() {
-                // Non-fatal quick-add caveats (e.g. a date phrase that resolved to
-                // the past). PT-1267 backdated a deadline silently because these
-                // were dropped on the MCP path — agents must see them.
-                v["warnings"] = serde_json::json!(q.warnings);
-            }
-            json_ok(&v)
+            json_ok(&task_json(&t))
         })
         .await
     }
@@ -786,8 +774,12 @@ impl PtaskMcp {
             )
             .await;
         }
-        let ap = ptask_core::approvals::get(&self.db, &outcome.approval.uuid)
-            .unwrap_or(outcome.approval);
+        let db = self.db.clone();
+        let uuid = outcome.approval.uuid.clone();
+        let ap = match on_blocking(move || approvals::get(&db, &uuid).map_err(domain_err)).await {
+            Ok(ap) => ap,
+            Err(_) => outcome.approval,
+        };
         json_ok(&ap.to_json(None))
     }
 

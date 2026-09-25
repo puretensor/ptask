@@ -117,11 +117,107 @@ pub fn router() -> Router<AppState> {
 
 // ---------------------------------------------------------------- auth
 
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+/// Failed-Basic-auth lockout per client address, the policy of the Python
+/// sidecar's `LoginThrottle` (FINDINGS T5/M6): 5 failures inside 15 min lock
+/// the client for 5 min. `pt serve` checks the same PTASK_DASH_PASS with no
+/// throttle, so a tailnet peer could guess at request speed. Lives in
+/// `AppState` so each router instance (and each test) has its own table.
+#[derive(Default)]
+pub struct BasicThrottle {
+    records: std::sync::Mutex<HashMap<Option<std::net::IpAddr>, Failures>>,
+}
+
+struct Failures {
+    count: u32,
+    last: std::time::Instant,
+    locked_until: Option<std::time::Instant>,
+}
+
+const THROTTLE_MAX_FAILURES: u32 = 5;
+const THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const THROTTLE_LOCKOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const THROTTLE_MAX_RECORDS: usize = 4096;
+
+impl BasicThrottle {
+    fn locked_for(&self, peer: Option<std::net::IpAddr>) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        let records = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        records
+            .get(&peer)
+            .and_then(|f| f.locked_until)
+            .and_then(|until| until.checked_duration_since(now))
     }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+
+    fn failure(&self, peer: Option<std::net::IpAddr>) {
+        let now = std::time::Instant::now();
+        let mut records = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        if !records.contains_key(&peer) && records.len() >= THROTTLE_MAX_RECORDS {
+            // Evict unlocked clients first so a flood cannot forgive a lockout.
+            records.retain(|_, f| f.locked_until.is_some_and(|u| u > now));
+            if records.len() >= THROTTLE_MAX_RECORDS
+                && let Some(oldest) = records
+                    .iter()
+                    .min_by_key(|(_, f)| f.locked_until)
+                    .map(|(k, _)| *k)
+            {
+                records.remove(&oldest);
+            }
+        }
+        let f = records.entry(peer).or_insert(Failures {
+            count: 0,
+            last: now,
+            locked_until: None,
+        });
+        if now.duration_since(f.last) > THROTTLE_WINDOW {
+            f.count = 0;
+            f.locked_until = None;
+        }
+        f.count += 1;
+        f.last = now;
+        if f.count >= THROTTLE_MAX_FAILURES {
+            f.locked_until = Some(now + THROTTLE_LOCKOUT);
+        }
+    }
+
+    fn success(&self, peer: Option<std::net::IpAddr>) {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&peer);
+    }
+}
+
+/// Route layer for the dashboard: refuses a locked-out client before the
+/// handler runs, and counts a 401 on a request that presented credentials
+/// as a failed guess. Handlers keep calling [`authed`] unchanged.
+pub async fn basic_throttle(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let presented = state.dash.pass.is_some() && req.headers().contains_key(header::AUTHORIZATION);
+    if !presented {
+        return next.run(req).await;
+    }
+    let peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+    if let Some(wait) = state.dash_throttle.locked_for(peer) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, (wait.as_secs() + 1).to_string())],
+            "too many attempts; try again later",
+        )
+            .into_response();
+    }
+    let resp = next.run(req).await;
+    if resp.status() == StatusCode::UNAUTHORIZED {
+        state.dash_throttle.failure(peer);
+    } else {
+        state.dash_throttle.success(peer);
+    }
+    resp
 }
 
 /// Sidecar rule: no configured password = open (local/dev); otherwise
@@ -148,7 +244,9 @@ pub fn authed(state: &AppState, headers: &HeaderMap) -> bool {
     let Some((user, pw)) = s.split_once(':') else {
         return false;
     };
-    ct_eq(user.as_bytes(), state.dash.user.as_bytes()) & ct_eq(pw.as_bytes(), pass.as_bytes())
+    use crate::auth::constant_time_eq;
+    constant_time_eq(user.as_bytes(), state.dash.user.as_bytes())
+        & constant_time_eq(pw.as_bytes(), pass.as_bytes())
 }
 
 /// CSRF guard for the state-changing dashboard routes: browsers attach
@@ -203,6 +301,15 @@ fn parse_deadline(s: &str) -> Option<(String, f64)> {
     let s = s.trim();
     if s.is_empty() {
         return None;
+    }
+    // A date-only deadline is due all day, as core `overdue` reads it; as
+    // midnight UTC it showed "0d over" from 00:00 on the due day itself.
+    if s.len() == 10
+        && let Ok(date) = s.parse::<ptask_core::jiff::civil::Date>()
+    {
+        let today = ptask_core::dates::now_in_operator_tz().ok()?.date();
+        let days = today.until(date).ok()?.get_days();
+        return Some((date.to_string(), f64::from(days)));
     }
     let z = ptask_core::dates::parse_iso_to_utc(s).or_else(|| {
         // Date-only "YYYY-MM-DD" → midnight UTC. `s.get(..10)` is char-safe:
@@ -1313,6 +1420,16 @@ mod tests {
     }
 
     #[test]
+    fn date_only_deadline_due_today_is_not_overdue() {
+        let today = ptask_core::dates::now_in_operator_tz().unwrap().date();
+        let (date, days) = parse_deadline(&today.to_string()).unwrap();
+        assert_eq!(date, today.to_string());
+        assert_eq!(days, 0.0);
+        let yesterday = today.yesterday().unwrap();
+        assert_eq!(parse_deadline(&yesterday.to_string()).unwrap().1, -1.0);
+    }
+
+    #[test]
     fn dashboard_framing_is_denied_by_default() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), "ok").unwrap();
@@ -1375,6 +1492,64 @@ mod tests {
         );
         assert_eq!(response.headers()["x-frame-options"], "DENY");
         assert!(!response.headers().contains_key("content-security-policy"));
+    }
+
+    #[tokio::test]
+    async fn basic_auth_locks_out_after_repeated_failures() {
+        use super::THROTTLE_MAX_FAILURES;
+        use axum::http::{StatusCode, header};
+        use base64::Engine;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            ptask_core::Db::open(dir.path().join("test.db")).unwrap(),
+            Default::default(),
+            Default::default(),
+        )
+        .with_dash(DashConfig {
+            user: "ops".into(),
+            pass: Some("correct horse".into()),
+            ..Default::default()
+        });
+        let app = crate::router(state);
+        let basic = |pw: &str| {
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(format!("ops:{pw}"))
+            )
+        };
+        let get = |auth: String| {
+            axum::http::Request::builder()
+                .uri("/api/stats")
+                .header(header::AUTHORIZATION, auth)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(get(basic("correct horse")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        for _ in 0..THROTTLE_MAX_FAILURES {
+            let status = app
+                .clone()
+                .oneshot(get(basic("guess")))
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        // Locked: even the right password waits out the lockout.
+        let locked = app
+            .clone()
+            .oneshot(get(basic("correct horse")))
+            .await
+            .unwrap();
+        assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(locked.headers().contains_key(header::RETRY_AFTER));
     }
 
     #[test]

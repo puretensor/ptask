@@ -140,18 +140,6 @@ pub fn record_in_conn(
     Ok(conn.last_insert_rowid())
 }
 
-/// Check whether a command UUID has been processed already.
-/// Used by the sync API for idempotent retries.
-pub fn exists(db: &Db, uuid: &str) -> Result<bool> {
-    let conn = db.get()?;
-    let found: Option<i64> = conn
-        .query_row("SELECT id FROM pt_event_log WHERE uuid = ?1", [uuid], |r| {
-            r.get(0)
-        })
-        .optional()?;
-    Ok(found.is_some())
-}
-
 /// Fetch a recorded command/event by idempotency UUID.
 pub fn get_by_uuid(db: &Db, uuid: &str) -> Result<Option<LoggedEvent>> {
     let conn = db.get()?;
@@ -296,22 +284,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn exists_detects_recorded_uuid() {
-        let (_dir, db) = fresh_db();
-        assert!(!exists(&db, "u1").unwrap());
-        record(
-            &db,
-            "u1",
-            None,
-            "x",
-            &serde_json::json!({}),
-            &EventCtx::test(),
-        )
-        .unwrap();
-        assert!(exists(&db, "u1").unwrap());
     }
 
     #[test]
