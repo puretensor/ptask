@@ -763,6 +763,41 @@ mod tests {
     }
 
     #[test]
+    fn supplied_idempotency_key_is_reused_as_the_command_uuid() {
+        // PT-2121 findings 1-2: a retried `pt --idempotency-key K remote done`
+        // must send the same /sync command uuid so the server replays it.
+        let server_rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (url, calls) = server_rt.block_on(spawn_mock_sync());
+        let c = RemoteClient::with_url(&url)
+            .unwrap()
+            .with_idempotency_key(Some("retry-probe".into()));
+        c.done("PT-100").unwrap();
+        c.done("PT-100").unwrap();
+        let uuids: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call["commands"][0]["uuid"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(uuids, ["retry-probe", "retry-probe"]);
+        assert_eq!(c.command_uuid("deadline"), "retry-probe:deadline");
+    }
+
+    #[test]
+    fn absent_or_blank_idempotency_key_mints_fresh_command_uuids() {
+        for key in [None, Some("  ".to_string())] {
+            let c = RemoteClient::with_url("http://127.0.0.1:9")
+                .unwrap()
+                .with_idempotency_key(key);
+            assert_ne!(c.command_uuid(""), c.command_uuid(""));
+        }
+    }
+
+    #[test]
     fn remote_list_full_sync_filters_locally() {
         let server_rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)

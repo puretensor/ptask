@@ -1,5 +1,6 @@
 import base64
 import http.client
+import io
 import json
 import os
 import sqlite3
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import server
@@ -81,6 +83,35 @@ class ReadmeDefaultsTests(unittest.TestCase):
             'os.environ.get("PTASK_VOICE_FALLBACK_MODEL", "nemotron-lightning")',
             src,
         )
+
+
+class ReadJsonBodyTests(unittest.TestCase):
+    """Login reads the body before auth, so the length checks are the only
+    bound an unauthenticated client meets (PT-2121 finding 10)."""
+
+    @staticmethod
+    def _handler(length, payload):
+        codes = []
+        handler = SimpleNamespace(
+            headers={"Content-Length": length},
+            rfile=io.BytesIO(payload),
+            _json=lambda body, code: codes.append(code),
+        )
+        return handler, codes
+
+    def test_negative_content_length_is_rejected_without_reading(self):
+        handler, codes = self._handler("-1", b" " * (server.MAX_POST_BYTES + 1))
+        self.assertIsNone(server.Handler._read_json_body(handler))
+        self.assertEqual(codes, [400])
+        self.assertTrue(handler.rfile.read(), "read(-1) would have drained the body")
+
+    def test_oversized_content_length_is_413(self):
+        handler, codes = self._handler(str(server.MAX_POST_BYTES + 1), b"x")
+        self.assertIsNone(server.Handler._read_json_body(handler))
+        self.assertEqual(codes, [413])
+
+    def test_request_socket_has_a_timeout(self):
+        self.assertNotIn(getattr(server.Handler, "timeout", None), (None, 0))
 
 
 class AuthTests(unittest.TestCase):

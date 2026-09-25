@@ -470,6 +470,74 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// POST a JSON body and return the status plus the parsed response.
+    async fn post_json(
+        app: &Router,
+        uri: &str,
+        body: &serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn keyed_incident_recaptured_after_resolve_opens_a_new_episode() {
+        // PT-2121 finding 8: the V014 identity index made a recovered incident
+        // that recurs with the same key + text a dead duplicate, so the second
+        // outage never became work.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let incident = serde_json::json!({
+            "text": "ceph HEALTH_ERR on fox-n0",
+            "source": "puresentinel:incident:ceph",
+            "severity": 4,
+            "client_key": "incident-ceph-fox-n0",
+        });
+
+        let (status, first) = post_json(&app, "/capture", &incident).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let first_task = first["task_uuid"].as_str().unwrap().to_string();
+
+        // Still open: a re-send is delivery idempotency, not a new outage.
+        let (status, replay) = post_json(&app, "/capture", &incident).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(replay["duplicate"], true);
+
+        let (status, resolved) = post_json(
+            &app,
+            "/capture/resolve",
+            &serde_json::json!({"client_key": "incident-ceph-fox-n0"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resolved["closed"], 1);
+
+        let (status, second) = post_json(&app, "/capture", &incident).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_ne!(second["duplicate"], true);
+        let second_task = second["task_uuid"].as_str().unwrap();
+        assert_ne!(second_task, first_task, "recurrence must be new work");
+    }
+
     #[tokio::test]
     async fn sync_round_trip_create_then_done() {
         let db = open_test_db();

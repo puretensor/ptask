@@ -1,5 +1,19 @@
 # PT-2121 ptask — 10 P1 findings
 
+> **2026-09-25:** the ten `tests/test_0N_*.py` pinning files named below were
+> removed. No CI job ran them, and each "pinning" test matched regexes against
+> Rust source or re-implemented the pre-fix code in Python and asserted on that
+> copy. The behaviours they described are pinned by tests CI runs:
+> findings 1–2 by `remote::tests::supplied_idempotency_key_is_reused_as_the_command_uuid`
+> and `absent_or_blank_idempotency_key_mints_fresh_command_uuids` (ptask-cli);
+> finding 4 by `tasks::tests::undo_preserves_claimed_promoted_and_advanced_tasks`;
+> finding 5 by the `idx` schema assertion in `ptask-distill/src/providers.rs`;
+> finding 8 by `tests::keyed_incident_recaptured_after_resolve_opens_a_new_episode`
+> (ptask-server); finding 10 by `ReadJsonBodyTests` in
+> `dashboard/tests/test_server.py`. Findings 3, 6, 7 and 9 are structural
+> (a runner flag, a loader choice, `spawn_blocking` placement) with no
+> behavioural test; the review record below stands.
+
 Worktree: `/var/tmp/cursor-fleet/pt2121-ptask/wt`  
 Branch: `cursor/pt2121-ptask`
 
