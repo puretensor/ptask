@@ -34,6 +34,8 @@ pub struct AppState {
     pub notify: Arc<DispatchCfg>,
     pub tg_forwarders: Arc<Vec<String>>,
     pub tg_approval_buttons: bool,
+    /// Failed-Basic-auth lockout for the dashboard routes.
+    pub dash_throttle: Arc<routes::dashboard::BasicThrottle>,
 }
 
 impl AppState {
@@ -46,6 +48,7 @@ impl AppState {
             notify: Arc::new(DispatchCfg::default()),
             tg_forwarders: Arc::new(vec!["nexus".into()]),
             tg_approval_buttons: false,
+            dash_throttle: Arc::default(),
         }
     }
 
@@ -149,7 +152,12 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(routes::base::router())
         .merge(routes::capture::router())
-        .merge(routes::dashboard::router())
+        .merge(
+            routes::dashboard::router().route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                routes::dashboard::basic_throttle,
+            )),
+        )
         .merge(routes::email::router())
         .merge(routes::sync::router())
         .merge(routes::tg::router())
@@ -180,9 +188,13 @@ pub async fn serve(db: Db, addr: SocketAddr, config: Config) -> Result<()> {
     let app = router(state);
     info!(target: "ptask::server", %addr, "starting pt serve");
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Peer addresses key the dashboard's failed-auth throttle.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     info!(target: "ptask::server", "pt serve stopped");
     Ok(())
 }
