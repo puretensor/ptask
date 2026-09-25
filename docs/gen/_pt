@@ -51,7 +51,7 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':title -- Task title (parsed as quick-add unless --raw is set). Inline tokens\: @label, #project, p1..p5, ~30m/~2h/~1d, !HH\:MM, //description (rest of string), date phrases (today/tomorrow/ weekday with this|next|last/ N days/ISO dates):_default' \
+':title -- Task title (parsed as quick-add unless --raw is set). Inline tokens\: @label, #project, p1..p5, ~30m/~2h/~1d, !HH\:MM, //description (rest of string), a future YYYY-MM-DD deadline, `every …` recurrence. Other date prose stays title text; use --deadline:_default' \
 && ret=0
 ;;
 (list)

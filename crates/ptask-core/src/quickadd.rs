@@ -9,7 +9,8 @@
 //! - `p1`..`p5`     — priority, native scale (p1=low, p2=normal, p3=high,
 //!   p4=urgent, p5=critical; defaults to "normal" / 2 if absent)
 //! - `~30m` `~2h` `~1d` — duration estimate in minutes
-//! - `!HH:MM`        — reminder time-of-day
+//! - `!HH:MM`        — reminder time-of-day (a valid time only; echoed by
+//!   `pt add`, not persisted)
 //! - `//rest of line` — everything after the `//` is the description
 //! - Future ISO date — an exact `YYYY-MM-DD` token. Other date-like prose is
 //!   kept as literal title text.
@@ -145,9 +146,11 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             continue;
         }
         // Reminder !HH:MM
+        // Only a real time of day: `!re:invoice` or `!note:` used to be
+        // swallowed out of the title as a "reminder" nothing stores.
         if let Some(rest) = tok.strip_prefix('!')
-            && !rest.is_empty()
-            && rest.contains(':')
+            && rest.len() <= 8
+            && rest.parse::<jiff::civil::Time>().is_ok()
         {
             out.reminder = Some(rest.to_string());
             idx += 1;
@@ -730,6 +733,10 @@ mod tests {
         let q = parse_at("call dentist !09:30", anchor()).unwrap();
         assert_eq!(q.reminder.as_deref(), Some("09:30"));
         assert_eq!(q.title, "call dentist");
+        // Not a time: title text, not a silently dropped "reminder".
+        let q = parse_at("Reply to Bob !re:invoice", anchor()).unwrap();
+        assert!(q.reminder.is_none());
+        assert_eq!(q.title, "Reply to Bob !re:invoice");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 ## What it does
 
-- **Capture fast** — inline-token quick-add (`tomorrow 10am @home p1 ~30m`), natural-language dates, idempotent `capture` lane that fast-tracks fleet incidents (severity ≥ 3) into tasks.
+- **Capture fast** — inline-token quick-add (`2026-10-02 @home p1 ~30m`, `every monday at 9am`), idempotent `capture` lane that fast-tracks fleet incidents (severity ≥ 3) into tasks.
 - **Find fast** — Linear-style `PT-N` IDs, filter DSL (`pt list "(today | overdue) & p1"`), FTS5 full-text search, saved views.
 - **Work in order** — DAG dependencies (`pt depend PT-3 --on PT-1`; `pt next` shows only unblocked tasks, and a task cannot be closed while a prerequisite is open), composite priority scoring with explainability (`pt why PT-42`), recurrence (`every` vs `every!`), snooze.
 - **Stay honest** — attributed event log (`pt log`: who did what, via which surface), `pt undo`, accountability escalation state machine with Telegram/SMTP/HAL notifications, staleness reaper for machine-generated tasks, operator **approval inbox** (`pt approval` / `pt approve` / `pt reject`: agents request, only the operator decides, executors consume once — [`docs/approvals.md`](docs/approvals.md)), **goal tree** (`pt goal` / `pt context`: every task traces up to the mission — [`docs/goals.md`](docs/goals.md)).
@@ -16,7 +16,7 @@
 ## Quick start
 
 ```bash
-pt add "Buy bread tomorrow 10am @home p1 ~30m"   # inline-token quick-add
+pt add "Buy bread 2026-10-02 @home p1 ~30m"      # inline-token quick-add
 pt list "(today | overdue) & p1"                  # filter DSL
 pt next                                           # DAG-ready tasks
 pt done PT-42                                     # complete

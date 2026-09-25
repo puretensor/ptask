@@ -16,27 +16,26 @@ trailing `//description` becomes the description.
 | `@label` | append to `pt_extensions.labels` JSON. Multiple allowed. |
 | `#project` | `pt_extensions.project` (last wins). |
 | `~30m`, `~2h`, `~1d` | `pt_extensions.duration_min`. |
-| `!HH:MM` | reminder hour. Stored alongside `deadline` if a date phrase is present. |
+| `!HH:MM` | reminder time of day (a valid `HH:MM` only). Echoed by `pt add`; not persisted. |
 | `//description` | everything from `//` to end-of-text → description. |
 | `every monday`, `every weekday`, `every! 5 days`, etc. | recurrence — see [recurrence.md](recurrence.md). |
-| date phrases | parsed by `interim` 0.2 (chrono-english-like). |
+| `YYYY-MM-DD` | deadline, when it is a standalone date in the future. |
 
-### Date phrases
+### Dates
 
-The date parser handles:
-
-- absolute: `2026-05-20`, `May 20`, `5/20/2026`
-- relative: `tomorrow`, `next monday`, `in 3 days`, `next week`
-- combined with time: `tomorrow 10am`, `friday 18:00`, `monday at 9am`
-- this/next/last: `this friday`, `next friday`, `last friday`
+Body-text deadline inference is deliberately narrow: only a standalone
+future ISO date (`2026-10-02`) sets the deadline. Other date prose
+(`tomorrow`, `next friday`, `4/5`, a past date) stays title text instead of
+silently setting a wrong deadline; pass `--deadline` for anything else.
+Recurrence phrases (`every monday at 9am`) set the first occurrence.
 
 Operator timezone: `Europe/London` (DST-correct via jiff).
 
 ### Examples
 
 ```
-pt add 'gym monday 8am @health every! monday p2 ~45m'
-pt add 'buy bread tomorrow 10am @home p1 ~30m //sourdough from baker'
+pt add 'gym @health every! monday at 8am p2 ~45m'
+pt add 'buy bread 2026-10-02 @home p1 ~30m //sourdough from baker'
 pt add 'investigate ceph mon quorum @ops p4 #fleet'
 pt add 'review PR #42 //sync via gh pr view 42'
 ```

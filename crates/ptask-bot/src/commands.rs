@@ -27,7 +27,7 @@ pub enum PtCommand {
 impl PtCommand {
     pub fn descriptions() -> &'static str {
         "pTask commands. PT-N IDs are sticky — share them in any chat.\n\
-         /add <text> — Quick-add a new task. Inline tokens: @label #project p1..p5 ~Nm //desc, plus date phrases.\n\
+         /add <text> — Quick-add a new task. Inline tokens: @label #project p1..p5 ~Nm //desc, a YYYY-MM-DD deadline, every <rule>.\n\
          /list [filter] — List tasks. Optional Todoist-style filter DSL.\n\
          /done <query> — Mark done by PT-N or title substring. Recurring tasks advance in place.\n\
          /next [N] — DAG-ready tasks (all dependencies satisfied).\n\
@@ -82,7 +82,7 @@ pub async fn dispatch(bot: Bot, msg: Message, cmd: PtCommand, db: Db) -> Result<
     match cmd {
         PtCommand::Help => {
             let text = format!(
-                "{}\n\nExamples:\n  /add Buy bread tomorrow 10am @home p1 ~30m\n  /list today | overdue\n  /done PT-42\n  /next",
+                "{}\n\nExamples:\n  /add Buy bread 2026-10-02 @home p1 ~30m\n  /list today | overdue\n  /done PT-42\n  /next",
                 PtCommand::descriptions()
             );
             send(&bot, chat_id, text).await?;

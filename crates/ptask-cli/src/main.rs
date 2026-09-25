@@ -574,8 +574,8 @@ struct PlanArgs {
 struct AddArgs {
     /// Task title (parsed as quick-add unless --raw is set).
     /// Inline tokens: @label, #project, p1..p5, ~30m/~2h/~1d, !HH:MM,
-    /// //description (rest of string), date phrases (today/tomorrow/
-    /// weekday with this|next|last/ N days/ISO dates).
+    /// //description (rest of string), a future YYYY-MM-DD deadline,
+    /// `every …` recurrence. Other date prose stays title text; use --deadline.
     title: String,
     /// Priority override (low|normal|high|urgent|critical or 1..=5).
     /// If omitted, uses quick-add priority or "normal".
