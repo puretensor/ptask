@@ -159,7 +159,7 @@ pub fn create_with_extensions(
     let now = iso_now();
 
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
     // Mint PT-N first so the row insert is a single statement.
     let n: i64 = tx.query_row(
@@ -644,7 +644,7 @@ pub enum DoneOutcome {
 /// commits in the same transaction as the status flip, attributed to `ctx`.
 pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let now = iso_now();
 
     // Dependency gate: a task with open `depends_on` prerequisites cannot
@@ -915,7 +915,7 @@ pub fn update_priority(db: &Db, task_uuid: &str, priority: i64, ctx: &EventCtx) 
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE tasks SET priority=?1, updated_at=?2 WHERE id=?3",
         params![priority, now, task_uuid],
@@ -960,7 +960,7 @@ pub fn update_deadline(
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
     let has_recurrence_table = tx
         .query_row(
@@ -1027,7 +1027,7 @@ pub fn update_deadline(
 /// learn about the removal. Use with care.
 pub fn delete_task(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     delete_task_in_conn(&tx, task_uuid, ctx)?;
     tx.commit()?;
     Ok(())
@@ -1059,7 +1059,7 @@ fn delete_task_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCt
 /// neglect score reads as a reopen signal.
 pub fn reopen(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     reopen_in_conn(&tx, task_uuid, ctx)?;
     tx.commit()?;
     Ok(())
@@ -1108,7 +1108,7 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
 pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let status: Option<String> = tx
         .query_row("SELECT status FROM tasks WHERE id=?1", [task_uuid], |r| {
             r.get(0)
@@ -1230,7 +1230,7 @@ pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
 pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE tasks SET status_v2='in_progress', status='pending',
                           snoozed_until=NULL, updated_at=?1
@@ -1264,7 +1264,7 @@ pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
 pub fn claim(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE tasks SET status_v2='in_progress', status='pending', updated_at=?1
          WHERE id=?2 AND status_v2 IN ('triage','backlog','todo')",
@@ -1349,7 +1349,7 @@ pub fn set_kind(
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = match deliverable {
         Some(d) => tx.execute(
             "UPDATE tasks SET kind=?1, deliverable=?2, updated_at=?3 WHERE id=?4",
@@ -1391,7 +1391,7 @@ pub fn set_kind(
 pub fn promote(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current: Option<(String, String)> = tx
         .query_row(
             "SELECT kind, status_v2 FROM tasks WHERE id=?1",
@@ -1446,7 +1446,7 @@ pub fn snooze(db: &Db, task_uuid: &str, until_iso: &str, ctx: &EventCtx) -> Resu
     parse_iso_zoned(until_iso)?;
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE tasks SET status_v2='snoozed', status='delayed',
                           snoozed_until=?1, updated_at=?2
@@ -1501,7 +1501,7 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
     let mut woken = 0usize;
     for uuid in &expired {
         let mut conn = db.get()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let changed = tx.execute(
             "UPDATE tasks SET status_v2='todo', status='pending',
                               snoozed_until=NULL, updated_at=?1
@@ -1588,7 +1588,7 @@ pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -
 /// Remove a `depends_on` edge. Errors if the edge doesn't exist.
 pub fn remove_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let n = tx.execute(
         "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='depends_on'",
         params![from_uuid, to_uuid],
@@ -1772,7 +1772,7 @@ pub fn update_text(
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let exists = tx
         .query_row("SELECT 1 FROM tasks WHERE id=?1", [task_uuid], |_| Ok(()))
         .optional()?
@@ -1841,7 +1841,7 @@ pub fn modify_labels(
     }
     let now = iso_now();
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let exists = tx
         .query_row("SELECT 1 FROM tasks WHERE id=?1", [task_uuid], |_| Ok(()))
         .optional()?
@@ -2770,6 +2770,30 @@ mod tests {
             })
             .unwrap();
         }
+    }
+
+    #[test]
+    fn mark_done_waits_out_a_concurrent_writer_instead_of_failing() {
+        // A deferred transaction that reads first cannot wait for the write
+        // lock: SQLite skips the busy handler on a read->write upgrade, so
+        // `pt done` failed with "database is locked" whenever the server's
+        // rescore held the lock. IMMEDIATE waits at BEGIN (busy_timeout).
+        let (_dir, db) = fresh_db();
+        let t = create(&db, NewTask::minimal("x"), &EventCtx::test()).unwrap();
+        let mut writer = rusqlite::Connection::open(db.path()).unwrap();
+        let tx = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "UPDATE tasks SET updated_at = updated_at WHERE id = ?1",
+            [&t.id],
+        )
+        .unwrap();
+        let (db2, t2) = (db.clone(), t.clone());
+        let done = std::thread::spawn(move || mark_done(&db2, &t2, &EventCtx::test()));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        tx.commit().unwrap();
+        assert!(done.join().unwrap().is_ok());
     }
 
     #[test]
