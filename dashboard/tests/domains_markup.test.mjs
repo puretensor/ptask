@@ -29,7 +29,6 @@ test("keyboard order and label regex are derived, not literal", () => {
 
 test("the brand title is not baked into the shell as the only source", () => {
   assert.match(shell, /id="brandTitle"/, "header brand carries an id so config can rename it");
-  assert.match(shell, /id="authTitle"/, "login title keeps its id");
 });
 
 test("the sidecar exposes /api/config publicly and reads the three env knobs", () => {

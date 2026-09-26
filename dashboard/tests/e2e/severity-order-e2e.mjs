@@ -5,16 +5,14 @@
  * sidecar and a real Chromium — a passing unit test on the SQL string is not
  * evidence that the panel renders in that order.
  *
- * Driven by severity-order.sh, which boots the sidecar and passes BASE +
- * PTASK_DASH_PASS.
+ * Driven by severity-order.sh, which boots the sidecar and passes BASE.
  */
 import { chromium } from '@playwright/test';
 
 const BASE = process.env.BASE;
-const PASS = process.env.PTASK_DASH_PASS;
 const SHOT = process.env.SHOT || '/tmp/ptask-severity-order.png';
-if (!BASE || !PASS) {
-  console.error('severity-order-e2e: BASE and PTASK_DASH_PASS are required');
+if (!BASE) {
+  console.error('severity-order-e2e: BASE is required');
   process.exit(2);
 }
 
@@ -23,9 +21,6 @@ const fail = (msg) => { console.error('FAIL ' + msg); process.exitCode = 1; };
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 
-// The login gate probes /api/auth/check unauthenticated and aborts in-flight
-// requests when it swaps the shell in, so only errors raised once the board is
-// up are this test's business.
 let boardUp = false;
 const consoleErrors = [];
 page.on('console', (m) => { if (boardUp && m.type() === 'error') consoleErrors.push(m.text()); });
@@ -37,8 +32,6 @@ page.on('requestfailed', (r) => {
 });
 
 await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-await page.fill('#authPassword', PASS);
-await page.click('#authForm button[type="submit"]');
 await page.waitForSelector('#crit .ccard', { timeout: 15000 });
 boardUp = true;
 

@@ -10,7 +10,6 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 dashboard="$(cd "$here/../.." && pwd)"
 modules="${1:-$HOME/ptve/ptve-ui/node_modules}"
 port="${PORT:-9613}"
-password='verify-domains-local'
 workdir="$(mktemp -d)"
 trap 'kill "${server_pid:-}" 2>/dev/null || true; rm -rf "$workdir"' EXIT
 
@@ -27,9 +26,6 @@ PTASK_ACTOR=e2e "$PT" edit PT-1 --label domain:bretalon >/dev/null
 PTASK_ACTOR=e2e "$PT" add "Renew the Windsor lease" >/dev/null   # untagged -> default domain
 
 PTASK_DASH_BIND="127.0.0.1:$port" \
-PTASK_DASH_PASS="$password" \
-PTASK_DASH_SECURE_COOKIE=0 \
-PTASK_DASH_SESSION_STORE="$workdir/sessions.json" \
 PTASK_DASH_TITLE="ALAN" \
 PTASK_DASH_DOMAINS="puretensor:PureTensor:PT,bretalon:Bretalon:BRET,eaglestone:Eaglestone:EAGLE,diloretio:Diloretio:DILO,personal:Personal:ME" \
 PTASK_DASH_DEFAULT_DOMAIN="personal" \
@@ -42,6 +38,6 @@ for _ in $(seq 1 40); do
 done
 curl -sf "http://localhost:$port/healthz" >/dev/null || { cat "$workdir/server.log"; exit 1; }
 
-BASE="http://localhost:$port" PTASK_DASH_PASS="$password" \
+BASE="http://localhost:$port" \
 SHOT="${SHOT:-$workdir/domains.png}" \
   node "$here/domains-e2e.mjs"

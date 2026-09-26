@@ -9,7 +9,6 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 dashboard="$(cd "$here/../.." && pwd)"
 modules="${1:-$HOME/ptve/ptve-ui/node_modules}"
 port="${PORT:-9612}"
-password='verify-severity-order-local'
 workdir="$(mktemp -d)"
 trap 'kill "${server_pid:-}" 2>/dev/null || true; rm -rf "$workdir"' EXIT
 
@@ -26,9 +25,6 @@ cp "$src" "$workdir/tasks.db"
 
 PTASK_DB="$workdir/tasks.db" \
 PTASK_DASH_BIND="127.0.0.1:$port" \
-PTASK_DASH_PASS="$password" \
-PTASK_DASH_SECURE_COOKIE=0 \
-PTASK_DASH_SESSION_STORE="$workdir/sessions.json" \
   python3 "$dashboard/server.py" >"$workdir/server.log" 2>&1 &
 server_pid=$!
 
@@ -38,6 +34,6 @@ for _ in $(seq 1 40); do
 done
 curl -sf "http://localhost:$port/healthz" >/dev/null || { cat "$workdir/server.log"; exit 1; }
 
-BASE="http://localhost:$port" PTASK_DASH_PASS="$password" \
+BASE="http://localhost:$port" \
 SHOT="${SHOT:-$workdir/severity-order.png}" \
   node "$here/severity-order-e2e.mjs"
