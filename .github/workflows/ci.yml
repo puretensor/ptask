@@ -100,8 +100,8 @@ jobs:
           python-version: '3.x'
       - run: python -m unittest discover -s tests -v
         working-directory: dashboard
-      - name: face-unlock contract tests
-        run: node --test tests/face_unlock.test.mjs tests/face_unlock_markup.test.mjs
+      - name: open-access + markup contract tests
+        run: node --test tests/domains_markup.test.mjs tests/open_access.test.mjs
         working-directory: dashboard
 
   security:
