@@ -5,9 +5,8 @@
 import { chromium } from '@playwright/test';
 
 const BASE = process.env.BASE;
-const PASS = process.env.PTASK_DASH_PASS;
 const SHOT = process.env.SHOT || '/tmp/ptask-domains.png';
-if (!BASE || !PASS) { console.error('domains-e2e: BASE and PTASK_DASH_PASS are required'); process.exit(2); }
+if (!BASE) { console.error('domains-e2e: BASE is required'); process.exit(2); }
 
 const fail = (msg) => { console.error('FAIL ' + msg); process.exitCode = 1; };
 const eq = (got, want, what) => { if (JSON.stringify(got) !== JSON.stringify(want)) fail(`${what}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`); };
@@ -20,11 +19,8 @@ page.on('console', (m) => { if (boardUp && m.type() === 'error') consoleErrors.p
 page.on('pageerror', (e) => { if (boardUp) consoleErrors.push('pageerror: ' + e.message); });
 
 await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-// brand follows config even on the login shell
-await page.waitForFunction(() => document.querySelector('#authTitle')?.textContent.trim() === 'ALAN', null, { timeout: 10000 })
-  .catch(() => fail('login title did not become ALAN'));
-await page.fill('#authPassword', PASS);
-await page.click('#authForm button[type="submit"]');
+await page.waitForFunction(() => document.querySelector('#brandTitle')?.textContent.trim() === 'ALAN', null, { timeout: 10000 })
+  .catch(() => fail('header brand did not become ALAN'));
 await page.waitForSelector('#crit .ccard', { timeout: 15000 });
 boardUp = true;
 

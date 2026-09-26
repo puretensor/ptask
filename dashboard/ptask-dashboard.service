@@ -1,13 +1,14 @@
 [Unit]
-Description=PTASK Triage Cockpit — session-auth dashboard sidecar over pt task DB
+Description=PTASK Triage Cockpit — tailnet-gated dashboard sidecar over pt task DB
 Documentation=https://github.com/puretensor/ptask/tree/main/dashboard
 After=network-online.target ptask-serve.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-# PTASK_DASH_PASS lives here (chmod 600), never in git. PTASK_DB defaults to
-# ~/puretensor-tasks/tasks.db (read-only). Writes shell out to ~/.cargo/bin/pt.
+# Optional per-instance knobs (title, domains, bind, PTASK_ACTOR) live here.
+# Browser login env vars (PTASK_DASH_PASS/USER/SESSION_STORE/SECURE_COOKIE) are unused.
+# PTASK_DB defaults to ~/puretensor-tasks/tasks.db (read-only). Writes shell out to ~/.cargo/bin/pt.
 EnvironmentFile=%h/puretensor-tasks/.dashboard.env
 WorkingDirectory=%h/worktrees/ptask-production/dashboard
 ExecStart=/usr/bin/python3 %h/worktrees/ptask-production/dashboard/server.py

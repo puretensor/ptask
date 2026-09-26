@@ -4,7 +4,7 @@ A visually compelling, on-brand, live **triage cockpit** for PureTensor Task
 Intelligence (`pt`). Surfaces pending tasks and critical issues ranked by the
 server's composite `priority_score`, with four runtime-switchable themes.
 
-**Live:** https://ptask.puretensor.ai (auth-gated)
+**Live:** https://ptask.tail07f9ef.ts.net (tailnet-gated; no login)
 
 ## What it is
 
@@ -107,8 +107,8 @@ counts at 1.3:1; Mission statusbar/ages at 2.6-2.9:1):
 Designed for Safari "Add to Home Screen" on an iPhone 17 Pro Max (440×956 CSS
 px, safe areas 59 top / 34 bottom): `viewport-fit=cover` + `black-translucent`
 status bar, safe-area padding on the header, tab bar, drawer and composer, a
-180px `apple-touch-icon.png` and PNG manifest icons (served **without** auth —
-iOS fetches them outside the page session; everything else stays gated).
+180px `apple-touch-icon.png` and PNG manifest icons. The tailnet is the only
+access gate; the sidecar does not challenge the browser.
 
 - Two-row header: brand · crit/urg/overdue counts · **+** ; full-width
   ALL/ENG/MGMT switch. The theme switch moves into the **More** pane.
@@ -131,7 +131,7 @@ transaction.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/healthz` | no auth (tunnel/systemd probe) |
+| GET | `/healthz` | systemd/tunnel probe |
 | GET | `/api/config` | public dashboard title, domains, default domain, and version |
 | GET | `/api/stats` | counts, throughput, overdue, due≤7d |
 | GET | `/api/tasks?status=&limit=` | tasks + scoring fields + `project` + `labels` (v0.12) |
@@ -152,7 +152,7 @@ transaction.
 ```bash
 # against a copy of the DB (never the live one for dev)
 PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
-# open http://127.0.0.1:9519/  (auth disabled only on loopback when PTASK_DASH_PASS is unset)
+# open http://127.0.0.1:9519/  (no login; production is reached only on the tailnet)
 ```
 
 ## Config (env)
@@ -162,15 +162,11 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_DB` | `~/puretensor-tasks/tasks.db` | SQLite path (opened read-only) |
 | `PTASK_BIN` | `~/.cargo/bin/pt` | pt binary for write delegation |
 | `PTASK_DASH_BIND` | `127.0.0.1:9510` | bind address (loopback; production sets this to the tailnet) |
-| `PTASK_DASH_TITLE` | `PTASK` | header, login, browser, and home-screen title |
+| `PTASK_DASH_TITLE` | `PTASK` | header, browser, and home-screen title |
 | `PTASK_DASH_DOMAINS` | _(unset)_ | comma-separated `key[:Label[:ABBR]]` list; blank keeps legacy ENG/MGMT mode |
 | `PTASK_DASH_DEFAULT_DOMAIN` | first configured key | domain assigned to tasks without an explicit configured `domain:` label |
-| `PTASK_DASH_USER` | `ops` | compatibility-only Basic-auth user for non-browser clients |
-| `PTASK_DASH_PASS` | _(unset)_ | dashboard password; **required for non-loopback binds** |
-| `PTASK_DASH_SESSION_STORE` | `~/.local/state/ptask-dashboard/sessions.json` | restart-persistent SHA-256 session-token store |
-| `PTASK_DASH_SECURE_COOKIE` | `1` | add `Secure` to the HttpOnly, SameSite=Strict browser cookie |
 | `PTASK_DASH_WWW` | `./www` | static dir |
-| `PTASK_DASH_TRUSTED_PROXIES` | _(unset)_ | comma-separated IPs/CIDRs (the cloudflared connector) whose `Cf-Connecting-Ip` keys the login throttle; unset keys on the TCP peer |
+| `PTASK_ACTOR` | `dashboard` | actor stamped on dashboard-originated `pt` writes |
 | `PTASK_STT_URL` | `http://127.0.0.1:9000/transcribe` | voice STT endpoint (local Whisper); accepts `-F audio=@` |
 | `PTASK_VOICE_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model for voice→task extraction |
 | `PTASK_VOICE_REGION` | `$AWS_DEFAULT_REGION` or `us-east-1` | Bedrock region (keyless, IAM via `~/.aws`) |
@@ -181,12 +177,12 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 ## Browser verification
 
 Two by-hand end-to-end checks (not in CI — each needs a browser download).
-Both boot their own sidecar on a spare loopback port with a throwaway password,
-so neither touches the live dashboard or its session store.
+Both boot their own sidecar on a spare loopback port, so neither touches the
+live dashboard.
 
 ```bash
-dashboard/tests/e2e/run.sh            # Face ID unlock against a virtual authenticator
 dashboard/tests/e2e/severity-order.sh # the board renders severity-ordered
+dashboard/tests/e2e/domains.sh        # configured-domain tenant switch
 ```
 
 `severity-order.sh` serves a copy of the task DB and asserts, in a real
@@ -207,9 +203,8 @@ git -C ~/ptask worktree add -b deploy/ptask-dashboard \
 # Later releases: fast-forward only after the canonical main commit is merged.
 git -C ~/worktrees/ptask-production pull --ff-only origin main
 
-# secrets (not in git)
-echo 'PTASK_DASH_PASS=<pass>' > ~/puretensor-tasks/.dashboard.env
-chmod 600 ~/puretensor-tasks/.dashboard.env
+# optional per-instance knobs (title, domains, bind, PTASK_ACTOR) — not a login secret
+# ~/puretensor-tasks/.dashboard.env is still read if present; PTASK_DASH_PASS is ignored.
 
 # user service
 cp ~/worktrees/ptask-production/dashboard/ptask-dashboard.service \
@@ -220,23 +215,16 @@ loginctl enable-linger "$USER"          # survive logout
 curl -s localhost:9510/healthz          # -> OK
 ```
 
-Public hostname `ptask.puretensor.ai` is routed via the existing k8s cloudflared
-tunnel (token mode) → the dashboard's tailnet bind (`PTASK_DASH_BIND`), managed
-in the Cloudflare dashboard/API (DNS CNAME `ptask` → `<tunnel-id>.cfargotunnel.com`).
-
-The connector pods reach the dashboard SNATed through their k8s node, so the
-peer address is a node's tailnet IP, not a pod IP. Set
-`PTASK_DASH_TRUSTED_PROXIES` to exactly the `/32`s of the nodes the connector
-can schedule on (measure with `ss -tn '( sport = :9510 )'` while requesting the
-public hostname). Never trust the whole tailnet range: any tailnet device could
-then forge `Cf-Connecting-Ip` and get a fresh lockout counter per guess.
+Published as a Tailscale Service at `https://ptask.tail07f9ef.ts.net`. Serve
+terminates TLS and reverse-proxies plain HTTP to this sidecar. Network reach
+on the tailnet is the access decision.
 
 ## Rollback
 
 ```bash
 systemctl --user disable --now ptask-dashboard
 rm ~/.config/systemd/user/ptask-dashboard.service
-# + remove the Cloudflare DNS record + tunnel hostname rule
+# the Tailscale Service is the remaining publish path
 ```
 
 The canonical `pt serve` and `tasks.db` are never modified — nothing to revert there.
@@ -251,6 +239,14 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 - Dependency DAG is deferred to v2 (`depends_on` is empty across all tasks).
 
 ## Version
+
+- **v0.21.0** — Tailnet is the only gate. Removed the login shell, session store,
+  `/api/auth/*`, HTTP Basic, failed-login throttle, Face ID unlock (`face-unlock.js`
+  and its tests), and the non-loopback password requirement. `/login` and `/logout`
+  redirect to `/`. CSRF Origin checks remain for state-changing POSTs and accept
+  `https://ptask.tail07f9ef.ts.net`. `PTASK_ACTOR` is unchanged. Leftover
+  `PTASK_DASH_PASS` / `PTASK_DASH_USER` / `PTASK_DASH_SESSION_STORE` /
+  `PTASK_DASH_SECURE_COOKIE` env vars are ignored.
 
 - **v0.20.1** — The login throttle keyed on the TCP peer, which behind the cloudflared
   tunnel is the connector for every internet client: five bad guesses from anyone locked

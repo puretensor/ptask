@@ -7,12 +7,10 @@ to the `pt` binary so the canonical mutation path is never bypassed.
 
 Endpoints
 ---------
-  GET  /healthz                 -> "OK"               (no auth; tunnel/systemd probe)
-  GET  /                        -> www/index.html     (public login shell)
-  GET  /api/config              -> public title/domain configuration
-  GET  /api/auth/check          -> current browser-session status
-  POST /api/auth/login          -> password exchange for an opaque session cookie
-  POST /api/auth/logout         -> revoke the current browser session
+  GET  /healthz                 -> "OK"
+  GET  /                        -> www/index.html
+  GET  /login, /logout          -> 302 to /  (old bookmarks)
+  GET  /api/config              -> title/domain configuration
   GET  /api/stats               -> counts, throughput, neglect buckets
   GET  /api/tasks?status=&limit&order -> task list + scoring fields (order: score|created)
   GET  /api/critical?limit=     -> top pending by priority_score
@@ -34,6 +32,11 @@ Endpoints
   POST /api/voice/task (raw audio body) -> the same, and then creates the task:
                                 -> {ok, pt_id, id, transcript, fields, stt, llm}
 
+  The tailnet is the access gate. This process never challenges the browser
+  (no login page, session cookie, HTTP Basic, or 401/403 on UI paths).
+  State-changing POSTs still require a same-origin Origin header when one is
+  sent, so a foreign site cannot mutate tasks from a tailnet browser.
+
 Config (env)
 ------------
   PTASK_DB         SQLite path (default ~/puretensor-tasks/tasks.db)
@@ -42,37 +45,24 @@ Config (env)
   PTASK_DASH_TITLE dashboard brand (default "PTASK")
   PTASK_DASH_DOMAINS comma-separated key[:Label[:ABBR]] domain list
   PTASK_DASH_DEFAULT_DOMAIN configured key used for unlabelled tasks
-  PTASK_DASH_USER  compatibility-only basic-auth user (default "ops")
-  PTASK_DASH_PASS  dashboard password (disabled if unset on localhost,
-                   required otherwise). Set in the systemd EnvironmentFile.
-  PTASK_DASH_SESSION_STORE  hashed session file (default
-                   ~/.local/state/ptask-dashboard/sessions.json)
-  PTASK_DASH_SECURE_COOKIE  add Secure to the browser cookie (default true)
   PTASK_DASH_WWW   static dir (default ./www next to this file)
-  PTASK_DASH_TRUSTED_PROXIES  comma-separated IPs/CIDRs whose
-                   Cf-Connecting-Ip header names the real client for the
-                   login throttle (the cloudflared connector). Default: none.
+  PTASK_ACTOR      actor stamped on dashboard-originated pt writes
+                   (default "dashboard")
 """
 from __future__ import annotations
 
-import base64
-import hmac
-import ipaddress
 import json
 import os
 import re
 import sqlite3
 import subprocess
 import tempfile
-import threading
 import time
 import urllib.request
 from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-
-from session_auth import LoginThrottle, SessionStore, parse_cookie, session_cookie
 
 
 _DOMAIN_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,23}$")
@@ -126,65 +116,13 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # Loopback by default: the API is pinned to the tailnet address on purpose and
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
-AUTH_USER = os.environ.get("PTASK_DASH_USER", "ops")
-AUTH_PASS = os.environ.get("PTASK_DASH_PASS", "")
-SESSION_STORE_PATH = Path(os.environ.get(
-    "PTASK_DASH_SESSION_STORE",
-    str(HOME / ".local" / "state" / "ptask-dashboard" / "sessions.json"),
-))
-COOKIE_SECURE = os.environ.get("PTASK_DASH_SECURE_COOKIE", "1").strip().lower() not in {
-    "0", "false", "no", "off",
-}
-COOKIE_NAME = "ptask_session"
-LOGIN_ATTEMPT_DELAY = 0.250
-SESSIONS = SessionStore(SESSION_STORE_PATH)
-LOGIN_THROTTLE = LoginThrottle()
 
-
-def parse_trusted_proxies(raw: str) -> tuple:
-    """Parse PTASK_DASH_TRUSTED_PROXIES into ip_network objects."""
-    nets = []
-    for part in raw.split(","):
-        part = part.strip()
-        if part:
-            nets.append(ipaddress.ip_network(part, strict=False))
-    return tuple(nets)
-
-
-TRUSTED_PROXIES = parse_trusted_proxies(os.environ.get("PTASK_DASH_TRUSTED_PROXIES", ""))
-
-
-def throttle_key(peer: str, headers, trusted=None) -> str:
-    """The client the login throttle counts against.
-
-    Behind the cloudflared tunnel every internet client arrives from the
-    connector's address, so keying on the TCP peer let five bad guesses from
-    anyone lock the operator out. Cf-Connecting-Ip is believed only from a
-    configured proxy; from anyone else it is attacker-chosen and would mint
-    a fresh key per guess.
-    """
-    trusted = TRUSTED_PROXIES if trusted is None else trusted
-    try:
-        addr = ipaddress.ip_address(peer)
-    except ValueError:
-        return peer
-    if any(addr in net for net in trusted):
-        forwarded = (headers.get("Cf-Connecting-Ip") or "").strip()
-        if forwarded:
-            return forwarded
-    return peer
-
-VERSION = "0.20.1"
+VERSION = "0.21.0"
 DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
 DASH_DOMAINS = parse_domains(os.environ.get("PTASK_DASH_DOMAINS"))
 DASH_DEFAULT_DOMAIN = resolve_default_domain(
     DASH_DOMAINS, os.environ.get("PTASK_DASH_DEFAULT_DOMAIN"),
 )
-# The login shell at "/" is public, so anything it loads before sign-in must be too: the two
-# Face ID modules are part of the gate itself, not data behind it.
-PUBLIC_ASSETS = frozenset({"/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",
-                           "/manifest.webmanifest", "/face-unlock.js", "/face-unlock-boot.js"})
-
 # /api/tasks sort orders. Whitelisted keys only — the raw value is spliced into
 # SQL, so nothing user-supplied may pass through unmapped.
 # Mirrored in the Rust dashboard route (TASK_ORDERS).
@@ -268,10 +206,6 @@ def parse_bind(bind: str) -> tuple[str, int]:
     if not (1 <= port <= 65535):
         raise ValueError("port out of range")
     return host, port
-
-
-def is_loopback_host(host: str) -> bool:
-    return host in {"127.0.0.1", "localhost", "::1"}
 
 
 def parse_limit(raw: str | None, default: int, maximum: int) -> int:
@@ -1047,42 +981,19 @@ class Handler(BaseHTTPRequestHandler):
             "frame-ancestors 'none'",
         )
 
-    def _authed(self) -> bool:
-        if not AUTH_PASS:  # auth disabled (local dev) when no pass configured
-            return True
-        if SESSIONS.validate(self._session_token()):
-            return True
-        # Compatibility for non-browser consumers during the cookie migration.
-        # The server no longer emits a Basic challenge, so human browsers use
-        # the login page and opaque session cookie instead.
-        hdr = self.headers.get("Authorization", "")
-        if hdr.startswith("Basic "):
-            # Same lockout as the login form: this path was guessable at request speed.
-            client = throttle_key(self.client_address[0], self.headers)
-            if LOGIN_THROTTLE.locked_for(client):
-                return False
-            try:
-                user, _, pw = base64.b64decode(hdr[6:], validate=True).decode().partition(":")
-                ok = (hmac.compare_digest(user.encode(), AUTH_USER.encode())
-                      and hmac.compare_digest(pw.encode(), AUTH_PASS.encode()))
-            except Exception:  # noqa: BLE001
-                ok = False
-            if ok:
-                LOGIN_THROTTLE.success(client)
-            else:
-                LOGIN_THROTTLE.failure(client)
-            return ok
-        return False
-
-    def _session_token(self) -> str | None:
-        return parse_cookie(self.headers.get("Cookie", ""), COOKIE_NAME)
-
-    def _need_auth(self):
-        self._json({"error": "authentication required"}, 401)
+    def _redirect(self, location="/", code=302):
+        self.send_response(code)
+        self._security_headers()
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def _origin_ok(self) -> bool:
-        # Session cookies and cached Basic credentials can both ride a browser
-        # request; non-browser clients commonly omit Origin and remain compatible.
+        # CSRF for state-changing requests: a browser on the tailnet sending
+        # Origin: https://ptask.tail07f9ef.ts.net with Host matching that
+        # hostname is allowed. Clients that omit Origin (curl, pt) remain
+        # compatible. Cross-site Origins are rejected.
         origin = self.headers.get("Origin")
         if origin is None:
             return True
@@ -1225,12 +1136,10 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         path, qs = u.path, parse_qs(u.query)
 
+        if path in ("/login", "/logout"):
+            return self._redirect("/")
         if path == "/healthz":
             return self._text("OK")
-        if path == "/api/auth/check":
-            if self._authed():
-                return self._json({"authenticated": True})
-            return self._json({"authenticated": False}, 401)
         if path == "/api/config":
             return self._json({
                 "title": DASH_TITLE,
@@ -1238,13 +1147,6 @@ class Handler(BaseHTTPRequestHandler):
                 "default_domain": DASH_DEFAULT_DOMAIN,
                 "version": VERSION,
             })
-        # home-screen app assets: iOS fetches the touch icon / manifest outside
-        # the page's credentialed session. The root is also public because it
-        # contains the login shell; every data endpoint remains gated.
-        if path == "/" or path in PUBLIC_ASSETS:
-            return self._serve_static(path)
-        if not self._authed():
-            return self._need_auth()
 
         try:
             if path == "/api/stats":
@@ -1295,53 +1197,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
-        if u.path == "/api/auth/login":
-            if not self._origin_ok():
-                return self._json({"error": "cross-origin request rejected"}, 403)
-            body = self._read_json_body()
-            if body is None:
-                return
-            client = throttle_key(self.client_address[0], self.headers)
-            time.sleep(LOGIN_ATTEMPT_DELAY)
-            remaining = LOGIN_THROTTLE.locked_for(client)
-            if remaining:
-                return self._json(
-                    {"error": "too many attempts; try again later"},
-                    429,
-                    {"Retry-After": str(remaining)},
-                )
-            if not AUTH_PASS:
-                return self._json({"ok": True, "auth_required": False})
-            password = body.get("password") if isinstance(body, dict) else None
-            if not isinstance(password, str) or not hmac.compare_digest(
-                    password.encode("utf-8"), AUTH_PASS.encode("utf-8")):
-                remaining = LOGIN_THROTTLE.failure(client)
-                if remaining:
-                    return self._json(
-                        {"error": "too many attempts; try again later"},
-                        429,
-                        {"Retry-After": str(remaining)},
-                    )
-                return self._json({"error": "invalid password"}, 401)
-            LOGIN_THROTTLE.success(client)
-            token = SESSIONS.create()
-            return self._json(
-                {"ok": True},
-                headers={"Set-Cookie": session_cookie(
-                    COOKIE_NAME, token, 24 * 60 * 60, COOKIE_SECURE,
-                )},
-            )
-
-        if not self._authed():
-            return self._need_auth()
+        if u.path in ("/login", "/logout"):
+            return self._redirect("/")
         if not self._origin_ok():
             return self._json({"error": "cross-origin request rejected"}, 403)
-        if u.path == "/api/auth/logout":
-            SESSIONS.remove(self._session_token())
-            return self._json(
-                {"ok": True},
-                headers={"Set-Cookie": session_cookie(COOKIE_NAME, "", 0, COOKIE_SECURE)},
-            )
         if u.path == "/api/voice":          # binary audio body, larger cap — own reader
             return self._handle_voice()
         if u.path == "/api/voice/task":     # same, and creates the task outright
@@ -1447,15 +1306,10 @@ def main():
         host, port = parse_bind(BIND)
     except ValueError as e:
         raise SystemExit(f"Invalid PTASK_DASH_BIND={BIND!r}: {e}") from e
-    if not AUTH_PASS and not is_loopback_host(host):
-        raise SystemExit(
-            "Refusing to serve without PTASK_DASH_PASS on non-loopback bind "
-            f"{host}:{port}. Set PTASK_DASH_PASS or bind to 127.0.0.1 for local dev."
-        )
     if not Path(DB_PATH).exists():
         raise SystemExit(f"DB not found: {DB_PATH}")
     print(f"ptask-dashboard v{VERSION}  db={DB_PATH}")
-    print(f"  bind http://{host}:{port}  www={WWW_DIR}  auth={'on' if AUTH_PASS else 'OFF(dev)'}")
+    print(f"  bind http://{host}:{port}  www={WWW_DIR}")
     srv = ThreadingHTTPServer((host, port), Handler)
     try:
         srv.serve_forever()

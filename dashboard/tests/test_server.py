@@ -1,4 +1,3 @@
-import base64
 import http.client
 import io
 import json
@@ -22,11 +21,6 @@ class BindSafetyTests(unittest.TestCase):
     def test_parse_bind_rejects_invalid_port(self):
         with self.assertRaises(ValueError):
             server.parse_bind("127.0.0.1:99999")
-
-    def test_loopback_detection_is_strict(self):
-        self.assertTrue(server.is_loopback_host("127.0.0.1"))
-        self.assertTrue(server.is_loopback_host("localhost"))
-        self.assertFalse(server.is_loopback_host("0.0.0.0"))
 
 
 def _readme_config_defaults():
@@ -86,28 +80,6 @@ class ReadmeDefaultsTests(unittest.TestCase):
         )
 
 
-class ThrottleKeyTests(unittest.TestCase):
-    """Behind cloudflared every internet client shares the connector's
-    address; only a configured proxy's Cf-Connecting-Ip is believed."""
-
-    TRUSTED = server.parse_trusted_proxies("10.42.0.0/16, 192.168.4.10")
-
-    def test_untrusted_peer_keys_on_itself_even_with_the_header(self):
-        headers = {"Cf-Connecting-Ip": "203.0.113.9"}
-        self.assertEqual(server.throttle_key("100.64.1.2", headers, self.TRUSTED), "100.64.1.2")
-
-    def test_trusted_proxy_keys_on_the_forwarded_client(self):
-        headers = {"Cf-Connecting-Ip": "203.0.113.9"}
-        self.assertEqual(server.throttle_key("10.42.3.4", headers, self.TRUSTED), "203.0.113.9")
-        self.assertEqual(server.throttle_key("192.168.4.10", headers, self.TRUSTED), "203.0.113.9")
-
-    def test_trusted_proxy_without_header_falls_back_to_peer(self):
-        self.assertEqual(server.throttle_key("10.42.3.4", {}, self.TRUSTED), "10.42.3.4")
-
-    def test_default_trusts_nobody(self):
-        self.assertEqual(server.parse_trusted_proxies(""), ())
-
-
 class DeadlineTests(unittest.TestCase):
     def test_date_only_deadline_due_today_is_not_overdue(self):
         today = server._operator_today()
@@ -132,8 +104,8 @@ class JournalCursorTests(unittest.TestCase):
 
 
 class ReadJsonBodyTests(unittest.TestCase):
-    """Login reads the body before auth, so the length checks are the only
-    bound an unauthenticated client meets (PT-2121 finding 10)."""
+    """POST body length and shape checks run before any route work
+    (PT-2121 finding 10)."""
 
     @staticmethod
     def _handler(length, payload):
@@ -172,86 +144,162 @@ class ReadJsonBodyTests(unittest.TestCase):
         self.assertNotIn(getattr(server.Handler, "timeout", None), (None, 0))
 
 
-class AuthTests(unittest.TestCase):
-    def test_compare_digest_auth_helper_importable(self):
+def _empty_dashboard_db(path: Path) -> None:
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE tasks (%s)" % ", ".join(server.TASK_COLS))
+    con.execute("CREATE TABLE pt_extensions (task_uuid TEXT, pt_id TEXT)")
+    con.execute("CREATE TABLE task_labels (task_uuid TEXT, label TEXT)")
+    con.execute(
+        """
+        CREATE TABLE pt_event_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid TEXT NOT NULL UNIQUE,
+            task_uuid TEXT,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            ts TEXT NOT NULL,
+            actor TEXT
+        )
+        """
+    )
+    con.commit()
+    con.close()
+
+
+def _header_map(response) -> dict:
+    return {k.lower(): v for k, v in response.getheaders()}
+
+
+class OpenAccessTests(unittest.TestCase):
+    """The tailnet is the gate: UI paths return 200 with no credentials."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        db = Path(self.td.name) / "tasks.db"
+        _empty_dashboard_db(db)
+        fake = Path(self.td.name) / "pt"
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "if 'approval' in args and 'ls' in args:\n"
+            "    print('[]')\n"
+            "else:\n"
+            "    print(json.dumps({'ok': True, 'id': 'u-1', 'pt_id': 'PT-1'}))\n"
+        )
+        fake.chmod(0o755)
+        self.saved = (server.DB_PATH, server.PT_BIN)
+        server.DB_PATH = str(db)
+        server.PT_BIN = str(fake)
+        self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.thread.join(timeout=2)
+        self.httpd.server_close()
+        server.DB_PATH, server.PT_BIN = self.saved
+        self.td.cleanup()
+
+    def request(self, method, path, body=None, headers=None, timeout=5):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.httpd.server_port, timeout=timeout,
+        )
+        payload = json.dumps(body).encode() if body is not None else None
+        merged = dict(headers or {})
+        if payload is not None:
+            merged.setdefault("Content-Type", "application/json")
+        connection.request(method, path, body=payload, headers=merged)
+        response = connection.getresponse()
+        data = response.read()
+        result = response.status, _header_map(response), data
+        connection.close()
+        return result
+
+    def test_semver(self):
         self.assertRegex(server.VERSION, r"^\d+\.\d+\.\d+$")
         self.assertGreater(server.MAX_POST_BYTES, 400)
 
-    def test_browser_login_uses_opaque_revocable_session(self):
-        old = (
-            server.AUTH_PASS,
-            server.SESSIONS,
-            server.LOGIN_THROTTLE,
-            server.LOGIN_ATTEMPT_DELAY,
-            server.COOKIE_SECURE,
+    def test_ui_gets_and_stream_are_open_without_credentials(self):
+        os.environ["PTASK_DASH_PASS"] = "must-not-gate"
+        os.environ["PTASK_DASH_USER"] = "ops"
+        try:
+            for path in (
+                "/",
+                "/api/config",
+                "/api/stats",
+                "/api/tasks",
+                "/api/critical",
+                "/api/timeline",
+                "/api/heatmap",
+                "/api/approvals",
+                "/version",
+                "/apple-touch-icon.png",
+                "/icon-192.png",
+                "/icon-512.png",
+                "/manifest.webmanifest",
+                "/api/tasks/00000000-0000-0000-0000-000000000001/events",
+            ):
+                status, headers, body = self.request("GET", path)
+                self.assertEqual(status, 200, path)
+                self.assertNotIn("www-authenticate", headers)
+                self.assertGreater(len(body), 0, path)
+        finally:
+            os.environ.pop("PTASK_DASH_PASS", None)
+            os.environ.pop("PTASK_DASH_USER", None)
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.httpd.server_port, timeout=2,
         )
-        with tempfile.TemporaryDirectory() as td:
-            server.AUTH_PASS = "shared-dashboard-password"
-            server.SESSIONS = server.SessionStore(Path(td) / "sessions.json")
-            server.LOGIN_THROTTLE = server.LoginThrottle()
-            server.LOGIN_ATTEMPT_DELAY = 0
-            server.COOKIE_SECURE = False
-            httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
-            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-            thread.start()
-            host = f"127.0.0.1:{httpd.server_port}"
+        try:
+            connection.request("GET", "/api/stream")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertNotIn("www-authenticate", _header_map(response))
+            self.assertIn("text/event-stream", response.getheader("Content-Type"))
+            chunk = response.read(14)
+            self.assertEqual(chunk, b"retry: 15000\n\n")
+        finally:
+            connection.close()
 
-            def request(method, path, body=None, headers=None):
-                connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
-                payload = json.dumps(body).encode() if body is not None else None
-                merged = dict(headers or {})
-                if payload is not None:
-                    merged["Content-Type"] = "application/json"
-                connection.request(method, path, body=payload, headers=merged)
-                response = connection.getresponse()
-                data = response.read()
-                result = response.status, dict(response.getheaders()), data
-                connection.close()
-                return result
+    def test_login_and_logout_redirect_home(self):
+        for path in ("/login", "/logout"):
+            status, headers, _ = self.request("GET", path)
+            self.assertEqual(status, 302, path)
+            self.assertEqual(headers.get("location"), "/")
+            self.assertNotIn("www-authenticate", headers)
+            status, headers, _ = self.request("POST", path, {})
+            self.assertEqual(status, 302, path)
+            self.assertEqual(headers.get("location"), "/")
 
-            try:
-                status, headers, _ = request("GET", "/")
-                self.assertEqual(status, 200)
-                status, headers, _ = request("GET", "/api/stats")
-                self.assertEqual(status, 401)
-                self.assertNotIn("WWW-Authenticate", headers)
+    def test_index_has_no_login_shell(self):
+        html = (Path(server.__file__).parent / "www" / "index.html").read_text()
+        self.assertNotIn('id="authGate"', html)
+        self.assertNotIn('id="authPassword"', html)
+        self.assertNotIn('id="authForm"', html)
+        self.assertNotIn("face-unlock", html)
+        self.assertNotIn("/api/auth/", html)
+        self.assertNotIn('id="logout-btn"', html)
+        self.assertNotIn('type="password"', html)
 
-                origin = {"Origin": f"http://{host}"}
-                status, _, _ = request(
-                    "POST", "/api/auth/login", {"password": "wrong"}, origin,
-                )
-                self.assertEqual(status, 401)
-                status, headers, body = request(
-                    "POST",
-                    "/api/auth/login",
-                    {"password": "shared-dashboard-password"},
-                    origin,
-                )
-                self.assertEqual(status, 200, body)
-                cookie = headers["Set-Cookie"].split(";", 1)[0]
-                self.assertNotIn("shared-dashboard-password", headers["Set-Cookie"])
-                self.assertIn("HttpOnly", headers["Set-Cookie"])
-                self.assertIn("SameSite=Strict", headers["Set-Cookie"])
+    def test_sidecar_source_has_no_human_auth(self):
+        src = Path(server.__file__).read_text()
+        self.assertNotIn("PTASK_DASH_PASS", src)
+        self.assertNotIn("PTASK_DASH_USER", src)
+        self.assertNotIn("WWW-Authenticate", src)
+        self.assertNotIn("session_auth", src)
+        self.assertIn("PTASK_ACTOR", src)
 
-                session_headers = {"Cookie": cookie}
-                self.assertEqual(request("GET", "/api/auth/check", headers=session_headers)[0], 200)
-                server.SESSIONS = server.SessionStore(Path(td) / "sessions.json")
-                self.assertEqual(request("GET", "/version", headers=session_headers)[0], 200)
-
-                logout_headers = {**session_headers, **origin}
-                self.assertEqual(request("POST", "/api/auth/logout", {}, logout_headers)[0], 200)
-                self.assertEqual(request("GET", "/api/auth/check", headers=session_headers)[0], 401)
-            finally:
-                httpd.shutdown()
-                thread.join(timeout=2)
-                httpd.server_close()
-                (
-                    server.AUTH_PASS,
-                    server.SESSIONS,
-                    server.LOGIN_THROTTLE,
-                    server.LOGIN_ATTEMPT_DELAY,
-                    server.COOKIE_SECURE,
-                ) = old
+    def test_same_origin_post_without_credentials_is_not_gated(self):
+        origin = f"http://127.0.0.1:{self.httpd.server_port}"
+        status, headers, body = self.request(
+            "POST", "/api/tasks",
+            {"title": "tailnet open task"},
+            {"Origin": origin},
+        )
+        self.assertNotIn(status, (401, 403), body)
+        self.assertNotIn("www-authenticate", headers)
 
 
 class EditFailureTests(unittest.TestCase):
@@ -261,7 +309,7 @@ class EditFailureTests(unittest.TestCase):
         thread.start()
         connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
         try:
-            with mock.patch.object(server, "AUTH_PASS", ""), mock.patch.object(
+            with mock.patch.object(
                 server, "pt_exec", side_effect=[(False, "cannot clear recurring deadline"), (True, "priority changed")],
             ) as execute:
                 connection.request("POST", "/api/tasks/PT-1/edit", body=json.dumps({
@@ -280,19 +328,14 @@ class EditFailureTests(unittest.TestCase):
 
 
 class OriginTests(unittest.TestCase):
-    def test_authenticated_cross_origin_post_is_rejected_before_mutation(self):
-        old_user = server.AUTH_USER
-        old_pass = server.AUTH_PASS
+    def test_cross_origin_post_is_rejected_before_mutation(self):
         old_pt_exec = server.pt_exec
         calls = []
         httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        server.AUTH_USER = "ops"
-        server.AUTH_PASS = "test-secret"
         server.pt_exec = lambda args: calls.append(args) or (True, "ok")
         thread.start()
         connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
-        credentials = base64.b64encode(b"ops:test-secret").decode()
         body = b'{"title":"must not be created"}'
 
         try:
@@ -301,7 +344,6 @@ class OriginTests(unittest.TestCase):
                 "/api/tasks",
                 body=body,
                 headers={
-                    "Authorization": f"Basic {credentials}",
                     "Content-Type": "application/json",
                     "Host": f"127.0.0.1:{httpd.server_port}",
                     "Origin": "https://attacker.invalid",
@@ -310,21 +352,25 @@ class OriginTests(unittest.TestCase):
             response = connection.getresponse()
             response.read()
             self.assertEqual(response.status, 403)
+            self.assertNotIn("www-authenticate", _header_map(response))
             self.assertEqual(calls, [])
         finally:
             connection.close()
             httpd.shutdown()
             thread.join(timeout=2)
             httpd.server_close()
-            server.AUTH_USER = old_user
-            server.AUTH_PASS = old_pass
             server.pt_exec = old_pt_exec
 
-    def test_origin_guard_allows_non_browser_and_same_origin_requests(self):
+    def test_origin_guard_allows_non_browser_same_origin_and_tailnet_host(self):
         handler = object.__new__(server.Handler)
         handler.headers = {"Host": "ptask.example"}
         self.assertTrue(handler._origin_ok())
         handler.headers["Origin"] = "https://ptask.example"
+        self.assertTrue(handler._origin_ok())
+        handler.headers = {
+            "Host": "ptask.tail07f9ef.ts.net",
+            "Origin": "https://ptask.tail07f9ef.ts.net",
+        }
         self.assertTrue(handler._origin_ok())
         handler.headers["Origin"] = "https://attacker.invalid"
         self.assertFalse(handler._origin_ok())
@@ -671,19 +717,12 @@ class VoiceFieldsTests(unittest.TestCase):
         self.assertEqual(safe["priority"], 2)
 
 
-if __name__ == "__main__":
-    os.chdir(os.path.dirname(os.path.dirname(__file__)))
-    unittest.main()
-
-
 class PublicAssetTests(unittest.TestCase):
-    """PWA assets and the login shell are public; dashboard data stays gated."""
+    """PWA assets and the board HTML are served without a login gate."""
 
-    def test_touch_icon_manifest_and_login_shell_are_public_but_api_is_not(self):
-        old_user, old_pass = server.AUTH_USER, server.AUTH_PASS
+    def test_touch_icon_manifest_and_board_are_open(self):
         httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-        server.AUTH_USER, server.AUTH_PASS = "ops", "test-secret"
         thread.start()
         try:
             for path, ctype in (("/apple-touch-icon.png", "image/png"),
@@ -701,17 +740,14 @@ class PublicAssetTests(unittest.TestCase):
             connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
             connection.request("GET", "/")
             response = connection.getresponse()
-            response.read()
+            body = response.read()
             self.assertEqual(response.status, 200)
-            connection.request("GET", "/api/stats")
-            response = connection.getresponse()
-            response.read()
-            self.assertEqual(response.status, 401)
+            self.assertNotIn("www-authenticate", _header_map(response))
+            self.assertNotIn(b'id="authGate"', body)
             connection.close()
         finally:
             httpd.shutdown()
             httpd.server_close()
-            server.AUTH_USER, server.AUTH_PASS = old_user, old_pass
 
 
 class VoiceDomainTests(unittest.TestCase):
@@ -936,8 +972,7 @@ class DomainConfigTests(unittest.TestCase):
 
 class ConfigEndpointTests(unittest.TestCase):
     """GET /api/config is the ONE place the shell learns its brand and domain
-    list. It is public (the login shell needs the title before any session
-    exists) and it carries nothing secret."""
+    list. It carries nothing secret."""
 
     def _boot(self):
         httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -954,9 +989,7 @@ class ConfigEndpointTests(unittest.TestCase):
         return response, body
 
     def test_config_is_public_and_reflects_env(self):
-        saved = (server.AUTH_USER, server.AUTH_PASS, server.DASH_TITLE,
-                 server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN)
-        server.AUTH_USER, server.AUTH_PASS = "ops", "test-secret"
+        saved = (server.DASH_TITLE, server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN)
         server.DASH_TITLE = "ALAN"
         server.DASH_DOMAINS = server.parse_domains("puretensor:PureTensor:PT,personal:Personal:ME")
         server.DASH_DEFAULT_DOMAIN = server.resolve_default_domain(server.DASH_DOMAINS, "personal")
@@ -965,21 +998,18 @@ class ConfigEndpointTests(unittest.TestCase):
             response, body = self._get(httpd, "/api/config")
             self.assertEqual(response.status, 200)
             self.assertEqual(response.getheader("Cache-Control"), "no-store")
+            self.assertNotIn("www-authenticate", _header_map(response))
             cfg = json.loads(body)
             self.assertEqual(cfg["title"], "ALAN")
             self.assertEqual(cfg["default_domain"], "personal")
             self.assertEqual([d["key"] for d in cfg["domains"]], ["puretensor", "personal"])
             self.assertEqual(cfg["domains"][1]["abbr"], "ME")
             self.assertEqual(cfg["version"], server.VERSION)
-            # nothing else leaks through the public surface
             self.assertEqual(set(cfg), {"title", "domains", "default_domain", "version"})
-            response, _ = self._get(httpd, "/api/stats")
-            self.assertEqual(response.status, 401)
         finally:
             httpd.shutdown()
             httpd.server_close()
-            (server.AUTH_USER, server.AUTH_PASS, server.DASH_TITLE,
-             server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN) = saved
+            (server.DASH_TITLE, server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN) = saved
 
     def test_legacy_mode_reports_no_domains_and_ptask_title(self):
         saved = (server.DASH_TITLE, server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN)
@@ -995,3 +1025,8 @@ class ConfigEndpointTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
             server.DASH_TITLE, server.DASH_DOMAINS, server.DASH_DEFAULT_DOMAIN = saved
+
+
+if __name__ == "__main__":
+    os.chdir(os.path.dirname(os.path.dirname(__file__)))
+    unittest.main()
