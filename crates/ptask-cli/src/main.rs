@@ -800,6 +800,25 @@ fn already_applied(db: &Db, ctx: &ptask_core::event_log::EventCtx) -> Result<boo
     })
 }
 
+/// `--json` shape for a remote verb that acted on one task: its identity,
+/// the verb, and whatever the client knows of the result.
+fn remote_outcome(
+    task: &ptask_core::Task,
+    action: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut out = serde_json::json!({
+        "pt_id": task.pt_id,
+        "task_uuid": task.id,
+        "title": task.title,
+        "action": action,
+    });
+    if let (Some(out), serde_json::Value::Object(extra)) = (out.as_object_mut(), extra) {
+        out.extend(extra);
+    }
+    out
+}
+
 /// `pt remote list` filter with `-p` folded in as a DSL `pN` term.
 fn remote_list_filter(filter: Option<&str>, priority: Option<i64>) -> Option<String> {
     match (filter, priority) {
@@ -1855,24 +1874,26 @@ fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
     match c {
         ViewCommand::Save { name, filter } => {
             let v = views::create(db, &name, &filter).map_err(anyhow::Error::msg)?;
-            println!(
-                "{}",
-                ui::outcome(ui::Status::Ok, "saved", &v.name, &v.filter_dsl, "view")
-            );
-            Ok(())
+            emit(&v, || {
+                println!(
+                    "{}",
+                    ui::outcome(ui::Status::Ok, "saved", &v.name, &v.filter_dsl, "view")
+                )
+            })
         }
         ViewCommand::List => {
             let vs = views::list(db).map_err(anyhow::Error::msg)?;
-            print_lines(ui::headline("ptask · views", None, "saved filters"));
-            if vs.is_empty() {
-                println!("{}", ui::empty("no saved views"));
-                return Ok(());
-            }
-            for v in &vs {
-                println!("{}", ui::bullet(&v.name, &v.filter_dsl, ui::Ink::Cyan, 24));
-            }
-            println!("{}", ui::footer(vs.len(), "view", "pt view show NAME"));
-            Ok(())
+            emit(&vs, || {
+                print_lines(ui::headline("ptask · views", None, "saved filters"));
+                if vs.is_empty() {
+                    println!("{}", ui::empty("no saved views"));
+                    return;
+                }
+                for v in &vs {
+                    println!("{}", ui::bullet(&v.name, &v.filter_dsl, ui::Ink::Cyan, 24));
+                }
+                println!("{}", ui::footer(vs.len(), "view", "pt view show NAME"));
+            })
         }
         ViewCommand::Show {
             name,
@@ -1904,15 +1925,19 @@ fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
         }
         ViewCommand::Rm { name } => {
             let removed = views::delete(db, &name).map_err(anyhow::Error::msg)?;
-            if removed {
-                println!(
-                    "{}",
-                    ui::outcome(ui::Status::Bad, "removed", &name, "", "view")
-                );
-            } else {
-                println!("{}", ui::empty(&format!("no view named {name:?}")));
-            }
-            Ok(())
+            emit(
+                &serde_json::json!({ "name": name, "removed": removed }),
+                || {
+                    if removed {
+                        println!(
+                            "{}",
+                            ui::outcome(ui::Status::Bad, "removed", &name, "", "view")
+                        );
+                    } else {
+                        println!("{}", ui::empty(&format!("no view named {name:?}")));
+                    }
+                },
+            )
         }
     }
 }
@@ -2096,21 +2121,21 @@ fn delegation_command(handle: &str, title: &str) -> String {
 fn cmd_delegate(db: &Db, a: DelegateArgs) -> Result<()> {
     let t = tasks::resolve_for_lookup(db, &a.id, false).map_err(anyhow::Error::msg)?;
     let handle = t.pt_id.clone().unwrap_or_else(|| t.id.clone());
-    print_lines(ui::headline(
-        &format!("ptask · delegate {handle}"),
-        Some(("operator-gated", ui::Ink::Amber)),
-        "review, then run it yourself",
-    ));
-    println!(
-        "  {}",
-        ui::paint(&delegation_command(&handle, &t.title), ui::Ink::Paper)
-    );
-    println!();
-    println!(
-        "{}",
-        ui::note("operator-gated by design — pt will not spawn agents autonomously")
-    );
-    Ok(())
+    let command = delegation_command(&handle, &t.title);
+    let out = serde_json::json!({ "pt_id": t.pt_id, "task_uuid": t.id, "command": command });
+    emit(&out, || {
+        print_lines(ui::headline(
+            &format!("ptask · delegate {handle}"),
+            Some(("operator-gated", ui::Ink::Amber)),
+            "review, then run it yourself",
+        ));
+        println!("  {}", ui::paint(&command, ui::Ink::Paper));
+        println!();
+        println!(
+            "{}",
+            ui::note("operator-gated by design — pt will not spawn agents autonomously")
+        );
+    })
 }
 
 fn cmd_serve(db: Db, a: ServeArgs) -> Result<()> {
@@ -2528,35 +2553,54 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
     let expr = ptask_core::filter::parse(&a.filter).map_err(anyhow::Error::msg)?;
     let matches = tasks::list_with_filter(db, Some(&expr), Some("pending"), None, 10_000)
         .map_err(anyhow::Error::msg)?;
-    if matches.is_empty() {
-        println!(
-            "{}",
-            ui::empty(&format!("bulk: no tasks match {:?}", a.filter))
-        );
-        return Ok(());
-    }
     let action = if let Some(prio) = a.set_priority.as_deref() {
-        format!("set priority {}", prio)
+        Some(format!("set priority {}", prio))
     } else if a.done {
-        "mark done".into()
+        Some("mark done".to_string())
     } else if a.dismiss {
-        "dismiss".into()
+        Some("dismiss".to_string())
     } else {
+        None
+    };
+    let report = |failures: &[(String, String)]| {
+        serde_json::json!({
+            "filter": a.filter,
+            "action": action,
+            "dry_run": a.dry_run,
+            "matched": matches,
+            "failures": failures
+                .iter()
+                .map(|(pt, e)| serde_json::json!({ "task": pt, "error": e }))
+                .collect::<Vec<_>>(),
+        })
+    };
+    if matches.is_empty() {
+        return emit(&report(&[]), || {
+            println!(
+                "{}",
+                ui::empty(&format!("bulk: no tasks match {:?}", a.filter))
+            )
+        });
+    }
+    let Some(action) = action.as_deref() else {
         anyhow::bail!("bulk needs one of --set-priority / --done / --dismiss");
     };
-    print_lines(ui::headline(
-        "ptask · bulk",
-        Some(if a.dry_run {
-            ("dry run", ui::Ink::Amber)
-        } else {
-            ("apply", ui::Ink::Magenta)
-        }),
-        &format!("{} match {:?} · action: {action}", matches.len(), a.filter),
-    ));
-    print_lines(ui::task_table(&matches, false, false, false));
+    if !json_mode() {
+        print_lines(ui::headline(
+            "ptask · bulk",
+            Some(if a.dry_run {
+                ("dry run", ui::Ink::Amber)
+            } else {
+                ("apply", ui::Ink::Magenta)
+            }),
+            &format!("{} match {:?} · action: {action}", matches.len(), a.filter),
+        ));
+        print_lines(ui::task_table(&matches, false, false, false));
+    }
     if a.dry_run {
-        println!("{}", ui::note("dry run — nothing applied"));
-        return Ok(());
+        return emit(&report(&[]), || {
+            println!("{}", ui::note("dry run — nothing applied"))
+        });
     }
     let level = a
         .set_priority
@@ -2581,7 +2625,9 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
                 tasks::update_priority(db, &t.id, level, &ctx).map(|_| ())
             } else if a.done {
                 tasks::mark_done(db, t, &ctx).map(|outcome| {
-                    if let tasks::DoneOutcome::Advanced { next_deadline } = outcome {
+                    if let tasks::DoneOutcome::Advanced { next_deadline } = outcome
+                        && !json_mode()
+                    {
                         println!(
                             "{}",
                             ui::outcome(
@@ -2610,7 +2656,8 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
         }
         pending = retry;
     }
-    match ptask_core::scoring::run_once(db, false) {
+    let rescored = ptask_core::scoring::run_once(db, false);
+    emit(&report(&failures), || match rescored {
         Ok(r) => println!(
             "{}",
             ui::section(
@@ -2627,7 +2674,7 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
                 &format!("{} task(s) · rescore failed: {e}", matches.len())
             )
         ),
-    }
+    })?;
     for (pt, e) in &failures {
         eprintln!(
             "{}",
@@ -2673,6 +2720,20 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("cutoff math: {e}"))?;
     let cutoff_iso = ptask_core::dates::format_iso(&stale_cutoff);
     let stale = stale_review_tasks(db, &cutoff_iso)?;
+    if json_mode() {
+        // Machine callers get the sweep's list; triage stays interactive.
+        let rows: Vec<serde_json::Value> = stale
+            .iter()
+            .map(|(uuid, pt, title, status, updated)| {
+                serde_json::json!({
+                    "task_uuid": uuid, "pt_id": pt, "title": title,
+                    "status": status, "updated_at": updated,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
 
     print_lines(ui::headline(
         "ptask · review",
@@ -3020,27 +3081,28 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
         RemoteCommand::Add(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.add(&a.text)?;
-            // Echo the parsed interpretation (priority + deadline) so a silent
-            // mis-parse — the PT-653 class — is visible at the moment of creation.
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Ok,
-                    "created",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "remote"
-                )
-            );
-            let mut pairs: Vec<(&str, String)> =
-                vec![("priority", ui::priority_pill(task.priority))];
-            if let Some(d) = &task.deadline {
-                pairs.push(("deadline", ui::due_cell(Some(d))));
-            }
-            for l in ui::kv(&pairs, 14) {
-                println!("    {}", l.trim_start());
-            }
-            Ok(())
+            emit(&task, || {
+                // Echo the parsed interpretation (priority + deadline) so a silent
+                // mis-parse — the PT-653 class — is visible at the moment of creation.
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Ok,
+                        "created",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        "remote"
+                    )
+                );
+                let mut pairs: Vec<(&str, String)> =
+                    vec![("priority", ui::priority_pill(task.priority))];
+                if let Some(d) = &task.deadline {
+                    pairs.push(("deadline", ui::due_cell(Some(d))));
+                }
+                for l in ui::kv(&pairs, 14) {
+                    println!("    {}", l.trim_start());
+                }
+            })
         }
         RemoteCommand::List(a) => {
             let client = remote_client(a.url.as_deref())?;
@@ -3079,37 +3141,47 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
         RemoteCommand::Done(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.done(&a.query)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Ok,
-                    "done",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "remote"
-                )
-            );
-            Ok(())
+            emit(
+                &remote_outcome(&task, "done", serde_json::json!({})),
+                || {
+                    println!(
+                        "{}",
+                        ui::outcome(
+                            ui::Status::Ok,
+                            "done",
+                            task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                            &task.title,
+                            "remote"
+                        )
+                    )
+                },
+            )
         }
         RemoteCommand::Priority(a) => {
             let client = remote_client(a.url.as_deref())?;
             let level = priority::parse(&a.level).map_err(anyhow::Error::msg)?;
             let task = client.priority(&a.query, level)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Changed,
-                    "priority",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    &format!(
-                        "{} ({}) · remote",
-                        task.priority,
-                        priority::label(task.priority)
+            let out = remote_outcome(
+                &task,
+                "priority",
+                serde_json::json!({ "priority": task.priority }),
+            );
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Changed,
+                        "priority",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        &format!(
+                            "{} ({}) · remote",
+                            task.priority,
+                            priority::label(task.priority)
+                        )
                     )
                 )
-            );
-            Ok(())
+            })
         }
         RemoteCommand::Edit(a) => {
             if a.deadline.is_some() && a.clear_deadline {
@@ -3150,32 +3222,44 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             if a.desc.is_some() {
                 parts.push("description".to_string());
             }
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Changed,
-                    "edited",
-                    &pt,
-                    &task.title,
-                    &format!("{} · remote", parts.join(" + "))
-                )
+            let out = remote_outcome(
+                &task,
+                "edit",
+                serde_json::json!({ "edited": parts, "deadline": task.deadline }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Changed,
+                        "edited",
+                        &pt,
+                        &task.title,
+                        &format!("{} · remote", parts.join(" + "))
+                    )
+                )
+            })
         }
         RemoteCommand::Reopen(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.reopen(&a.query)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Changed,
-                    "reopened",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    &format!("→ {} · remote", task.status)
-                )
+            let out = remote_outcome(
+                &task,
+                "reopen",
+                serde_json::json!({ "status": task.status }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Changed,
+                        "reopened",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        &format!("→ {} · remote", task.status)
+                    )
+                )
+            })
         }
         RemoteCommand::Show(a) => {
             let client = remote_client(a.url.as_deref())?;
@@ -3183,12 +3267,17 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             // Rich side-table detail (best-effort: a pre-v1.9 server has no
             // /detail route, so just skip it and keep the base row).
             let d = client.detail(&t.id).ok();
-            print_lines(render_show(&t, d.as_ref(), &[], &[]));
-            Ok(())
+            let mut v = serde_json::to_value(&t)?;
+            v["detail"] = serde_json::to_value(&d)?;
+            emit(&v, || print_lines(render_show(&t, d.as_ref(), &[], &[])))
         }
         RemoteCommand::Next(a) => {
             let client = remote_client(a.url.as_deref())?;
             let rows = client.next(a.limit)?;
+            if json_mode() {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(());
+            }
             print_lines(ui::headline(
                 "ptask · next",
                 Some(("remote", ui::Ink::Violet)),
@@ -3205,32 +3294,44 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
         RemoteCommand::Dismiss(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.dismiss(&a.query)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Mute,
-                    "dismissed",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "remote"
-                )
+            let out = remote_outcome(
+                &task,
+                "dismiss",
+                serde_json::json!({ "status": task.status }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Mute,
+                        "dismissed",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        "remote"
+                    )
+                )
+            })
         }
         RemoteCommand::Start(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.start(&a.query)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Busy,
-                    "started",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "in progress · remote"
-                )
+            let out = remote_outcome(
+                &task,
+                "start",
+                serde_json::json!({ "status": "in_progress" }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Busy,
+                        "started",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        "in progress · remote"
+                    )
+                )
+            })
         }
         RemoteCommand::Snooze(a) => {
             let client = remote_client(a.url.as_deref())?;
@@ -3238,36 +3339,51 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let until = ptask_core::dates::parse(&phrase).map_err(anyhow::Error::msg)?;
             let until_iso = ptask_core::dates::format_iso(&until);
             let task = client.snooze(&a.query, &until_iso)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Mute,
-                    "snoozed",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    &format!("until {until_iso} · remote")
-                )
+            let out = remote_outcome(
+                &task,
+                "snooze",
+                serde_json::json!({ "status": "snoozed", "snoozed_until": until_iso }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Mute,
+                        "snoozed",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        &format!("until {until_iso} · remote")
+                    )
+                )
+            })
         }
         RemoteCommand::Depend(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.depend(&a.query, &a.on, a.clear)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    if a.clear {
-                        ui::Status::Mute
-                    } else {
-                        ui::Status::Changed
-                    },
-                    if a.clear { "cleared" } else { "depends" },
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    &format!("on {} · remote", a.on)
-                )
+            let out = remote_outcome(
+                &task,
+                "depend",
+                serde_json::json!({
+                    "on": a.on,
+                    "edge": if a.clear { "removed" } else { "added" },
+                }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        if a.clear {
+                            ui::Status::Mute
+                        } else {
+                            ui::Status::Changed
+                        },
+                        if a.clear { "cleared" } else { "depends" },
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        &format!("on {} · remote", a.on)
+                    )
+                )
+            })
         }
         RemoteCommand::Rm(a) => {
             let client = remote_client(a.url.as_deref())?;
@@ -3278,35 +3394,33 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 let pt = task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id));
                 confirm_delete(pt, &task.title)
             })?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Bad,
-                    "deleted",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "permanent · remote"
+            let out = remote_outcome(&task, "rm", serde_json::json!({ "deleted": true }));
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Bad,
+                        "deleted",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        "permanent · remote"
+                    )
                 )
-            );
-            Ok(())
+            })
         }
         RemoteCommand::Version(a) => {
             let client = remote_client(a.url.as_deref())?;
             let local = ptask_core::VERSION;
-            print_lines(ui::headline("ptask · version", None, client.url()));
-            match client.server_version() {
-                Some(server) if server == local => {
-                    print_lines(ui::kv(
-                        &[
-                            ("client", format!("v{local}")),
-                            ("server", format!("v{server}")),
-                        ],
-                        14,
-                    ));
-                    println!("{}", ui::section("in sync", ui::Ink::Green, ""));
-                    Ok(())
-                }
-                Some(server) => {
+            let server = client.server_version();
+            let out = serde_json::json!({
+                "url": client.url(),
+                "client": local,
+                "server": server,
+                "in_sync": server.as_deref() == Some(local),
+            });
+            emit(&out, || {
+                print_lines(ui::headline("ptask · version", None, client.url()));
+                if let Some(server) = &server {
                     print_lines(ui::kv(
                         &[
                             ("client", format!("v{local}")),
@@ -3316,8 +3430,17 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                     ));
                     println!(
                         "{}",
-                        ui::section("version skew", ui::Ink::Red, "redeploy pt")
+                        if server == local {
+                            ui::section("in sync", ui::Ink::Green, "")
+                        } else {
+                            ui::section("version skew", ui::Ink::Red, "redeploy pt")
+                        }
                     );
+                }
+            })?;
+            match server {
+                Some(server) if server == local => Ok(()),
+                Some(server) => {
                     anyhow::bail!(
                         "client/server version skew (v{local} vs v{server}) — \
                          redeploy pt (scripts/ansible/ptask.yml)"

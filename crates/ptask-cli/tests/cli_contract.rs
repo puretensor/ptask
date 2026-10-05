@@ -73,3 +73,79 @@ fn remote_rm_confirms_and_matches_active_tasks_only() {
     pt.ok(&["remote", "rm", "PT-1", "-y", "--url", url]);
     assert!(!pt.exists("PT-1"));
 }
+
+#[test]
+fn json_flag_is_honoured_by_bulk_review_view_delegate() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "alpha chore"]); // PT-1
+    pt.ok(&["add", "--raw", "beta chore"]); // PT-2
+
+    let dry = pt.json(&[
+        "bulk",
+        "search: chore",
+        "--set-priority",
+        "high",
+        "--dry-run",
+    ]);
+    assert_eq!(dry["dry_run"], true);
+    assert_eq!(dry["matched"].as_array().unwrap().len(), 2, "{dry:#}");
+    let applied = pt.json(&["bulk", "search: alpha", "--dismiss"]);
+    assert_eq!(applied["matched"][0]["pt_id"], "PT-1", "{applied:#}");
+    assert!(applied["failures"].as_array().unwrap().is_empty());
+    let none = pt.json(&["bulk", "search: nothing-matches", "--done"]);
+    assert!(none["matched"].as_array().unwrap().is_empty());
+
+    let stale = pt.json(&["review", "--stale-days", "0"]);
+    assert_eq!(stale[0]["pt_id"], "PT-2", "{stale:#}");
+
+    assert_eq!(
+        pt.json(&["view", "save", "chores", "search: chore"])["name"],
+        "chores"
+    );
+    assert_eq!(pt.json(&["view", "list"])[0]["name"], "chores");
+    assert_eq!(pt.json(&["view", "rm", "chores"])["removed"], true);
+
+    let delegate = pt.json(&["delegate", "PT-2"]);
+    assert_eq!(delegate["pt_id"], "PT-2");
+    assert!(
+        delegate["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("claude -p '")
+    );
+}
+
+#[test]
+fn json_flag_is_honoured_by_remote_verbs() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Blocker task"]); // PT-1
+    let srv = pt.serve();
+    let url = srv.url.as_str();
+    let remote = |args: &[&str]| {
+        let mut full = vec!["remote"];
+        full.extend_from_slice(args);
+        full.extend_from_slice(&["--url", url]);
+        pt.json(&full)
+    };
+
+    let added = remote(&["add", "Remote chore p4"]);
+    assert_eq!(added["pt_id"], "PT-2", "{added:#}");
+    assert_eq!(remote(&["list"]).as_array().unwrap().len(), 2);
+    assert_eq!(remote(&["show", "PT-2"])["title"], added["title"]);
+    assert_eq!(remote(&["priority", "PT-2", "critical"])["priority"], 5);
+    let edited = remote(&["edit", "PT-2", "--deadline", "2031-01-01"]);
+    assert_eq!(edited["deadline"], "2031-01-01", "{edited:#}");
+    assert_eq!(remote(&["start", "PT-2"])["pt_id"], "PT-2");
+    assert_eq!(remote(&["depend", "PT-2", "--on", "PT-1"])["on"], "PT-1");
+    assert_eq!(
+        remote(&["depend", "PT-2", "--on", "PT-1", "--clear"])["pt_id"],
+        "PT-2"
+    );
+    assert_eq!(remote(&["next"]).as_array().unwrap().len(), 2);
+    assert_eq!(remote(&["done", "PT-2"])["pt_id"], "PT-2");
+    assert_eq!(remote(&["reopen", "PT-2"])["pt_id"], "PT-2");
+    assert_eq!(remote(&["snooze", "PT-2", "2031-02-01"])["pt_id"], "PT-2");
+    assert_eq!(remote(&["dismiss", "PT-2"])["status"], "dismissed");
+    assert_eq!(remote(&["rm", "PT-2", "--yes"])["deleted"], true);
+    assert_eq!(remote(&["version"])["in_sync"], true);
+}
