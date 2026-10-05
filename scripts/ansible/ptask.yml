@@ -33,7 +33,8 @@
 # controller-built target/release/pt to the whole fleet — that is how
 # mon3 got an x86_64 binary (exec format error).
 #
-# Force one specific binary onto every host (single-arch escape hatch):
+# Force one specific binary onto every host (single-arch escape hatch; the
+# play still requires /path/to/pt.sha256 beside it):
 #
 #   ansible-playbook ... -e ptask_binary=/path/to/pt
 #
@@ -108,7 +109,29 @@
           or cross-build:
             cargo build --release --bin pt --features native-ml --target {{ ptask_target_triple }} --locked
             cp target/{{ ptask_target_triple }}/release/pt dist/pt-{{ ptask_target_triple }}
+            (cd dist && sha256sum pt-{{ ptask_target_triple }} > pt-{{ ptask_target_triple }}.sha256)
       when: not pt_local.stat.exists
+
+    # Integrity before anything leaves the controller: every release asset
+    # has a pt-<triple>.sha256 beside it. The manifest must name exactly this
+    # file (sha256sum -c checks whatever path a manifest lists), then
+    # sha256sum -c must pass. A missing manifest or a mismatch fails the play.
+    - name: verify binary against its published .sha256
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cd "$(dirname "{{ ptask_binary }}")"
+        bin="$(basename "{{ ptask_binary }}")"
+        if [ ! -f "$bin.sha256" ]; then
+          echo "missing $bin.sha256 beside $bin: fetch it with the binary" >&2
+          exit 1
+        fi
+        awk -v f="$bin" '$2 != f && $2 != "*" f { bad = 1 } END { exit bad || NR != 1 }' "$bin.sha256" \
+          || { echo "$bin.sha256 must be one line naming $bin" >&2; exit 1; }
+        sha256sum -c --strict "$bin.sha256"
+      args:
+        executable: /bin/bash
+      changed_when: false
 
     # Belt-and-braces: refuse to copy a binary whose ELF architecture does
     # not match the target host. Catches a hand-copied wrong-arch file in
