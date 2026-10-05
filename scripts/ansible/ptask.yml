@@ -5,16 +5,19 @@
 # systemd units (serve / backup / distill / accountability / scoring), enables
 # the canonical API service + timers, and verifies the binary version.
 #
-# Usage from the workstation — populate dist/ with the per-arch release
-# artifacts first (the fleet is heterogeneous: mon3 is aarch64, mon2 has
-# a glibc-2.35 floor; both are covered by the release.yml artifacts):
+# Usage from the workstation. The playbook downloads nothing: it installs
+# dist/pt-<triple> from the controller, so populate dist/ with the per-arch
+# release artifacts first (the fleet is heterogeneous: mon3 is aarch64).
+# Every tag publishes the same assets, each with a .sha256, on both forges
+# (.github and .gitea release workflows); fetch from either:
 #
 #   cd ~/ptask
-#   # Fetch the per-arch artifacts from the Gitea release. GitHub Actions
-#   # billing is blocked (PT-1215), so releases now publish to Gitea via
-#   # .gitea/workflows/release.yml and `gh release download` no longer works.
-#   GITEA=http://100.92.245.5:3002
 #   TAG=vX.Y.Z
+#   # GitHub Release (canonical; x86_64 built on tensor-core, glibc 2.39):
+#   gh release download "$TAG" --repo puretensor/ptask --pattern 'pt-*' -D dist --clobber
+#   # or the Gitea release (sovereign mirror; x86_64 built on ubuntu-22.04,
+#   # glibc 2.35 floor: use it if any host is older than glibc 2.39):
+#   GITEA=http://100.92.245.5:3002
 #   for a in pt-x86_64-unknown-linux-gnu pt-x86_64-unknown-linux-gnu.sha256 \
 #            pt-aarch64-unknown-linux-gnu pt-aarch64-unknown-linux-gnu.sha256; do
 #     curl -fsSL -o "dist/$a" "$GITEA/puretensor/ptask/releases/download/$TAG/$a"
@@ -92,8 +95,9 @@
         msg: |
           Binary not found at {{ ptask_binary }} (host {{ inventory_hostname }},
           triple {{ ptask_target_triple }}).
-          Download the release artifacts first:
-            gh release download vX.Y.Z --pattern 'pt-*' -D dist --clobber
+          Download the release artifacts first (GitHub, or the Gitea mirror
+          as shown in this playbook's header):
+            gh release download vX.Y.Z --repo puretensor/ptask --pattern 'pt-*' -D dist --clobber
           or cross-build:
             cargo build --release --bin pt --features native-ml --target {{ ptask_target_triple }} --locked
             cp target/{{ ptask_target_triple }}/release/pt dist/pt-{{ ptask_target_triple }}

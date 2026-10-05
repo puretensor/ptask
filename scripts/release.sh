@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Tag + push helper. Runs the standard release verification then tags the
 # current commit and pushes the tag to the canonical GitHub remote. The tag
-# push triggers `.github/workflows/release.yml` which builds the binary and
-# attaches it to the GitHub Release; the Gitea mirror syncs automatically.
+# drives both forges' release workflows: GitHub runs
+# `.github/workflows/release.yml` (self-hosted tensor-core runner) and
+# publishes the GitHub Release; the Gitea mirror syncs the tag from GitHub
+# and runs `.gitea/workflows/release.yml`, publishing the same per-arch
+# assets (each with a .sha256) to the Gitea release, the sovereign copy.
 #
 # Usage: scripts/release.sh v0.10.0
 set -euo pipefail
@@ -53,7 +56,10 @@ git push origin "$TAG"
 
 cat <<EOF
 
-Release $TAG tagged + pushed. GitHub Actions will build and publish at:
-  https://github.com/puretensor/ptask/releases/tag/$TAG
+Release $TAG tagged + pushed. Both forges build and publish it:
+  GitHub (.github/workflows/release.yml):
+    https://github.com/puretensor/ptask/releases/tag/$TAG
+  Gitea mirror (.gitea/workflows/release.yml, once the mirror syncs the tag):
+    http://100.92.245.5:3002/puretensor/ptask/releases/tag/$TAG
 
 EOF

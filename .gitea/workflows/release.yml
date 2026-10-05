@@ -1,15 +1,16 @@
 name: release
 
 # Sovereign release mirror — runs on the self-hosted Gitea act_runner
-# (puretensor-act-runner on tensor-core). Fires when an operator pushes
-# a `vX.Y.Z` tag.
+# (puretensor-act-runner on tensor-core). Fires when a `vX.Y.Z` tag
+# arrives (scripts/release.sh pushes it to GitHub; the mirror syncs it).
 #
-# Why this exists: .github/workflows/release.yml is GitHub-only and dead
-# while GitHub Actions billing is blocked (PT-1215). This mirror builds
-# the `pt` binary for x86_64-unknown-linux-gnu AND aarch64-unknown-linux-gnu
-# (mon3), generates SHA-256 manifests, and attaches everything to the
-# Gitea Release — with zero GitHub dependency and zero third-party
-# marketplace actions:
+# Why this exists: sovereignty. .github/workflows/release.yml publishes
+# the GitHub Release from the self-hosted tensor-core runner; this mirror
+# builds the same `pt` binary for x86_64-unknown-linux-gnu AND
+# aarch64-unknown-linux-gnu (mon3), generates SHA-256 manifests, and
+# attaches everything to the Gitea Release, so a GitHub outage or a
+# billing block (as in PT-1215) cannot leave the fleet without a release.
+# It has zero GitHub dependency and zero third-party marketplace actions:
 #   - no softprops/action-gh-release, no actions/upload-artifact
 #   - assets are POSTed straight to the Gitea release API with the
 #     built-in ${{ secrets.GITHUB_TOKEN }} (Gitea injects this into
