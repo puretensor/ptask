@@ -93,6 +93,11 @@ pub struct Extensions {
     /// `pt_recurrence` in the same transaction as the task insert.
     /// `next_occurrence` is initialised from the task's deadline.
     pub recurrence: Option<crate::recurrence::Recurrence>,
+    /// The unclamped occurrence a plain monthly rule counts from, when the
+    /// first deadline was computed from it (quick-add on Jan 31: anchor Jan
+    /// 31, first deadline Feb 28). Used only while it still leads to the
+    /// stored deadline; otherwise the deadline itself is the anchor.
+    pub recurrence_anchor: Option<String>,
 }
 
 /// Insert a task with byte-for-byte Python defaults, mint a PT-N, log a
@@ -227,11 +232,22 @@ pub fn create_with_extensions(
             crate::recurrence::Mode::Fixed => "fixed",
             crate::recurrence::Mode::Completion => "completion",
         };
+        let anchor = match ext.recurrence_anchor.as_deref() {
+            Some(a) if anchor_leads_to(rec, a, &next_occ) => normalize_when(a)?,
+            _ => next_occ.clone(),
+        };
         tx.execute(
             "INSERT INTO pt_recurrence
                  (task_uuid, rrule, mode, original_input, next_occurrence, anchor)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id, rec.rrule_str, mode_str, rec.original_input, next_occ],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                rec.rrule_str,
+                mode_str,
+                rec.original_input,
+                next_occ,
+                anchor
+            ],
         )?;
     }
 
@@ -955,6 +971,23 @@ fn parse_iso_zoned(s: &str) -> Result<jiff::Zoned> {
                 .map_err(|e| crate::Error::Other(format!("date→zoned {}: {}", s, e)))
         }
     }
+}
+
+/// True when a plain monthly rule counting whole intervals from `anchor`
+/// lands its first occurrence exactly on `deadline` — i.e. the anchor is the
+/// unclamped day that deadline was computed from. Anything else (another
+/// rule, an overridden deadline, an unreadable value) is not an anchor.
+fn anchor_leads_to(rec: &crate::recurrence::Recurrence, anchor: &str, deadline: &str) -> bool {
+    if rec.freq != crate::recurrence::Freq::Monthly || !rec.bymonthday.is_empty() {
+        return false;
+    }
+    let (Ok(anchor), Ok(deadline)) = (parse_iso_zoned(anchor), parse_iso_zoned(deadline)) else {
+        return false;
+    };
+    jiff::Span::new()
+        .try_months(i64::from(rec.interval))
+        .and_then(|span| anchor.checked_add(span))
+        .is_ok_and(|first| first.timestamp() == deadline.timestamp())
 }
 
 fn recurrence_time_of_day(original: &str, now: &jiff::Zoned) -> Result<Option<jiff::Zoned>> {
@@ -3713,6 +3746,55 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn a_quick_added_monthly_rule_keeps_the_day_it_was_set_on() {
+        // Regression (PARSE-9): the quick-add path seeded pt_recurrence.anchor
+        // with its first deadline, which next_after had already clamped
+        // (Jan 31 + 1 month = Feb 28), so "pay rent every month" added on
+        // Jan 31 chained Feb 28, Mar 28, Apr 28 ... for good.
+        let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ).unwrap();
+        let jan31 = jiff::civil::date(2099, 1, 31)
+            .at(14, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        for (text, time) in [
+            ("pay rent every month", "T14:00:00"),
+            ("pay rent every month at 9am", "T09:00:00"),
+        ] {
+            let (_dir, db) = fresh_db();
+            let q = crate::quickadd::parse_at(text, jan31.clone()).unwrap();
+            let (new, ext) = q.task_parts("test");
+            let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+            let mut due = vec![t.deadline.clone().unwrap()];
+            for _ in 0..2 {
+                let fresh = resolve_for_lookup(&db, &t.id, true).unwrap();
+                let DoneOutcome::Advanced { next_deadline } =
+                    mark_done(&db, &fresh, &EventCtx::test()).unwrap()
+                else {
+                    panic!("must recur")
+                };
+                due.push(next_deadline);
+            }
+            let days: Vec<&str> = due.iter().map(|d| &d[..10]).collect();
+            assert_eq!(days, ["2099-02-28", "2099-03-31", "2099-04-30"], "{text}");
+            assert!(due.iter().all(|d| d.contains(time)), "{text}: {due:?}");
+        }
+
+        // An explicit deadline replaces the quick-add one: the rule anchors
+        // on what was stored, not on the day the phrase was parsed.
+        let (_dir, db) = fresh_db();
+        let q = crate::quickadd::parse_at("pay rent every month", jan31).unwrap();
+        let (mut new, ext) = q.task_parts("test");
+        new.deadline = Some("2099-03-15T10:00:00+00:00".into());
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let DoneOutcome::Advanced { next_deadline } =
+            mark_done(&db, &t, &EventCtx::test()).unwrap()
+        else {
+            panic!("must recur")
+        };
+        assert_eq!(&next_deadline[..10], "2099-04-15");
     }
 
     #[test]
