@@ -57,4 +57,48 @@ impl Pt {
         let out = self.ok(&full);
         serde_json::from_str(&out).unwrap_or_else(|e| panic!("pt {full:?}: {e}\n{out}"))
     }
+
+    /// Whether `PT-N` (any status) still exists in this database.
+    pub fn exists(&self, pt_id: &str) -> bool {
+        self.run(&["show", pt_id]).status.success()
+    }
+
+    /// A throwaway `pt serve` on a free loopback port, sharing this
+    /// database. Loopback with no token configured runs unauthenticated.
+    pub fn serve(&self) -> Server {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let child = self
+            .command("test", &["serve", "--bind", &format!("127.0.0.1:{port}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let server = Server {
+            child,
+            url: format!("http://127.0.0.1:{port}"),
+        };
+        for _ in 0..200 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return server;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("pt serve did not come up on {}", server.url);
+    }
+}
+
+pub struct Server {
+    child: std::process::Child,
+    pub url: String,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }

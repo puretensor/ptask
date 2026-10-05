@@ -235,7 +235,7 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote start <query>` | server-side `task_start` |
 | `pt remote snooze <query> <until…>` | server-side `task_snooze` (date parsed locally) |
 | `pt remote depend <query> --on <t> [--clear]` | server-side `task_depend` |
-| `pt remote rm <query>` | server-side `task_delete` (tombstoned) |
+| `pt remote rm <query> [-y]` | server-side `task_delete` (tombstoned); asks `PT-N "title"` first, refuses without `--yes` on a non-TTY or with `--json`; a substring matches open tasks only (exact PT-N/uuid reach any status) |
 | `pt remote list --filter '<DSL>'` | SERVER-side filtered list via `GET /list` |
 | `pt remote version` | compare client vs server `GET /version`; exits non-zero on skew |
 

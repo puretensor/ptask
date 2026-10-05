@@ -372,9 +372,14 @@ impl RemoteClient {
     }
 
     /// `pt remote rm <query>` — permanent delete (tombstoned for delta
-    /// sync). Resolves terminal tasks too.
-    pub fn rm(&self, query: &str) -> Result<Task> {
-        self.simple_task_command("task_delete", query, serde_json::Map::new(), true)
+    /// sync). A title substring reaches active tasks only; an exact PT-N or
+    /// uuid may still name a done/dismissed one. `confirm` sees the resolved
+    /// task before anything is sent and aborts the delete by failing.
+    pub fn rm(&self, query: &str, confirm: impl FnOnce(&Task) -> Result<()>) -> Result<Task> {
+        let task = self.resolve(query, false)?;
+        confirm(&task)?;
+        self.dispatch("task_delete", &task.id, serde_json::Map::new())?;
+        Ok(task)
     }
 
     /// `GET /list?filter=` — server-side filtered list (replaces the old
@@ -407,9 +412,20 @@ impl RemoteClient {
         include_terminal: bool,
     ) -> Result<Task> {
         let task = self.resolve(query, include_terminal)?;
+        self.dispatch(command, &task.id, extra)?;
+        Ok(task)
+    }
+
+    /// Send one command against an already-resolved task.
+    fn dispatch(
+        &self,
+        command: &str,
+        task_uuid: &str,
+        extra: serde_json::Map<String, Value>,
+    ) -> Result<()> {
         let cmd_uuid = self.command_uuid("");
         let mut args = serde_json::Map::new();
-        args.insert("task_uuid".into(), json!(task.id));
+        args.insert("task_uuid".into(), json!(task_uuid));
         args.extend(extra);
         let req = json!({
             "sync_token": NO_DELTA_TOKEN,
@@ -421,8 +437,7 @@ impl RemoteClient {
             }]
         });
         let resp = self.sync(&req)?;
-        ensure_ok(&resp.sync_status, &cmd_uuid)?;
-        Ok(task)
+        ensure_ok(&resp.sync_status, &cmd_uuid)
     }
 
     /// `pt remote next` — DAG-ready tasks computed on the canonical host. The
@@ -919,6 +934,27 @@ mod tests {
         assert_eq!(d.labels, vec!["ops".to_string()]);
         assert_eq!(d.project.as_deref(), Some("fleet"));
         assert_eq!(d.duration_min, Some(30));
+    }
+
+    #[test]
+    fn remote_rm_reaches_active_substrings_and_confirms_before_sending() {
+        let (c, calls, _rt) = mock_client();
+        // "archive completed receipt" (PT-102) is done: out of a substring's reach.
+        assert!(c.rm("archive", |_| Ok(())).is_err());
+        // A declined confirmation sends nothing.
+        assert!(c.rm("PT-100", |_| Err(anyhow!("declined"))).is_err());
+        assert!(calls.lock().unwrap().is_empty(), "nothing may be sent");
+        // An exact PT-N still names the done task, after confirmation.
+        let task = c
+            .rm("PT-102", |t| {
+                assert_eq!(t.status, "done");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(task.pt_id.as_deref(), Some("PT-102"));
+        let calls_v = calls.lock().unwrap();
+        let cmd = dispatched(&calls_v, "task_delete").expect("task_delete dispatched");
+        assert_eq!(cmd["args"]["task_uuid"], "uuid-cccccccc");
     }
 
     #[test]

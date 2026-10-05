@@ -4483,7 +4483,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__rm)
-            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY>"
+            opts="-y -h --yes --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

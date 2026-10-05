@@ -351,8 +351,9 @@ enum RemoteCommand {
     Snooze(RemoteSnoozeArgs),
     /// `pt remote depend <query> --on <target> [--clear]`.
     Depend(RemoteDependArgs),
-    /// `pt remote rm <query>` — permanent delete (tombstoned).
-    Rm(RemoteDoneArgs),
+    /// `pt remote rm <query>` — permanent delete (tombstoned). Asks first;
+    /// refuses without --yes when there is no TTY to ask on.
+    Rm(RemoteRmArgs),
     /// `pt remote version` — compare this client's version against the
     /// canonical server's `GET /version`. Exits non-zero on skew.
     Version(RemoteVersionArgs),
@@ -413,6 +414,17 @@ struct RemoteListArgs {
 struct RemoteDoneArgs {
     /// PT-N (e.g. PT-42), bare integer (42), or title substring.
     query: String,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteRmArgs {
+    /// PT-N, bare integer, uuid, or a title substring (open tasks only).
+    query: String,
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long = "yes")]
+    yes: bool,
     #[arg(long = "url", env = "PTASK_SYNC_URL")]
     url: Option<String>,
 }
@@ -1550,32 +1562,38 @@ fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {
     )
 }
 
+/// Confirm a permanent delete of `pt` on the operator's TTY. No
+/// confirmation possible (piped, agent, --json): refuse loudly — printing
+/// "aborted" and exiting 0 read as success to a caller.
+fn confirm_delete(pt: &str, title: &str) -> Result<()> {
+    if json_mode() || !std::io::stdin().is_terminal() {
+        anyhow::bail!("refusing to delete {pt} without --yes (no TTY to confirm)");
+    }
+    use std::io::Write;
+    print!(
+        "{}",
+        ui::prompt(
+            &format!(
+                "permanently delete {pt} \"{}\"? This cannot be undone.",
+                ui::sanitize(title)
+            ),
+            "[y/N]"
+        )
+    );
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok();
+    if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        anyhow::bail!("aborted: {pt} not deleted");
+    }
+    Ok(())
+}
+
 fn cmd_rm(db: &Db, a: RmArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
     let pt = task.pt_id.as_deref().unwrap_or("").to_string();
     if !a.yes {
-        // No confirmation possible (piped, agent, --json): refuse loudly.
-        // Printing "aborted" and exiting 0 read as success to a caller.
-        if json_mode() || !std::io::stdin().is_terminal() {
-            anyhow::bail!("refusing to delete {pt} without --yes (no TTY to confirm)");
-        }
-        use std::io::Write;
-        print!(
-            "{}",
-            ui::prompt(
-                &format!(
-                    "permanently delete {pt} \"{}\"? This cannot be undone.",
-                    ui::sanitize(&task.title)
-                ),
-                "[y/N]"
-            )
-        );
-        std::io::stdout().flush().ok();
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line).ok();
-        if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            anyhow::bail!("aborted: {pt} not deleted");
-        }
+        confirm_delete(&pt, &task.title)?;
     }
     tasks::delete_task(db, &task.id, &cli_ctx())?;
     emit(
@@ -3253,7 +3271,13 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
         }
         RemoteCommand::Rm(a) => {
             let client = remote_client(a.url.as_deref())?;
-            let task = client.rm(&a.query)?;
+            let task = client.rm(&a.query, |task| {
+                if a.yes {
+                    return Ok(());
+                }
+                let pt = task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id));
+                confirm_delete(pt, &task.title)
+            })?;
             println!(
                 "{}",
                 ui::outcome(
