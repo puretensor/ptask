@@ -24,6 +24,10 @@
 //!             | kind:       scout|ship
 //! ```
 //!
+//! Semantics (docs/dsl.md): day atoms use the operator-local (London) day;
+//! `today` also matches a task scheduled (`due_at`) for today; `!a` is true
+//! wherever `a` is not, including rows where `a` reads a NULL column.
+//!
 //! Examples:
 //! - `today & p1`
 //! - `(today | overdue) & #fleet`
@@ -132,7 +136,13 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
         // negation is true.
         Expr::Not(inner) => format!("(NOT COALESCE(({}), 0))", compile(inner, now, params)?),
 
-        Expr::Today => day_cmp("t.deadline", DayCmp::On, now.date(), now, params)?,
+        // Deadline today, or scheduled (`due:` quick-add token -> due_at)
+        // for today.
+        Expr::Today => format!(
+            "({} OR {})",
+            day_cmp("t.deadline", DayCmp::On, now.date(), now, params)?,
+            day_cmp("t.due_at", DayCmp::On, now.date(), now, params)?
+        ),
         Expr::Tomorrow => {
             let d = now.date().tomorrow().map_err(day_err)?;
             day_cmp("t.deadline", DayCmp::On, d, now, params)?
@@ -889,18 +899,21 @@ mod tests {
     fn compile_today_binds_the_operator_local_day_bounds() {
         let sql = to_sql(&ast("today"), &anchor()).unwrap();
         assert!(sql.where_clause.contains("julianday(t.deadline)"));
+        assert!(sql.where_clause.contains("julianday(t.due_at)"));
         let text = |v: &rusqlite::types::Value| match v {
             rusqlite::types::Value::Text(s) => s.clone(),
             other => panic!("{other:?}"),
         };
-        // 13 May is BST: the London day runs 23:00Z to 23:00Z.
+        // 13 May is BST: the London day runs 23:00Z to 23:00Z, bound once
+        // for the deadline and once for the scheduled date.
+        let day = [
+            "2026-05-13",
+            "2026-05-12T23:00:00+00:00",
+            "2026-05-13T23:00:00+00:00",
+        ];
         assert_eq!(
             sql.params.iter().map(text).collect::<Vec<_>>(),
-            [
-                "2026-05-13",
-                "2026-05-12T23:00:00+00:00",
-                "2026-05-13T23:00:00+00:00"
-            ]
+            [day, day].concat()
         );
     }
 
@@ -1083,6 +1096,33 @@ mod tests {
             .at(h, 0, 0, 0)
             .to_zoned(tz)
             .unwrap()
+    }
+
+    #[test]
+    fn today_lists_a_task_scheduled_for_today() {
+        // PARSE-5: quick-add `due:<date>` stores due_at, which no filter read,
+        // while docs/dsl.md promises `today` = "deadline = today or due today".
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path().join("due.db")).unwrap();
+        let ctx = crate::event_log::EventCtx::test();
+        let today = dates::now_in_operator_tz().unwrap().date();
+        let (new, ext) = crate::quickadd::parse(&format!("x due:{today}"))
+            .unwrap()
+            .task_parts("test");
+        assert!(ext.due_at.is_some() && new.deadline.is_none());
+        let scheduled = crate::tasks::create_with_extensions(&db, new, ext, &ctx).unwrap();
+        let (new, ext) = crate::quickadd::parse("y due:2020-01-01")
+            .unwrap()
+            .task_parts("test");
+        crate::tasks::create_with_extensions(&db, new, ext, &ctx).unwrap();
+        crate::tasks::create(&db, crate::NewTask::minimal("z"), &ctx).unwrap();
+
+        let expr = parse("today").unwrap();
+        let rows = crate::tasks::list_with_filter(&db, Some(&expr), None, None, 10).unwrap();
+        assert_eq!(
+            rows.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            [scheduled.id.as_str()]
+        );
     }
 
     #[test]
