@@ -1,7 +1,9 @@
 [Unit]
 Description=pTask native distillation (hourly delta over raw_items)
 Documentation=https://github.com/puretensor/ptask
-ConditionPathExists=%h/puretensor-tasks/.env
+# No ConditionPathExists on .env: a failed Condition skips the unit as a
+# success, so OnFailure never fires. The bare EnvironmentFile= below fails
+# the unit loudly (and alerts) when .env is missing.
 After=network-online.target
 Wants=network-online.target
 OnFailure=ptask-failure-alert@%n.service
