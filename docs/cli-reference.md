@@ -171,7 +171,7 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 
 | Verb | Cadence | Description |
 |---|---|---|
-| `pt distill [--batch 200]` | hourly (`*:15`) | Native fail-closed distillation: consumes new `raw_items` only, Gemini structured-output classify+consolidate with `thinkingBudget=0`, transient retry, and token/semantic/temporal dedup. Exit 3 = missing GOOGLE_API_KEY before consumption. |
+| `pt distill [--batch 200]` | hourly (`*:15`) | Native fail-closed distillation: consumes new `raw_items` only; LLM classify+consolidate via `PTASK_LLM_BACKEND` (default `local`: the OpenAI-compatible endpoint at `LOCAL_LLM_URL`, default `http://127.0.0.1:8600/v1`; `gemini`: structured output with `thinkingBudget=0`), transient retry, token/semantic/temporal dedup. Exit 3 = `gemini` backend without `GOOGLE_API_KEY`, before consumption; a failed provider preflight exits 1 with a `distill.failed` event. Env: [operations.md](operations.md#provider-env). |
 | `pt accountability run [--dry-run]` | `*:0/15` | Escalation state machine + dispatch. |
 | `pt scoring run [--dry-run]` | `hourly` | Composite priority recompute. |
 | `pt backfill` | one-shot | Mint PT-N for any task lacking one. |

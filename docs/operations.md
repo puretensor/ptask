@@ -71,10 +71,20 @@ The pre-v0.1.0 baseline is at `~/puretensor-tasks/tasks.db.pre-ptask-backup`.
 
 `pt distill` runs the native Rust delta pipeline over unprocessed
 `raw_items` and records each invocation in `pt_event_log`. It preflights
-Gemini before consuming data, sends classify/consolidate calls with
-`thinkingBudget=0`, retries transient Gemini failures, deduplicates
-candidates, writes tasks through `ptask-core`, and fails closed with a
-`distill.failed` event on provider or pipeline errors.
+the configured LLM provider before consuming data, retries transient
+provider failures, deduplicates candidates, writes tasks through
+`ptask-core`, and fails closed with a `distill.failed` event on provider or
+pipeline errors.
+
+### Provider (env)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PTASK_LLM_BACKEND` | `local` | `local` (an OpenAI-compatible endpoint) or `gemini`. Any other value exits 1 before a provider call. |
+| `LOCAL_LLM_URL` | `http://127.0.0.1:8600/v1` | `local` backend base URL; `/chat/completions` is appended. |
+| `LOCAL_LLM_MODEL` | `nemotron-lightning` | `local` backend model id. |
+| `GOOGLE_API_KEY` | — | `gemini` backend only, and required there. |
+| `GEMINI_CONSOLIDATE_MODEL` | `gemini-3.5-flash` | `gemini` backend model; calls use structured output with `thinkingBudget=0`. |
 
 The legacy Python distiller is retired from the CLI and from the timer path.
 It remains only in `~/puretensor-tasks-legacy` as historical reference.
@@ -132,8 +142,11 @@ Any native provider or pipeline error writes a `distill.failed` event to
 `pt_event_log` with the provider name and detailed error chain, then exits
 non-zero. systemd records the failure; the operator's existing Telegram
 alert pipeline (or any HMAC webhook subscriber) can scrape `pt_event_log`
-for `distill.failed` events. A missing `GOOGLE_API_KEY` exits 3 before any
-raw item is consumed.
+for `distill.failed` events. With `PTASK_LLM_BACKEND=gemini`, a missing
+`GOOGLE_API_KEY` exits 3 before any raw item is consumed (no event: nothing
+was attempted). The default `local` backend needs no key; an unreachable or
+misbehaving endpoint fails the preflight, which records `distill.failed` and
+exits 1 with nothing consumed.
 
 ### Poison captures and quarantine (v3.8.0)
 
@@ -207,8 +220,9 @@ sqlite3 ~/puretensor-tasks/tasks.db \
 ## Accountability (v0.7.0)
 
 `pt accountability run` is the Rust port of the Python `accountability/engine.py`.
-It walks the 6-level escalation state machine, gates on the 22:00 — 08:00 UTC
-quiet window, respects a daily Telegram budget of 3, and enforces a 4-hour
+It walks the 6-level escalation state machine, gates on the 22:00 — 08:00
+Europe/London quiet window (the operator's wall clock, so it follows BST),
+respects a daily Telegram budget of 3, and enforces a 4-hour
 cooldown per task between reminders.
 
 ### Config (env)
