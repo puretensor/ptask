@@ -125,7 +125,12 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             compile(l, now, params)?,
             compile(r, now, params)?
         ),
-        Expr::Not(inner) => format!("(NOT ({}))", compile(inner, now, params)?),
+        // Atoms read nullable columns (no deadline, no project, no
+        // pt_extensions row for a task without a pt_id), and NOT NULL is
+        // NULL, which WHERE drops: `!#fleet` lost every project-less task.
+        // An atom that is unknown for a row is false for it, so its
+        // negation is true.
+        Expr::Not(inner) => format!("(NOT COALESCE(({}), 0))", compile(inner, now, params)?),
 
         Expr::Today => {
             params.push(Value::Text(now.date().to_string()));
@@ -603,6 +608,72 @@ mod tests {
     fn search_consumes_keyword() {
         let e = ast("search: ceph");
         assert!(matches!(e, Expr::Search(ref s) if s == "ceph"));
+    }
+
+    /// A migrated store whose rows leave every column an atom reads NULL
+    /// somewhere: no pt_id (so no pt_extensions row), no project, no
+    /// deadline, an unreadable deadline, NULL description and legacy status.
+    fn nullable_fixture() -> (tempfile::TempDir, crate::Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path().join("filter.db")).unwrap();
+        db.with_conn(|c| {
+            c.execute_batch(
+                "INSERT INTO tasks (id, title, description, priority, status, created_at,
+                                    updated_at, deadline, pt_id, project, kind, due_at) VALUES
+                   ('full', 'ceph mon', 'ceph quorum', 5, 'pending', 'x', 'x', '2026-05-13',
+                    'PT-1', 'fleet', 'scout', '2026-05-13T10:00:00+01:00'),
+                   ('bare', 'bare', NULL, 2, 'pending', 'x', 'x', NULL, NULL, NULL, 'ship', NULL),
+                   ('nulls', 'nulls', NULL, 3, NULL, 'x', 'x', '2020-01-01T00:00:00Z', 'PT-3',
+                    NULL, 'ship', NULL),
+                   ('junk', 'junk', '', 1, 'pending', 'x', 'x', 'in two weeks', 'PT-4', NULL,
+                    'ship', NULL);
+                 INSERT INTO task_labels (task_uuid, label) VALUES ('full', 'ops');
+                 INSERT INTO pt_recurrence (task_uuid, rrule, mode, original_input,
+                                            next_occurrence)
+                   VALUES ('full', 'FREQ=DAILY', 'fixed', 'every day', '2026-05-13');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn every_atom_or_its_negation_covers_every_row() {
+        // PARSE-2: `!A` compiled to `NOT (A)`, and A is NULL -- not false -- on
+        // a row missing the column it reads, so `!#fleet` dropped every
+        // project-less task and `#fleet | !#fleet` returned part of the table.
+        let (_dir, db) = nullable_fixture();
+        let count = |f: &str| {
+            let expr = parse(f).unwrap();
+            crate::tasks::list_with_filter(&db, Some(&expr), None, None, 100)
+                .unwrap()
+                .len()
+        };
+        let all = crate::tasks::list_with_filter(&db, None, None, None, 100)
+            .unwrap()
+            .len();
+        assert_eq!(all, 4);
+        for atom in [
+            "today",
+            "tomorrow",
+            "yesterday",
+            "overdue",
+            "no date",
+            "recurring",
+            "p1",
+            "p5",
+            "@ops",
+            "#fleet",
+            "due: 2026-05-13",
+            "due before: 2026-05-13",
+            "due after: 2026-05-13",
+            "search: ceph",
+            "kind: scout",
+        ] {
+            assert_eq!(count(&format!("{atom} | !{atom}")), all, "{atom} | !{atom}");
+            assert_eq!(count(&format!("{atom} & !{atom}")), 0, "{atom} & !{atom}");
+        }
     }
 
     #[test]
