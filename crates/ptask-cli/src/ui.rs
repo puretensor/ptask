@@ -160,6 +160,22 @@ pub fn sanitize(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// True when `text` holds something `sanitize` must neutralise beyond tab
+/// expansion and CRLF line ends — bytes a terminal would act on, so what is
+/// displayed differs from what is stored.
+pub fn has_hazard(text: &str) -> bool {
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' && chars.peek() == Some(&'\n') {
+            continue;
+        }
+        if is_hazard(c) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Length of the SGR sequence at the start of `s` if it is one this module
 /// emits outside gradients: reset, bold, dim, or a palette foreground.
 fn own_sgr_len(s: &str) -> Option<usize> {
@@ -1017,6 +1033,9 @@ mod tests {
         // Newlines survive; a CRLF line end displays the same as LF; a tab is
         // a space; a lone CR, BS, DEL and NEL do not survive.
         assert_eq!(sanitize("a\r\nb\n\tc"), "a\nb\n c");
+        // has_hazard: only what changes what the terminal shows counts.
+        assert!(has_hazard(HOSTILE) && has_hazard("x\ry") && has_hazard("a\u{202e}b"));
+        assert!(!has_hazard("Dear Alan,\r\n\tthe numbers.\n") && !has_hazard(""));
         assert_eq!(
             sanitize("x\ry\u{8}z\u{7f}w\u{85}"),
             "x\u{fffd}y\u{fffd}z\u{fffd}w\u{fffd}"

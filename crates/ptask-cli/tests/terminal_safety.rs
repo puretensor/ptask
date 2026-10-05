@@ -23,13 +23,17 @@ impl Pt {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.run_as("test", args)
+    }
+
+    fn run_as(&self, actor: &str, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_pt"))
             .args(args)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.path())
             .env("PTASK_DB", self.dir.path().join("tasks.db"))
-            .env("PTASK_ACTOR", "test")
+            .env("PTASK_ACTOR", actor)
             .env("COLUMNS", "120")
             .stdin(Stdio::null())
             .output()
@@ -37,7 +41,11 @@ impl Pt {
     }
 
     fn ok(&self, args: &[&str]) -> String {
-        let out = self.run(args);
+        self.ok_as("test", args)
+    }
+
+    fn ok_as(&self, actor: &str, args: &[&str]) -> String {
+        let out = self.run_as(actor, args);
         assert!(
             out.status.success(),
             "pt {args:?} failed: {}",
@@ -176,4 +184,85 @@ fn hostile_task_text_never_reaches_the_terminal_raw() {
     ] {
         check(&pt, label, &args);
     }
+}
+
+/// The reviewer's spoof: the stored (and digest-bound) payload wires
+/// $50,000 to the attacker, but cursor-up + erase-line rewrite the preview on
+/// screen into a $50 refund to the CFO.
+const SPOOF_PAYLOAD: &str = "To: attacker@evil.example\nWire: $50,000 to acct 999\n\x1b[2A\r\x1b[2KTo: cfo@puretensor.ai\n\x1b[2KWire: $50 to acct 123 (refund)\n";
+
+#[test]
+fn approval_preview_cannot_spoof_the_bound_payload() {
+    let pt = Pt::new();
+    let payload = pt.dir.path().join("wire.txt");
+    std::fs::write(&payload, SPOOF_PAYLOAD).unwrap();
+    let agent = format!("agent{HOSTILE}");
+    pt.ok_as(
+        &agent,
+        &[
+            "approval",
+            "request",
+            "--kind",
+            "spend",
+            "--title",
+            &format!("Refund customer {HOSTILE}"),
+            "--note",
+            "routine refund\x1b[8m",
+            "--payload-file",
+            payload.to_str().unwrap(),
+        ],
+    );
+
+    for (colour, flag) in [(true, "--color=always"), (false, "--no-color")] {
+        for (actor, args) in [
+            ("operator", vec![flag, "approval", "show", "AP-1"]),
+            ("operator", vec![flag, "approval", "list"]),
+        ] {
+            let out = pt.run_as(actor, &args);
+            assert!(out.status.success(), "{args:?}");
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            assert_terminal_safe(&format!("{args:?}"), &stdout, colour);
+        }
+    }
+
+    let shown = pt.ok_as("operator", &["--no-color", "approval", "show", "AP-1"]);
+    assert!(!shown.contains('\x1b') && !shown.contains('\r'), "{shown}");
+    assert!(shown.contains("attacker@evil.example"), "{shown}");
+    assert!(shown.contains("$50,000"), "{shown}");
+    assert!(
+        shown.contains("pt approval payload AP-1 | cat -v"),
+        "a hazardous payload must carry the inspect warning:\n{shown}"
+    );
+
+    // The decision path prints the same page.
+    let approved = pt.ok_as(
+        "operator",
+        &["--no-color", "approve", "AP-1", "--via", "dashboard"],
+    );
+    assert!(!approved.contains('\x1b') && !approved.contains('\r'));
+    assert!(approved.contains("pt approval payload AP-1 | cat -v"));
+
+    // An ordinary CRLF email body with a tab does not cry wolf.
+    let email = pt.dir.path().join("email.txt");
+    std::fs::write(&email, "Dear Alan,\r\n\tthe Q3 numbers are attached.\r\n").unwrap();
+    pt.ok_as(
+        "hal",
+        &[
+            "approval",
+            "request",
+            "--kind",
+            "email",
+            "--title",
+            "Send Q3",
+            "--payload-file",
+            email.to_str().unwrap(),
+        ],
+    );
+    let benign = pt.ok_as("operator", &["--no-color", "approval", "show", "AP-2"]);
+    assert!(benign.contains("the Q3 numbers are attached."), "{benign}");
+    assert!(!benign.contains("cat -v"), "{benign}");
+    assert!(
+        !benign.contains('\r') && !benign.contains('\u{fffd}'),
+        "{benign}"
+    );
 }

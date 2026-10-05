@@ -226,8 +226,10 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
             &ap.kind
         )
     );
+    // Requester, note and preview are agent-supplied: sanitised so escape
+    // sequences cannot rewrite what the operator reads before deciding.
     let mut pairs: Vec<(&str, String)> = vec![
-        ("requester", ap.requester.clone()),
+        ("requester", ui::sanitize(&ap.requester).into_owned()),
         ("digest", ap.digest.clone()),
         (
             "payload",
@@ -243,13 +245,13 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
         ),
     ];
     if let Some(t) = &ap.task_pt_id {
-        pairs.push(("task", t.clone()));
+        pairs.push(("task", ui::sanitize(t).into_owned()));
     }
     if let Some(n) = &ap.request_note {
-        pairs.push(("requester note", n.clone()));
+        pairs.push(("requester note", ui::sanitize(n).into_owned()));
     }
     if let Some(d) = &ap.decided_by {
-        pairs.push(("decided by", d.clone()));
+        pairs.push(("decided by", ui::sanitize(d).into_owned()));
     }
     for l in ui::kv(&pairs, 16) {
         println!("    {}", l.trim_start());
@@ -263,7 +265,28 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
             "rendered from the stored payload"
         )
     );
-    println!("{}", ap.preview());
+    let preview = ap.preview();
+    // The digest binds the stored bytes, not the screen: when they hold
+    // anything a terminal would act on, say so above and below the preview.
+    let warning = ui::has_hazard(&preview).then(|| {
+        format!(
+            "  {}",
+            ui::pill(
+                ui::Status::Bad,
+                &format!(
+                    "WARNING: payload has terminal control/bidi characters (shown as \u{FFFD}) — run `pt approval payload {} | cat -v` before deciding",
+                    ap.ap_id()
+                )
+            )
+        )
+    });
+    if let Some(w) = &warning {
+        println!("{w}");
+    }
+    println!("{}", ui::sanitize(&preview));
+    if let Some(w) = &warning {
+        println!("{w}");
+    }
     if let Some(events) = events
         && !events.is_empty()
     {
@@ -271,10 +294,13 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
         println!("{}", ui::section("events", ui::Ink::Steel, "journal"));
         for e in events {
             println!(
-                "  {}  {}  {}",
-                e.at,
-                e.event_type,
-                e.actor.as_deref().unwrap_or("-")
+                "{}",
+                ui::sanitize(&format!(
+                    "  {}  {}  {}",
+                    e.at,
+                    e.event_type,
+                    e.actor.as_deref().unwrap_or("-")
+                ))
             );
         }
     }
