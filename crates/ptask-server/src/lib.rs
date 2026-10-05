@@ -658,6 +658,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_with_a_deeply_nested_filter_is_400_not_an_abort() {
+        // SRV-1: /list handed the filter to a recursive parser on a 2 MiB
+        // blocking-pool thread; ~1000 nested parens overflowed it and aborted
+        // the whole server (a stack overflow is not a catchable panic).
+        let app = router(AppState::new(
+            open_test_db(),
+            Default::default(),
+            Default::default(),
+        ));
+        let filter = format!("{}today{}", "%28".repeat(5000), "%29".repeat(5000));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/list?filter={filter}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn sync_priority_batch_is_rescored_once_after_the_loop() {
         let db = open_test_db();
         let app = router(AppState::new(

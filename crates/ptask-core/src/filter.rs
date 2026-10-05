@@ -59,6 +59,14 @@ pub enum Expr {
     Kind(String),
 }
 
+/// Longest filter accepted, in bytes. Real filters are a few dozen bytes.
+pub const MAX_FILTER_BYTES: usize = 2048;
+/// Deepest `(` / `!` nesting accepted; each level is a recursive parser call.
+pub const MAX_FILTER_NESTING: usize = 32;
+/// Most terms accepted. The AST is compiled and dropped recursively, one
+/// stack frame per node, and SQLite rejects expression trees deeper than 1000.
+pub const MAX_FILTER_TERMS: usize = 256;
+
 /// Compiled SQL fragment + bound parameter values (positional).
 pub struct Sql {
     pub where_clause: String,
@@ -66,7 +74,18 @@ pub struct Sql {
 }
 
 /// Public entry point: parse a filter DSL string into an AST.
+///
+/// Size, nesting and term count are capped here, so every caller (CLI,
+/// saved views, `/list`, MCP, the bot) is protected: the parser, `to_sql`
+/// and the AST's drop all recurse, and a hostile filter used to abort the
+/// whole process with a stack overflow no panic guard can catch.
 pub fn parse(input: &str) -> Result<Expr> {
+    if input.len() > MAX_FILTER_BYTES {
+        return Err(Error::Other(format!(
+            "filter: {} bytes is over the {MAX_FILTER_BYTES}-byte limit",
+            input.len()
+        )));
+    }
     let mut p = ParseCtx::new(input);
     p.skip_ws();
     let expr = p.parse_or()?;
@@ -203,11 +222,32 @@ pub(crate) fn escape_like(input: &str) -> String {
 struct ParseCtx<'a> {
     input: &'a str,
     pos: usize,
+    /// Current `(` / `!` nesting.
+    depth: usize,
+    /// Terms parsed so far.
+    terms: usize,
 }
 
 impl<'a> ParseCtx<'a> {
     fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+        Self {
+            input,
+            pos: 0,
+            depth: 0,
+            terms: 0,
+        }
+    }
+
+    /// Enter one `(` / `!` level.
+    fn descend(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_FILTER_NESTING {
+            return Err(Error::Other(format!(
+                "filter: nested deeper than {MAX_FILTER_NESTING} levels at byte {}",
+                self.pos
+            )));
+        }
+        Ok(())
     }
 
     fn peek(&self) -> Option<char> {
@@ -267,7 +307,9 @@ impl<'a> ParseCtx<'a> {
         self.skip_ws();
         if self.peek() == Some('!') {
             self.pos += 1;
+            self.descend()?;
             let inner = self.parse_atom()?;
+            self.depth -= 1;
             Ok(Expr::Not(Box::new(inner)))
         } else {
             self.parse_atom()
@@ -278,6 +320,7 @@ impl<'a> ParseCtx<'a> {
         self.skip_ws();
         if self.peek() == Some('(') {
             self.pos += 1;
+            self.descend()?;
             let inner = self.parse_or()?;
             self.skip_ws();
             if self.peek() != Some(')') {
@@ -287,6 +330,7 @@ impl<'a> ParseCtx<'a> {
                 )));
             }
             self.pos += 1;
+            self.depth -= 1;
             Ok(inner)
         } else {
             self.parse_term()
@@ -295,6 +339,12 @@ impl<'a> ParseCtx<'a> {
 
     fn parse_term(&mut self) -> Result<Expr> {
         self.skip_ws();
+        self.terms += 1;
+        if self.terms > MAX_FILTER_TERMS {
+            return Err(Error::Other(format!(
+                "filter: more than {MAX_FILTER_TERMS} terms"
+            )));
+        }
         // Order matters: longer keywords before shorter overlapping ones.
         for (kw, expr) in &[
             ("today", Expr::Today),
@@ -563,6 +613,73 @@ mod tests {
     #[test]
     fn trailing_garbage_is_error() {
         assert!(parse("today garbage").is_err());
+    }
+
+    /// Run `f` on a thread with a tokio-worker-sized (2 MiB) stack, where a
+    /// recursion bomb aborts the whole process instead of failing a test.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
+    #[test]
+    fn deeply_nested_filter_is_an_error_not_a_stack_overflow() {
+        // SRV-1: one GET /list with 1000 nested parens aborted `pt serve`.
+        on_small_stack(|| {
+            let bomb = format!("{}today{}", "(".repeat(200_000), ")".repeat(200_000));
+            assert!(parse(&bomb).is_err());
+            // Short enough to pass the length cap, still too deep.
+            let deep = format!("{}today{}", "(".repeat(40), ")".repeat(40));
+            assert!(parse(&deep).is_err());
+            let negated = format!("{}today{}", "!(".repeat(40), ")".repeat(40));
+            assert!(parse(&negated).is_err());
+        });
+    }
+
+    #[test]
+    fn long_flat_chain_is_an_error_not_a_stack_overflow() {
+        // A flat `p5&p5&…` chain parses iteratively but compiles and drops
+        // recursively, one frame per term.
+        on_small_stack(|| {
+            assert!(parse(&vec!["p5"; 100_000].join("&")).is_err());
+            assert!(parse(&vec!["p5"; MAX_FILTER_TERMS + 1].join("|")).is_err());
+        });
+    }
+
+    #[test]
+    fn filters_at_the_limits_still_parse_compile_and_run() {
+        on_small_stack(|| {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (id TEXT, title TEXT, description TEXT, priority INTEGER,
+                                     deadline TEXT, due_at TEXT, status TEXT, kind TEXT);
+                 CREATE TABLE pt_extensions (task_uuid TEXT, labels TEXT, project TEXT);
+                 CREATE TABLE pt_recurrence (task_uuid TEXT);
+                 INSERT INTO tasks (id, title, priority) VALUES ('a', 'x', 5);",
+            )
+            .unwrap();
+            let terms = vec!["p5"; MAX_FILTER_TERMS].join("&");
+            let nested = format!(
+                "{}today{}",
+                "(".repeat(MAX_FILTER_NESTING),
+                ")".repeat(MAX_FILTER_NESTING)
+            );
+            for f in [terms, nested] {
+                let sql = to_sql(&parse(&f).unwrap(), &anchor()).unwrap();
+                let query = format!(
+                    "SELECT COUNT(*) FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid = t.id
+                     WHERE {}",
+                    sql.where_clause
+                );
+                let params = bind_refs(&sql.params);
+                conn.query_row(&query, params.as_slice(), |r| r.get::<_, i64>(0))
+                    .unwrap();
+            }
+        });
     }
 
     #[test]
