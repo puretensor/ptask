@@ -30,8 +30,10 @@ const TOKEN_HEADER: &str = "x-ptask-token";
 ///   3. `pt_api_tokens` hash lookup → named identity + its scope
 ///
 /// No credential presented: allowed only in unauthenticated back-compat
-/// mode (no env token configured) as `anonymous` (Write) — identical
-/// enforcement semantics to the pre-v1.17 single-token gate.
+/// mode — no env token configured and no unrevoked named token — as
+/// `anonymous` (Write). An active named token closes anonymous access just as
+/// the env token does, so finishing the rotation off `PTASK_API_TOKEN` does
+/// not reopen every route.
 #[allow(clippy::result_large_err)] // the Err IS the ready-made 401 Response
 pub fn authenticate(
     db: &Db,
@@ -71,13 +73,19 @@ pub fn authenticate(
             }
         }
         None => {
-            if auth.api_token.is_none() && auth.metrics_token.is_none() {
-                Identity {
+            if auth.api_token.is_some() || auth.metrics_token.is_some() {
+                return Err(unauthorized());
+            }
+            match tokens::any_active(db) {
+                Ok(false) => Identity {
                     client_id: "anonymous".into(),
                     scope: Scope::Write,
+                },
+                Ok(true) => return Err(unauthorized()),
+                Err(e) => {
+                    warn!(target: "ptask::auth", error = %e, "named-token check failed");
+                    return Err(unauthorized());
                 }
-            } else {
-                return Err(unauthorized());
             }
         }
     };
@@ -114,18 +122,20 @@ fn unauthorized() -> Response {
 /// Refuse externally reachable unauthenticated API listeners by default.
 ///
 /// Loopback keeps the old local-dev behaviour. Any non-loopback bind must have
-/// both machine-API bearer auth and dashboard Basic auth configured, unless an
-/// operator explicitly sets `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately
-/// isolated deployment. The dashboard routes are always mounted, so an API
-/// token alone does not make the listener safe.
+/// both machine-API bearer auth (the env token or an unrevoked named token)
+/// and dashboard Basic auth configured, unless an operator explicitly sets
+/// `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately isolated deployment. The
+/// dashboard routes are always mounted, so an API token alone does not make
+/// the listener safe.
 pub fn validate_bind_auth(
     addr: &SocketAddr,
     auth: &AuthConfig,
     dash: &DashConfig,
+    named_tokens_active: bool,
 ) -> Result<(), String> {
     validate_bind_auth_state(
         addr,
-        auth.api_token.is_some(),
+        auth.api_token.is_some() || named_tokens_active,
         dash.pass.is_some(),
         auth.allow_unauthenticated,
     )
@@ -240,6 +250,18 @@ mod tests {
     fn validate_bind_auth_allows_non_loopback_with_both_credentials() {
         let addr: SocketAddr = "10.0.0.10:9501".parse().unwrap();
         assert!(validate_bind_auth_state(&addr, true, true, false).is_ok());
+    }
+
+    #[test]
+    fn validate_bind_auth_counts_named_tokens_as_api_auth() {
+        let addr: SocketAddr = "10.0.0.10:9501".parse().unwrap();
+        let auth = AuthConfig::default();
+        let dash = DashConfig {
+            pass: Some("pw".into()),
+            ..Default::default()
+        };
+        assert!(validate_bind_auth(&addr, &auth, &dash, true).is_ok());
+        assert!(validate_bind_auth(&addr, &auth, &dash, false).is_err());
     }
 
     #[test]

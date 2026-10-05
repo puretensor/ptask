@@ -35,6 +35,8 @@ pub struct Config {
 
 /// Triage-cockpit surface served by `pt serve` (v2.3.0 — absorbed from the
 /// Python sidecar). Basic auth, NOT bearer tokens: the consumer is a browser.
+/// (The Python sidecar in dashboard/ has no login since PT-2201; this one
+/// keeps Basic auth.)
 #[derive(Debug, Clone, Default)]
 pub struct DashConfig {
     /// Basic-auth user (`$PTASK_DASH_USER`, default "ops").
@@ -55,6 +57,11 @@ pub struct DashConfig {
     /// Public dashboard origin (`$PTASK_DASH_URL`), used as the approval
     /// Telegram URL-button target. None = omit the button.
     pub url: Option<String>,
+    /// Host names the dashboard routes answer to besides IP literals,
+    /// single-label names and `*.ts.net` (`$PTASK_DASH_ALLOWED_HOSTS`,
+    /// comma-separated, plus the host of `$PTASK_DASH_URL`). Lower-cased,
+    /// without port or trailing dot.
+    pub allowed_hosts: Vec<String>,
 }
 
 /// API-token material for `pt serve` (enforce-if-configured).
@@ -203,11 +210,44 @@ impl Config {
                     .unwrap_or_else(|| "http://127.0.0.1:9510".into()),
                 frame_ancestor: env_nonempty("PTASK_DASH_FRAME_ANCESTOR"),
                 url: env_nonempty("PTASK_DASH_URL"),
+                allowed_hosts: dash_allowed_hosts(
+                    env_nonempty("PTASK_DASH_ALLOWED_HOSTS").as_deref(),
+                    env_nonempty("PTASK_DASH_URL").as_deref(),
+                ),
             },
             tg_forwarders: parse_forwarders(env_nonempty("PTASK_TG_FORWARDERS")),
             tg_approval_buttons: env_truthy("PTASK_TG_APPROVAL_BUTTONS"),
         }
     }
+}
+
+/// `$PTASK_DASH_ALLOWED_HOSTS` entries plus the host part of
+/// `$PTASK_DASH_URL`, normalised the way the dashboard's Host check compares
+/// them (lower case, no port, no trailing dot).
+fn dash_allowed_hosts(list: Option<&str>, url: Option<&str>) -> Vec<String> {
+    let mut hosts: Vec<String> = list
+        .unwrap_or("")
+        .split(',')
+        .map(|h| h.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    if let Some(url) = url {
+        let rest = url.split_once("://").map_or(url, |(_, r)| r);
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let host = if host_port.starts_with('[') {
+            host_port
+                .split_once(']')
+                .map_or("", |(h, _)| h.trim_start_matches('['))
+        } else {
+            host_port.split(':').next().unwrap_or("")
+        };
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if !host.is_empty() && !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
 }
 
 fn parse_forwarders(raw: Option<String>) -> Vec<String> {
@@ -266,6 +306,23 @@ fn env_first(names: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn dash_allowed_hosts_normalises_the_list_and_adds_the_dashboard_url_host() {
+        assert_eq!(
+            dash_allowed_hosts(
+                Some(" Cockpit.Example.org. ,,other.example "),
+                Some("https://ops@ptask.example.net:8443/cockpit?x=1"),
+            ),
+            vec!["cockpit.example.org", "other.example", "ptask.example.net"]
+        );
+        assert_eq!(
+            dash_allowed_hosts(None, Some("http://[fd7a::1]:9510/")),
+            vec!["fd7a::1"]
+        );
+        assert!(dash_allowed_hosts(None, None).is_empty());
+    }
+
     use super::*;
 
     static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();

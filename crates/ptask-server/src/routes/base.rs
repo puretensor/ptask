@@ -1,4 +1,4 @@
-//! Base routes: health, version, banner.
+//! Base routes: health and version.
 
 use crate::AppState;
 use axum::Router;
@@ -6,8 +6,9 @@ use axum::response::{IntoResponse, Json};
 use axum::routing::get;
 
 pub fn router() -> Router<AppState> {
+    // `/` serves the cockpit, so it lives in the dashboard router behind the
+    // Host guard and the Basic-auth throttle.
     Router::new()
-        .route("/", get(crate::routes::dashboard::root))
         .route("/healthz", get(healthz))
         .route("/version", get(version))
 }

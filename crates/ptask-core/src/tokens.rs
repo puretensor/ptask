@@ -132,6 +132,17 @@ pub fn resolve(db: &Db, presented: &str) -> Result<Option<Identity>> {
     Ok(Some(Identity { client_id, scope }))
 }
 
+/// True when at least one named token is unrevoked: API auth is configured
+/// even with no env token, so anonymous callers must be refused.
+pub fn any_active(db: &Db) -> Result<bool> {
+    let conn = db.get()?;
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pt_api_tokens WHERE revoked_at IS NULL)",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 pub fn list(db: &Db) -> Result<Vec<TokenInfo>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
