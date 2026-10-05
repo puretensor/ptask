@@ -49,27 +49,31 @@ Boolean expressions over field tokens.
 | Token | Predicate |
 |---|---|
 | `today` | `deadline = today` or due today |
+| `tomorrow`, `yesterday` | deadline on that day |
 | `overdue` | `deadline < today`, not done or dismissed |
-| `no date` | `deadline IS NULL` |
+| `no date` (or `no deadline`) | `deadline IS NULL` |
 | `recurring` | row has a `pt_recurrence` entry |
 | `p1`..`p5` | exact priority match |
 | `@label` | label in `pt_extensions.labels` |
 | `#project` | project match |
 | `due:`*phrase* | resolves a date phrase; exact-day match |
 | `due before:`*phrase* | `deadline < parsed_date` |
-| `created:`*phrase* | `created_at` on that day |
-| `search:`*str* | `title LIKE %str%` (case-insensitive) |
-| `status:STATE` | exact status; same lexicon as `-s` |
+| `due after:`*phrase* | `deadline > parsed_date` |
+| `search:`*str* | title or description contains *str* (case-insensitive) |
 | `kind:`*scout\|ship* | investigation vs implementation (see `pt promote`) |
 
 ### Operators
 
 | Op | Form |
 |---|---|
-| AND | `a & b` or whitespace `a b` |
+| AND | `a & b` |
 | OR | `a | b` |
 | NOT | `!a` |
 | group | `(a | b) & c` |
+
+Not supported; the parser rejects them: `created:`, `status:` (filter by
+status with `pt list -s STATE`), and whitespace between terms as an
+implicit AND (join terms with `&`).
 
 ### Examples
 
