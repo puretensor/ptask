@@ -327,6 +327,22 @@ fn duplicate_capture_response(r: ptask_core::raw_items::RawItem) -> axum::respon
         .into_response()
 }
 
+/// N from a literal `[puresentinel sevN]` marker (case-insensitive).
+fn marker_severity(text: &str) -> Option<i64> {
+    const MARKER: &str = "[puresentinel sev";
+    // ASCII lowercasing keeps byte offsets.
+    let lower = text.to_ascii_lowercase();
+    lower.match_indices(MARKER).find_map(|(idx, _)| {
+        let rest = &lower[idx + MARKER.len()..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0 && rest[digits..].starts_with(']') {
+            rest[..digits].parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
 /// Severity from the explicit field, else parsed from a puresentinel
 /// incident marker (`[puresentinel sevN]`) when the source says incident.
 fn effective_severity(req: &CaptureReq, source: &str) -> Option<i64> {
@@ -334,14 +350,18 @@ fn effective_severity(req: &CaptureReq, source: &str) -> Option<i64> {
         return Some(s);
     }
     if source.starts_with("puresentinel:incident:") {
-        // First `sev` followed by digits: an earlier word ("several OSDs
-        // down [puresentinel sev4]") must not hide the marker.
-        let marked = req.text.match_indices("sev").find_map(|(idx, _)| {
-            let digits: String = req.text[idx + 3..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-            digits.parse::<i64>().ok()
+        // The literal marker wins: an earlier number ("prior sev1 cleared",
+        // a host named sev01-db) demoted a sev4 out of the fast lane.
+        // Without one, the first `sev` followed by digits: an earlier word
+        // ("several OSDs down") must not hide it.
+        let marked = marker_severity(&req.text).or_else(|| {
+            req.text.match_indices("sev").find_map(|(idx, _)| {
+                let digits: String = req.text[idx + 3..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse::<i64>().ok()
+            })
         });
         // Incident source without a parsable marker still counts as critical.
         return Some(marked.unwrap_or(3));
@@ -847,6 +867,24 @@ mod tests {
             .to_string();
         refresh_matched_incident(&db, &lane_task, Some("sentinel:disk"), now).unwrap();
         assert_eq!(closed_by_resolve(&state, "sentinel:disk").await, 1);
+    }
+
+    #[test]
+    fn the_puresentinel_marker_beats_an_earlier_sev_number() {
+        // SRV-10: the first `sev<digits>` anywhere won, so an earlier mention
+        // or a host name demoted a sev4 incident to sev1 and out of the
+        // fast lane.
+        assert_eq!(
+            incident("prior sev1 cleared; [puresentinel sev4] ceph HEALTH_ERR"),
+            Some(4)
+        );
+        assert_eq!(
+            incident("disk full on sev01-db [puresentinel sev4]"),
+            Some(4)
+        );
+        assert_eq!(incident("[PureSentinel SEV5] site down"), Some(5));
+        // No marker: the first sev number still counts.
+        assert_eq!(incident("sev2 latency on fox-n1"), Some(2));
     }
 
     #[test]
