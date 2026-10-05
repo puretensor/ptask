@@ -79,10 +79,14 @@ fn resolve_blocking(
     // Not between a capture's create and its capture_key stamp.
     let _lane = incident_lane();
     let open: Vec<String> = match state.db.with_conn(|c| {
-        let mut stmt = c.prepare(
+        // Only tasks the capture lane created: a key stamped onto any other
+        // incident (before refresh_matched_incident checked) must not hand
+        // it to a capture-scope client.
+        let mut stmt = c.prepare(&format!(
             "SELECT id FROM tasks
-                 WHERE capture_key = ?1 AND status_v2 NOT IN ('done','dismissed')",
-        )?;
+                 WHERE capture_key = ?1 AND status_v2 NOT IN ('done','dismissed')
+                   AND {CAPTURE_LANE_TASK}"
+        ))?;
         let rows = stmt.query_map([&key], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }) {
@@ -255,6 +259,41 @@ fn open_incident_for_key(db: &ptask_core::Db, key: &str) -> Result<bool, ptask_c
             [key],
             |r| r.get::<_, bool>(0),
         )?)
+    })
+}
+
+/// SQL predicate (over `tasks`): the capture fast lane created this task.
+/// Its `task.created` journal row is keyed `capture:<raw_items id>` and
+/// commits with the insert; incidents HAL files over MCP and /sync tasks
+/// typed `incident` carry other keys.
+const CAPTURE_LANE_TASK: &str = "EXISTS (SELECT 1 FROM pt_event_log e
+     WHERE e.task_uuid = tasks.id AND e.event_type = 'task.created'
+       AND e.uuid LIKE 'capture:%')";
+
+/// Bump a matched open incident's occurrence counters. The capture's key is
+/// stamped only onto an unkeyed task the capture lane created: resolve
+/// closes every open task carrying a key, so stamping one onto an incident
+/// filed elsewhere let a capture-scope client close work it never created.
+fn refresh_matched_incident(
+    db: &ptask_core::Db,
+    uuid: &str,
+    capture_key: Option<&str>,
+    now: &str,
+) -> Result<(), ptask_core::Error> {
+    db.with_conn(|c| {
+        c.execute(
+            &format!(
+                "UPDATE tasks SET
+                     capture_count = capture_count + 1,
+                     last_captured_at = ?1,
+                     updated_at = ?1,
+                     capture_key = CASE WHEN capture_key IS NULL AND {CAPTURE_LANE_TASK}
+                                        THEN ?2 ELSE capture_key END
+                 WHERE id = ?3"
+            ),
+            rusqlite::params![now, capture_key, uuid],
+        )?;
+        Ok(())
     })
 }
 
@@ -493,18 +532,8 @@ fn capture_blocking(
             let now = ptask_core::dates::format_iso(
                 &ptask_core::dates::now_in_operator_tz().unwrap_or_else(|_| jiff::Zoned::now()),
             );
-            let refresh = state.db.with_conn(|c| {
-                c.execute(
-                    "UPDATE tasks SET
-                         capture_count = capture_count + 1,
-                         last_captured_at = ?1,
-                         updated_at = ?1,
-                         capture_key = COALESCE(capture_key, ?2)
-                     WHERE id = ?3",
-                    rusqlite::params![now, capture_key, existing_uuid],
-                )?;
-                Ok(())
-            });
+            let refresh =
+                refresh_matched_incident(&state.db, &existing_uuid, capture_key.as_deref(), &now);
             match refresh {
                 Ok(()) => {
                     let ctx = EventCtx {
@@ -730,6 +759,94 @@ mod tests {
             expected.push(StatusCode::CREATED);
             assert_eq!(statuses, expected, "trial {trial}");
         }
+    }
+
+    async fn closed_by_resolve(state: &AppState, key: &str) -> i64 {
+        let resp = resolve_blocking(
+            state.clone(),
+            HeaderMap::new(),
+            ResolveReq {
+                client_key: key.into(),
+                note: None,
+            },
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["closed"]
+            .as_i64()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn semantic_merge_does_not_hand_a_capture_client_someone_elses_incident() {
+        // SRV-15: a semantic merge stamped the capture's key onto any
+        // unkeyed open incident (`COALESCE(capture_key, ?)`), e.g. one HAL
+        // filed over MCP, and /capture/resolve closes every open task with
+        // that key -- so a capture-scope client could close work it never
+        // created.
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("merge.db")).unwrap();
+        let state = AppState::new(db.clone(), Default::default(), Default::default());
+        let now = "2026-10-05T09:00:00+00:00";
+        let hal = EventCtx {
+            actor: "hal".into(),
+            source: "mcp".into(),
+            event_uuid: None,
+        };
+        let filed_by_hal = ptask_core::tasks::create_with_extensions(
+            &db,
+            ptask_core::NewTask {
+                source_type: "incident".into(),
+                ..ptask_core::NewTask::minimal("ceph mon quorum lost")
+            },
+            ptask_core::Extensions::default(),
+            &hal,
+        )
+        .unwrap();
+        // The merge path the embedder takes for "mons out of quorum".
+        refresh_matched_incident(&db, &filed_by_hal.id, Some("sentinel:quorum"), now).unwrap();
+        assert_eq!(closed_by_resolve(&state, "sentinel:quorum").await, 0);
+        let status = ptask_core::tasks::resolve_for_lookup(&db, &filed_by_hal.id, true)
+            .unwrap()
+            .status;
+        assert_ne!(status, "done");
+
+        // A key stamped onto it before the fix is out of resolve's reach too.
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET capture_key = 'legacy:quorum' WHERE id = ?1",
+                [&filed_by_hal.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(closed_by_resolve(&state, "legacy:quorum").await, 0);
+
+        // An unkeyed incident the capture lane created still takes the key
+        // and closes on recovery.
+        let resp = capture_blocking(
+            state.clone(),
+            HeaderMap::new(),
+            CaptureReq {
+                text: "disk 97% on fox-n2".into(),
+                source: None,
+                source_file: None,
+                severity: Some(4),
+                client_key: None,
+            },
+        );
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let lane_task = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["task_uuid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        refresh_matched_incident(&db, &lane_task, Some("sentinel:disk"), now).unwrap();
+        assert_eq!(closed_by_resolve(&state, "sentinel:disk").await, 1);
     }
 
     #[test]
