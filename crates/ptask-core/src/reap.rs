@@ -16,6 +16,7 @@
 
 use crate::event_log::EventCtx;
 use crate::{Db, Result};
+use rusqlite::OptionalExtension;
 
 /// One task the reaper dismissed (or would dismiss, in dry-run).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -84,23 +85,61 @@ pub fn run(db: &Db, dry_run: bool, ctx: &EventCtx) -> Result<ReapReport> {
     };
 
     let mut errors = 0usize;
-    if !dry_run {
-        for c in &candidates {
-            let ctx = ctx.with_uuid(format!("reap:{}:{}", c.uuid, c.updated_at));
-            if let Err(e) = crate::tasks::dismiss(db, &c.uuid, &ctx) {
-                tracing::warn!(target: "ptask::reap", uuid = %c.uuid, error = %e, "dismiss failed");
-                errors += 1;
+    let reaped = if dry_run {
+        candidates
+    } else {
+        let mut reaped = Vec::with_capacity(candidates.len());
+        for c in candidates {
+            match reap_one(db, &c, ctx) {
+                Ok(true) => reaped.push(c),
+                Ok(false) => tracing::info!(
+                    target: "ptask::reap", uuid = %c.uuid,
+                    "changed since the candidate scan; not reaped"
+                ),
+                Err(e) => {
+                    tracing::warn!(target: "ptask::reap", uuid = %c.uuid, error = %e, "dismiss failed");
+                    errors += 1;
+                }
             }
         }
-    }
+        reaped
+    };
 
     Ok(ReapReport {
         dry_run,
         incident_ttl_days: INCIDENT_TTL_DAYS,
         distilled_ttl_days: DISTILLED_TTL_DAYS,
-        reaped: candidates,
+        reaped,
         errors,
     })
+}
+
+/// Dismiss one candidate from the scan, re-checking the reap rule under the
+/// write lock: still untriaged in triage/backlog/todo, and untouched since
+/// the scan (`updated_at` as read). Between the scan and here a task can be
+/// claimed, started, completed, snoozed, triaged or refreshed; a generic
+/// dismiss would discard that (a completion turned into "dismissed").
+/// Returns false, writing nothing, when the task no longer qualifies.
+fn reap_one(db: &Db, c: &Reaped, ctx: &EventCtx) -> Result<bool> {
+    let ctx = ctx.with_uuid(format!("reap:{}:{}", c.uuid, c.updated_at));
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM tasks
+             WHERE id = ?1 AND updated_at = ?2
+               AND status_v2 IN ('triage','backlog','todo')
+               AND triage_reason IS NULL",
+            rusqlite::params![c.uuid, c.updated_at],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(status) = status else {
+        return Ok(false);
+    };
+    crate::tasks::dismiss_in_tx(&tx, &c.uuid, &status, &ctx)?;
+    tx.commit()?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -200,6 +239,58 @@ mod tests {
         age(&db, &t.id, 30);
         let dry = run(&db, true, &EventCtx::test()).unwrap();
         assert!(dry.reaped.is_empty(), "{:?}", dry.reaped);
+    }
+
+    #[test]
+    fn a_task_touched_after_the_snapshot_is_not_reaped() {
+        // Regression (CORE-5): candidates come from an autocommit SELECT and
+        // the generic dismiss only refused an already-dismissed task, so a
+        // task claimed, started, completed, snoozed, triaged or refreshed in
+        // between was dismissed anyway (a completion lost to "dismissed").
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("t.db")).unwrap();
+        let ctx = EventCtx::test();
+        let mut cases = Vec::new();
+        for touch in ["start", "done", "snooze", "triage", "refresh"] {
+            let t = mk(&db, &format!("stale incident ({touch})"), "incident", 4);
+            age(&db, &t.id, 30);
+            cases.push((touch, t));
+        }
+        let snapshot = run(&db, true, &ctx).unwrap().reaped;
+        assert_eq!(snapshot.len(), cases.len());
+
+        for (touch, t) in &cases {
+            match *touch {
+                "start" => crate::tasks::start(&db, &t.id, &ctx).unwrap(),
+                "done" => {
+                    crate::tasks::mark_done(&db, t, &ctx).unwrap();
+                }
+                "snooze" => crate::tasks::snooze(&db, &t.id, "2099-01-01", &ctx).unwrap(),
+                "triage" => {
+                    db.get()
+                        .unwrap()
+                        .execute(
+                            "UPDATE tasks SET triage_reason='needs a human' WHERE id=?1",
+                            [&t.id],
+                        )
+                        .unwrap();
+                }
+                "refresh" => crate::tasks::update_priority(&db, &t.id, 3, &ctx).unwrap(),
+                _ => unreachable!(),
+            }
+        }
+        for c in &snapshot {
+            assert!(!reap_one(&db, c, &ctx).unwrap(), "{} was reaped", c.title);
+        }
+        let conn = db.get().unwrap();
+        for (touch, t) in &cases {
+            let status: String = conn
+                .query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&t.id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_ne!(status, "dismissed", "{touch}");
+        }
     }
 
     #[test]

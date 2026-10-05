@@ -1304,7 +1304,6 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
 /// Dismiss (soft close; reversible via reopen). The `task.updated` event
 /// commits in the same transaction, attributed to `ctx`.
 pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
-    let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let status: Option<String> = tx
@@ -1316,6 +1315,21 @@ pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     if status == "dismissed" {
         return Err(crate::Error::Other("task is already dismissed".into()));
     }
+    dismiss_in_tx(&tx, task_uuid, &status, ctx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The dismissal writes (row, interaction, attributed event) inside the
+/// caller's transaction; `status` is the legacy status being left. The
+/// reaper uses it after re-checking its own rule under the write lock.
+pub(crate) fn dismiss_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    task_uuid: &str,
+    status: &str,
+    ctx: &EventCtx,
+) -> Result<()> {
+    let now = iso_now();
     tx.execute(
         "UPDATE tasks SET status='dismissed', status_v2='dismissed', updated_at=?1 WHERE id=?2",
         params![now, task_uuid],
@@ -1326,13 +1340,12 @@ pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
         params![task_uuid, now, format!("Dismissed (was {})", status)],
     )?;
     record_event_tx(
-        &tx,
+        tx,
         ctx,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "status": "dismissed" }),
     )?;
-    tx.commit()?;
     Ok(())
 }
 
