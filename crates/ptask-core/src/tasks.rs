@@ -436,6 +436,11 @@ pub fn list_all(db: &Db) -> Result<Vec<Task>> {
 pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     let conn = db.get()?;
     let q = query.trim();
+    // A blank query is the LIKE pattern "%%": it matched every open task,
+    // so `pt done ""` completed the only one.
+    if q.is_empty() {
+        return Err(crate::Error::Other("empty task query".into()));
+    }
     let upper = q.to_ascii_uppercase();
 
     // PT-N exact match.
@@ -3082,6 +3087,22 @@ mod tests {
         assert_eq!(by_short.id, t.id);
         let by_sub = resolve(&db, "artisanal").unwrap();
         assert_eq!(by_sub.id, t.id);
+    }
+
+    #[test]
+    fn resolve_rejects_an_empty_or_blank_query() {
+        // Regression (CLI-14): "" became the LIKE pattern "%%", so with one
+        // open task `pt done ""` completed it and `pt rm " " -y` deleted it.
+        let (_dir, db) = fresh_db();
+        let only = create(&db, NewTask::minimal("the only task"), &EventCtx::test()).unwrap();
+        for blank in ["", " ", "\t\n"] {
+            let err = resolve(&db, blank).unwrap_err();
+            assert!(format!("{err}").contains("empty task query"), "{err}");
+        }
+        assert_eq!(
+            resolve_for_lookup(&db, &only.id, true).unwrap().status,
+            "todo"
+        );
     }
 
     #[test]
