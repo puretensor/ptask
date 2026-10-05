@@ -768,7 +768,17 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         {
             next_z = combine_date_with_time(&next_z, time)?;
         }
-        let next_iso = crate::dates::format_iso(&next_z);
+        // A date-only deadline is due all day; its next occurrence must be
+        // date-only too, not a midnight timestamp that is overdue at 00:00.
+        let date_only = matches!(
+            current_deadline.as_deref().map(parse_when),
+            Some(Ok(When::Date(_)))
+        );
+        let next_iso = if date_only {
+            next_z.date().to_string()
+        } else {
+            crate::dates::format_iso(&next_z)
+        };
 
         tx.execute(
             "UPDATE tasks SET deadline=?1, updated_at=?2, status='pending',
@@ -3703,6 +3713,58 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn a_date_only_recurring_deadline_stays_date_only() {
+        // Regression (CORE-3): "pay rent every month" due 2026-10-01 came
+        // back as 2026-11-01T00:00:00+00:00, overdue from 00:00 on the due
+        // day, where a date-only deadline is due all day.
+        for (rule, deadline, expected) in [
+            ("every month", "2099-10-05", "2099-11-05"),
+            ("every day", "2099-10-05", "2099-10-06"),
+            ("every monday", "2099-10-05", "2099-10-12"),
+        ] {
+            let (_dir, db) = fresh_db();
+            let mut new = NewTask::minimal("pay rent");
+            new.deadline = Some(deadline.into());
+            let ext = Extensions {
+                recurrence: Some(crate::recurrence::parse(rule).unwrap()),
+                ..Default::default()
+            };
+            let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+            let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
+            assert_eq!(
+                outcome,
+                DoneOutcome::Advanced {
+                    next_deadline: expected.into()
+                },
+                "{rule}"
+            );
+            let after = resolve_for_lookup(&db, &t.id, true).unwrap();
+            assert_eq!(after.deadline.as_deref(), Some(expected), "{rule}");
+            assert_eq!(
+                load_detail(&db, &t.id).unwrap().recurrence_next.as_deref(),
+                Some(expected),
+                "{rule}"
+            );
+        }
+        // Completion mode counts from now but keeps the date-only shape.
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("water plants");
+        new.deadline = Some("2026-10-05".into());
+        let ext = Extensions {
+            recurrence: Some(crate::recurrence::parse("every! 5 days").unwrap()),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let DoneOutcome::Advanced { next_deadline } =
+            mark_done(&db, &t, &EventCtx::test()).unwrap()
+        else {
+            panic!("must recur")
+        };
+        assert_eq!(next_deadline.len(), 10, "{next_deadline}");
+        next_deadline.parse::<jiff::civil::Date>().unwrap();
     }
 
     #[test]
