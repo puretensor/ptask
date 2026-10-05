@@ -1959,6 +1959,115 @@ Don't forget the sourdough.\r\n";
         .unwrap();
     }
 
+    /// `levels` unencoded message/rfc822 parts nested in one another
+    /// (the reviewer's mknest.py).
+    fn nested_rfc822(levels: usize) -> String {
+        format!(
+            "Subject: probe\r\nMessage-ID: <probe-{levels}@x>\r\n{}Subject: inner\r\n\r\nbody\r\n",
+            "Content-Type: message/rfc822\r\n\r\n".repeat(levels)
+        )
+    }
+
+    async fn post_email(app: &Router, raw: Vec<u8>) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/email")
+                    .method("POST")
+                    .header("content-type", "message/rfc822")
+                    .body(Body::from(raw))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn email_with_deeply_nested_messages_is_400_not_an_abort() {
+        // SRV-2: mail-parser nests one Message per unencoded message/rfc822
+        // part with no limit, and dropping the tree recursed once per level:
+        // ~10k levels (320 KB) overflowed the blocking thread and aborted pt
+        // serve -- after the raw_items insert, so a re-send crashed it again.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        assert_eq!(
+            post_email(&app, nested_rfc822(10_000).into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+        // The deepest chain the 2 MiB body limit admits (~61k levels).
+        assert_eq!(
+            post_email(&app, nested_rfc822(61_000).into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // Variants a scan for the literal type misses: mail-parser accepts
+        // whitespace inside the type, and nests untyped digest parts.
+        let spaced = nested_rfc822(10_000).replace("message/rfc822", "message/ rfc822");
+        assert_eq!(
+            post_email(&app, spaced.into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+        let digest = format!(
+            "Subject: digest\r\n{}Subject: inner\r\n\r\nbody\r\n",
+            "Content-Type: multipart/digest; boundary=d\r\n\r\n--d\r\n\r\n".repeat(10_000)
+        );
+        assert_eq!(
+            post_email(&app, digest.into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // The same chain hidden in a base64 part is invisible to any scan of
+        // the raw body; mail-parser decodes and re-parses it, copying the
+        // decoded buffer once per nested message (quadratic memory). The
+        // header name may even carry whitespace mail-parser ignores.
+        use base64::Engine as _;
+        let hidden = base64::engine::general_purpose::STANDARD.encode(nested_rfc822(10_000));
+        for cte in ["Content-Transfer-Encoding", "Content-Transfer- Encoding"] {
+            let raw = format!(
+                "Subject: probe\r\nMessage-ID: <b64@x>\r\nContent-Type: message/rfc822\r\n\
+                 {cte}: base64\r\n\r\n{hidden}\r\n"
+            );
+            assert_eq!(
+                post_email(&app, raw.into_bytes()).await,
+                StatusCode::BAD_REQUEST,
+                "{cte}"
+            );
+        }
+        assert_eq!(
+            ptask_core::raw_items::unprocessed_count(&db).unwrap(),
+            0,
+            "a rejected mail must not land in the inbox"
+        );
+
+        // An ordinary forward (one embedded message) is still captured.
+        let forward = format!(
+            "Subject: Fwd: renew the cert\r\nMessage-ID: <fwd@x>\r\n\
+             Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\
+             Content-Type: text/plain\r\n\r\nplease handle\r\n--b\r\n{}--b--\r\n",
+            nested_rfc822(1)
+        );
+        assert_eq!(
+            post_email(&app, forward.into_bytes()).await,
+            StatusCode::CREATED
+        );
+        // ...including one whose embedded message declares an identity
+        // transfer encoding, as Thunderbird does.
+        let forward_7bit = "Subject: Fwd: rotate keys\r\nMessage-ID: <fwd7@x>\r\n\
+             Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\
+             Content-Type: text/plain\r\n\r\nsee below\r\n--b\r\n\
+             Content-Type: message/rfc822\r\nContent-Transfer-Encoding: 7bit\r\n\r\n\
+             Subject: rotate keys\r\n\r\nbefore friday\r\n--b--\r\n";
+        assert_eq!(
+            post_email(&app, forward_7bit.as_bytes().to_vec()).await,
+            StatusCode::CREATED
+        );
+    }
+
     /// mail-parser 0.11.3 panics when a `Received` header ends on a folded
     /// whitespace line (stalwartlabs/mail-parser#155). Inbound `/email` is
     /// that parser; a panic here is a request-task abort on a well-formed

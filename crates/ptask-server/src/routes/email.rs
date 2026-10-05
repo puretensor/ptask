@@ -12,15 +12,30 @@
 use crate::AppState;
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
-use mail_parser::MessageParser;
+use mail_parser::{HeaderName, Message, MessageParser, MessagePart, MimeHeaders, PartType};
 use serde::Serialize;
 
+/// Largest accepted message (axum's implicit default, made explicit).
+const EMAIL_BODY_LIMIT: usize = 2 * 1024 * 1024;
+/// Deepest embedded-message nesting a capture may have. mail-parser builds
+/// one nested `Message` per message/rfc822 level with no limit of its own,
+/// and its tree conversion and drop recurse once per level: ~10k levels
+/// (320 KB) overflowed a 2 MiB thread and aborted pt serve.
+const MAX_MESSAGE_DEPTH: usize = 32;
+/// Stack for the parse thread, which drops the structure probe's tree: an
+/// unencoded chain under EMAIL_BODY_LIMIT nests ~60k deep before the depth
+/// check can refuse it (a debug build drops that in under 32 MiB).
+const PARSE_STACK_BYTES: usize = 64 << 20;
+
 pub fn router() -> Router<AppState> {
-    Router::new().route("/email", post(email))
+    Router::new().route(
+        "/email",
+        post(email).layer(DefaultBodyLimit::max(EMAIL_BODY_LIMIT)),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -38,20 +53,185 @@ async fn email(
     crate::blocking::db_response(move || email_blocking(state, headers, body)).await
 }
 
+/// The fields a capture keeps, owned so the parsed tree can be dropped on
+/// the thread that built it.
+struct ParsedEmail {
+    subject: String,
+    body_text: String,
+    message_id: String,
+}
+
+enum ParseOutcome {
+    Parsed(ParsedEmail),
+    Unparseable,
+    Refused(&'static str),
+}
+
+/// mail-parser's default field table (parsers/header.rs `parse_headers`),
+/// except that `Content-Transfer-Encoding` is ignored: the parser then walks
+/// every part undecoded, so an encoded embedded message is never decoded
+/// and re-parsed. The real parser decodes such a part and copies its whole
+/// decoded buffer once per message nested inside it (`into_owned`), so a
+/// 2 MB body could demand tens of GB.
+fn structure_parser() -> MessageParser {
+    MessageParser::new()
+        .header_text(HeaderName::Subject)
+        .header_text(HeaderName::Comments)
+        .header_text(HeaderName::ContentDescription)
+        .header_text(HeaderName::ContentLocation)
+        .header_address(HeaderName::From)
+        .header_address(HeaderName::To)
+        .header_address(HeaderName::Cc)
+        .header_address(HeaderName::Bcc)
+        .header_address(HeaderName::ReplyTo)
+        .header_address(HeaderName::Sender)
+        .header_address(HeaderName::ResentTo)
+        .header_address(HeaderName::ResentFrom)
+        .header_address(HeaderName::ResentBcc)
+        .header_address(HeaderName::ResentCc)
+        .header_address(HeaderName::ResentSender)
+        .header_address(HeaderName::ListArchive)
+        .header_address(HeaderName::ListHelp)
+        .header_address(HeaderName::ListId)
+        .header_address(HeaderName::ListOwner)
+        .header_address(HeaderName::ListPost)
+        .header_address(HeaderName::ListSubscribe)
+        .header_address(HeaderName::ListUnsubscribe)
+        .header_date(HeaderName::Date)
+        .header_date(HeaderName::ResentDate)
+        .header_id(HeaderName::MessageId)
+        .header_id(HeaderName::References)
+        .header_id(HeaderName::InReplyTo)
+        .header_id(HeaderName::ReturnPath)
+        .header_id(HeaderName::ContentId)
+        .header_id(HeaderName::ResentMessageId)
+        .header_comma_separated(HeaderName::Keywords)
+        .header_comma_separated(HeaderName::ContentLanguage)
+        .header_received(HeaderName::Received)
+        .header_raw(HeaderName::MimeVersion)
+        .header_content_type(HeaderName::ContentType)
+        .header_content_type(HeaderName::ContentDisposition)
+        .ignore_header(HeaderName::ContentTransferEncoding)
+}
+
+/// A part mail-parser parses as an embedded message: message/rfc822 or
+/// message/global, or untyped inside a multipart/digest.
+fn is_embedded_message(part: &MessagePart<'_>, in_digest: bool) -> bool {
+    match part.content_type() {
+        Some(ct) => {
+            ct.ctype().eq_ignore_ascii_case("message")
+                && ct.subtype().is_some_and(|s| {
+                    s.eq_ignore_ascii_case("rfc822") || s.eq_ignore_ascii_case("global")
+                })
+        }
+        None => in_digest,
+    }
+}
+
+/// Any `Content-Transfer-Encoding` other than an identity one, read from the
+/// raw header bytes (the probe ignored its value).
+fn has_transfer_encoding(part: &MessagePart<'_>, raw: &[u8]) -> bool {
+    part.headers.iter().any(|h| {
+        h.name == HeaderName::ContentTransferEncoding
+            && raw
+                .get(h.offset_start as usize..h.offset_end as usize)
+                .map(<[u8]>::trim_ascii)
+                .is_some_and(|v| {
+                    !v.is_empty()
+                        && !["7bit", "8bit", "binary"]
+                            .iter()
+                            .any(|identity| v.eq_ignore_ascii_case(identity.as_bytes()))
+                })
+    })
+}
+
+/// Walk the undecoded structure without recursion. Refuses nesting deeper
+/// than MAX_MESSAGE_DEPTH and embedded messages with a transfer encoding,
+/// which RFC 2046 (5.2.1) forbids and which are the only parts the real
+/// parser decodes and re-parses as MIME.
+fn check_structure(probe: &Message<'_>, raw: &[u8]) -> Result<(), &'static str> {
+    let mut stack = vec![(probe, 0usize)];
+    while let Some((msg, depth)) = stack.pop() {
+        if depth > MAX_MESSAGE_DEPTH {
+            return Err("embedded messages nested too deeply");
+        }
+        let digest = msg.parts.iter().any(|p| {
+            p.content_type()
+                .is_some_and(|ct| ct.ctype() == "multipart" && ct.subtype() == Some("digest"))
+        });
+        for part in &msg.parts {
+            if is_embedded_message(part, digest) && has_transfer_encoding(part, raw) {
+                return Err("transfer-encoded embedded message");
+            }
+            if let PartType::Message(inner) = &part.body {
+                stack.push((inner, depth + 1));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Probe the structure, then parse and extract, on a dedicated big-stack
+/// thread: the probe's tree may nest arbitrarily deep before it is refused,
+/// and dropping it recurses once per level.
+fn parse_email(body: Bytes) -> std::io::Result<ParseOutcome> {
+    let worker = std::thread::Builder::new()
+        .name("ptask-email-parse".into())
+        .stack_size(PARSE_STACK_BYTES)
+        .spawn(move || {
+            let Some(probe) = structure_parser().parse(&body[..]) else {
+                return ParseOutcome::Unparseable;
+            };
+            if let Err(why) = check_structure(&probe, &body) {
+                return ParseOutcome::Refused(why);
+            }
+            drop(probe);
+            let Some(msg) = MessageParser::default().parse(&body[..]) else {
+                return ParseOutcome::Unparseable;
+            };
+            ParseOutcome::Parsed(ParsedEmail {
+                subject: msg.subject().unwrap_or("(no subject)").to_string(),
+                body_text: msg.body_text(0).map(|s| s.to_string()).unwrap_or_default(),
+                message_id: msg.message_id().unwrap_or("none").to_string(),
+            })
+        })?;
+    // A parser panic is an unparseable message, not a dead request.
+    Ok(worker.join().unwrap_or(ParseOutcome::Unparseable))
+}
+
 fn email_blocking(state: AppState, headers: HeaderMap, body: Bytes) -> axum::response::Response {
     if let Some(resp) = crate::auth::require_write_token(&state.db, &state.auth, &headers) {
         return resp;
     }
-    let Some(msg) = MessageParser::default().parse(&body[..]) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "could not parse RFC 822 message"})),
-        )
-            .into_response();
+    let ParsedEmail {
+        subject,
+        body_text,
+        message_id,
+    } = match parse_email(body) {
+        Ok(ParseOutcome::Parsed(p)) => p,
+        Ok(ParseOutcome::Refused(why)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("refused: {why}")})),
+            )
+                .into_response();
+        }
+        Ok(ParseOutcome::Unparseable) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "could not parse RFC 822 message"})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!(target: "ptask::email", error = %e, "parse thread spawn failed");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "could not start the parser"})),
+            )
+                .into_response();
+        }
     };
-    let subject = msg.subject().unwrap_or("(no subject)").to_string();
-    let body_text = msg.body_text(0).map(|s| s.to_string()).unwrap_or_default();
-    let message_id = msg.message_id().unwrap_or("none").to_string();
 
     // Compose the raw_items text: subject + blank line + body. Distill's
     // speech-act classifier handles the rest. Keep it short — anything too
