@@ -75,7 +75,9 @@ carries no HTTP/TLS/executor dependencies.
 | `PTASK_DB` | `pt` (canonical) | Override the SQLite path. Defaults to `~/puretensor-tasks/tasks.db`. |
 | `PTASK_SYNC_URL` | `pt remote` (clients) | Canonical `pt serve` URL, for example `http://ptask.example:9501`. |
 | `PTASK_API_TOKEN` | `pt serve`, `pt remote` | Machine-API bearer credential; required together with `PTASK_DASH_PASS` for non-loopback `pt serve` binds. |
-| `PTASK_DASH_USER`, `PTASK_DASH_PASS` | `pt serve` cockpit | Dashboard Basic auth. The password is required together with `PTASK_API_TOKEN` for non-loopback binds. |
+| `PTASK_DASH_USER`, `PTASK_DASH_PASS` | `pt serve` cockpit | Dashboard Basic auth. The password is required together with `PTASK_API_TOKEN` (or an active named token) for non-loopback binds. The Python sidecar in `dashboard/` ignores both: it has no login and is reachable from the whole tailnet. |
+| `PTASK_DASH_ALLOWED_HOSTS` | `pt serve` cockpit, dashboard sidecar | Extra `Host` names the dashboard answers to besides IP literals, single-label names and `*.ts.net` (the DNS-rebinding guard; `pt serve` applies it only while no dashboard password is set). |
+| `PTASK_DASH_DECIDE_TOKEN` | dashboard sidecar | Secret (≥ 16 characters) the cockpit must send to approve or reject; unset disables approval decisions on the sidecar. |
 | `PTASK_DASH_FRAME_ANCESTOR` | `pt serve` cockpit | Optional single HTTPS origin allowed to frame dashboard documents through CSP. Unset or invalid values fail closed with `X-Frame-Options: DENY`. |
 | `PTASK_ALLOW_UNAUTHENTICATED` | `pt serve` | Emergency/test override for unauthenticated non-loopback binds. Do not set in production. |
 | `GOOGLE_API_KEY`, `GEMINI_CONSOLIDATE_MODEL` | `pt distill` | Gemini structured-output credentials/model for native classify+consolidate. Missing key = preflight exit 3, fail closed. |

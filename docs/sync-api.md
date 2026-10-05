@@ -190,10 +190,18 @@ Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
 
 ## Dashboard surface (v2.3.0)
 
-The Triage Cockpit's API lives in `pt serve` (the Python sidecar shrank to a
-voice shim). HTTP **Basic** auth (`PTASK_DASH_USER`/`PTASK_DASH_PASS`; open
-when no password configured — local/dev only). Same shapes as the sidecar
-v0.6.0 contract.
+The Triage Cockpit's API also lives in `pt serve`. HTTP **Basic** auth
+(`PTASK_DASH_USER`/`PTASK_DASH_PASS`; open when no password configured —
+local/dev only). Same shapes as the sidecar v0.6.0 contract. While no password
+is configured, these routes (and `GET /`) answer only to the server's own names
+— IP literals, single-label names, `*.ts.net`, `PTASK_DASH_ALLOWED_HOSTS` and the
+host of `PTASK_DASH_URL` — and refuse any other `Host` with 421, so a
+DNS-rebinding page cannot drive them.
+
+The Python sidecar in `dashboard/` (the live tailnet cockpit) is a different
+process with a different posture: no login at all since PT-2201, the same Host
+check on every request, and approval decisions gated by
+`PTASK_DASH_DECIDE_TOKEN` (see `dashboard/README.md`).
 
 Reads: `GET /api/stats · /api/tasks?status=&limit= · /api/critical?limit= ·
 /api/timeline · /api/heatmap · /api/tasks/{id}/events` (journal history) ·
@@ -213,7 +221,9 @@ proxy forwards only the path it is given, never the query string.
 ## POST /tg/callback (v2.2.0)
 
 Executes a Telegram inline-button tap forwarded by nexus (the bot's single
-`getUpdates` owner). Requires `write` scope.
+`getUpdates` owner). Requires `write` scope **and** a client named in
+`PTASK_TG_FORWARDERS` (default `nexus`); any other token gets 403, because every
+verb is journaled as the operator's tap.
 
 ```json
 {"data": "ptdone:<task-uuid>", "callback_id": "<telegram callback id>"}
@@ -222,7 +232,9 @@ Executes a Telegram inline-button tap forwarded by nexus (the bot's single
 Verbs: `ptdone` | `ptsnooze` (3 days) | `ptdismiss`. Idempotent per
 `callback_id` (journal uuid `tg-cb:<id>`); duplicate taps return
 `{"ok":true,"duplicate":true}`. Actions land in the journal as
-`actor=telegram`, `source=tg-callback`.
+`actor=telegram`, `source=tg-callback`. Approval verbs (`ptapprove:AP-n`,
+`ptreject:AP-n`) are refused with 403 unless `PTASK_TG_APPROVAL_BUTTONS=1`; see
+`docs/approvals.md`.
 
 ## GET /list (v2.0.0)
 

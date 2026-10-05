@@ -12,7 +12,7 @@ tasks mint `PT-<n>`.
 | Role | Who | What they may do |
 |---|---|---|
 | Requester | any write-capable actor (`$PTASK_ACTOR`, HTTP `client_id`, MCP actor) | `request`, `withdraw` (own pending rows), `list`/`show`/`payload` |
-| Operator | a human at a TTY, the dashboard, Telegram (operator chat), or an **admin** HTTP token | `approve` / `reject` / `decide` |
+| Operator | a human at a TTY, the dashboard sidecar holding `PTASK_DASH_DECIDE_TOKEN`, Telegram (operator chat, with `PTASK_TG_APPROVAL_BUTTONS=1`), or an **admin** HTTP token | `approve` / `reject` / `decide` |
 | Executor | a script or agent holding the approved bytes | `payload` → act → `consume` |
 
 A request is pending until it is approved, rejected, withdrawn, or expired.
@@ -91,12 +91,23 @@ HTTP `POST /api/approvals/{id}/decide` requires **admin** scope;
 `decided_via=api`. Write-scope tokens may request and withdraw (own rows
 only). Read-scope tokens may list and get.
 
+Dashboard sidecar `POST /api/approvals/AP-n/approve|reject` (the cockpit's
+inbox) runs `pt approve|reject AP-n --via dashboard`, so it is the one route
+that reaches the CLI's decide path without a TTY. The sidecar has no login
+(PT-2201) and the tailnet carries the fleet's agents as well as the operator,
+so the route requires the `X-PTask-Decide-Token` header to equal
+`$PTASK_DASH_DECIDE_TOKEN`. With the variable unset, or shorter than 16
+characters, the sidecar refuses every decision (403, `decide_disabled`); a
+missing or wrong header gets 403 `decide_token_required`. The cockpit asks for
+the token once and keeps it in the browser's localStorage.
+
 Telegram `/tg/callback` verbs `ptapprove:AP-n` / `ptreject:AP-n` are accepted
-only when the authenticated `client_id` is in `$PTASK_TG_FORWARDERS`
+only when `$PTASK_TG_APPROVAL_BUTTONS=1` (the switch that puts decide buttons on
+the pings), the authenticated `client_id` is in `$PTASK_TG_FORWARDERS`
 (default `nexus`) **and** `from_id` equals `$PTASK_ACCOUNTABILITY_CHAT_ID`.
 Otherwise 403 and no state change. `decided_via=telegram`,
-`decided_by=operator@telegram`. Idempotent per `callback_id`. Existing
-`ptdone:` / `ptsnooze:` / `ptdismiss:` verbs are unchanged.
+`decided_by=operator@telegram`. Idempotent per `callback_id`. The
+`ptdone:` / `ptsnooze:` / `ptdismiss:` verbs also require a forwarder token.
 
 MCP exposes `approval_request`, `approval_list`, `approval_status`,
 `approval_withdraw`. No MCP tool can decide.
@@ -142,8 +153,10 @@ Every pTask writer — CLI, MCP stdio, HTTP tokens, the dashboard sidecar —
 runs as **one Unix user** on tensor-core against one SQLite file. These
 rules are guardrails against an agent approving its own request by
 accident (a `CLAUDECODE` session calling `pt approve`, an MCP tool named
-`approve`, a write-scope token hitting `/decide`). They are not a
-cryptographic boundary. Anyone who can write the database, replace the
+`approve`, a write-scope token hitting `/decide`, a tailnet agent POSTing to
+the open dashboard sidecar). They are not a cryptographic boundary. The decide
+token lives in the sidecar's environment file, which any process of the same
+user can read. Anyone who can write the database, replace the
 binary, or steal an admin token can decide. The tamper triggers raise the
 cost of a confused-deputy `UPDATE`; they do not stop a process with the
 same uid from disabling them.
