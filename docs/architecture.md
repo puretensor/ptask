@@ -84,14 +84,19 @@ carries no HTTP/TLS/executor dependencies.
 
 ## Recovery
 
-- **Lose canonical disk, replica intact:** stop `ptask-serve` and
-  `ptask-litestream`, `litestream restore` into a new `tasks.db`, swap
-  atomically, restart. RPO is the Litestream interval (default under one
-  minute).
+- **Lose canonical disk, replica intact:** `litestream restore` to a scratch
+  file, verify it, then put it live with
+  [Promote a restored copy over the live DB](operations.md#promote-a-restored-copy-over-the-live-db):
+  stop every pTask unit (dashboard, `ptask-serve`, `ptask-litestream`, the
+  timers), confirm nothing holds the files, move `tasks.db` and its
+  `-wal`/`-shm` aside, install and check the restored file, restart in order.
+  A rename alone is not enough: a stale `-wal` next to the new file corrupts
+  or reverts it. RPO is the Litestream interval (default under one minute).
 - **Lose the canonical host:** promote a client: restore from the replica,
-  update inventory, point `PTASK_SYNC_URL` at the new host.
+  install it with the same procedure, update inventory, point
+  `PTASK_SYNC_URL` at the new host.
 - **Lose the replica:** the nightly `ptask-backup.timer` snapshot is the
-  last-resort path (default 30-day retention).
+  last-resort path (default 30-day retention), promoted the same way.
 - **Lose a client node:** no data loss; clients rebuild from the canonical
   URL.
 

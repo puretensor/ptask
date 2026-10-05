@@ -49,17 +49,23 @@ systemctl --user start ptask-backup.service
 ### Verifying a backup
 
 ```bash
-scp backup-host:/var/backups/ptask/ptask-tasks-$(date -u +%Y-%m-%d).db /tmp/
-sqlite3 /tmp/ptask-tasks-*.db 'SELECT COUNT(*) FROM tasks, COUNT(*) FROM pt_extensions'
+F=ptask-tasks-$(date -u +%Y-%m-%d).db
+scp backup-host:/var/backups/ptask/$F /tmp/
+sqlite3 /tmp/$F 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
+sqlite3 "file:$HOME/puretensor-tasks/tasks.db?mode=ro" 'SELECT COUNT(*) FROM tasks;'
 ```
 
-The count should match the live DB row counts.
+`integrity_check` must print `ok`, and the snapshot's task count should be at
+or a little below the live count (the snapshot is up to a day old).
+`ptask-restore-verify.timer` runs this check weekly, together with a
+Litestream restore and the off-site copy (`scripts/ptask-restore-verify.sh`).
 
 ### Recovery
 
-Restore: copy a snapshot back to `~/puretensor-tasks/tasks.db` (stop Python
-services first if running). The pre-v0.1.0 baseline is at
-`~/puretensor-tasks/tasks.db.pre-ptask-backup`.
+Never `cp` a snapshot over the live `tasks.db`. Copy it to a scratch path,
+verify it as above, then put it live with
+[Promote a restored copy over the live DB](#promote-a-restored-copy-over-the-live-db).
+The pre-v0.1.0 baseline is at `~/puretensor-tasks/tasks.db.pre-ptask-backup`.
 
 ## Distillation (v3.0.0)
 
@@ -398,20 +404,71 @@ litestream restore -config ~/.config/litestream/litestream.yml \
     -o /tmp/tasks-restored.db \
     -timestamp $(date -u -d '5 minutes ago' '+%FT%TZ') \
     ~/puretensor-tasks/tasks.db
-sqlite3 /tmp/tasks-restored.db 'SELECT count(*) FROM tasks'
+sqlite3 /tmp/tasks-restored.db 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
 ```
 
-Promote a restore over the live DB (requires stopping `pt distill`,
-`ptask-backup`, etc. first):
+### Promote a restored copy over the live DB
+
+The one procedure for putting any restored file live: a Litestream restore,
+a nightly snapshot, or the pre-v0.1.0 baseline. Every step is load-bearing.
+SQLite treats whatever `tasks.db-wal` sits next to `tasks.db` as that file's
+log, so a WAL left by the old database is replayed onto the restored one: a
+small WAL gives "database disk image is malformed", a large one silently
+reverts the restore. `pt serve` keeps pooled connections open (with
+`PTASK_WAL_AUTOCHECKPOINT=0` SQLite never checkpoints its WAL), the dashboard
+sidecar holds long-lived read connections, and a killed process leaves its
+WAL behind. So: stop everything, prove nothing holds the files, and move the
+`-wal`/`-shm` aside together with the database. Run the steps one at a time
+and check each result before going on.
 
 ```bash
-systemctl --user stop ptask-backup.timer ptask-distill.timer \
-    ptask-accountability.timer ptask-scoring.timer ptask-litestream.service
-cp /tmp/tasks-restored.db ~/puretensor-tasks/tasks.db
+DBDIR=~/puretensor-tasks
+RESTORED=/tmp/tasks-restored.db     # the copy to promote
+
+# 1. Verify the copy out of place: "ok", and note the task count.
+sqlite3 "$RESTORED" 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
+test ! -e "$RESTORED-wal" || echo "STOP: $RESTORED has its own WAL; checkpoint it first"
+
+# 2. Stop every pTask unit: timers first so nothing new starts, then the
+#    dashboard, pt serve, Litestream and any oneshot still running.
+systemctl --user list-units 'ptask-*' --state=active --no-legend   # note what to restart
+systemctl --user stop 'ptask-*.timer'
+systemctl --user stop 'ptask-*.service'
+systemctl --user list-units 'ptask-*' --state=active,activating,deactivating --no-legend
+#    ^ must print nothing
+
+# 3. Nothing may still hold the files (pt bot, pt tui, an open sqlite3 shell);
+#    use sudo if a reader runs as another user. Silence means go.
+if fuser -v "$DBDIR"/tasks.db*; then echo "STOP: the processes above still hold the DB"; fi
+
+# 4. Move the database AND its -wal/-shm aside (kept as the way back).
+ASIDE="$DBDIR/pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -m 0700 "$ASIDE"
+for f in tasks.db tasks.db-wal tasks.db-shm; do
+    if [ -e "$DBDIR/$f" ]; then mv "$DBDIR/$f" "$ASIDE/"; fi
+done
+
+# 5. Install the restored file: copy under a temp name, rename into place.
+install -m 0600 "$RESTORED" "$DBDIR/tasks.db.restoring"
+mv "$DBDIR/tasks.db.restoring" "$DBDIR/tasks.db"
+
+# 6. Check what is now live: "ok" and the count from step 1.
+sqlite3 "$DBDIR/tasks.db" 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
+
+# 7. Replication first, then serve, the dashboard and the timers (plus
+#    anything else step 2 listed).
 systemctl --user start ptask-litestream.service
-systemctl --user start ptask-backup.timer ptask-distill.timer \
-    ptask-accountability.timer ptask-scoring.timer
+systemctl --user start ptask-serve.service
+systemctl --user start ptask-dashboard.service
+systemctl --user start ptask-backup.timer ptask-distill.timer ptask-accountability.timer \
+    ptask-scoring.timer ptask-reaper.timer ptask-export.timer ptask-restore-verify.timer
+litestream generations -config ~/.config/litestream/litestream.yml "$DBDIR/tasks.db"
+#    ^ Litestream starts a new generation for the replaced file
 ```
+
+`$ASIDE` keeps the pre-restore database with its own WAL: open
+`$ASIDE/tasks.db` in place to read that state, or move the three files back
+(steps 2–7 again) to undo the promotion.
 
 ### Rollback
 
