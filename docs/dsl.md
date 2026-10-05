@@ -53,8 +53,8 @@ Boolean expressions over field tokens.
 | `no date` | `deadline IS NULL` |
 | `recurring` | row has a `pt_recurrence` entry |
 | `p1`..`p5` | exact priority match |
-| `@label` | label in `pt_extensions.labels` |
-| `#project` | project match |
+| `@label` | label in `pt_extensions.labels`; the name runs to the next space or operator (`@domain:mgmt`, `@v1.2`) |
+| `#project` | exact project match; same name rule (`#infra/core`) |
 | `due:`*phrase* | resolves a date phrase; exact-day match |
 | `due before:`*phrase* | `deadline < parsed_date` |
 | `created:`*phrase* | `created_at` on that day |

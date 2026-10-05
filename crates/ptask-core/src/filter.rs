@@ -462,15 +462,16 @@ impl<'a> ParseCtx<'a> {
         }
     }
 
-    /// Consume an identifier (letters/digits/`_`/`-`). Trims trailing whitespace.
+    /// Consume a `@label` / `#project` name: everything up to whitespace or
+    /// an operator character, so `domain:mgmt`, `v1.2` and `team/ops` are
+    /// whole names (the CLI and MCP write `domain:<x>` labels).
     fn consume_ident(&mut self) -> String {
         let start = self.pos;
         while let Some(c) = self.peek() {
-            if c.is_alphanumeric() || c == '_' || c == '-' {
-                self.pos += c.len_utf8();
-            } else {
+            if c.is_whitespace() || matches!(c, '&' | '|' | '(' | ')' | '!') {
                 break;
             }
+            self.pos += c.len_utf8();
         }
         self.input[start..self.pos].to_string()
     }
@@ -551,6 +552,58 @@ mod tests {
     fn label_and_project_tokens() {
         assert!(matches!(ast("@home"), Expr::Label(ref s) if s == "home"));
         assert!(matches!(ast("#fleet"), Expr::Project(ref s) if s == "fleet"));
+    }
+
+    #[test]
+    fn label_and_project_names_run_to_the_next_operator() {
+        // PARSE-3: names stopped at the first char outside [alnum _ -], so
+        // the system's own `domain:<x>` labels (pt add --label domain:mgmt,
+        // MCP labels_add) were unfilterable: "unexpected trailing input".
+        for name in ["domain:mgmt", "v1.2", "team/ops", "a_b-c"] {
+            assert_eq!(ast(&format!("@{name}")), Expr::Label(name.into()));
+            assert_eq!(ast(&format!("#{name}")), Expr::Project(name.into()));
+        }
+        assert_eq!(
+            ast("(@domain:mgmt&#infra/core)|!@x"),
+            Expr::Or(
+                Box::new(Expr::And(
+                    Box::new(Expr::Label("domain:mgmt".into())),
+                    Box::new(Expr::Project("infra/core".into())),
+                )),
+                Box::new(Expr::Not(Box::new(Expr::Label("x".into())))),
+            )
+        );
+        assert!(parse("@").is_err());
+        assert!(parse("# & p1").is_err());
+    }
+
+    #[test]
+    fn colon_label_filter_lists_the_labelled_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path().join("labels.db")).unwrap();
+        let ext = crate::Extensions {
+            labels: vec!["domain:mgmt".into()],
+            ..Default::default()
+        };
+        let task = crate::tasks::create_with_extensions(
+            &db,
+            crate::NewTask::minimal("quarterly board pack"),
+            ext,
+            &crate::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        crate::tasks::create(
+            &db,
+            crate::NewTask::minimal("unlabelled"),
+            &crate::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        let expr = parse("@domain:mgmt").unwrap();
+        let rows = crate::tasks::list_with_filter(&db, Some(&expr), None, None, 10).unwrap();
+        assert_eq!(
+            rows.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            [task.id.as_str()]
+        );
     }
 
     #[test]
