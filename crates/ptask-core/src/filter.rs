@@ -379,6 +379,13 @@ impl<'a> ParseCtx<'a> {
         }
         if self.match_keyword("search:") {
             let phrase = self.consume_phrase();
+            // An empty keyword compiles to LIKE '%%' -- every task.
+            if phrase.is_empty() {
+                return Err(Error::Other(format!(
+                    "filter: empty search: at byte {}",
+                    self.pos
+                )));
+            }
             return Ok(Expr::Search(phrase));
         }
         // p1..p5 — native pTask scale (p1=low .. p5=critical), no inversion.
@@ -596,6 +603,21 @@ mod tests {
     fn search_consumes_keyword() {
         let e = ast("search: ceph");
         assert!(matches!(e, Expr::Search(ref s) if s == "ceph"));
+    }
+
+    #[test]
+    fn empty_search_is_an_error_not_a_match_all() {
+        // CLI-15: `pt bulk "search: $TERM" --done` with an empty TERM matched
+        // `%%` -- every task -- while empty `@` / `#` were already rejected.
+        for f in [
+            "search:",
+            "search:   ",
+            "search: & p1",
+            "p1 & search:",
+            "(search: )",
+        ] {
+            assert!(parse(f).is_err(), "{f:?} must not parse");
+        }
     }
 
     #[test]
