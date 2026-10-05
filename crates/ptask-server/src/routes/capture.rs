@@ -76,6 +76,8 @@ fn resolve_blocking(
         )
             .into_response();
     }
+    // Not between a capture's create and its capture_key stamp.
+    let _lane = incident_lane();
     let open: Vec<String> = match state.db.with_conn(|c| {
         let mut stmt = c.prepare(
             "SELECT id FROM tasks
@@ -192,6 +194,21 @@ pub struct CaptureResp {
     pub task_uuid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pt_id: Option<String>,
+}
+
+/// Serialises the incident fast lane and close-on-recovery. The open-task
+/// lookup, raw insert, episode decision and create-or-refresh (with its
+/// capture_key) read and write across several statements, and concurrent
+/// re-sends of one incident interleaved them into duplicate P5 tasks.
+/// `tasks::create_with_extensions` commits in a transaction of its own, so
+/// the lane can't be one SQLite transaction; `/capture` is the only writer
+/// of `capture_key`, so one in-process lock closes the race.
+static INCIDENT_LANE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn incident_lane() -> std::sync::MutexGuard<'static, ()> {
+    INCIDENT_LANE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Delivery idempotency vs incident identity.
@@ -345,6 +362,9 @@ fn capture_blocking(
     // episode so a later identical capture can create work again.
     let severity = effective_severity(&req, &source);
     let is_incident = severity.is_some_and(|s| s >= 3);
+    // Held until the incident's task exists with its key (or the capture
+    // turned out to be a duplicate).
+    let lane = is_incident.then(incident_lane);
     let has_open_keyed_task = match capture_key.as_deref() {
         Some(key) => match open_incident_for_key(&state.db, key) {
             Ok(open) => open,
@@ -590,6 +610,9 @@ fn capture_blocking(
                 if let Err(e) = ptask_core::raw_items::mark_processed(&state.db, row.id) {
                     tracing::warn!(target: "ptask::capture", error = %e, "mark_processed failed");
                 }
+                // The incident is recorded; rescoring rewrites every active
+                // row and needn't hold up the next capture.
+                drop(lane);
                 if let Err(e) = ptask_core::scoring::run_once(&state.db, false) {
                     tracing::warn!(target: "ptask::capture", error = %e, "rescore failed");
                 }
@@ -642,6 +665,71 @@ mod tests {
     fn severity_marker_is_found_past_an_earlier_sev_word() {
         assert_eq!(incident("several OSDs down [puresentinel sev4]"), Some(4));
         assert_eq!(incident("[puresentinel sev5] mon quorum lost"), Some(5));
+    }
+
+    #[test]
+    fn concurrent_keyed_captures_make_one_incident() {
+        // SRV-4: the keyed fast lane read "is there an open task for this
+        // key?" before inserting, and stamped capture_key in a separate
+        // UPDATE after creating the task, with nothing in between to stop a
+        // concurrent capture: barrier-synced re-sends of one incident minted
+        // several open P5 tasks, and a pure re-send took the NewEpisode path
+        // and answered 201 instead of 200 duplicate.
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("race.db")).unwrap();
+        let state = AppState::new(db.clone(), Default::default(), Default::default());
+        // Odd trials: each sentinel words the incident differently, so every
+        // capture is a new raw row refreshing the one keyed task.
+        for trial in 0..10 {
+            let key = format!("race:{trial}");
+            let text = format!("[puresentinel sev4] ceph HEALTH_ERR {trial}");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let threads: Vec<_> = (0..8)
+                .map(|i| {
+                    let (state, barrier) = (state.clone(), barrier.clone());
+                    let req = CaptureReq {
+                        text: if trial % 2 == 0 {
+                            text.clone()
+                        } else {
+                            format!("{text} from sentinel {i}")
+                        },
+                        source: Some("puresentinel:incident:ceph".into()),
+                        source_file: None,
+                        severity: None,
+                        client_key: Some(key.clone()),
+                    };
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        capture_blocking(state, HeaderMap::new(), req).status()
+                    })
+                })
+                .collect();
+            let mut statuses: Vec<StatusCode> =
+                threads.into_iter().map(|t| t.join().unwrap()).collect();
+            statuses.sort();
+            let (open, raw): (i64, i64) = db
+                .with_conn(|c| {
+                    Ok((
+                        c.query_row(
+                            "SELECT COUNT(*) FROM tasks WHERE capture_key = ?1
+                               AND status_v2 NOT IN ('done','dismissed')",
+                            [&key],
+                            |r| r.get(0),
+                        )?,
+                        c.query_row(
+                            "SELECT COUNT(*) FROM raw_items WHERE text LIKE ?1 || '%'",
+                            [&text],
+                            |r| r.get(0),
+                        )?,
+                    ))
+                })
+                .unwrap();
+            let raw_rows = if trial % 2 == 0 { 1 } else { 8 };
+            assert_eq!((open, raw), (1, raw_rows), "trial {trial}: {statuses:?}");
+            let mut expected = vec![StatusCode::OK; 7];
+            expected.push(StatusCode::CREATED);
+            assert_eq!(statuses, expected, "trial {trial}");
+        }
     }
 
     #[test]
