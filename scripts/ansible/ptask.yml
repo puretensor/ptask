@@ -3,7 +3,8 @@
 #
 # Installs the `pt` binary into ~/.cargo/bin/, drops the user-mode
 # systemd units (serve / backup / distill / accountability / scoring), enables
-# the canonical API service + timers, and verifies the binary version.
+# the canonical API service + timers, installs and enables Litestream WAL
+# replication on the canonical host only, and verifies the binary version.
 #
 # Usage from the workstation. The playbook downloads nothing: it installs
 # dist/pt-<triple> from the controller, so populate dist/ with the per-arch
@@ -75,6 +76,12 @@
     ptask_service_units:
       - ptask-serve.service
     ptask_units: "{{ ptask_timer_units + ptask_service_units }}"
+    # Installed and enabled on the canonical host only; clients hold no
+    # tasks.db to replicate (docs/operations.md, Litestream WAL replication).
+    ptask_canonical_units:
+      - ptask-litestream.service
+    ptask_litestream_dir: "{{ ansible_env.HOME }}/.config/litestream"
+    ptask_litestream_bin: /usr/local/bin/litestream
     # The canonical-store host owns `tasks.db`. Other tier-0 nodes will
     # eventually proxy through `pt serve` over Tailscale (v0.9.5). Until
     # that lands, only the canonical host runs the timers.
@@ -169,6 +176,62 @@
         - daemon-reload
         - restart ptask serve
 
+    # ---- Litestream: canonical host only --------------------------------
+    - name: check litestream binary on canonical host
+      ansible.builtin.stat:
+        path: "{{ ptask_litestream_bin }}"
+      register: litestream_bin
+      when: ptask_is_canonical
+
+    - name: fail if litestream is not installed on canonical host
+      ansible.builtin.fail:
+        msg: |
+          {{ ptask_litestream_bin }} is missing on {{ inventory_hostname }}.
+          Install it first (docs/operations.md, Litestream > Pre-requisites);
+          the unit would otherwise crash-loop into failed.
+      when: ptask_is_canonical and not litestream_bin.stat.exists
+
+    - name: ensure litestream config dir exists on canonical host
+      ansible.builtin.file:
+        path: "{{ ptask_litestream_dir }}"
+        state: directory
+        mode: '0700'
+      when: ptask_is_canonical
+
+    # The repo file is an example ("edit paths"): install it on first deploy
+    # only, never over an operator's edited copy or the documented symlink.
+    - name: install litestream config on canonical host (first deploy only)
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../litestream/litestream.yml"
+        dest: "{{ ptask_litestream_dir }}/litestream.yml"
+        mode: '0644'
+        force: false
+      notify: restart ptask litestream
+      when: ptask_is_canonical
+
+    # The unit refuses to start without this file (ConditionPathExists=).
+    # The CephFS replica needs no settings, so an empty 0600 file is valid;
+    # existing contents (S3 credentials) are never touched.
+    - name: ensure litestream env file exists on canonical host
+      ansible.builtin.file:
+        path: "{{ ptask_litestream_dir }}/.env"
+        state: touch
+        mode: '0600'
+        access_time: preserve
+        modification_time: preserve
+      when: ptask_is_canonical
+
+    - name: install canonical-only systemd units
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../systemd/{{ item }}"
+        dest: "{{ ptask_systemd_dir }}/{{ item }}"
+        mode: '0644'
+      loop: "{{ ptask_canonical_units }}"
+      notify:
+        - daemon-reload
+        - restart ptask litestream
+      when: ptask_is_canonical
+
     - name: ensure linger enabled (timers must run when operator is logged out)
       ansible.builtin.command: "loginctl enable-linger {{ ansible_env.USER }}"
       register: linger_result
@@ -177,6 +240,16 @@
 
     - name: flush handlers so daemon-reload runs before enable
       ansible.builtin.meta: flush_handlers
+
+    # Replication first, then the writers (timers, API).
+    - name: enable + start litestream on canonical host
+      ansible.builtin.systemd:
+        name: ptask-litestream.service
+        scope: user
+        enabled: true
+        state: started
+        daemon_reload: false
+      when: ptask_is_canonical
 
     - name: enable + start timers on canonical host
       ansible.builtin.systemd:
@@ -230,6 +303,15 @@
       when: not ptask_is_canonical
       failed_when: false
 
+    - name: keep litestream disabled on non-canonical hosts
+      ansible.builtin.systemd:
+        name: ptask-litestream.service
+        scope: user
+        enabled: false
+        state: stopped
+      when: not ptask_is_canonical
+      failed_when: false
+
   handlers:
     - name: daemon-reload
       ansible.builtin.systemd:
@@ -243,6 +325,13 @@
     - name: restart ptask serve
       ansible.builtin.systemd:
         name: ptask-serve.service
+        scope: user
+        state: restarted
+      when: ptask_is_canonical
+
+    - name: restart ptask litestream
+      ansible.builtin.systemd:
+        name: ptask-litestream.service
         scope: user
         state: restarted
       when: ptask_is_canonical
