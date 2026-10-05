@@ -1424,7 +1424,10 @@ fn cmd_context(db: &Db, a: ContextArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    print!("{}", ptask_core::goals::context_markdown(db, &t)?);
+    print!(
+        "{}",
+        ui::sanitize(&ptask_core::goals::context_markdown(db, &t)?)
+    );
     Ok(())
 }
 
@@ -1501,9 +1504,10 @@ fn render_show(
         out.push(String::new());
         out.push(ui::section("why", ui::Ink::Magenta, ""));
         for g in why_chain {
+            let title = ui::sanitize(&g.title);
             match g.why.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                Some(why) => out.push(format!("  {}: {why}", g.title)),
-                None => out.push(format!("  {}", g.title)),
+                Some(why) => out.push(format!("  {title}: {}", ui::sanitize(why))),
+                None => out.push(format!("  {title}")),
             }
         }
     }
@@ -1558,7 +1562,7 @@ fn cmd_rm(db: &Db, a: RmArgs) -> Result<()> {
             ui::prompt(
                 &format!(
                     "permanently delete {pt} \"{}\"? This cannot be undone.",
-                    task.title
+                    ui::sanitize(&task.title)
                 ),
                 "[y/N]"
             )
@@ -2697,7 +2701,7 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
                     "{}  {}  {}  {}",
                     ui::pt_id(pt.as_deref().unwrap_or("-")),
                     ui::status_pill(status),
-                    title,
+                    ui::sanitize(title),
                     ui::dim(
                         &format!("last {}", updated.get(..10).unwrap_or(updated)),
                         ui::Ink::Slate
