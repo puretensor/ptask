@@ -76,7 +76,7 @@ jobs:
             strip: aarch64-linux-gnu-strip
             apt: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           # Full history: the next step proves the tagged commit is on main.
           fetch-depth: 0
@@ -98,9 +98,23 @@ jobs:
           apt-get install -y curl file jq build-essential ${{ matrix.apt }}
 
       - name: install rust (stable, rustup)
+        # rustup-init for the runner arch, checked against its published
+        # .sha256 before it runs (never `curl | sh`).
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain 1.98.1
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) triple=x86_64-unknown-linux-gnu ;;
+            aarch64) triple=aarch64-unknown-linux-gnu ;;
+            *) echo "::error::no rustup-init for $(uname -m)"; exit 1 ;;
+          esac
+          dir=$(mktemp -d)
+          base="https://static.rust-lang.org/rustup/dist/${triple}"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$dir/rustup-init" "$base/rustup-init"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$dir/rustup-init.sha256" "$base/rustup-init.sha256"
+          # The manifest reads "<sha256> *./rustup-init": check our download against that hash.
+          echo "$(cut -d' ' -f1 "$dir/rustup-init.sha256")  $dir/rustup-init" | sha256sum -c --strict -
+          chmod +x "$dir/rustup-init"
+          "$dir/rustup-init" -y --profile minimal --default-toolchain 1.98.1
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: add rust target
