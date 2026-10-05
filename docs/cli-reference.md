@@ -208,7 +208,7 @@ not-yet-retired consumers).
 | Verb | Use |
 |---|---|
 | `pt log <query> [-n N]` | attributed event history for a task: when, who (actor), via which surface, what |
-| `pt undo` | reverse the most recent eligible mutation within the last 50 task events (done/dismiss → reopen, create → delete); any later event on that task protects it, including claims, promotions and prior reversals. Selection and reversal are atomic; the reversal is itself attributed. |
+| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor: `$PTASK_ACTOR`, default `shell`) within your last 50 task events (done/dismiss → reopen, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, or that parents another task, is never deleted. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
 | `pt token create <client_id> [--scope read\|capture\|write\|admin]` | mint a named scoped API token (plain value shown ONCE; only the sha256 is stored) |
 | `pt token list` | client, scope, active/revoked, created/last-used |
 | `pt token revoke <client_id>` | revoke all active tokens for a client |

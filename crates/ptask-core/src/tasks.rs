@@ -1056,6 +1056,14 @@ fn delete_task_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCt
             r.get(0)
         })
         .optional()?;
+    // task_links and task_labels (V010) carry no foreign key, so nothing
+    // cascades: without these, a deleted task stayed a prerequisite (or a
+    // dependent) of live tasks and kept its labels.
+    tx.execute(
+        "DELETE FROM task_links WHERE from_uuid=?1 OR to_uuid=?1",
+        [task_uuid],
+    )?;
+    tx.execute("DELETE FROM task_labels WHERE task_uuid=?1", [task_uuid])?;
     tx.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
     record_event_tx(
         tx,
@@ -1154,91 +1162,208 @@ pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     Ok(())
 }
 
+/// What an undo reverses: reopen a completed or dismissed task, or delete
+/// a task the caller created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndoAction {
+    ReopenCompleted,
+    ReopenDismissed,
+    /// Irreversible: the task row goes (a tombstone is journaled).
+    DeleteCreated,
+}
+
+impl UndoAction {
+    /// The verb for operator output: `reopened` or `deleted`.
+    pub fn verb(self) -> &'static str {
+        match self {
+            UndoAction::ReopenCompleted | UndoAction::ReopenDismissed => "reopened",
+            UndoAction::DeleteCreated => "deleted",
+        }
+    }
+
+    /// What the reversed event did: `completed`, `dismissed` or `created`.
+    pub fn reversed(self) -> &'static str {
+        match self {
+            UndoAction::ReopenCompleted => "completed",
+            UndoAction::ReopenDismissed => "dismissed",
+            UndoAction::DeleteCreated => "created",
+        }
+    }
+}
+
+/// The mutation an undo would reverse right now (see [`undo_plan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoPlan {
+    pub event_id: i64,
+    pub task_uuid: String,
+    pub pt_id: Option<String>,
+    pub title: String,
+    pub action: UndoAction,
+}
+
 /// What `undo_last` reversed, for operator feedback.
 #[derive(Debug, Clone)]
 pub struct UndoOutcome {
     pub reversed_event_id: i64,
     pub description: String,
+    pub task_uuid: String,
+    pub pt_id: Option<String>,
+    pub title: String,
+    pub action: UndoAction,
 }
 
-/// Reverse the most recent undoable mutation in the journal.
+const NOTHING_UNDOABLE: &str =
+    "nothing undoable in your recent journal (undo covers your own done/dismiss/create)";
+
+/// Select the caller's most recent undoable mutation.
 ///
 /// Undoable (honest v1 — reversals that need no "before" snapshot):
 ///   task.completed                 → reopen
 ///   task.updated{status=dismissed} → reopen
 ///   task.created                   → delete (with tombstone)
 /// Everything else (priority/deadline/text edits, escalations) is skipped —
-/// their events don't carry the prior state yet. The reversal itself is a
-/// normal attributed mutation, so `pt log` shows both sides.
+/// their events don't carry the prior state yet.
+///
+/// Candidates are the caller's own events (`ctx.actor`): the operator's
+/// undo must not delete a task HAL created. Any later event on the task,
+/// from ANY actor, protects it — every later mutation, including newly
+/// introduced event types, and reversals already recorded by an earlier
+/// undo or a manual reopen. A created task that another task depends on
+/// (or is depended on by), or that parents another task, is never deleted:
+/// those relations are not journaled under its own uuid.
+fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<UndoPlan>> {
+    let candidates: Vec<(i64, String, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, task_uuid, event_type, payload FROM pt_event_log
+             WHERE task_uuid IS NOT NULL AND actor = ?1
+             ORDER BY id DESC LIMIT 50",
+        )?;
+        let rows = stmt.query_map([&ctx.actor], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+
+    for (id, task_uuid, event_type, payload) in candidates {
+        let superseded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2)",
+            params![task_uuid, id],
+            |r| r.get(0),
+        )?;
+        if superseded {
+            continue;
+        }
+        let row: Option<(String, Option<String>, String)> = tx
+            .query_row(
+                "SELECT status_v2, pt_id, title FROM tasks WHERE id=?1",
+                [&task_uuid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((status, pt_id, title)) = row else {
+            continue;
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        let action = match event_type.as_str() {
+            "task.completed" if status == "done" => UndoAction::ReopenCompleted,
+            "task.updated"
+                if status == "dismissed"
+                    && payload.get("status").and_then(|s| s.as_str()) == Some("dismissed") =>
+            {
+                UndoAction::ReopenDismissed
+            }
+            "task.created" => {
+                let related: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM task_links WHERE from_uuid=?1 OR to_uuid=?1)
+                         OR EXISTS(SELECT 1 FROM tasks WHERE parent_uuid=?1)",
+                    [&task_uuid],
+                    |r| r.get(0),
+                )?;
+                if related {
+                    continue;
+                }
+                UndoAction::DeleteCreated
+            }
+            _ => continue,
+        };
+        return Ok(Some(UndoPlan {
+            event_id: id,
+            task_uuid,
+            pt_id,
+            title,
+            action,
+        }));
+    }
+    Ok(None)
+}
+
+fn apply_undo(
+    tx: &rusqlite::Transaction<'_>,
+    plan: UndoPlan,
+    ctx: &EventCtx,
+) -> Result<UndoOutcome> {
+    let description = match plan.action {
+        UndoAction::ReopenCompleted | UndoAction::ReopenDismissed => {
+            reopen_in_conn(tx, &plan.task_uuid, ctx)?;
+            format!(
+                "reopened {} (was {})",
+                plan.task_uuid,
+                plan.action.reversed()
+            )
+        }
+        UndoAction::DeleteCreated => {
+            delete_task_in_conn(tx, &plan.task_uuid, ctx)?;
+            format!("deleted {} (undid create)", plan.task_uuid)
+        }
+    };
+    Ok(UndoOutcome {
+        reversed_event_id: plan.event_id,
+        description,
+        task_uuid: plan.task_uuid,
+        pt_id: plan.pt_id,
+        title: plan.title,
+        action: plan.action,
+    })
+}
+
+/// What [`undo_last`] would reverse right now, without changing anything.
+/// Lets a surface confirm an irreversible delete before [`undo_planned`].
+pub fn undo_plan(db: &Db, ctx: &EventCtx) -> Result<UndoPlan> {
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    select_undo(&tx, ctx)?.ok_or_else(|| crate::Error::Other(NOTHING_UNDOABLE.into()))
+}
+
+/// Reverse `plan`, provided it is still exactly what undo would select.
+/// Errors, changing nothing, if the journal moved since the plan was made.
+pub fn undo_planned(db: &Db, ctx: &EventCtx, plan: &UndoPlan) -> Result<UndoOutcome> {
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current = select_undo(&tx, ctx)?;
+    if current.as_ref() != Some(plan) {
+        return Err(crate::Error::Other(
+            "the journal changed since this undo was planned; nothing was reversed — run undo again"
+                .into(),
+        ));
+    }
+    let outcome = apply_undo(&tx, plan.clone(), ctx)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// Reverse the caller's most recent undoable mutation (see [`select_undo`]).
+/// The reversal itself is a normal attributed mutation, so `pt log` shows
+/// both sides.
 pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
     // Keep the selected history and current task state stable until reversal.
     // A concurrent claim/edit must not commit between validation and deletion.
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let candidates: Vec<(i64, String, String, String)> = {
-        let mut stmt = tx.prepare(
-            "SELECT id, task_uuid, event_type, payload FROM pt_event_log
-             WHERE task_uuid IS NOT NULL
-             ORDER BY id DESC LIMIT 50",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
-
-    // Only a task's newest event is eligible. This protects every later
-    // mutation, including newly introduced event types, and skips reversals
-    // already recorded by an earlier undo or a manual reopen.
-    let mut seen = std::collections::HashSet::new();
-
-    for (id, task_uuid, event_type, payload) in candidates {
-        if !seen.insert(task_uuid.clone()) {
-            continue;
-        }
-        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
-        let status: Option<String> = tx
-            .query_row(
-                "SELECT status_v2 FROM tasks WHERE id=?1",
-                [&task_uuid],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(status) = status else {
-            continue;
-        };
-        match event_type.as_str() {
-            "task.completed" if status == "done" => {
-                reopen_in_conn(&tx, &task_uuid, ctx)?;
-                tx.commit()?;
-                return Ok(UndoOutcome {
-                    reversed_event_id: id,
-                    description: format!("reopened {} (was completed)", task_uuid),
-                });
-            }
-            "task.updated"
-                if status == "dismissed"
-                    && payload.get("status").and_then(|s| s.as_str()) == Some("dismissed") =>
-            {
-                reopen_in_conn(&tx, &task_uuid, ctx)?;
-                tx.commit()?;
-                return Ok(UndoOutcome {
-                    reversed_event_id: id,
-                    description: format!("reopened {} (was dismissed)", task_uuid),
-                });
-            }
-            "task.created" => {
-                delete_task_in_conn(&tx, &task_uuid, ctx)?;
-                tx.commit()?;
-                return Ok(UndoOutcome {
-                    reversed_event_id: id,
-                    description: format!("deleted {} (undid create)", task_uuid),
-                });
-            }
-            _ => continue,
-        }
-    }
-    Err(crate::Error::Other(
-        "nothing undoable in the recent journal (undo covers done/dismiss/create)".into(),
-    ))
+    let plan =
+        select_undo(&tx, ctx)?.ok_or_else(|| crate::Error::Other(NOTHING_UNDOABLE.into()))?;
+    let outcome = apply_undo(&tx, plan, ctx)?;
+    tx.commit()?;
+    Ok(outcome)
 }
 
 /// Mark a task in progress (status_v2 `in_progress`; legacy stays
@@ -3916,6 +4041,156 @@ mod tests {
                 }
             );
         }
+    }
+
+    fn task_exists(db: &Db, uuid: &str) -> bool {
+        db.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+                [uuid],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn undo_after_depend_does_not_delete_the_prerequisite() {
+        // Regression (CORE-1): `pt add B; pt add A; pt depend A --on B;
+        // pt done A` (blocked) then `pt undo` deleted B. The depend event is
+        // filed under A only, so B's newest event was its create and the
+        // create arm deleted it, leaving A -> B dangling and A "ready".
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let b = create(&db, NewTask::minimal("prerequisite"), &ctx).unwrap();
+        let a = create(&db, NewTask::minimal("dependent"), &ctx).unwrap();
+        add_dependency(&db, &a.id, &b.id, &ctx).unwrap();
+        assert!(matches!(
+            mark_done(&db, &a, &ctx),
+            Err(crate::Error::Blocked(_))
+        ));
+
+        let res = undo_last(&db, &ctx);
+        assert!(
+            res.is_err(),
+            "nothing is undoable here, got {:?}",
+            res.ok().map(|o| o.description)
+        );
+        assert!(task_exists(&db, &b.id), "the prerequisite was deleted");
+        assert_eq!(load_detail(&db, &a.id).unwrap().depends_on, vec![b.id]);
+    }
+
+    #[test]
+    fn undo_never_deletes_a_parent_of_another_task() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let child = create(&db, NewTask::minimal("child"), &ctx).unwrap();
+        let parent = create(&db, NewTask::minimal("parent"), &ctx).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET parent_uuid=?1 WHERE id=?2",
+                params![parent.id, child.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        // The parent's create is protected, so undo moves past it to the
+        // child's bare create.
+        let out = undo_last(&db, &ctx).unwrap();
+        assert!(out.description.contains(&child.id), "{}", out.description);
+        assert!(task_exists(&db, &parent.id), "the parent was deleted");
+    }
+
+    #[test]
+    fn undo_reverses_only_the_callers_own_mutations() {
+        // Regression (CORE-1): undo walked every actor's events, so the
+        // operator's `pt undo` deleted a task HAL had just created.
+        let (_dir, db) = fresh_db();
+        let operator = EventCtx::local("shell");
+        let hal = EventCtx::local("hal");
+        let mine = create(&db, NewTask::minimal("operator task"), &operator).unwrap();
+        mark_done(&db, &mine, &operator).unwrap();
+        let theirs = create(&db, NewTask::minimal("hal task"), &hal).unwrap();
+
+        let out = undo_last(&db, &operator).unwrap();
+        assert!(out.description.contains(&mine.id), "{}", out.description);
+        assert!(task_exists(&db, &theirs.id), "HAL's task was deleted");
+        assert_eq!(
+            resolve_for_lookup(&db, &mine.id, true).unwrap().status,
+            "todo"
+        );
+
+        // A later event from any actor still protects a task: HAL edited the
+        // operator's completed task, so the operator's undo leaves it alone.
+        mark_done(
+            &db,
+            &resolve_for_lookup(&db, &mine.id, true).unwrap(),
+            &operator,
+        )
+        .unwrap();
+        update_priority(&db, &mine.id, 4, &hal).unwrap();
+        assert!(undo_last(&db, &operator).is_err());
+        assert_eq!(
+            resolve_for_lookup(&db, &mine.id, true).unwrap().status,
+            "done"
+        );
+    }
+
+    #[test]
+    fn undo_planned_refuses_a_plan_the_journal_moved_past() {
+        // A surface confirms a planned delete with the operator; if anything
+        // the plan depends on changed meanwhile, nothing may be reversed.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let first = create(&db, NewTask::minimal("planned"), &ctx).unwrap();
+        let plan = undo_plan(&db, &ctx).unwrap();
+        assert_eq!(plan.action, UndoAction::DeleteCreated);
+        assert_eq!(plan.pt_id.as_deref(), Some("PT-1"));
+        assert_eq!(plan.title, "planned");
+        let second = create(&db, NewTask::minimal("newer"), &ctx).unwrap();
+
+        assert!(undo_planned(&db, &ctx, &plan).is_err());
+        assert!(task_exists(&db, &first.id) && task_exists(&db, &second.id));
+
+        let fresh = undo_plan(&db, &ctx).unwrap();
+        let out = undo_planned(&db, &ctx, &fresh).unwrap();
+        assert_eq!(out.task_uuid, second.id);
+        assert_eq!(out.action, UndoAction::DeleteCreated);
+        assert!(!task_exists(&db, &second.id));
+    }
+
+    #[test]
+    fn delete_removes_the_tasks_link_and_label_rows() {
+        // Regression (CORE-1): task_links / task_labels have no FK cascade,
+        // so `pt rm` (and undo-of-create) left rows pointing at a deleted id.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let a = create(&db, NewTask::minimal("a"), &ctx).unwrap();
+        let b = create(&db, NewTask::minimal("b"), &ctx).unwrap();
+        let c = create(&db, NewTask::minimal("c"), &ctx).unwrap();
+        add_dependency(&db, &a.id, &b.id, &ctx).unwrap();
+        add_dependency(&db, &b.id, &c.id, &ctx).unwrap();
+        modify_labels(&db, &b.id, &["ops".into()], &[], &ctx).unwrap();
+
+        delete_task(&db, &b.id, &ctx).unwrap();
+
+        db.with_conn(|conn| {
+            let links: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM task_links WHERE from_uuid=?1 OR to_uuid=?1",
+                [&b.id],
+                |r| r.get(0),
+            )?;
+            let labels: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM task_labels WHERE task_uuid=?1",
+                [&b.id],
+                |r| r.get(0),
+            )?;
+            assert_eq!((links, labels), (0, 0));
+            Ok(())
+        })
+        .unwrap();
+        assert!(load_detail(&db, &a.id).unwrap().depends_on.is_empty());
+        assert!(load_detail(&db, &c.id).unwrap().blocks_tasks.is_empty());
     }
 
     // ---- list ordering: severity is the primary key -------------------------

@@ -995,10 +995,12 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'-y[Skip the confirmation when the undo would delete a task]' \
+'--yes[Skip the confirmation when the undo would delete a task]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (token)
@@ -2058,7 +2060,7 @@ _pt_commands() {
 'why:Explain a task'\''s composite score\: components, weights, rank' \
 'bulk:Apply one action to every task matching a filter DSL expression' \
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
-'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
+'undo:Reverse your own most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
 'approval:Approval inbox\: agents request, the operator decides, executors consume' \
 'goal:Goal tree\: mission ancestry for tasks' \
@@ -2492,7 +2494,7 @@ _pt__subcmd__help_commands() {
 'why:Explain a task'\''s composite score\: components, weights, rank' \
 'bulk:Apply one action to every task matching a filter DSL expression' \
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
-'undo:Reverse the most recent undoable mutation (done/dismiss/create)' \
+'undo:Reverse your own most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
 'approval:Approval inbox\: agents request, the operator decides, executors consume' \
 'goal:Goal tree\: mission ancestry for tasks' \

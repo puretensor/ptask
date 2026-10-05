@@ -5155,7 +5155,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__undo)
-            opts="-h --db --json --idempotency-key --color --no-color --help"
+            opts="-y -h --yes --db --json --idempotency-key --color --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

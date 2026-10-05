@@ -145,8 +145,12 @@ enum Command {
     Bulk(BulkArgs),
     /// Show a task's attributed event history (who did what, via which surface).
     Log(LogArgs),
-    /// Reverse the most recent undoable mutation (done/dismiss/create).
-    Undo,
+    /// Reverse your own most recent undoable mutation (done/dismiss/create).
+    ///
+    /// done/dismiss → reopen; create → delete. Only the caller's own events
+    /// ($PTASK_ACTOR) are candidates. Undoing a create deletes the task
+    /// permanently, so it asks first and, without a TTY, refuses unless --yes.
+    Undo(UndoArgs),
     /// Manage named scoped API tokens (create/list/revoke).
     #[command(subcommand)]
     Token(TokenCommand),
@@ -711,6 +715,13 @@ struct RmArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct UndoArgs {
+    /// Skip the confirmation when the undo would delete a task.
+    #[arg(short = 'y', long = "yes")]
+    yes: bool,
+}
+
+#[derive(clap::Args, Debug)]
 struct GenCompletionsArgs {
     /// Target shell.
     #[arg(value_enum)]
@@ -884,7 +895,7 @@ fn run() -> Result<()> {
                 Some(Command::Why(a)) => cmd_why(&db, a),
                 Some(Command::Bulk(a)) => cmd_bulk(&db, a),
                 Some(Command::Log(a)) => cmd_log(&db, a),
-                Some(Command::Undo) => cmd_undo(&db),
+                Some(Command::Undo(a)) => cmd_undo(&db, a),
                 Some(Command::Token(c)) => cmd_token(&db, c),
                 Some(Command::Approval(c)) => cmd_approval(&db, c),
                 Some(Command::Goal(c)) => goals::run(&db, c, cli_ctx(), json_mode()),
@@ -2820,22 +2831,66 @@ fn summarize_payload(payload: &str) -> String {
     parts.join(" ")
 }
 
-fn cmd_undo(db: &Db) -> Result<()> {
-    let out = tasks::undo_last(db, &cli_ctx()).map_err(anyhow::Error::msg)?;
+fn cmd_undo(db: &Db, a: UndoArgs) -> Result<()> {
+    let ctx = cli_ctx();
+    let plan = tasks::undo_plan(db, &ctx).map_err(anyhow::Error::msg)?;
+    let handle = plan
+        .pt_id
+        .clone()
+        .unwrap_or_else(|| short_id(&plan.task_uuid).to_string());
+    if plan.action == tasks::UndoAction::DeleteCreated && !a.yes {
+        // Same gate as `pt rm`: undoing a create is a permanent delete, and
+        // with no TTY to confirm, refuse rather than delete silently.
+        if json_mode() || !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "refusing to undo the creation of {handle} without --yes: it would be deleted permanently (no TTY to confirm)"
+            );
+        }
+        use std::io::Write;
+        print!(
+            "{}",
+            ui::prompt(
+                &format!(
+                    "undo the creation of {handle} \"{}\"? It will be deleted permanently.",
+                    plan.title
+                ),
+                "[y/N]"
+            )
+        );
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok();
+        if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            anyhow::bail!("aborted: {handle} not deleted");
+        }
+    }
+    let out = tasks::undo_planned(db, &ctx, &plan).map_err(anyhow::Error::msg)?;
     emit(
         &serde_json::json!({
             "description": out.description,
-            "reversed_event_id": out.reversed_event_id
+            "reversed_event_id": out.reversed_event_id,
+            "task_uuid": out.task_uuid,
+            "pt_id": out.pt_id,
+            "title": out.title,
+            "action": out.action.verb(),
+            "was": out.action.reversed(),
         }),
         || {
             println!(
                 "{}",
-                ui::section(
-                    "undo",
-                    ui::Ink::Green,
+                ui::outcome(
+                    if out.action == tasks::UndoAction::DeleteCreated {
+                        ui::Status::Bad
+                    } else {
+                        ui::Status::Changed
+                    },
+                    out.action.verb(),
+                    &handle,
+                    &out.title,
                     &format!(
-                        "{} · reversed event #{}",
-                        out.description, out.reversed_event_id
+                        "undo · was {} · reversed event #{}",
+                        out.action.reversed(),
+                        out.reversed_event_id
                     )
                 )
             )
