@@ -347,8 +347,9 @@ it from `~/puretensor-tasks/.env`.
 
 ```bash
 mkdir -p ~/.config/litestream ~/.config/systemd/user
-sudo mkdir -p /var/backups/ptask-litestream  # CephFS replica root
-sudo chown ptask:ptask /var/backups/ptask-litestream
+# CephFS replica root, owner-only: the replica is the whole DB (raw captures,
+# approval payloads, token hashes). Existing install: sudo chmod -R go-rwx it.
+sudo install -d -m 0700 -o ptask -g ptask /var/backups/ptask-litestream
 ln -sf ~/ptask/scripts/litestream/litestream.yml ~/.config/litestream/litestream.yml
 ln -sf ~/ptask/scripts/systemd/ptask-litestream.service ~/.config/systemd/user/
 
@@ -379,8 +380,10 @@ systemctl --user enable --now ptask-serve.service
 # it actually binds: loopback does not answer a tailnet-only bind.
 BIND=$(sed -n 's/^PTASK_SERVE_BIND=//p' ~/puretensor-tasks/.env); BIND=${BIND:-127.0.0.1:9501}
 curl "http://$BIND/healthz"   # → ok
-curl -H "Authorization: Bearer $PTASK_API_TOKEN" \
-  "http://$BIND/version"       # → {"ptask_core":"<current version>"}
+# The header goes through stdin (-H @-), never argv: any local user can read
+# a process's command line from /proc.
+sed -n 's/^PTASK_API_TOKEN=/Authorization: Bearer /p' ~/puretensor-tasks/.env \
+  | curl -H @- "http://$BIND/version"   # → {"ptask_core":"<current version>"}
 ```
 
 Fleet clients reach this over Tailscale at the canonical host's tailnet

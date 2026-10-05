@@ -48,9 +48,23 @@ jobs:
           toolchain: 1.98.1
           targets: ${{ matrix.target }}
 
-      - name: install aarch64 cross toolchain
+      - name: aarch64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
+        # The production runner must not need root: pre-install
+        # gcc-aarch64-linux-gnu + g++-aarch64-linux-gnu on the host and drop
+        # ghrunner's sudo grant. sudo apt-get runs only when the toolchain is
+        # missing AND the runner's env sets PTASK_ALLOW_SUDO_APT=1.
         run: |
+          if command -v aarch64-linux-gnu-gcc >/dev/null \
+             && command -v aarch64-linux-gnu-g++ >/dev/null \
+             && command -v aarch64-linux-gnu-strip >/dev/null; then
+            echo "aarch64 cross toolchain present: $(aarch64-linux-gnu-gcc --version | head -n1)"
+            exit 0
+          fi
+          if [ "${PTASK_ALLOW_SUDO_APT:-}" != "1" ]; then
+            echo "::error::aarch64-linux-gnu-gcc/g++/strip not on PATH. Pre-install gcc-aarch64-linux-gnu and g++-aarch64-linux-gnu on the runner host (preferred), or set PTASK_ALLOW_SUDO_APT=1 in the runner's environment to let this job sudo apt-get them."
+            exit 1
+          fi
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
