@@ -144,17 +144,16 @@ pub fn create_with_extensions(
 ) -> Result<Task> {
     // Every edit path validates a deadline; create stored any text, so
     // `--deadline "next friday"` read as overdue forever (julianday NULL)
-    // and made a recurring task uncompletable.
+    // and made a recurring task uncompletable. Stored in the one canonical
+    // form (see normalize_when); recurrence rows are seeded from it.
     let mut new = new;
     new.deadline = new
         .deadline
         .as_deref()
         .map(str::trim)
         .filter(|d| !d.is_empty())
-        .map(str::to_owned);
-    if let Some(d) = new.deadline.as_deref() {
-        parse_iso_zoned(d)?;
-    }
+        .map(normalize_when)
+        .transpose()?;
     let id = Uuid::new_v4().to_string();
     let now = iso_now();
 
@@ -868,28 +867,84 @@ pub fn open_blockers(db: &Db, task_uuid: &str) -> Result<Vec<String>> {
     open_blockers_tx(&tx, task_uuid)
 }
 
-/// Parse an ISO-formatted deadline string (as produced by `dates::format_iso`,
-/// or any ISO-8601 with an offset) back to a `Zoned` anchored in the operator
-/// timezone. Bare date strings (`YYYY-MM-DD`) are interpreted at midnight in
-/// the operator tz.
-fn parse_iso_zoned(s: &str) -> Result<jiff::Zoned> {
+/// A deadline or snooze value, as any surface may spell it.
+enum When {
+    /// A bare calendar date: due (or waking) all day, operator-local.
+    Date(jiff::civil::Date),
+    /// An instant, in the operator timezone.
+    Instant(jiff::Zoned),
+}
+
+/// Parse a deadline / snooze string: an ISO-8601 / RFC 3339 / RFC 9557
+/// instant (any offset, a zone annotation, basic format, ...), a datetime
+/// with a zone annotation or none (read as operator-local wall time), or a
+/// bare date.
+fn parse_when(s: &str) -> Result<When> {
+    let s = s.trim();
     let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ)
         .map_err(|e| crate::Error::Other(format!("operator tz: {}", e)))?;
-    // ISO with offset → Timestamp → Zoned in operator tz.
     if let Ok(ts) = s.parse::<jiff::Timestamp>() {
-        return Ok(ts.to_zoned(tz));
+        return Ok(When::Instant(ts.to_zoned(tz)));
     }
-    // Bare date.
-    if let Ok(d) = s.parse::<jiff::civil::Date>() {
-        return d
-            .at(0, 0, 0, 0)
+    if let Ok(z) = s.parse::<jiff::Zoned>() {
+        return Ok(When::Instant(z.with_time_zone(tz)));
+    }
+    // jiff reads a date out of a datetime string too, so only a value with
+    // no time part is a bare date.
+    let date_part = s.split('[').next().unwrap_or(s);
+    if !date_part.contains(['T', 't', ' '])
+        && let Ok(d) = s.parse::<jiff::civil::Date>()
+    {
+        return Ok(When::Date(d));
+    }
+    if let Ok(dt) = s.parse::<jiff::civil::DateTime>() {
+        return dt
             .to_zoned(tz)
-            .map_err(|e| crate::Error::Other(format!("date→zoned {}: {}", s, e)));
+            .map(When::Instant)
+            .map_err(|e| crate::Error::Other(format!("datetime {s:?}: {e}")));
     }
     Err(crate::Error::Other(format!(
         "parse iso zoned {:?}: not a Timestamp or Date",
         s
     )))
+}
+
+/// The one stored form for a deadline or snooze, whatever the writer sent.
+///
+/// A bare date stays `YYYY-MM-DD` (due all day). Anything else is stored as
+/// the instant rendered in the operator timezone with a colon offset
+/// (`dates::format_iso`, e.g. `2026-12-10T09:00:00+00:00`): SQLite's
+/// julianday() reads it, and its first ten characters are the operator-local
+/// date that the today/tomorrow/`due before:` filters and the dashboard
+/// compare. Raw jiff-accepted spellings (`+0100`, `t`/`z`, `[Europe/London]`,
+/// basic format) were julianday NULL: overdue forever, and a snooze that
+/// woke at once.
+pub(crate) fn normalize_when(s: &str) -> Result<String> {
+    let (year, canonical) = match parse_when(s)? {
+        When::Date(d) => (d.year(), d.to_string()),
+        When::Instant(z) => (z.year(), crate::dates::format_iso(&z)),
+    };
+    if !(1..=9999).contains(&year) {
+        return Err(crate::Error::Other(format!(
+            "date {s:?} is outside years 1..9999"
+        )));
+    }
+    Ok(canonical)
+}
+
+/// Parse a stored deadline back to a `Zoned` in the operator timezone. Bare
+/// date strings (`YYYY-MM-DD`) are interpreted at midnight in the operator tz.
+fn parse_iso_zoned(s: &str) -> Result<jiff::Zoned> {
+    match parse_when(s)? {
+        When::Instant(z) => Ok(z),
+        When::Date(d) => {
+            let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ)
+                .map_err(|e| crate::Error::Other(format!("operator tz: {}", e)))?;
+            d.at(0, 0, 0, 0)
+                .to_zoned(tz)
+                .map_err(|e| crate::Error::Other(format!("date→zoned {}: {}", s, e)))
+        }
+    }
 }
 
 fn recurrence_time_of_day(original: &str, now: &jiff::Zoned) -> Result<Option<jiff::Zoned>> {
@@ -1004,11 +1059,14 @@ pub fn update_deadline(
     // over /sync or MCP, a blanked dashboard field) and every one of them
     // used to reach `parse_iso_zoned` and fail with a bare parse error.
     // Normalising here keeps the recurring-task guard below correct for all
-    // of them. Surrounding whitespace is trimmed off a real date too.
-    let deadline = deadline.map(str::trim).filter(|d| !d.is_empty());
-    if let Some(d) = deadline {
-        parse_iso_zoned(d)?;
-    }
+    // of them. Surrounding whitespace is trimmed off a real date too, and a
+    // real date is stored in the canonical form (see normalize_when).
+    let deadline = deadline
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(normalize_when)
+        .transpose()?;
+    let deadline = deadline.as_deref();
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1636,7 +1694,8 @@ pub fn promote(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
 /// task leaves `pt next` and accountability until the wake time passes,
 /// when [`wake_expired_snoozes`] flips it back to todo.
 pub fn snooze(db: &Db, task_uuid: &str, until_iso: &str, ctx: &EventCtx) -> Result<()> {
-    parse_iso_zoned(until_iso)?;
+    let until = normalize_when(until_iso)?;
+    let until_iso = until.as_str();
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1673,39 +1732,39 @@ pub fn snooze(db: &Db, task_uuid: &str, until_iso: &str, ctx: &EventCtx) -> Resu
 /// Invoked by the hourly scoring run so snoozes expire without their own
 /// timer. Returns the number woken; each wake is an attributed event.
 ///
-/// An unparseable `snoozed_until` wakes immediately: `julianday()` returns
-/// NULL on junk and a NULL comparison is never true, so such a row would
-/// otherwise stay `snoozed` forever with no timer that could ever fire it.
+/// Each `snoozed_until` is read with the same parser the writers use, so a
+/// row stored before writes were normalised wakes on time too. A date-only
+/// snooze wakes from operator-local midnight. An unparseable one wakes
+/// immediately: it would otherwise stay `snoozed` forever with no timer that
+/// could ever fire it.
 pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<usize> {
-    let expired: Vec<String> = {
+    let now = parse_iso_zoned(now_iso)?;
+    let snoozed: Vec<(String, String)> = {
         let conn = db.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id FROM tasks
-             WHERE status_v2='snoozed' AND snoozed_until IS NOT NULL
-               AND (julianday(snoozed_until) IS NULL
-                    OR (length(snoozed_until) = 10
-                        AND snoozed_until <= substr(?1, 1, 10))
-                    OR (length(snoozed_until) > 10
-                        AND julianday(snoozed_until) <= julianday(?1)))",
+            "SELECT id, snoozed_until FROM tasks
+             WHERE status_v2='snoozed' AND snoozed_until IS NOT NULL",
         )?;
-        let rows = stmt.query_map([now_iso], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<std::result::Result<_, _>>()?
     };
+    let expired = snoozed
+        .into_iter()
+        .filter(|(_, until)| match parse_when(until) {
+            Ok(When::Date(d)) => d <= now.date(),
+            Ok(When::Instant(z)) => z.timestamp() <= now.timestamp(),
+            Err(_) => true,
+        });
     let mut woken = 0usize;
-    for uuid in &expired {
+    for (uuid, until) in expired {
         let mut conn = db.get()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Unchanged since it was read: a concurrent re-snooze is not woken.
         let changed = tx.execute(
             "UPDATE tasks SET status_v2='todo', status='pending',
                               snoozed_until=NULL, updated_at=?1
-              WHERE id=?2 AND status_v2='snoozed'
-                AND snoozed_until IS NOT NULL
-                AND (julianday(snoozed_until) IS NULL
-                     OR (length(snoozed_until) = 10
-                         AND snoozed_until <= substr(?1, 1, 10))
-                     OR (length(snoozed_until) > 10
-                         AND julianday(snoozed_until) <= julianday(?1)))",
-            params![now_iso, uuid],
+              WHERE id=?2 AND status_v2='snoozed' AND snoozed_until=?3",
+            params![now_iso, uuid, until],
         )?;
         if changed == 0 {
             continue;
@@ -1713,7 +1772,7 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
         record_event_tx(
             &tx,
             ctx,
-            uuid,
+            &uuid,
             "task.updated",
             &serde_json::json!({ "task_uuid": uuid, "status": "todo", "woke_from_snooze": true }),
         )?;
@@ -1831,9 +1890,12 @@ pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx)
             "priority {p} out of range 1..=5"
         )));
     }
-    if let Some(Some(d)) = edit.deadline {
-        parse_iso_zoned(d)?;
-    }
+    // A set deadline is stored in the canonical form (see normalize_when).
+    let deadline: Option<Option<String>> = edit
+        .deadline
+        .map(|d| d.map(normalize_when).transpose())
+        .transpose()?;
+    let deadline: Option<Option<&str>> = deadline.as_ref().map(|d| d.as_deref());
     let add: Vec<&str> = edit
         .labels_add
         .iter()
@@ -1876,8 +1938,8 @@ pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx)
             edit.title,
             edit.description,
             edit.priority,
-            edit.deadline.is_some(),
-            edit.deadline.flatten(),
+            deadline.is_some(),
+            deadline.flatten(),
             now,
             task_uuid
         ],
@@ -1906,7 +1968,7 @@ pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx)
         payload["priority"] = serde_json::json!(p);
         interactions.push(("priority_change", format!("priority → {p}")));
     }
-    if let Some(deadline) = edit.deadline {
+    if let Some(deadline) = deadline {
         tx.execute(
             "UPDATE pt_recurrence SET next_occurrence=?1, anchor=?1 WHERE task_uuid=?2",
             params![deadline, task_uuid],
@@ -4000,6 +4062,159 @@ mod tests {
             1,
             "date-only snooze expires at operator-local midnight"
         );
+    }
+
+    /// Every spelling jiff accepts but SQLite's julianday() does not
+    /// (CORE-2): `date +%FT%T%z`'s `+0100`, lowercase t/z, an RFC 9557 zone
+    /// suffix, hour-only times, basic format, comma fractions, the +25:00
+    /// offset bound and an expanded year.
+    const JULIANDAY_HOSTILE: [&str; 9] = [
+        "2099-12-10T09:00:00+0100",
+        "2099-12-10t09:00:00z",
+        "2099-12-10T09:00:00+00:00[Europe/London]",
+        "2099-12-10T09Z",
+        "20991210T090000Z",
+        "2099-12-10T09:00:00,5Z",
+        "2099-12-10T09:00:00+25:00",
+        "+002099-12-10",
+        "2099-12-10T09:00[Europe/London]",
+    ];
+
+    fn sql_reads(db: &Db, column: &str, uuid: &str) -> (String, bool) {
+        db.with_conn(|c| {
+            Ok(c.query_row(
+                &format!("SELECT {column}, julianday({column}) IS NOT NULL FROM tasks WHERE id=?1"),
+                [uuid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn every_deadline_and_snooze_writer_stores_a_form_sqlite_reads() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        for raw in JULIANDAY_HOSTILE {
+            let mut new = NewTask::minimal("created");
+            new.deadline = Some(raw.into());
+            let created = create(&db, new, &ctx).unwrap();
+            let (stored, readable) = sql_reads(&db, "deadline", &created.id);
+            assert!(readable, "create stored {stored:?} for {raw:?}");
+            assert_eq!(created.deadline.as_deref(), Some(stored.as_str()));
+
+            let t = create(&db, NewTask::minimal("updated"), &ctx).unwrap();
+            update_deadline(&db, &t.id, Some(raw), &ctx).unwrap();
+            let (stored, readable) = sql_reads(&db, "deadline", &t.id);
+            assert!(readable, "update_deadline stored {stored:?} for {raw:?}");
+
+            let e = create(&db, NewTask::minimal("edited"), &ctx).unwrap();
+            let edit = TaskEdit {
+                deadline: Some(Some(raw)),
+                ..Default::default()
+            };
+            edit_atomic(&db, &e.id, edit, &ctx).unwrap();
+            let (stored, readable) = sql_reads(&db, "deadline", &e.id);
+            assert!(readable, "edit_atomic stored {stored:?} for {raw:?}");
+
+            let s = create(&db, NewTask::minimal("snoozed"), &ctx).unwrap();
+            snooze(&db, &s.id, raw, &ctx).unwrap();
+            let (stored, readable) = sql_reads(&db, "snoozed_until", &s.id);
+            assert!(readable, "snooze stored {stored:?} for {raw:?}");
+        }
+        // A bare date stays a bare date (due all day).
+        let mut new = NewTask::minimal("dated");
+        new.deadline = Some("+002099-12-10".into());
+        let dated = create(&db, new, &ctx).unwrap();
+        assert_eq!(dated.deadline.as_deref(), Some("2099-12-10"));
+    }
+
+    #[test]
+    fn a_compact_offset_deadline_two_months_out_is_not_overdue() {
+        // `date +%FT%T%z` spells the offset `+0100`; stored raw, julianday()
+        // was NULL and the overdue filter reads NULL as overdue.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let later = crate::dates::now_in_operator_tz()
+            .unwrap()
+            .checked_add(jiff::Span::new().days(60))
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%S%z")
+            .to_string();
+        let mut new = NewTask::minimal("two months out");
+        new.deadline = Some(later.clone());
+        let t = create(&db, new, &ctx).unwrap();
+        let overdue = crate::filter::parse("overdue").unwrap();
+        let rows = list_with_filter(&db, Some(&overdue), None, None, 50).unwrap();
+        assert!(
+            rows.iter().all(|r| r.id != t.id),
+            "{later:?} two months out listed as overdue"
+        );
+    }
+
+    #[test]
+    fn a_compact_offset_snooze_survives_the_wake_pass() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let now = crate::dates::now_in_operator_tz().unwrap();
+        let later = now
+            .checked_add(jiff::Span::new().days(60))
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%S%z")
+            .to_string();
+        let t = create(&db, NewTask::minimal("parked"), &ctx).unwrap();
+        snooze(&db, &t.id, &later, &ctx).unwrap();
+        let woken = wake_expired_snoozes(
+            &db,
+            &crate::dates::format_iso(&now),
+            &EventCtx::system("wake-test"),
+        )
+        .unwrap();
+        assert_eq!(woken, 0, "a snooze 60 days out woke immediately");
+        assert_eq!(
+            resolve_for_lookup(&db, &t.id, true).unwrap().status,
+            "snoozed"
+        );
+    }
+
+    #[test]
+    fn today_and_tomorrow_agree_for_one_instant_spelt_two_ways() {
+        // 00:30 tomorrow, operator-local, is still "today" at -05:00: the
+        // day filters take substr(deadline, 1, 10) of whatever offset the
+        // writer used, so the same instant landed on two different days.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ).unwrap();
+        let tomorrow = crate::dates::now_in_operator_tz()
+            .unwrap()
+            .date()
+            .checked_add(jiff::Span::new().days(1))
+            .unwrap();
+        let instant = tomorrow.at(0, 30, 0, 0).to_zoned(tz).unwrap();
+        let local = crate::dates::format_iso(&instant);
+        let west = instant
+            .with_time_zone(jiff::tz::TimeZone::fixed(jiff::tz::offset(-5)))
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string();
+        let mut ids = Vec::new();
+        for spelling in [&local, &west] {
+            let mut new = NewTask::minimal("just after midnight");
+            new.deadline = Some(spelling.clone());
+            ids.push(create(&db, new, &ctx).unwrap().id);
+        }
+        let on = |dsl: &str| -> Vec<String> {
+            let expr = crate::filter::parse(dsl).unwrap();
+            list_with_filter(&db, Some(&expr), None, None, 50)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect()
+        };
+        let (due_tomorrow, due_today) = (on("tomorrow"), on("today"));
+        for (id, spelling) in ids.iter().zip([&local, &west]) {
+            assert!(due_tomorrow.contains(id), "{spelling} not due tomorrow");
+            assert!(!due_today.contains(id), "{spelling} due today");
+        }
     }
 
     #[test]
