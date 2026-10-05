@@ -132,19 +132,14 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
         // negation is true.
         Expr::Not(inner) => format!("(NOT COALESCE(({}), 0))", compile(inner, now, params)?),
 
-        Expr::Today => {
-            params.push(Value::Text(now.date().to_string()));
-            format!("substr(t.deadline,1,10) = ?{}", params.len())
-        }
+        Expr::Today => day_cmp("t.deadline", DayCmp::On, now.date(), now, params)?,
         Expr::Tomorrow => {
-            let d = now.date().checked_add(jiff::Span::new().days(1)).unwrap();
-            params.push(Value::Text(d.to_string()));
-            format!("substr(t.deadline,1,10) = ?{}", params.len())
+            let d = now.date().tomorrow().map_err(day_err)?;
+            day_cmp("t.deadline", DayCmp::On, d, now, params)?
         }
         Expr::Yesterday => {
-            let d = now.date().checked_sub(jiff::Span::new().days(1)).unwrap();
-            params.push(Value::Text(d.to_string()));
-            format!("substr(t.deadline,1,10) = ?{}", params.len())
+            let d = now.date().yesterday().map_err(day_err)?;
+            day_cmp("t.deadline", DayCmp::On, d, now, params)?
         }
         Expr::Overdue => {
             params.push(Value::Text(now.date().to_string()));
@@ -180,18 +175,9 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             params.push(Value::Text(name.clone()));
             format!("x.project = ?{}", params.len())
         }
-        Expr::DueOn(d) => {
-            params.push(Value::Text(d.clone()));
-            format!("substr(t.deadline,1,10) = ?{}", params.len())
-        }
-        Expr::DueBefore(d) => {
-            params.push(Value::Text(d.clone()));
-            format!("substr(t.deadline,1,10) < ?{}", params.len())
-        }
-        Expr::DueAfter(d) => {
-            params.push(Value::Text(d.clone()));
-            format!("substr(t.deadline,1,10) > ?{}", params.len())
-        }
+        Expr::DueOn(d) => day_cmp("t.deadline", DayCmp::On, iso_day(d)?, now, params)?,
+        Expr::DueBefore(d) => day_cmp("t.deadline", DayCmp::Before, iso_day(d)?, now, params)?,
+        Expr::DueAfter(d) => day_cmp("t.deadline", DayCmp::After, iso_day(d)?, now, params)?,
         Expr::Kind(k) => {
             params.push(Value::Text(k.clone()));
             format!("COALESCE(t.kind,'ship') = ?{}", params.len())
@@ -206,6 +192,77 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             )
         }
     })
+}
+
+/// Which side of an operator-local day a column must fall on.
+#[derive(Clone, Copy)]
+enum DayCmp {
+    Before,
+    On,
+    After,
+}
+
+fn day_err(e: jiff::Error) -> Error {
+    Error::Other(format!("filter: day out of range: {e}"))
+}
+
+fn iso_day(d: &str) -> Result<jiff::civil::Date> {
+    d.parse()
+        .map_err(|e| Error::Other(format!("filter: bad date {d:?}: {e}")))
+}
+
+/// SQL for `col` falling before / on / after `day` in `now`'s (operator)
+/// timezone. A date-only value (`YYYY-MM-DD`) compares as a date; anything
+/// longer is an instant, bucketed by the day's start and end there. Stored
+/// offsets are mixed (`Z`, `+00:00`, `+01:00`), so the stored date prefix is
+/// not the operator's day: 23:30Z on 20 Oct is 00:30 on 21 Oct in London.
+fn day_cmp(
+    col: &str,
+    cmp: DayCmp,
+    day: jiff::civil::Date,
+    now: &Zoned,
+    params: &mut Vec<rusqlite::types::Value>,
+) -> Result<String> {
+    use rusqlite::types::Value;
+    let start_of = |d: jiff::civil::Date| -> Result<Value> {
+        let start = d.to_zoned(now.time_zone().clone()).map_err(day_err)?;
+        Ok(Value::Text(dates::format_iso(
+            &start.with_time_zone(jiff::tz::TimeZone::UTC),
+        )))
+    };
+    let next = day.tomorrow().map_err(day_err)?;
+    params.push(Value::Text(day.to_string()));
+    let date = params.len();
+    let (date_op, instant) = match cmp {
+        DayCmp::Before => {
+            params.push(start_of(day)?);
+            (
+                "<",
+                format!("julianday({col}) < julianday(?{})", params.len()),
+            )
+        }
+        DayCmp::On => {
+            params.push(start_of(day)?);
+            params.push(start_of(next)?);
+            let (start, end) = (params.len() - 1, params.len());
+            (
+                "=",
+                format!(
+                    "julianday({col}) >= julianday(?{start}) AND julianday({col}) < julianday(?{end})"
+                ),
+            )
+        }
+        DayCmp::After => {
+            params.push(start_of(next)?);
+            (
+                ">",
+                format!("julianday({col}) >= julianday(?{})", params.len()),
+            )
+        }
+    };
+    Ok(format!(
+        "((length({col}) = 10 AND {col} {date_op} ?{date}) OR (length({col}) > 10 AND {instant}))"
+    ))
 }
 
 pub(crate) fn escape_like(input: &str) -> String {
@@ -829,10 +886,22 @@ mod tests {
     }
 
     #[test]
-    fn compile_today_emits_substring_match() {
+    fn compile_today_binds_the_operator_local_day_bounds() {
         let sql = to_sql(&ast("today"), &anchor()).unwrap();
-        assert_eq!(sql.where_clause, "substr(t.deadline,1,10) = ?1");
-        assert_eq!(sql.params.len(), 1);
+        assert!(sql.where_clause.contains("julianday(t.deadline)"));
+        let text = |v: &rusqlite::types::Value| match v {
+            rusqlite::types::Value::Text(s) => s.clone(),
+            other => panic!("{other:?}"),
+        };
+        // 13 May is BST: the London day runs 23:00Z to 23:00Z.
+        assert_eq!(
+            sql.params.iter().map(text).collect::<Vec<_>>(),
+            [
+                "2026-05-13",
+                "2026-05-12T23:00:00+00:00",
+                "2026-05-13T23:00:00+00:00"
+            ]
+        );
     }
 
     #[test]
@@ -976,6 +1045,90 @@ mod tests {
             rows,
             vec!["free text long", "free text ten"],
             "unparseable deadlines must surface as overdue, and only those"
+        );
+    }
+
+    /// Titles matched by `expr` at `now` over `(title, deadline)` rows.
+    fn day_titles(rows: &[(&str, &str)], expr: &Expr, now: &Zoned) -> Vec<String> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (title TEXT, deadline TEXT, due_at TEXT, status TEXT);
+             CREATE TABLE pt_extensions (task_uuid TEXT, labels TEXT);",
+        )
+        .unwrap();
+        for (title, deadline) in rows {
+            conn.execute(
+                "INSERT INTO tasks (title, deadline, status) VALUES (?1, ?2, 'pending')",
+                [title, deadline],
+            )
+            .unwrap();
+        }
+        let sql = to_sql(expr, now).unwrap();
+        let query = format!(
+            "SELECT title FROM tasks t LEFT JOIN pt_extensions x ON 1=0 WHERE {} ORDER BY title",
+            sql.where_clause
+        );
+        let params = bind_refs(&sql.params);
+        conn.prepare(&query)
+            .unwrap()
+            .query_map(params.as_slice(), |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    fn london(y: i16, m: i8, d: i8, h: i8) -> Zoned {
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        jiff::civil::date(y, m, d)
+            .at(h, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap()
+    }
+
+    #[test]
+    fn day_atoms_bucket_instants_by_the_operator_local_day() {
+        // PARSE-4: day atoms compared substr(deadline,1,10) -- the date in
+        // whatever offset was stored. `2026-10-20T23:30:00Z` is 00:30 on
+        // 21 Oct in London (BST) but matched `due: 2026-10-20`.
+        let rows = [
+            ("z-late", "2026-10-20T23:30:00Z"),
+            ("bst-late", "2026-10-21T00:30:00+01:00"),
+            ("date-only", "2026-10-21"),
+            ("prev", "2026-10-20T22:30:00Z"),
+            ("next", "2026-10-21T23:30:00Z"),
+        ];
+        let now = london(2026, 10, 21, 12);
+        let today = ["bst-late", "date-only", "z-late"];
+        assert_eq!(day_titles(&rows, &Expr::Today, &now), today);
+        assert_eq!(
+            day_titles(&rows, &Expr::DueOn("2026-10-21".into()), &now),
+            today
+        );
+        assert_eq!(day_titles(&rows, &Expr::Yesterday, &now), ["prev"]);
+        assert_eq!(day_titles(&rows, &Expr::Tomorrow, &now), ["next"]);
+        assert_eq!(
+            day_titles(&rows, &Expr::DueBefore("2026-10-21".into()), &now),
+            ["prev"]
+        );
+        assert_eq!(
+            day_titles(&rows, &Expr::DueAfter("2026-10-21".into()), &now),
+            ["next"]
+        );
+        assert_eq!(
+            day_titles(&rows, &Expr::DueAfter("2026-10-20".into()), &now),
+            ["bst-late", "date-only", "next", "z-late"]
+        );
+
+        // The 25-hour day the clocks go back: 23:00Z on the 24th to 00:00Z
+        // on the 26th, not a fixed-offset guess.
+        let rows = [
+            ("first", "2026-10-24T23:30:00Z"),
+            ("last", "2026-10-25T23:30:00Z"),
+            ("before", "2026-10-24T22:30:00Z"),
+        ];
+        assert_eq!(
+            day_titles(&rows, &Expr::Today, &london(2026, 10, 25, 12)),
+            ["first", "last"]
         );
     }
 
