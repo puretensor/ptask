@@ -759,39 +759,44 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         //   Fixed      → from the current deadline, or the operator-set anchor
         //                for a plain monthly rule (preserves cadence)
         //   Completion → from now (drifts forward with completions)
-        let mut next_z = match mode_str.as_str() {
+        let advanced: Result<jiff::Zoned> = match mode_str.as_str() {
             "fixed" => {
                 let current = match &current_deadline {
                     Some(d) => parse_iso_zoned(d)?,
                     None => completion_now.clone(),
                 };
                 let anchor = anchor.as_deref().map(parse_iso_zoned).transpose()?;
-                let next = crate::recurrence::next_fixed(
-                    &rec,
-                    anchor.as_ref(),
-                    &current,
-                    &completion_now,
-                )?;
-                // Chaining keeps the current deadline's clock time, so one
-                // occurrence inside a spring-forward gap (01:30 → 02:30)
-                // moved every later one too. Re-apply the rule's wall-clock
-                // time: its `at`, else the operator-set anchor's.
-                match explicit_time.as_ref().or(anchor.as_ref()) {
-                    Some(time) => {
-                        let floor = current.max(completion_now.clone());
-                        let mut z = combine_date_with_time(&next, time)?;
-                        while z <= floor {
-                            z = combine_date_with_time(
-                                &crate::recurrence::next_after(&rec, &z)?,
-                                time,
-                            )?;
-                        }
-                        z
+                (|| {
+                    let next = crate::recurrence::next_fixed(
+                        &rec,
+                        anchor.as_ref(),
+                        &current,
+                        &completion_now,
+                    )?;
+                    // Chaining keeps the current deadline's clock time, so one
+                    // occurrence inside a spring-forward gap (01:30 → 02:30)
+                    // moved every later one too. Re-apply the rule's wall-clock
+                    // time: its `at`, else the operator-set anchor's.
+                    let Some(time) = explicit_time.as_ref().or(anchor.as_ref()) else {
+                        return Ok(next);
+                    };
+                    let floor = current.clone().max(completion_now.clone());
+                    let mut z = combine_date_with_time(&next, time)?;
+                    while z <= floor {
+                        z = combine_date_with_time(
+                            &crate::recurrence::next_after(&rec, &z)?,
+                            time,
+                        )?;
                     }
-                    None => next,
-                }
+                    Ok(z)
+                })()
             }
-            "completion" => crate::recurrence::next_after(&rec, &completion_now)?,
+            "completion" => crate::recurrence::next_after(&rec, &completion_now).and_then(|next| {
+                match explicit_time.as_ref() {
+                    Some(time) => combine_date_with_time(&next, time),
+                    None => Ok(next),
+                }
+            }),
             other => {
                 return Err(crate::Error::Other(format!(
                     "recurrence: unknown mode in pt_recurrence: {:?}",
@@ -799,56 +804,66 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                 )));
             }
         };
-        if mode_str == "completion"
-            && let Some(time) = explicit_time.as_ref()
-        {
-            next_z = combine_date_with_time(&next_z, time)?;
-        }
-        // A date-only deadline is due all day; its next occurrence must be
-        // date-only too, not a midnight timestamp that is overdue at 00:00.
-        let date_only = matches!(
-            current_deadline.as_deref().map(parse_when),
-            Some(Ok(When::Date(_)))
-        );
-        let next_iso = if date_only {
-            next_z.date().to_string()
-        } else {
-            crate::dates::format_iso(&next_z)
+        // No representable next occurrence ("every 95000 months" runs past
+        // year 9999): the series is over, so this completion closes the task
+        // below instead of failing on every attempt.
+        let next_z = match advanced {
+            Ok(next_z) => Some(next_z),
+            Err(e) => {
+                tracing::warn!(
+                    target: "ptask::tasks", task = %task.id, error = %e,
+                    "no next occurrence; completing the recurring task"
+                );
+                None
+            }
         };
+        if let Some(next_z) = next_z {
+            // A date-only deadline is due all day; its next occurrence must be
+            // date-only too, not a midnight timestamp that is overdue at 00:00.
+            let date_only = matches!(
+                current_deadline.as_deref().map(parse_when),
+                Some(Ok(When::Date(_)))
+            );
+            let next_iso = if date_only {
+                next_z.date().to_string()
+            } else {
+                crate::dates::format_iso(&next_z)
+            };
 
-        tx.execute(
-            "UPDATE tasks SET deadline=?1, updated_at=?2, status='pending',
+            tx.execute(
+                "UPDATE tasks SET deadline=?1, updated_at=?2, status='pending',
                               status_v2='todo', snoozed_until=NULL WHERE id=?3",
-            params![next_iso, now, task.id],
-        )?;
-        tx.execute(
-            "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
-            params![next_iso, task.id],
-        )?;
-        tx.execute(
-            "INSERT INTO interactions (task_id, action, ts, details)
+                params![next_iso, now, task.id],
+            )?;
+            tx.execute(
+                "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
+                params![next_iso, task.id],
+            )?;
+            tx.execute(
+                "INSERT INTO interactions (task_id, action, ts, details)
              VALUES (?1, 'recurrence_advance', ?2, ?3)",
-            params![
-                task.id,
-                now,
-                format!("Recurring task advanced to {}", next_iso),
-            ],
-        )?;
-        record_event_tx(
-            &tx,
-            ctx,
-            &task.id,
-            "task.recurrence_advanced",
-            &serde_json::json!({
-                "task_uuid": task.id,
-                "pt_id": task.pt_id,
-                "next_deadline": next_iso,
-            }),
-        )?;
-        tx.commit()?;
-        return Ok(DoneOutcome::Advanced {
-            next_deadline: next_iso,
-        });
+                params![
+                    task.id,
+                    now,
+                    format!("Recurring task advanced to {}", next_iso),
+                ],
+            )?;
+            record_event_tx(
+                &tx,
+                ctx,
+                &task.id,
+                "task.recurrence_advanced",
+                &serde_json::json!({
+                    "task_uuid": task.id,
+                    "pt_id": task.pt_id,
+                    "next_deadline": next_iso,
+                }),
+            )?;
+            tx.commit()?;
+            return Ok(DoneOutcome::Advanced {
+                next_deadline: next_iso,
+            });
+        }
     }
 
     // Completing a done task is refused like dismissing a dismissed one: the
@@ -3867,6 +3882,43 @@ mod tests {
             }
             assert_eq!(seen, [gap_day, after], "{rule}");
         }
+    }
+
+    #[test]
+    fn a_rule_with_no_representable_next_occurrence_completes_outright() {
+        // Regression (PARSE-16): quick-add accepts "every 95000 months" (the
+        // first occurrence, ~7,900 years out, still fits), but the next one
+        // is past year 9999, so every `done` failed with "year out of range"
+        // and the task could only be dismissed.
+        let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ).unwrap();
+        let now = jiff::civil::date(2026, 10, 5)
+            .at(9, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        let (_dir, db) = fresh_db();
+        let q = crate::quickadd::parse_at("archive every 95000 months", now).unwrap();
+        let (new, ext) = q.task_parts("test");
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        assert_eq!(
+            mark_done(&db, &t, &EventCtx::test()).unwrap(),
+            DoneOutcome::Completed
+        );
+        assert_eq!(resolve_for_lookup(&db, &t.id, true).unwrap().status, "done");
+        assert_eq!(event_count(&db, "task.completed"), 1);
+
+        // Completion mode counts from now; past year 9999 from now as well.
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("archive");
+        new.deadline = Some("2099-01-01".into());
+        let ext = Extensions {
+            recurrence: Some(crate::recurrence::parse("every! 99999 months").unwrap()),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        assert_eq!(
+            mark_done(&db, &t, &EventCtx::test()).unwrap(),
+            DoneOutcome::Completed
+        );
     }
 
     #[test]
