@@ -749,15 +749,12 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         let rec = crate::recurrence::parse(&original)
             .map_err(|e| crate::Error::Other(format!("re-parse recurrence: {}", e)))?;
         let completion_now = crate::dates::now_in_operator_tz()?;
-        // Only completion mode re-applies the time of day. Rows stored before
-        // quick-add rejected unparseable times ("at 9") must stay completable.
-        let explicit_time = if mode_str == "completion" {
-            recurrence_time_of_day(&original, &completion_now)
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
+        // The rule's `at` time, if any. Rows stored before quick-add rejected
+        // unparseable times ("at 9") must stay completable, so a bad one is
+        // simply absent.
+        let explicit_time = recurrence_time_of_day(&original, &completion_now)
+            .ok()
+            .flatten();
         // Where the next occurrence counts from:
         //   Fixed      → from the current deadline, or the operator-set anchor
         //                for a plain monthly rule (preserves cadence)
@@ -769,7 +766,30 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                     None => completion_now.clone(),
                 };
                 let anchor = anchor.as_deref().map(parse_iso_zoned).transpose()?;
-                crate::recurrence::next_fixed(&rec, anchor.as_ref(), &current, &completion_now)?
+                let next = crate::recurrence::next_fixed(
+                    &rec,
+                    anchor.as_ref(),
+                    &current,
+                    &completion_now,
+                )?;
+                // Chaining keeps the current deadline's clock time, so one
+                // occurrence inside a spring-forward gap (01:30 → 02:30)
+                // moved every later one too. Re-apply the rule's wall-clock
+                // time: its `at`, else the operator-set anchor's.
+                match explicit_time.as_ref().or(anchor.as_ref()) {
+                    Some(time) => {
+                        let floor = current.max(completion_now.clone());
+                        let mut z = combine_date_with_time(&next, time)?;
+                        while z <= floor {
+                            z = combine_date_with_time(
+                                &crate::recurrence::next_after(&rec, &z)?,
+                                time,
+                            )?;
+                        }
+                        z
+                    }
+                    None => next,
+                }
             }
             "completion" => crate::recurrence::next_after(&rec, &completion_now)?,
             other => {
@@ -992,7 +1012,10 @@ fn anchor_leads_to(rec: &crate::recurrence::Recurrence, anchor: &str, deadline: 
 
 fn recurrence_time_of_day(original: &str, now: &jiff::Zoned) -> Result<Option<jiff::Zoned>> {
     let (_rule, time) = crate::recurrence::split_time_suffix(original);
-    time.map(|t| crate::dates::parse_at(&format!("today {}", t), now.clone()))
+    // Only the clock fields are used. Read them on a UTC clock, which has no
+    // gaps: on the spring-forward day "today 1:30am" in London is 02:30.
+    let utc = now.with_time_zone(jiff::tz::TimeZone::UTC);
+    time.map(|t| crate::dates::parse_at(&format!("today {}", t), utc.clone()))
         .transpose()
 }
 
@@ -3795,6 +3818,71 @@ mod tests {
             panic!("must recur")
         };
         assert_eq!(&next_deadline[..10], "2099-04-15");
+    }
+
+    #[test]
+    fn a_fixed_rule_keeps_its_clock_time_after_the_spring_forward_gap() {
+        // Regression (PARSE-13): fixed mode chained from the current instant,
+        // so the one occurrence inside Europe/London's 2027-03-28 gap (01:00
+        // to 02:00 does not exist) moved to 02:xx, and every later one kept
+        // that time. Only completion mode re-applied the rule's time.
+        for (rule, first, gap_day, after) in [
+            (
+                "every sunday at 1:30am",
+                "2027-03-21T01:30:00+00:00",
+                "2027-03-28T02:30:00+01:00",
+                "2027-04-04T01:30:00+01:00",
+            ),
+            (
+                "every day at 1:15am",
+                "2027-03-27T01:15:00+00:00",
+                "2027-03-28T02:15:00+01:00",
+                "2027-03-29T01:15:00+01:00",
+            ),
+            // No `at`: the operator-set anchor carries the clock time.
+            (
+                "every sunday",
+                "2027-03-21T01:30:00+00:00",
+                "2027-03-28T02:30:00+01:00",
+                "2027-04-04T01:30:00+01:00",
+            ),
+        ] {
+            let (_dir, db) = fresh_db();
+            let mut new = NewTask::minimal("night job");
+            new.deadline = Some(first.into());
+            let ext = Extensions {
+                recurrence: Some(crate::recurrence::parse(rule).unwrap()),
+                ..Default::default()
+            };
+            let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let fresh = resolve_for_lookup(&db, &t.id, true).unwrap();
+                let DoneOutcome::Advanced { next_deadline } =
+                    mark_done(&db, &fresh, &EventCtx::test()).unwrap()
+                else {
+                    panic!("must recur")
+                };
+                seen.push(next_deadline);
+            }
+            assert_eq!(seen, [gap_day, after], "{rule}");
+        }
+    }
+
+    #[test]
+    fn a_rules_clock_time_reads_exactly_on_the_spring_forward_day() {
+        let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ).unwrap();
+        let gap_day = jiff::civil::date(2027, 3, 28)
+            .at(12, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        // On a London clock, 01:30 that day does not exist.
+        let london = crate::dates::parse_at("today 1:30am", gap_day.clone()).unwrap();
+        assert_eq!((london.hour(), london.minute()), (2, 30));
+        let time = recurrence_time_of_day("every sunday at 1:30am", &gap_day)
+            .unwrap()
+            .unwrap();
+        assert_eq!((time.hour(), time.minute()), (1, 30));
     }
 
     #[test]
