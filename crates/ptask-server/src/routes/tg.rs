@@ -8,6 +8,11 @@
 //!
 //! Idempotent per tap: the Telegram callback id becomes the journal event
 //! uuid, so a retried forward of the same tap is a no-op.
+//!
+//! Every verb is journaled as the operator's tap (`telegram`,
+//! `operator@telegram`), so only a client named in `$PTASK_TG_FORWARDERS` may
+//! post here; approval verbs additionally need `$PTASK_TG_APPROVAL_BUTTONS`,
+//! the switch that puts decide buttons on the pings in the first place.
 
 use crate::AppState;
 use axum::Router;
@@ -57,6 +62,12 @@ fn callback_blocking(
         Ok(id) => id,
         Err(resp) => return resp,
     };
+    if !state.tg_forwarders.iter().any(|n| n == &identity.client_id) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "telegram taps are accepted only from a configured forwarder",
+        );
+    }
     let Some((verb, rest)) = req.data.split_once(':') else {
         return err(StatusCode::BAD_REQUEST, "malformed callback data");
     };
@@ -148,6 +159,14 @@ fn approval_callback(
 ) -> axum::response::Response {
     if req.callback_id.is_empty() {
         return err(StatusCode::BAD_REQUEST, "callback_id must be non-empty");
+    }
+    // pTask only offers decide buttons when this switch is on; without it a
+    // forwarder (or anyone holding its token) could decide by naming any AP-n.
+    if !state.tg_approval_buttons {
+        return err(
+            StatusCode::FORBIDDEN,
+            "approval taps are disabled (PTASK_TG_APPROVAL_BUTTONS is off)",
+        );
     }
     let allowed = state.tg_forwarders.iter().any(|n| n == &identity.client_id);
     let operator_chat = state.notify.telegram_chat_id;
