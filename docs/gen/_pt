@@ -261,6 +261,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-n+[Override row limit]:LIMIT:_default' \
 '--limit=[Override row limit]:LIMIT:_default' \
+'-s+[Filter by status (or \`all\`), as in \`pt list\`]:STATUS:_default' \
+'--status=[Filter by status (or \`all\`), as in \`pt list\`]:STATUS:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \

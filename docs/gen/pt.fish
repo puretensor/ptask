@@ -234,6 +234,7 @@ complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_f
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from list" -l no-color -d 'Plain output — shorthand for `--color never`'
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -s n -l limit -d 'Override row limit' -r
+complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -s s -l status -d 'Filter by status (or `all`), as in `pt list`' -r
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -l idempotency-key -d 'Idempotency key recorded with the mutation\'s event — a retried command with the same key returns ok without re-applying' -r
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -l color -d 'Colour: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never' -r -f -a "auto\t''

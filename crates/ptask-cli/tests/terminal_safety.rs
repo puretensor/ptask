@@ -6,54 +6,11 @@
 //! Black-box: drives the built `pt` against a throwaway database seeded with
 //! hostile text and checks every byte each renderer prints.
 
-use std::process::{Command, Output, Stdio};
+mod common;
+use common::Pt;
 
 /// OSC 52 clipboard write, screen clear, carriage return, C1 CSI.
 const HOSTILE: &str = "\x1b]52;c;eA==\x07\x1b[2J\r\u{9b}31m";
-
-struct Pt {
-    dir: tempfile::TempDir,
-}
-
-impl Pt {
-    fn new() -> Self {
-        Pt {
-            dir: tempfile::tempdir().unwrap(),
-        }
-    }
-
-    fn run(&self, args: &[&str]) -> Output {
-        self.run_as("test", args)
-    }
-
-    fn run_as(&self, actor: &str, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_pt"))
-            .args(args)
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("HOME", self.dir.path())
-            .env("PTASK_DB", self.dir.path().join("tasks.db"))
-            .env("PTASK_ACTOR", actor)
-            .env("COLUMNS", "120")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
-    }
-
-    fn ok(&self, args: &[&str]) -> String {
-        self.ok_as("test", args)
-    }
-
-    fn ok_as(&self, actor: &str, args: &[&str]) -> String {
-        let out = self.run_as(actor, args);
-        assert!(
-            out.status.success(),
-            "pt {args:?} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap()
-    }
-}
 
 fn is_bidi_control(c: char) -> bool {
     matches!(

@@ -247,8 +247,16 @@ impl App {
             ViewSel::Saved { dsl, .. } => {
                 let expr = ptask_core::filter::parse(dsl)
                     .map_err(|e| anyhow::anyhow!("saved view DSL parse failed: {}", e))?;
-                tasks::list_with_filter(&self.db, Some(&expr), None, None, TUI_TASK_LIMIT)
-                    .context("reloading saved view")?
+                // Open tasks only, like the pending list and the bot: the DSL
+                // has no status predicate, so done/dismissed rows crowded in.
+                tasks::list_with_filter(
+                    &self.db,
+                    Some(&expr),
+                    Some("pending"),
+                    None,
+                    TUI_TASK_LIMIT,
+                )
+                .context("reloading saved view")?
             }
         };
         self.apply_filter();
@@ -752,6 +760,29 @@ mod tests {
         });
         app.handle(Event::Paste("y".into()));
         assert_eq!(snapshot(&app.db), before);
+    }
+
+    #[test]
+    fn saved_view_shows_open_tasks_not_done_ones() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        for i in 0..22 {
+            let t =
+                ptask_core::tasks::create(&db, NewTask::minimal(format!("done task {i}")), &ctx)
+                    .unwrap();
+            ptask_core::tasks::mark_done(&db, &t, &ctx).unwrap();
+        }
+        let gone =
+            ptask_core::tasks::create(&db, NewTask::minimal("dismissed task"), &ctx).unwrap();
+        ptask_core::tasks::dismiss(&db, &gone.id, &ctx).unwrap();
+        ptask_core::tasks::create(&db, NewTask::minimal("open task"), &ctx).unwrap();
+        views::create(&db, "everything", "search: task").unwrap();
+
+        let mut app = App::new(db).unwrap();
+        app.action_cycle_view();
+        assert_eq!(app.view.label(), "view:everything");
+        let titles: Vec<&str> = app.tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["open task"]);
     }
 
     #[test]

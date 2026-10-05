@@ -145,7 +145,7 @@ No-deadline urgency GROWS with age (aged p5 can never rank below fresh p3). `sco
 ```
 pt view save <name> '<filter-dsl>'   # store
 pt view list                          # list
-pt view show <name>                   # run
+pt view show <name> [-s all]          # run (open tasks; -s all lifts it)
 pt view rm <name>                     # delete
 ```
 

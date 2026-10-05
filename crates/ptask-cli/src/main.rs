@@ -527,6 +527,9 @@ enum ViewCommand {
         /// Override row limit.
         #[arg(short = 'n', long = "limit", default_value_t = 20)]
         limit: usize,
+        /// Filter by status (or `all`), as in `pt list`.
+        #[arg(short = 's', long = "status", default_value = "pending")]
+        status: String,
     },
     /// Delete a saved view.
     Rm { name: String },
@@ -1853,10 +1856,17 @@ fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
             println!("{}", ui::footer(vs.len(), "view", "pt view show NAME"));
             Ok(())
         }
-        ViewCommand::Show { name, limit } => {
+        ViewCommand::Show {
+            name,
+            limit,
+            status,
+        } => {
             let v = views::get(db, &name).map_err(anyhow::Error::msg)?;
             let expr = ptask_core::filter::parse(&v.filter_dsl).map_err(anyhow::Error::msg)?;
-            let rows = tasks::list_with_filter(db, Some(&expr), None, None, limit)?;
+            // Open tasks by default: the DSL has no status predicate, so a
+            // view used to let done/dismissed rows crowd out open ones.
+            let status = (status != "all").then_some(status.as_str());
+            let rows = tasks::list_with_filter(db, Some(&expr), status, None, limit)?;
             if json_mode() {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
                 return Ok(());
