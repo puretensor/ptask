@@ -332,12 +332,16 @@ config — see `scripts/litestream/litestream.yml`.
 ### One-time SQLite tunings
 
 ```bash
-sqlite3 ~/puretensor-tasks/tasks.db <<'SQL'
-PRAGMA journal_mode = WAL;
-PRAGMA wal_autocheckpoint = 0;   -- Litestream owns checkpoints
-PRAGMA synchronous = NORMAL;
-SQL
+sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA journal_mode = WAL;'   # persists in the file
+grep '^PTASK_WAL_AUTOCHECKPOINT=0$' ~/puretensor-tasks/.env      # Litestream owns checkpoints
 ```
+
+Only `journal_mode` is stored in the database. `wal_autocheckpoint` and
+`synchronous` are per-connection: running them in a `sqlite3` shell changes
+that one shell. `pt` sets `synchronous=NORMAL` itself and applies
+`PTASK_WAL_AUTOCHECKPOINT` to every connection it opens; `ptask-serve` and
+the `pt` timer units (distill, accountability, scoring, reaper, export) load
+it from `~/puretensor-tasks/.env`.
 
 ### Install
 
@@ -472,10 +476,28 @@ litestream generations -config ~/.config/litestream/litestream.yml "$DBDIR/tasks
 
 ### Rollback
 
+Without Litestream nothing checkpoints the WAL while `pt` runs with
+`PTASK_WAL_AUTOCHECKPOINT=0`, so it grows without bound. A `PRAGMA
+wal_autocheckpoint` from a `sqlite3` shell does not help: it changes only
+that shell's connection, and `pt serve`'s pooled connections keep the value
+they were opened with. Change it where `pt` reads it, then restart:
+
 ```bash
 systemctl --user disable --now ptask-litestream.service
-sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA wal_autocheckpoint = 1000;'
+# Drop the override: pt then keeps SQLite's default (checkpoint every 1000 pages).
+sed -i '/^PTASK_WAL_AUTOCHECKPOINT=/d' ~/puretensor-tasks/.env
+# Long-lived processes reopen their connections; oneshot timers re-read .env
+# on every run (let any running one finish: the second command lists them).
+systemctl --user restart ptask-serve.service ptask-dashboard.service
+systemctl --user list-units 'ptask-*.service' --state=activating --no-legend
+# Verify: prints 0|0|0 (not blocked, WAL emptied); retry if the first field is 1.
+sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA wal_checkpoint(TRUNCATE);'
+ls -l ~/puretensor-tasks/tasks.db-wal   # recheck after a day: stays in the low MB (~1000 pages)
 ```
+
+The weekly restore drill's Litestream check now fails, correctly: the replica
+is frozen. Expect that alert until Litestream is back, or stop
+`ptask-restore-verify.timer` (which also pauses its nightly checks).
 
 Nightly Ceph snapshot via `ptask-backup.timer` keeps a 30-day file
 backup independent of Litestream — it is the recovery path of last
