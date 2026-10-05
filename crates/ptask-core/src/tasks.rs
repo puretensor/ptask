@@ -656,6 +656,11 @@ struct RecurrenceRow {
 /// `interactions` row is logged.
 /// Mark done. The `task.completed` / `task.recurrence_advanced` event
 /// commits in the same transaction as the status flip, attributed to `ctx`.
+///
+/// `task` is the caller's snapshot: a recurring task advances only if its
+/// deadline is still the occurrence the caller saw, so a duplicate or stale
+/// completion is refused instead of skipping an occurrence. A task that is
+/// already done is refused too; neither refusal writes anything.
 pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -713,6 +718,18 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             return Err(crate::Error::Other(
                 "recurring task is terminal; reopen it before completing an occurrence".into(),
             ));
+        }
+        // The caller completes the occurrence it saw. If the deadline moved
+        // since (another completion advanced it, or an edit), advancing again
+        // would silently skip an occurrence: refuse and change nothing.
+        if task.deadline != current_deadline {
+            let handle = task.pt_id.clone().unwrap_or_else(|| task.id.clone());
+            return Err(crate::Error::Other(format!(
+                "{handle} changed since it was read: the occurrence is now due {} \
+                 (already completed or edited); nothing was advanced — run done again \
+                 to complete it",
+                current_deadline.as_deref().unwrap_or("(none)")
+            )));
         }
         let rec = crate::recurrence::parse(&original)
             .map_err(|e| crate::Error::Other(format!("re-parse recurrence: {}", e)))?;
@@ -3592,7 +3609,18 @@ mod tests {
             &crate::recurrence::next_after(&rec, &parse_iso_zoned(revised).unwrap()).unwrap(),
         );
 
-        let outcome = mark_done(&db, &stale, &EventCtx::test()).unwrap();
+        // A caller holding the pre-edit occurrence is refused (CORE-4), and
+        // nothing moves; one that read the revised deadline advances from it.
+        assert!(mark_done(&db, &stale, &EventCtx::test()).is_err());
+        assert_eq!(
+            load_detail(&db, &stale.id)
+                .unwrap()
+                .recurrence_next
+                .as_deref(),
+            Some(revised)
+        );
+        let fresh = resolve_for_lookup(&db, &stale.id, true).unwrap();
+        let outcome = mark_done(&db, &fresh, &EventCtx::test()).unwrap();
         assert_eq!(
             outcome,
             DoneOutcome::Advanced {
@@ -3616,6 +3644,35 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicate_completion_does_not_advance_a_recurring_task_twice() {
+        // Regression (CORE-4): two completions of the same occurrence (a
+        // dashboard double-click, HAL and the operator at once, a stale tap)
+        // both advanced it, silently skipping the next occurrence.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let mut new = NewTask::minimal("daily");
+        new.deadline = Some("2099-01-01T09:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(crate::recurrence::parse("every day").unwrap()),
+            ..Default::default()
+        };
+        let seen = create_with_extensions(&db, new, ext, &ctx).unwrap();
+        let first = mark_done(&db, &seen, &ctx).unwrap();
+        let DoneOutcome::Advanced { next_deadline } = first else {
+            panic!("must recur")
+        };
+        let cursor = crate::event_log::current_cursor(&db).unwrap();
+
+        // The second caller still holds the occurrence it saw.
+        let err = mark_done(&db, &seen, &ctx).unwrap_err();
+        assert!(format!("{err}").contains(&next_deadline), "{err}");
+        let after = resolve_for_lookup(&db, &seen.id, true).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some(next_deadline.as_str()));
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor);
+        assert_eq!(event_count(&db, "task.recurrence_advanced"), 1);
+    }
+
+    #[test]
     fn monthly_recurrence_returns_to_its_anchor_day_after_a_short_month() {
         let (_dir, db) = fresh_db();
         let rec = crate::recurrence::parse("every month").unwrap();
@@ -3627,10 +3684,11 @@ mod tests {
         };
         let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
         let mut days = Vec::new();
-        // mark_done reads the deadline inside its transaction.
+        // Each completion is of the occurrence the caller just read.
+        let fresh = || resolve_for_lookup(&db, &t.id, true).unwrap();
         for _ in 0..3 {
             let DoneOutcome::Advanced { next_deadline } =
-                mark_done(&db, &t, &EventCtx::test()).unwrap()
+                mark_done(&db, &fresh(), &EventCtx::test()).unwrap()
             else {
                 panic!("recurring task completed");
             };
@@ -3648,7 +3706,7 @@ mod tests {
         )
         .unwrap();
         let DoneOutcome::Advanced { next_deadline } =
-            mark_done(&db, &t, &EventCtx::test()).unwrap()
+            mark_done(&db, &fresh(), &EventCtx::test()).unwrap()
         else {
             panic!("recurring task completed");
         };
