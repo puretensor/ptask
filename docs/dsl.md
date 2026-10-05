@@ -24,7 +24,7 @@ trailing `//description` becomes the description.
 ### Dates
 
 Body-text deadline inference is deliberately narrow: only a standalone
-future ISO date (`2026-10-02`) sets the deadline. Other date prose
+future ISO date (`2030-03-01`) sets the deadline. Other date prose
 (`tomorrow`, `next friday`, `4/5`, a past date) stays title text instead of
 silently setting a wrong deadline; pass `--deadline` for anything else.
 Recurrence phrases (`every monday at 9am`) set the first occurrence.
@@ -35,9 +35,9 @@ Operator timezone: `Europe/London` (DST-correct via jiff).
 
 ```
 pt add 'gym @health every! monday at 8am p2 ~45m'
-pt add 'buy bread 2026-10-02 @home p1 ~30m //sourdough from baker'
+pt add 'renew passport 2030-03-01 @home p2 ~1h //book the appointment early'
 pt add 'investigate ceph mon quorum @ops p4 #fleet'
-pt add 'review PR #42 //sync via gh pr view 42'
+pt add 'review the sync PR @review #ptask //gh pr view 42'
 ```
 
 ## Filter DSL (`pt list`, saved views)
