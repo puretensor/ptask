@@ -2731,10 +2731,14 @@ fn stale_review_tasks(db: &Db, cutoff_iso: &str) -> Result<Vec<ReviewRow>> {
 
 fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
     use std::io::Write;
+    // Checked: jiff's infallible Span::days panicked (exit 101) past ±7.3M days.
+    let span = ptask_core::jiff::Span::new()
+        .try_days(a.stale_days)
+        .map_err(|_| anyhow::anyhow!("--stale-days {} is out of range", a.stale_days))?;
     let stale_cutoff = ptask_core::dates::now_in_operator_tz()
         .map_err(anyhow::Error::msg)?
-        .checked_sub(ptask_core::jiff::Span::new().days(a.stale_days))
-        .map_err(|e| anyhow::anyhow!("cutoff math: {e}"))?;
+        .checked_sub(span)
+        .map_err(|e| anyhow::anyhow!("--stale-days {}: {e}", a.stale_days))?;
     let cutoff_iso = ptask_core::dates::format_iso(&stale_cutoff);
     let stale = stale_review_tasks(db, &cutoff_iso)?;
     if json_mode() {
@@ -3852,6 +3856,16 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("bogus"), "{err:#}");
+    }
+
+    #[test]
+    fn review_rejects_an_out_of_range_stale_days_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("review.db")).unwrap();
+        for stale_days in [99_999_999, i64::MAX, i64::MIN] {
+            let err = super::cmd_review(&db, super::ReviewArgs { stale_days }).unwrap_err();
+            assert!(format!("{err:#}").contains("--stale-days"), "{err:#}");
+        }
     }
 
     #[test]
