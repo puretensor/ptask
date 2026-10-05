@@ -423,3 +423,21 @@ sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA wal_autocheckpoint = 1000;'
 Nightly Ceph snapshot via `ptask-backup.timer` keeps a 30-day file
 backup independent of Litestream — it is the recovery path of last
 resort if Litestream itself misbehaves.
+
+## CI runner (self-hosted, public repository)
+
+Every GitHub Actions job runs on the self-hosted `tensor-core` runner, the
+same host that serves the canonical store, and this repository is public.
+For `pull_request` events GitHub runs the workflow files from the pull
+request's own merge ref, so a fork can edit `.github/workflows/ci.yml` or add
+a workflow of its own that targets `[self-hosted, tensor-core]`.
+
+- `ci.yml` skips every job for pull requests whose head branch is not in this
+  repository. That keeps ordinary fork PRs off the runner. It cannot stop a
+  fork that rewrites the workflow.
+- The control that does stop it is the repository setting **Settings →
+  Actions → General → Approval for running fork pull request workflows →
+  Require approval for all external contributors**. Keep it set, and read the
+  diff for `.github/` changes before approving a run.
+- To test a fork's change, push its branch into this repository after reading
+  it. CI then runs as a same-repository pull request.
