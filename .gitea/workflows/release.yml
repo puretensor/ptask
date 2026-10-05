@@ -77,6 +77,20 @@ jobs:
             apt: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the next step proves the tagged commit is on main.
+          fetch-depth: 0
+
+      - name: verify the tagged commit is on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::${TAG} ($(git rev-parse --short HEAD)) is not on origin/main; release tags must be cut from main"
+            exit 1
+          fi
+          echo "${TAG} ($(git rev-parse --short HEAD)) is on origin/main"
 
       - name: install build deps + cross toolchain
         run: |
