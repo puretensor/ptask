@@ -1765,6 +1765,7 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
         .collect();
 
     // 4. optional --write: tentative events on OUR calendar only
+    let mut not_written: Vec<String> = Vec::new();
     if a.write {
         for s in &scheduled {
             let pt = s.pt_id.as_deref().unwrap_or("--");
@@ -1782,6 +1783,7 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
                 .with_context(|| "creating calendar event")?;
             if !status.success() {
                 eprintln!("warning: failed to create event for {}", pt);
+                not_written.push(pt.to_string());
             }
         }
     }
@@ -1792,13 +1794,18 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
         unscheduled,
     };
     let write = a.write;
+    let holds = output.scheduled.len();
     emit(&output, || {
         print_lines(ui::headline(
             "ptask · plan",
-            Some(if write {
-                ("written", ui::Ink::Green)
-            } else {
+            Some(if !write {
                 ("advisory", ui::Ink::Amber)
+            } else if not_written.is_empty() {
+                ("written", ui::Ink::Green)
+            } else if not_written.len() == holds {
+                ("not written", ui::Ink::Red)
+            } else {
+                ("partly written", ui::Ink::Amber)
             }),
             &format!("free-slot fit · {}", output.tz),
         ));
@@ -1867,7 +1874,15 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
                 ui::note("advisory only — re-run with --write to add tentative holds")
             );
         }
-    })
+    })?;
+    if !not_written.is_empty() {
+        anyhow::bail!(
+            "plan --write: {} of {holds} calendar hold(s) not created ({})",
+            not_written.len(),
+            not_written.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
@@ -2551,6 +2566,14 @@ fn cmd_search(db: &Db, a: SearchArgs) -> Result<()> {
 
 fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
     let expr = ptask_core::filter::parse(&a.filter).map_err(anyhow::Error::msg)?;
+    // Validate before the dry run returns: `--set-priority bogus --dry-run`
+    // previewed happily and exited 0.
+    let level = a
+        .set_priority
+        .as_deref()
+        .map(priority::parse)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
     let matches = tasks::list_with_filter(db, Some(&expr), Some("pending"), None, 10_000)
         .map_err(anyhow::Error::msg)?;
     let action = if let Some(prio) = a.set_priority.as_deref() {
@@ -2602,12 +2625,6 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
             println!("{}", ui::note("dry run — nothing applied"))
         });
     }
-    let level = a
-        .set_priority
-        .as_deref()
-        .map(priority::parse)
-        .transpose()
-        .map_err(anyhow::Error::msg)?;
     // Apply to every match; a failing task (e.g. blocked by another match)
     // is reported and the rest still land, instead of stopping half-done.
     let mut pending: Vec<&ptask_core::Task> = matches.iter().collect();
@@ -3455,9 +3472,21 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
 fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
     let ctx = ptask_core::event_log::EventCtx::system("reap");
     let report = ptask_core::reap::run(db, a.dry_run, &ctx)?;
+    // A failed dismiss fails the unit: the reaper's OnFailure alert fires
+    // on a non-zero exit, and "REAP OK … 1 error(s)" used to exit 0.
+    let outcome = || {
+        if report.errors == 0 {
+            return Ok(());
+        }
+        Err(anyhow::anyhow!(
+            "reap: {} of {} dismiss(es) failed",
+            report.errors,
+            report.reaped.len()
+        ))
+    };
     if a.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
+        return outcome();
     }
     if report.reaped.is_empty() {
         println!(
@@ -3467,19 +3496,22 @@ fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
         return Ok(());
     }
     for r in &report.reaped {
+        // The report counts failures but not which: read the row back so a
+        // failed dismiss is never shown as dismissed.
+        let (status, verb) = if report.dry_run {
+            (ui::Status::Warn, "would drop")
+        } else if tasks::resolve_for_lookup(db, &r.uuid, true)
+            .is_ok_and(|t| t.status == "dismissed")
+        {
+            (ui::Status::Mute, "dismissed")
+        } else {
+            (ui::Status::Bad, "failed")
+        };
         println!(
             "{}",
             ui::outcome(
-                if report.dry_run {
-                    ui::Status::Warn
-                } else {
-                    ui::Status::Mute
-                },
-                if report.dry_run {
-                    "would drop"
-                } else {
-                    "dismissed"
-                },
+                status,
+                verb,
                 r.pt_id.as_deref().unwrap_or(&r.uuid),
                 &r.title,
                 &format!("[{}] idle since {}", r.source_type, r.updated_at)
@@ -3489,9 +3521,13 @@ fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
     println!(
         "{}",
         ui::section(
-            "reap ok",
             if report.errors > 0 {
-                ui::Ink::Amber
+                "reap failed"
+            } else {
+                "reap ok"
+            },
+            if report.errors > 0 {
+                ui::Ink::Red
             } else {
                 ui::Ink::Green
             },
@@ -3507,7 +3543,7 @@ fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
             )
         )
     );
-    Ok(())
+    outcome()
 }
 
 fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
@@ -3755,6 +3791,67 @@ mod tests {
             task.title
         );
         assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), cursor);
+    }
+
+    #[test]
+    fn plan_write_fails_when_calendar_holds_are_not_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("plan.db")).unwrap();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("write the plan"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        // Free/busy works; every `create` fails (the review's fakegcal.py).
+        let gcal = dir.path().join("gcalendar.py");
+        std::fs::write(
+            &gcal,
+            "import sys, json\n\
+             if 'freebusy' in sys.argv:\n\
+             \x20   print(json.dumps({'tz': 'Europe/London', 'free_slots': [{'start': '2026-10-06T08:00:00Z', 'minutes': 480}]}))\n\
+             else:\n\
+             \x20   sys.exit(1)\n",
+        )
+        .unwrap();
+        let args = |write| super::PlanArgs {
+            account: "ops".into(),
+            days: 1,
+            work: "09:00-18:00".into(),
+            tz: "Europe/London".into(),
+            calendar: "primary".into(),
+            slot_default: 30,
+            limit: 20,
+            write,
+            gcal: Some(gcal.clone()),
+        };
+        super::cmd_plan(&db, args(false)).expect("the advisory plan itself works");
+        let err = super::cmd_plan(&db, args(true)).unwrap_err();
+        assert!(format!("{err:#}").contains("1 of 1"), "{err:#}");
+    }
+
+    #[test]
+    fn bulk_dry_run_rejects_a_bad_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("bulk.db")).unwrap();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("bulk target"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        let err = super::cmd_bulk(
+            &db,
+            super::BulkArgs {
+                filter: "search: bulk".into(),
+                set_priority: Some("bogus".into()),
+                done: false,
+                dismiss: false,
+                dry_run: true,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("bogus"), "{err:#}");
     }
 
     #[test]

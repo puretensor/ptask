@@ -74,6 +74,70 @@ fn remote_rm_confirms_and_matches_active_tasks_only() {
     assert!(!pt.exists("PT-1"));
 }
 
+/// Two incident tasks idle past the reaper's TTL; dismissing the second is
+/// made to fail inside SQLite.
+fn seed_reap_failure(pt: &Pt) {
+    let db = ptask_core::Db::open(pt.dir.path().join("tasks.db")).unwrap();
+    let ctx = ptask_core::event_log::EventCtx::test();
+    let mut ids = Vec::new();
+    for title in ["stale incident ok", "stale incident stuck"] {
+        let new = ptask_core::NewTask {
+            title: title.into(),
+            description: String::new(),
+            priority: 3,
+            deadline: None,
+            source_type: "incident".into(),
+            ai_confidence: 1.0,
+            ai_reasoning: String::new(),
+        };
+        let t = ptask_core::tasks::create_with_extensions(
+            &db,
+            new,
+            ptask_core::Extensions::default(),
+            &ctx,
+        )
+        .unwrap();
+        ids.push(t.id);
+    }
+    db.with_conn(|c| {
+        c.execute(
+            "UPDATE tasks SET updated_at = strftime('%Y-%m-%dT%H:%M:%f','now','-10 days') || '+00:00'",
+            [],
+        )?;
+        c.execute_batch(&format!(
+            "CREATE TRIGGER test_stuck BEFORE UPDATE ON tasks
+             WHEN OLD.id = '{}' AND NEW.status = 'dismissed'
+             BEGIN SELECT RAISE(ABORT, 'dismiss refused by test'); END;",
+            ids[1]
+        ))?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn reap_exits_non_zero_when_a_dismiss_fails() {
+    let pt = Pt::new();
+    seed_reap_failure(&pt);
+    let out = pt.run(&["--no-color", "reap"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "the OnFailure alert must fire:\n{stdout}"
+    );
+    assert!(stdout.contains("dismissed PT-1"), "{stdout}");
+    assert!(
+        !stdout.contains("dismissed PT-2"),
+        "PT-2 was not dismissed:\n{stdout}"
+    );
+    assert_ne!(pt.json(&["show", "PT-2"])["status"], "dismissed");
+    // --json still prints the report, and still fails the unit.
+    let out = pt.run(&["reap", "--json"]);
+    assert!(!out.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["errors"], 1, "{report:#}");
+}
+
 #[test]
 fn json_flag_is_honoured_by_bulk_review_view_delegate() {
     let pt = Pt::new();
