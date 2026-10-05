@@ -2196,6 +2196,18 @@ async function loadApprovals(force){
     host.appendChild(ph);
   }
 }
+/* Decisions are operator-only and the tailnet also carries the fleet's agents,
+   so the sidecar wants PTASK_DASH_DECIDE_TOKEN on approve/reject. It is asked
+   for once and kept in this browser's localStorage. */
+const DECIDE_KEY='ptask-decide-token';
+function storedDecideToken(){try{return localStorage.getItem(DECIDE_KEY)||'';}catch(e){return '';}}
+function postDecision(id, verb, payload, token){
+  return fetch('/api/approvals/'+encodeURIComponent(id)+'/'+verb,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','X-PTask-Decide-Token':token},
+    body:JSON.stringify(payload)
+  });
+}
 async function decideApproval(id, verb){
   const card=document.querySelector('.ap-card[data-id="'+CSS.escape(id)+'"]');
   const noteEl=card&&card.querySelector('.ap-note');
@@ -2204,10 +2216,16 @@ async function decideApproval(id, verb){
   if(note) payload.note=note;
   if(card) card.querySelectorAll('button').forEach(b=>b.disabled=true);
   try{
-    const r=await fetch('/api/approvals/'+encodeURIComponent(id)+'/'+verb,{
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
-    });
-    const j=await r.json().catch(()=>({}));
+    let r=await postDecision(id, verb, payload, storedDecideToken());
+    let j=await r.json().catch(()=>({}));
+    if(r.status===403 && j.code==='decide_token_required'){
+      const entered=(window.prompt('Decide token (PTASK_DASH_DECIDE_TOKEN)')||'').trim();
+      if(entered){
+        r=await postDecision(id, verb, payload, entered);
+        j=await r.json().catch(()=>({}));
+        if(r.ok && j.ok){try{localStorage.setItem(DECIDE_KEY, entered);}catch(e){}}
+      }
+    }
     const word=verb==='approve'?'approved':'rejected';
     if(r.ok && j.ok) toast('\u2713 '+id+' '+word);
     else toast('\u2717 '+(j.error||j.message||'failed'));

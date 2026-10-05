@@ -4,7 +4,7 @@ A visually compelling, on-brand, live **triage cockpit** for PureTensor Task
 Intelligence (`pt`). Surfaces pending tasks and critical issues ranked by the
 server's composite `priority_score`, with four runtime-switchable themes.
 
-**Live:** https://ptask.tail07f9ef.ts.net (tailnet-gated; no login)
+**Live:** https://ptask.tail07f9ef.ts.net (tailnet-gated; no login; approval decisions need the decide token)
 
 ## What it is
 
@@ -146,6 +146,15 @@ transaction.
 | POST | `/api/tasks` `{title, description?, priority?, deadline?}` | shells `pt add [--priority=] [--description=] [--deadline=] -- "<title>"` |
 | POST | `/api/voice` (raw audio body) | Whisper STT → Bedrock Claude draft → `{transcript, fields:{title,description,priority,deadline,labels,domain,reason}}` to pre-fill the composer |
 | POST | `/api/voice/task` (raw audio body) | The same pipeline, then `pt add` — the header capture bar's one-press path. Returns `{ok, pt_id, id, transcript, fields, stt, llm}`. Rejects silence and Whisper artefacts with `ok:false` and creates nothing |
+| GET | `/api/approvals?status=` | `pt --json approval ls --status <s>` (whitelisted statuses; default pending) |
+| POST | `/api/approvals/AP-n/approve\|reject` `{note?}` | shells `pt approve\|reject AP-n --via dashboard [--note=…]`; needs `X-PTask-Decide-Token` = `PTASK_DASH_DECIDE_TOKEN` (403 `decide_token_required` / `decide_disabled` otherwise) |
+| GET | `/api/stream` | SSE `change` events when the journal grows; at most 32 open streams (503 beyond) |
+
+Every request's `Host` (except `/healthz`) must name this sidecar — an IP literal, a single-label
+name (`localhost`, a MagicDNS short name), a `*.ts.net` name, or one listed in
+`PTASK_DASH_ALLOWED_HOSTS` — or it gets 421. That stops a DNS-rebinding page
+from addressing the sidecar under the attacker's own name and reading or
+writing as same-origin.
 
 ## Run locally
 
@@ -167,6 +176,8 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_DASH_DEFAULT_DOMAIN` | first configured key | domain assigned to tasks without an explicit configured `domain:` label |
 | `PTASK_DASH_WWW` | `./www` | static dir |
 | `PTASK_ACTOR` | `dashboard` | actor stamped on dashboard-originated `pt` writes |
+| `PTASK_DASH_ALLOWED_HOSTS` | _(unset)_ | extra comma-separated `Host` names to serve besides IP literals, single-label names and `*.ts.net` |
+| `PTASK_DASH_DECIDE_TOKEN` | _(unset)_ | secret (≥ 16 chars) required to approve/reject from the cockpit; unset disables approval decisions here |
 | `PTASK_STT_URL` | `http://127.0.0.1:9000/transcribe` | voice STT endpoint (local Whisper); accepts `-F audio=@` |
 | `PTASK_VOICE_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model for voice→task extraction |
 | `PTASK_VOICE_REGION` | `$AWS_DEFAULT_REGION` or `us-east-1` | Bedrock region (keyless, IAM via `~/.aws`) |
@@ -217,7 +228,25 @@ curl -s localhost:9510/healthz          # -> OK
 
 Published as a Tailscale Service at `https://ptask.tail07f9ef.ts.net`. Serve
 terminates TLS and reverse-proxies plain HTTP to this sidecar. Network reach
-on the tailnet is the access decision.
+on the tailnet is the access decision for the board, with two limits:
+
+- **Never publish the sidecar beyond the tailnet.** It has no login, so a
+  cloudflared tunnel or any other public route to it hands the whole board,
+  writes included, to the internet. Remove any tunnel that predates v0.21.0.
+  The Host check refuses unknown public names; do not add them to
+  `PTASK_DASH_ALLOWED_HOSTS`.
+- **Approval decisions need the decide token.** The tailnet carries the
+  fleet's agents too, and "only the operator decides" cannot rest on network
+  reach. Put a random secret in `~/puretensor-tasks/.dashboard.env`, restart,
+  and enter it once per browser when the cockpit asks:
+
+  ```bash
+  printf 'PTASK_DASH_DECIDE_TOKEN=%s\n' "$(openssl rand -hex 24)" >> ~/puretensor-tasks/.dashboard.env
+  systemctl --user restart ptask-dashboard
+  ```
+
+  Without it, approve/reject answers 403 `decide_disabled`; decide at a
+  terminal with `pt approve|reject AP-n` instead.
 
 ## Rollback
 
@@ -240,6 +269,16 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.22.0** — The Host header must name the sidecar (IP literal, single-label
+  name, `*.ts.net`, or `PTASK_DASH_ALLOWED_HOSTS`), else 421: since v0.21.0 a
+  DNS-rebinding page could read every task and pass the Origin check, which only
+  compared Origin with the client-supplied Host. Approve/reject now requires
+  `X-PTask-Decide-Token` = `PTASK_DASH_DECIDE_TOKEN` (unset = decisions disabled):
+  v0.21.0 let any tailnet caller, with no Origin header and no credential,
+  approve an agent's request through `pt approve --via dashboard`. Decision
+  notes go to `pt` as `--note=…`, so a note starting with `-` no longer fails
+  the decision. `/api/stream` is capped at 32 concurrent streams. A non-string
+  `title` or `deadline` on create gets a 400 instead of a dropped connection.
 - **v0.21.0** — Tailnet is the only gate. Removed the login shell, session store,
   `/api/auth/*`, HTTP Basic, failed-login throttle, Face ID unlock (`face-unlock.js`
   and its tests), and the non-loopback password requirement. `/login` and `/logout`

@@ -49,6 +49,8 @@ if args[:2] in (["approve", "AP-8"], ["reject", "AP-8"]):
 print("ok")
 """.replace("CANNED", repr(CANNED).replace("'", '"'))
 
+DECIDE_TOKEN = "operator-decide-token-0123456789"
+
 
 class ApprovalsPanelTests(unittest.TestCase):
     def setUp(self):
@@ -59,6 +61,8 @@ class ApprovalsPanelTests(unittest.TestCase):
         fake.write_text(FAKE_PT)
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
         self.saved = server.PT_BIN
+        self.saved_token = server.DECIDE_TOKEN
+        server.DECIDE_TOKEN = DECIDE_TOKEN
         self.saved_env = {k: os.environ.get(k) for k in ("FAKE_PT_LOG", "CLAUDECODE", "PTASK_ACTOR")}
         server.PT_BIN = str(fake)
         os.environ["FAKE_PT_LOG"] = str(self.log)
@@ -70,6 +74,7 @@ class ApprovalsPanelTests(unittest.TestCase):
     def tearDown(self):
         self.httpd.shutdown()
         server.PT_BIN = self.saved
+        server.DECIDE_TOKEN = self.saved_token
         for k, v in self.saved_env.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -78,9 +83,11 @@ class ApprovalsPanelTests(unittest.TestCase):
         self.td.cleanup()
 
     # ---------------------------------------------------------------- helpers
-    def request(self, method, path, body=None, origin="self"):
+    def request(self, method, path, body=None, origin="self", token=DECIDE_TOKEN):
         conn = http.client.HTTPConnection("127.0.0.1", self.httpd.server_port)
         headers = {}
+        if token is not None:
+            headers["X-PTask-Decide-Token"] = token
         if origin == "self":
             headers["Origin"] = f"http://{self.host}"
         elif origin:
@@ -134,7 +141,7 @@ class ApprovalsPanelTests(unittest.TestCase):
     def test_approve_calls_pt_with_dashboard_via_and_note(self):
         status, data = self.request("POST", "/api/approvals/AP-7/approve", {"note": "fine"})
         self.assertEqual(status, 200, data)
-        self.assertEqual(self.calls()[-1]["args"], ["approve", "AP-7", "--via", "dashboard", "--note", "fine"])
+        self.assertEqual(self.calls()[-1]["args"], ["approve", "AP-7", "--via", "dashboard", "--note=fine"])
 
     def test_reject_without_note(self):
         status, data = self.request("POST", "/api/approvals/AP-7/reject", {})
@@ -164,6 +171,34 @@ class ApprovalsPanelTests(unittest.TestCase):
         status, data = self.request("POST", "/api/approvals/AP-7/approve", {})
         self.assertEqual(status, 200, data)
         self.assertTrue(self.calls())
+
+    def test_decide_needs_the_operator_token(self):
+        # The tailnet carries the fleet's agents too: no token, no decision,
+        # whether or not the caller sends an Origin.
+        for origin in ("self", None):
+            status, data = self.request("POST", "/api/approvals/AP-7/approve", {},
+                                        origin=origin, token=None)
+            self.assertEqual(status, 403, data)
+            self.assertEqual(data["code"], "decide_token_required")
+        status, data = self.request("POST", "/api/approvals/AP-7/reject", {},
+                                    token="not-the-operator-token-at-all")
+        self.assertEqual(status, 403, data)
+        self.assertEqual(self.calls(), [])
+
+    def test_decisions_are_disabled_without_a_strong_configured_token(self):
+        for configured in ("", "short-token"):
+            server.DECIDE_TOKEN = configured
+            status, data = self.request("POST", "/api/approvals/AP-7/approve", {},
+                                        token=configured or None)
+            self.assertEqual(status, 403, data)
+            self.assertEqual(data["code"], "decide_disabled")
+        self.assertEqual(self.calls(), [])
+
+    def test_note_starting_with_a_dash_stays_one_argument(self):
+        status, data = self.request("POST", "/api/approvals/AP-7/approve",
+                                    {"note": "-5% discount is fine"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(self.calls()[-1]["args"][-1], "--note=-5% discount is fine")
 
     def test_note_is_bounded(self):
         status, _ = self.request("POST", "/api/approvals/AP-7/approve", {"note": "x" * 2001})
