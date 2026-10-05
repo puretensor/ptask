@@ -1,4 +1,4 @@
-"""ptask-backup.sh against stub ssh/scp.
+"""ptask-backup.sh and ptask-restore-verify.sh against stub ssh/scp/litestream.
 
 Everything runs in a temp sandbox: HOME, TMPDIR and the "remote" hosts are
 local directories, ssh runs the remote command locally, and hosts listed in
@@ -169,6 +169,126 @@ class BackupLegsTests(unittest.TestCase):
             (snap,) = d.glob("ptask-tasks-*.db")
             n = sqlite3.connect(snap).execute("select count(*) from tasks").fetchone()[0]
             self.assertEqual(n, 200)
+
+
+class RestoreDrillTests(unittest.TestCase):
+    ROWS = 1000
+
+    def setUp(self) -> None:
+        self.sb = Sandbox()
+        self.addCleanup(self.sb.cleanup)
+        self.near = self.sb.remote("near")
+        self.dr = self.sb.remote("dr")
+        self.replica = self.sb.root / "replica.db"
+        make_db(self.sb.live, self.ROWS, ago(days=3))
+
+    # -- fixtures -----------------------------------------------------------
+    def snapshot_live(self, dest: Path) -> None:
+        shutil.copyfile(self.sb.live, dest)
+
+    def healthy_backups(self) -> None:
+        """Replica and both nightlies are current copies of live. The
+        nightlies are backdated 2h so a file a test writes next is newest."""
+        self.snapshot_live(self.replica)
+        for d in (self.near, self.dr):
+            nightly = d / "ptask-tasks-2026-10-04.db"
+            self.snapshot_live(nightly)
+            backdate(nightly, hours=2)
+
+    def drill(self, offsite: bool = True) -> subprocess.CompletedProcess:
+        return self.sb.run(
+            "ptask-restore-verify.sh",
+            STUB_REPLICA=str(self.replica),
+            PTASK_BACKUP_REMOTE=f"mon1:{self.near}",
+            PTASK_BACKUP_OFFSITE=f"dr:{self.dr}" if offsite else "none",
+        )
+
+    # -- passes -------------------------------------------------------------
+    def test_healthy_backups_pass(self):
+        self.healthy_backups()
+        r = self.drill()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("ALL OK", r.stdout)
+
+    def test_writes_racing_the_drill_are_not_blamed_on_replication(self):
+        self.healthy_backups()
+        # Seconds-old writes Litestream has not shipped yet: a status change
+        # and two new tasks. Inside LAG_MIN and inside the count slack.
+        execute(self.sb.live, "update tasks set status='done', updated_at=? where id=7", ago(seconds=5))
+        execute(self.sb.live, "insert into tasks values(1001, 'pending', ?, 'y')", ago(seconds=3))
+        execute(self.sb.live, "insert into tasks values(1002, 'pending', ?, 'y')", ago(seconds=1))
+        r = self.drill()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    # -- replica ------------------------------------------------------------
+    def test_frozen_replica_with_matching_row_count_fails(self):
+        self.healthy_backups()
+        # Replica froze; since then 600 status changes landed an hour ago.
+        # Same number of rows, so only the UPDATE-sensitive check can see it.
+        execute(self.sb.live, "update tasks set status='done', updated_at=? where id <= 600", ago(hours=1))
+        self.snapshot_live(self.near / "ptask-tasks-2026-10-05.db")
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("replication stalled", r.stderr)
+        self.assertIn("1 check(s) failed: litestream", r.stderr)
+
+    def test_replica_missing_rows_fails(self):
+        self.healthy_backups()
+        execute(self.replica, "delete from tasks where id > 976")
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("replica diverged", r.stderr)
+
+    # -- nightlies ----------------------------------------------------------
+    def test_zero_byte_nightly_fails_despite_passing_integrity_check(self):
+        self.healthy_backups()
+        (self.near / "ptask-tasks-2026-10-05.db").write_bytes(b"")
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("nearby nightly is 0 bytes", r.stderr)
+
+    def test_nightly_missing_most_tasks_fails(self):
+        self.healthy_backups()
+        thin = self.near / "ptask-tasks-2026-10-05.db"
+        make_db(thin, 400, ago(days=3), pad=400)  # big enough for the size floor
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("holds 400 tasks, under 90%", r.stderr)
+
+    def test_stale_nightly_fails(self):
+        self.healthy_backups()
+        backdate(self.near / "ptask-tasks-2026-10-04.db", days=3)
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("old (>48h)", r.stderr)
+
+    def test_truncated_offsite_fails(self):
+        self.healthy_backups()
+        (self.dr / "ptask-tasks-2026-10-05.db").write_bytes(b"\0" * 1024)
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("newest off-site backup is 1024 bytes", r.stderr)
+
+    def test_every_broken_leg_is_reported_in_one_run(self):
+        # The reviewer's case: a replica 24 creations + 600 status changes
+        # behind, and a zero-byte newest nightly — plus a truncated off-site.
+        self.healthy_backups()
+        execute(self.replica, "delete from tasks where id > 976")
+        execute(self.sb.live, "update tasks set status='done', updated_at=? where id <= 600", ago(hours=1))
+        (self.near / "ptask-tasks-2026-10-05.db").write_bytes(b"")
+        (self.dr / "ptask-tasks-2026-10-05.db").write_bytes(b"\0" * 10)
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("3 check(s) failed: litestream nearby offsite", r.stderr)
+
+    def test_ssh_calls_carry_connect_timeout(self):
+        self.healthy_backups()
+        self.drill()
+        remote = [c for c in self.sb.calls() if c.startswith(("ssh ", "scp "))]
+        self.assertTrue(remote)
+        for c in remote:
+            self.assertIn("ConnectTimeout=15", c)
+            self.assertIn("BatchMode=yes", c)
 
 
 if __name__ == "__main__":

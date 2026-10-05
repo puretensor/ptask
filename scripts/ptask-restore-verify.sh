@@ -4,12 +4,29 @@
 # the Litestream replica was verified exactly once (at activation) and
 # never re-drilled until this script existed.
 #
-# Three checks, all must pass (exit non-zero otherwise → OnFailure alert):
-#   1. Litestream replica restores to a scratch path, passes
-#      PRAGMA integrity_check, and its task count is sane vs live.
-#   2. The newest nearby nightly is <48h old and passes integrity_check.
-#   3. The newest off-site nightly is <48h old (existence+age only —
-#      pulling it back over the WAN weekly is unnecessary).
+# Three independent checks. All three always run (one broken leg must not
+# hide another); any failure exits non-zero → OnFailure alert.
+#   1. The Litestream replica restores to a scratch path, passes
+#      PRAGMA integrity_check, holds the live task count (±COUNT_SLACK, live
+#      read just before and just after the restore), and holds every task
+#      write older than LAG_MIN minutes. updated_at moves on every create,
+#      status change, edit and claim — the UPDATEs a row count never sees —
+#      so a replica that froze days ago with the right number of rows and
+#      stale statuses fails here. Writes newer than LAG_MIN are excluded, so
+#      traffic while the drill runs cannot be blamed on replication.
+#   2. The newest nearby nightly is <48h old, is at least the size floor,
+#      passes integrity_check, and holds at least NIGHTLY_MIN_PCT% of live's
+#      task count (it is up to 48h of task creation behind).
+#   3. The newest off-site nightly is <48h old and at least the size floor
+#      (stat over ssh — pulling it back over the WAN weekly is unnecessary).
+#
+# Size floor: max(64 KiB, 50% of live's logical size). A nightly is a
+# page-for-page online-backup copy of live from <48h ago, so a healthy one
+# lands within a few percent of live's size; half is far outside normal
+# growth, while a zero-length, truncated or near-empty file (which still
+# passes integrity_check — an empty file is a valid empty database) falls
+# well under it. 64 KiB is below an empty pTask schema, so it only rejects
+# junk even if live itself were tiny.
 #
 # Env overrides:
 #   PTASK_DB                — live DB (default ~/puretensor-tasks/tasks.db)
@@ -23,62 +40,131 @@ LS_CONFIG="${PTASK_LITESTREAM_CONFIG:-$HOME/.config/litestream/litestream.yml}"
 REMOTE="${PTASK_BACKUP_REMOTE:-backup-host:/var/backups/ptask}"
 OFFSITE="${PTASK_BACKUP_OFFSITE:-dr-host:dr-backup/ptask}"
 
+COUNT_SLACK=10        # tasks; Litestream trails live by seconds
+LAG_MIN=10            # minutes; every task write older than this must be replicated
+NIGHTLY_MIN_PCT=90    # nightly task count vs live
+FLOOR_MIN_BYTES=65536
+FLOOR_PCT=50
+
+# Same options as ptask-backup.sh: a dead peer or a hung mount must fail the
+# drill (and alert), not hang it until TimeoutStartSec.
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+
 SCRATCH=$(mktemp -d -t ptask-restore-verify-XXXXXX)
 cleanup() { rm -rf "$SCRATCH"; }
 trap cleanup EXIT
 
-fail() { echo "ptask-restore-verify: FAIL — $*" >&2; exit 1; }
+say() { echo "ptask-restore-verify: $*"; }
+fail() { echo "ptask-restore-verify: FAIL — $*" >&2; }
+die() { fail "$@"; exit 1; }
 
-live_count=$(sqlite3 "file:$DB?mode=ro" "SELECT COUNT(*) FROM tasks;") \
-    || fail "cannot read live DB $DB"
+LIVE="file:$DB?mode=ro"
+
+# "count|settled_jd|settled_iso": COUNT(*) and the newest task write at least
+# LAG_MIN minutes old (as a Julian day, and readable; 0/none when there is
+# none). Scoring does not touch updated_at, so only real mutations move it.
+task_stats() {
+    sqlite3 "$1" "SELECT COUNT(*), COALESCE(MAX(s), 0),
+        COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', MAX(s)), 'none')
+        FROM (SELECT CASE WHEN julianday(updated_at) <= julianday('now', '-$LAG_MIN minutes')
+              THEN julianday(updated_at) END AS s FROM tasks);"
+}
+
+live_stats=$(task_stats "$LIVE") || die "cannot read live DB $DB"
+IFS='|' read -r live_count live_settled live_settled_iso <<<"$live_stats"
+live_bytes=$(sqlite3 "$LIVE" \
+    "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size();") \
+    || die "cannot read live DB size $DB"
+floor=$(( live_bytes * FLOOR_PCT / 100 ))
+[ "$floor" -ge "$FLOOR_MIN_BYTES" ] || floor=$FLOOR_MIN_BYTES
+
+# The check functions run from `||`, where bash suspends errexit (also inside
+# them), so every fallible step handles its own failure.
 
 # ---- 1. Litestream restore drill ----------------------------------------
-command -v litestream >/dev/null || fail "litestream binary not on PATH"
-litestream restore -config "$LS_CONFIG" -o "$SCRATCH/restored.db" "$DB" \
-    || fail "litestream restore returned non-zero"
+check_replica() {
+    local ic stats count settled settled_iso live_after lo hi
+    command -v litestream >/dev/null || { fail "litestream binary not on PATH"; return 1; }
+    litestream restore -config "$LS_CONFIG" -o "$SCRATCH/restored.db" "$DB" \
+        || { fail "litestream restore returned non-zero"; return 1; }
+    ic=$(sqlite3 "$SCRATCH/restored.db" "PRAGMA integrity_check;") \
+        || { fail "litestream restore is unreadable"; return 1; }
+    [ "$ic" = "ok" ] || { fail "litestream restore integrity_check: $ic"; return 1; }
+    stats=$(task_stats "$SCRATCH/restored.db") \
+        || { fail "litestream restore has no readable tasks table"; return 1; }
+    IFS='|' read -r count settled settled_iso <<<"$stats"
+    # Bracket the restore with live counts from before and after it: rows
+    # created or deleted while the drill runs widen the band instead of
+    # failing it, so the slack only has to cover replication lag.
+    live_after=$(sqlite3 "$LIVE" "SELECT COUNT(*) FROM tasks;") \
+        || { fail "cannot re-read live DB $DB"; return 1; }
+    lo=$(( (live_count < live_after ? live_count : live_after) - COUNT_SLACK ))
+    hi=$(( (live_count > live_after ? live_count : live_after) + COUNT_SLACK ))
+    if [ "$count" -lt "$lo" ] || [ "$count" -gt "$hi" ]; then
+        fail "litestream restore holds $count tasks vs live $live_count..$live_after (±$COUNT_SLACK) — replica diverged"
+        return 1
+    fi
+    if awk -v r="$settled" -v l="$live_settled" 'BEGIN { exit !(r < l) }'; then
+        fail "litestream restore lacks task writes older than ${LAG_MIN}min: its newest is $settled_iso, live's $live_settled_iso — replication stalled"
+        return 1
+    fi
+    say "litestream ok (restored $count tasks, live $live_count; newest settled write $settled_iso)"
+}
 
-ic=$(sqlite3 "$SCRATCH/restored.db" "PRAGMA integrity_check;")
-[ "$ic" = "ok" ] || fail "litestream restore integrity_check: $ic"
+# ---- 2. Nearby nightly freshness, size, integrity, content ---------------
+check_nightly() {
+    local host="${REMOTE%%:*}" dir="${REMOTE#*:}" latest age_h bytes ic count
+    latest=$(ssh "${SSH_OPTS[@]}" "$host" \
+        "ls -1t '$dir'/ptask-tasks-*.db 2>/dev/null | head -1") \
+        || { fail "cannot list nightlies at $REMOTE"; return 1; }
+    [ -n "$latest" ] || { fail "no nightly backups found at $REMOTE"; return 1; }
+    age_h=$(ssh "${SSH_OPTS[@]}" "$host" \
+        "echo \$(( ( \$(date +%s) - \$(stat -c %Y '$latest') ) / 3600 ))") \
+        || { fail "cannot stat $latest on $host"; return 1; }
+    [ "$age_h" -lt 48 ] || { fail "newest nearby nightly is ${age_h}h old (>48h): $latest"; return 1; }
+    scp -q "${SSH_OPTS[@]}" "$host:$latest" "$SCRATCH/nightly.db" \
+        || { fail "cannot copy $latest from $host"; return 1; }
+    bytes=$(stat -c %s "$SCRATCH/nightly.db")
+    [ "$bytes" -ge "$floor" ] \
+        || { fail "nearby nightly is $bytes bytes, under the $floor-byte floor (live $live_bytes): $latest"; return 1; }
+    ic=$(sqlite3 "$SCRATCH/nightly.db" "PRAGMA integrity_check;") \
+        || { fail "nearby nightly is unreadable: $latest"; return 1; }
+    [ "$ic" = "ok" ] || { fail "nearby nightly integrity_check: $ic"; return 1; }
+    count=$(sqlite3 "$SCRATCH/nightly.db" "SELECT COUNT(*) FROM tasks;") \
+        || { fail "nearby nightly has no readable tasks table: $latest"; return 1; }
+    [ $(( count * 100 )) -ge $(( live_count * NIGHTLY_MIN_PCT )) ] \
+        || { fail "nearby nightly holds $count tasks, under ${NIGHTLY_MIN_PCT}% of live's $live_count: $latest"; return 1; }
+    say "nearby nightly ok ($(basename "$latest"), ${age_h}h old, $bytes bytes, $count tasks)"
+}
 
-restored_count=$(sqlite3 "$SCRATCH/restored.db" "SELECT COUNT(*) FROM tasks;")
-# The replica trails live by ≤1min of writes; a large deficit means the
-# replication path is silently broken.
-if [ "$restored_count" -lt $((live_count - 25)) ]; then
-    fail "litestream restore row count $restored_count vs live $live_count — replica lagging or broken"
-fi
-echo "ptask-restore-verify: litestream ok (restored $restored_count tasks, live $live_count)"
+# ---- 3. Off-site freshness + size ------------------------------------------
+check_offsite() {
+    local host="${OFFSITE%%:*}" dir="${OFFSITE#*:}" latest age_size age_h bytes
+    latest=$(ssh "${SSH_OPTS[@]}" "$host" \
+        "ls -1t '$dir'/ptask-tasks-*.db 2>/dev/null | head -1") \
+        || { fail "cannot list off-site backups at $OFFSITE"; return 1; }
+    [ -n "$latest" ] || { fail "no off-site backups found at $OFFSITE"; return 1; }
+    age_size=$(ssh "${SSH_OPTS[@]}" "$host" \
+        "echo \$(( ( \$(date +%s) - \$(stat -c %Y '$latest') ) / 3600 )) \$(stat -c %s '$latest')") \
+        || { fail "cannot stat $latest on $host"; return 1; }
+    read -r age_h bytes <<<"$age_size"
+    [ "$age_h" -lt 48 ] || { fail "newest off-site backup is ${age_h}h old (>48h): $latest"; return 1; }
+    [ "$bytes" -ge "$floor" ] \
+        || { fail "newest off-site backup is $bytes bytes, under the $floor-byte floor (live $live_bytes): $latest"; return 1; }
+    say "offsite ok ($(basename "$latest"), ${age_h}h old, $bytes bytes)"
+}
 
-# ---- 2. mon1 nightly freshness + integrity ------------------------------
-remote_host="${REMOTE%%:*}"
-remote_dir="${REMOTE#*:}"
-latest=$(ssh -o BatchMode=yes "$remote_host" \
-    "ls -1t '$remote_dir'/ptask-tasks-*.db 2>/dev/null | head -1")
-[ -n "$latest" ] || fail "no nightly backups found at $REMOTE"
-
-age_h=$(ssh -o BatchMode=yes "$remote_host" \
-    "echo \$(( ( \$(date +%s) - \$(stat -c %Y '$latest') ) / 3600 ))")
-[ "$age_h" -lt 48 ] || fail "newest mon1 nightly is ${age_h}h old (>48h): $latest"
-
-scp -q "$remote_host:$latest" "$SCRATCH/nightly.db"
-ic2=$(sqlite3 "$SCRATCH/nightly.db" "PRAGMA integrity_check;")
-[ "$ic2" = "ok" ] || fail "mon1 nightly integrity_check: $ic2"
-echo "ptask-restore-verify: mon1 nightly ok ($(basename "$latest"), ${age_h}h old)"
-
-# ---- 3. Off-site freshness ------------------------------------------------
+failed=()
+check_replica || failed+=(litestream)
+check_nightly || failed+=(nearby)
 if [ "$OFFSITE" = "none" ]; then
-    echo "ptask-restore-verify: offsite skipped (PTASK_BACKUP_OFFSITE=none)"
-    echo "ptask-restore-verify: ALL OK"
-    exit 0
+    say "offsite skipped (PTASK_BACKUP_OFFSITE=none)"
+else
+    check_offsite || failed+=(offsite)
 fi
-offsite_host="${OFFSITE%%:*}"
-offsite_dir="${OFFSITE#*:}"
-off_latest=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$offsite_host" \
-    "ls -1t '$offsite_dir'/ptask-tasks-*.db 2>/dev/null | head -1")
-[ -n "$off_latest" ] || fail "no off-site backups found at $OFFSITE"
 
-off_age_h=$(ssh -o BatchMode=yes "$offsite_host" \
-    "echo \$(( ( \$(date +%s) - \$(stat -c %Y '$off_latest') ) / 3600 ))")
-[ "$off_age_h" -lt 48 ] || fail "newest off-site backup is ${off_age_h}h old (>48h): $off_latest"
-echo "ptask-restore-verify: offsite ok ($(basename "$off_latest"), ${off_age_h}h old)"
-
-echo "ptask-restore-verify: ALL OK"
+if [ "${#failed[@]}" -gt 0 ]; then
+    fail "${#failed[@]} check(s) failed: ${failed[*]}"
+    exit 1
+fi
+say "ALL OK"

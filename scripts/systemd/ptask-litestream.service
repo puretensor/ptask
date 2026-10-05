@@ -7,6 +7,13 @@ Documentation=https://litestream.io/
 ConditionPathExists=%h/.config/litestream/.env
 After=network-online.target
 Wants=network-online.target
+# A crash loop must end in `failed` and alert, not restart quietly forever:
+# with RestartSec=5 the default limit (5 starts in 10s) can never trip.
+# Five starts in ten minutes fails the unit; after fixing the cause,
+# `systemctl --user reset-failed ptask-litestream.service` and start it.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+OnFailure=ptask-failure-alert@%n.service
 
 [Service]
 Type=simple
