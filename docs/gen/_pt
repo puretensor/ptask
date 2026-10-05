@@ -945,7 +945,7 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
 '-h[Print help]' \
 '--help[Print help]' \
-'*::query -- FTS5 query (words, phrases, AND/OR/NOT):_default' \
+'*::query -- Words to find (FTS5)\: every word must match; punctuation and AND/OR/NOT are plain text; a trailing * matches a prefix:_default' \
 && ret=0
 ;;
 (why)

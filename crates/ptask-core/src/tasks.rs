@@ -649,6 +649,32 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
     }
 }
 
+/// Free text → a safe FTS5 `MATCH` expression for `tasks_fts`.
+///
+/// Every whitespace-separated word becomes a quoted FTS5 string (inner `"`
+/// doubled), so `-`, `:`, `+`, `?`, `%`, quotes and bare AND/OR/NOT are text,
+/// not query syntax: raw user input used to fail ("no such column: up" for
+/// `follow-up`). Words are ANDed. A trailing `*` stays outside the quotes as
+/// a prefix marker (`deploy*`). `None` when no word has a letter or digit.
+pub fn fts_match_query(text: &str) -> Option<String> {
+    let terms: Vec<String> = text
+        .split_whitespace()
+        .filter_map(|word| {
+            let base = word.trim_end_matches('*');
+            if !base.chars().any(char::is_alphanumeric) {
+                return None;
+            }
+            let quoted = format!("\"{}\"", base.replace('"', "\"\""));
+            Some(if base.len() < word.len() {
+                format!("{quoted}*")
+            } else {
+                quoted
+            })
+        })
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
 /// Outcome of `mark_done`: either the task was completed, or it was
 /// recurring and the deadline was advanced in-place.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3273,6 +3299,22 @@ mod tests {
         assert_eq!(by_short.id, t.id);
         let by_sub = resolve(&db, "artisanal").unwrap();
         assert_eq!(by_sub.id, t.id);
+    }
+
+    #[test]
+    fn fts_match_query_quotes_words_and_keeps_a_prefix_marker() {
+        assert_eq!(
+            fts_match_query("follow-up call").as_deref(),
+            Some("\"follow-up\" \"call\"")
+        );
+        assert_eq!(
+            fts_match_query("\"don't\"").as_deref(),
+            Some("\"\"\"don't\"\"\"")
+        );
+        assert_eq!(fts_match_query("deploy*").as_deref(), Some("\"deploy\"*"));
+        assert_eq!(fts_match_query("NOT").as_deref(), Some("\"NOT\""));
+        assert_eq!(fts_match_query(" * - ** "), None);
+        assert_eq!(fts_match_query(""), None);
     }
 
     #[test]

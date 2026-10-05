@@ -259,7 +259,8 @@ struct WhyArgs {
 
 #[derive(clap::Args, Debug)]
 struct SearchArgs {
-    /// FTS5 query (words, phrases, AND/OR/NOT).
+    /// Words to find (FTS5): every word must match; punctuation and
+    /// AND/OR/NOT are plain text; a trailing * matches a prefix.
     query: Vec<String>,
     #[arg(short = 'n', long = "limit", default_value_t = 20)]
     limit: usize,
@@ -2448,24 +2449,27 @@ fn cmd_search(db: &Db, a: SearchArgs) -> Result<()> {
     if q.trim().is_empty() {
         anyhow::bail!("search needs a query");
     }
-    let conn = db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.pt_id, t.title, t.status_v2, t.priority
-         FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
-         WHERE tasks_fts MATCH ?1
-         ORDER BY rank LIMIT ?2",
-    )?;
-    let rows: Vec<serde_json::Value> = stmt
-        .query_map((&q, a.limit as i64), |r| {
-            Ok(serde_json::json!({
-                "task_uuid": r.get::<_, String>(0)?,
-                "pt_id": r.get::<_, Option<String>>(1)?,
-                "title": r.get::<_, String>(2)?,
-                "status": r.get::<_, String>(3)?,
-                "priority": r.get::<_, i64>(4)?,
-            }))
-        })?
-        .collect::<std::result::Result<_, _>>()?;
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    if let Some(fts) = tasks::fts_match_query(&q) {
+        let conn = db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.pt_id, t.title, t.status_v2, t.priority
+             FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
+             WHERE tasks_fts MATCH ?1
+             ORDER BY rank LIMIT ?2",
+        )?;
+        rows = stmt
+            .query_map((&fts, a.limit as i64), |r| {
+                Ok(serde_json::json!({
+                    "task_uuid": r.get::<_, String>(0)?,
+                    "pt_id": r.get::<_, Option<String>>(1)?,
+                    "title": r.get::<_, String>(2)?,
+                    "status": r.get::<_, String>(3)?,
+                    "priority": r.get::<_, i64>(4)?,
+                }))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+    }
     emit(&rows, || {
         print_lines(ui::headline(
             "ptask · search",
@@ -3645,6 +3649,42 @@ mod tests {
             task.title
         );
         assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), cursor);
+    }
+
+    #[test]
+    fn search_takes_free_text_without_fts_syntax_errors() {
+        // Regression (CORE-6): the query went straight to `MATCH`, so
+        // `pt search follow-up` failed with "no such column: up", and
+        // quotes, PT-ids, c++, ?, %, bare AND/NOT and * all errored.
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("search.db")).unwrap();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("schedule the follow-up call"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        for query in [
+            "follow-up",
+            "\"don't\"",
+            "PT-2201",
+            "c++",
+            "what?",
+            "100%",
+            "NOT",
+            "AND",
+            "*",
+            "foll*",
+        ] {
+            super::cmd_search(
+                &db,
+                super::SearchArgs {
+                    query: vec![query.into()],
+                    limit: 20,
+                },
+            )
+            .unwrap_or_else(|e| panic!("{query:?}: {e:#}"));
+        }
     }
 
     #[test]

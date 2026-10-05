@@ -186,7 +186,7 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 | `pt snooze <query> <until…>` | park until a date (natural language ok); auto-wakes to todo via the hourly scoring run |
 | `pt depend <query> --on <target> [--clear]` | dependency edges in `task_links`; `pt next` hides tasks with unmet deps; **`pt done` refuses (exit non-zero, names the open blockers) while any prerequisite is still open** — dismissed prerequisites count as satisfied; no `--on` shows current edges |
 | `pt review [--stale-days N]` | interactive sweep of stale tasks (TTY: k/d/x/s/q; non-TTY prints the list) |
-| `pt search <query…> [-n N]` | FTS5 full-text over titles + descriptions |
+| `pt search <query…> [-n N]` | FTS5 full-text over titles + descriptions; free text: every word must match, punctuation and AND/OR/NOT are literal (`follow-up`, `c++`, `PT-2201` just work), a trailing `*` matches a prefix |
 | `pt bulk '<filter>' --set-priority P \| --done \| --dismiss [--dry-run]` | one action across every DSL match |
 | `pt done <q1> <q2> …` | done now accepts multiple tasks |
 
