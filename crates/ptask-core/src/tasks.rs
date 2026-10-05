@@ -789,6 +789,19 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         });
     }
 
+    // Completing a done task is refused like dismissing a dismissed one: the
+    // repeat used to journal a second task.completed (and fire its webhook).
+    // Done ↔ dismissed stays a deliberate, journaled re-classification.
+    let status: Option<String> = tx
+        .query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&task.id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    match status.as_deref() {
+        None => return Err(crate::Error::Other("task not found".into())),
+        Some("done") => return Err(crate::Error::Other("task is already done".into())),
+        Some(_) => {}
+    }
     tx.execute(
         "UPDATE tasks SET status='done', status_v2='done', updated_at=?1 WHERE id=?2",
         params![now, task.id],
@@ -3336,6 +3349,41 @@ mod tests {
         let t = create(&db, NewTask::minimal("solo task"), &EventCtx::test()).unwrap();
         let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
         assert_eq!(outcome, DoneOutcome::Completed);
+    }
+
+    #[test]
+    fn completing_a_done_task_is_refused_and_journals_nothing() {
+        // Regression (MCP-13 / CLI-19): a second `done` on a PT-N wrote a
+        // second task.completed event, interaction and outbound webhook, so
+        // the bot's "Completed today" counted it twice.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let t = create(&db, NewTask::minimal("close once"), &ctx).unwrap();
+        mark_done(&db, &t, &ctx).unwrap();
+        let cursor = crate::event_log::current_cursor(&db).unwrap();
+
+        let again = resolve_for_lookup(&db, &t.id, true).unwrap();
+        let err = mark_done(&db, &again, &ctx).unwrap_err();
+        assert!(format!("{err}").contains("already done"), "{err}");
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor);
+        assert_eq!(event_count(&db, "task.completed"), 1);
+        let interactions: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM interactions WHERE task_id=?1 AND action='status_change'",
+                    [&t.id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(interactions, 1);
+
+        // Unchanged CLI semantics: a dismissed task can still be marked done
+        // (and a done one dismissed) — a deliberate re-classification.
+        let d = create(&db, NewTask::minimal("dropped, then done"), &ctx).unwrap();
+        dismiss(&db, &d.id, &ctx).unwrap();
+        assert_eq!(mark_done(&db, &d, &ctx).unwrap(), DoneOutcome::Completed);
+        dismiss(&db, &d.id, &ctx).unwrap();
     }
 
     #[test]

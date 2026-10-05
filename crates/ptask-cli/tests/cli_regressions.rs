@@ -62,6 +62,31 @@ fn undo_of_a_create_needs_a_tty_or_yes() {
 }
 
 #[test]
+fn done_twice_journals_one_completion() {
+    // Regression (CLI-19): the second `pt done PT-1` wrote another
+    // task.completed and interaction, inflating "Completed today".
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    ok(&db, &["add", "--raw", "close once"]);
+    ok(&db, &["done", "PT-1"]);
+    let again = pt(&db, &["done", "PT-1"]);
+    assert!(!again.status.success(), "a second done must be refused");
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("already done"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    let log = ok(&db, &["--json", "log", "PT-1"]);
+    let completions = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event_type"] == "task.completed")
+        .count();
+    assert_eq!(completions, 1);
+}
+
+#[test]
 fn undo_of_a_completion_needs_no_confirmation() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("t.db");

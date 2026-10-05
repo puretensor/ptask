@@ -974,6 +974,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_done_twice_journals_one_completion() {
+        // Regression (MCP-13): task_done resolves PT-N/uuid across terminal
+        // states, so a repeated call re-completed the task and journaled a
+        // second task.completed.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("finish once"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+        let done = |id: String| mcp.task_done(Parameters(IdArg { id }));
+        done(t.pt_id.clone().unwrap()).await.unwrap();
+        let cursor = ptask_core::event_log::current_cursor(&db).unwrap();
+        assert!(done(t.pt_id.clone().unwrap()).await.is_err());
+        assert!(done(t.id.clone()).await.is_err());
+        assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), cursor);
+        let completed: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM pt_event_log WHERE event_type='task.completed'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(completed, 1);
+    }
+
+    #[tokio::test]
     async fn task_done_reports_advanced_for_a_recurring_task() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(dir.path().join("mcp.db")).unwrap();
