@@ -93,6 +93,10 @@ pub struct Extensions {
     /// `pt_recurrence` in the same transaction as the task insert.
     /// `next_occurrence` is initialised from the task's deadline.
     pub recurrence: Option<crate::recurrence::Recurrence>,
+    /// Provenance: uuid of the task this one was discovered from. The
+    /// `discovered_from` link is written in the create transaction and named
+    /// in the `task.created` payload, so it can't fail after the task exists.
+    pub discovered_from: Option<String>,
 }
 
 /// Insert a task with byte-for-byte Python defaults, mint a PT-N, log a
@@ -257,8 +261,16 @@ pub fn create_with_extensions(
         kind: ext.kind.clone().unwrap_or_else(|| "ship".into()),
         deliverable: ext.deliverable.clone(),
     };
-    let payload = serde_json::to_value(&task)
+    let mut payload = serde_json::to_value(&task)
         .map_err(|e| crate::Error::Other(format!("task.created payload: {}", e)))?;
+    if let Some(parent) = ext.discovered_from.as_deref() {
+        tx.execute(
+            "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
+             VALUES (?1, ?2, 'discovered_from', ?3)",
+            params![task.id, parent, task.created_at],
+        )?;
+        payload["discovered_from"] = serde_json::json!(parent);
+    }
     record_event_tx(&tx, ctx, &task.id, "task.created", &payload)?;
 
     tx.commit()?;
