@@ -146,17 +146,20 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             idx += 1;
             continue;
         }
-        // Explicit @label
-        if let Some(rest) = tok.strip_prefix('@')
+        // Explicit @label (trailing prose punctuation is not part of it:
+        // "ask @bob, then" labels `bob`).
+        if let Some(rest) = tok.strip_prefix('@').map(trim_prose_punct)
             && !rest.is_empty()
         {
             out.labels.push(rest.to_string());
             idx += 1;
             continue;
         }
-        // Explicit #project
-        if let Some(rest) = tok.strip_prefix('#')
+        // Explicit #project. An all-digit `#42` is an issue/PR reference,
+        // not a project.
+        if let Some(rest) = tok.strip_prefix('#').map(trim_prose_punct)
             && !rest.is_empty()
+            && !rest.bytes().all(|b| b.is_ascii_digit())
         {
             out.project = Some(rest.to_string());
             idx += 1;
@@ -165,10 +168,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         // Priority pN (1..=5), native pTask scale: p1=low, p2=normal,
         // p3=high, p4=urgent, p5=critical. Matches the display, `--priority`,
         // and `pt priority` — no Todoist inversion.
-        if let Some(rest) = tok.strip_prefix('p')
-            && let Ok(n) = rest.parse::<i64>()
-            && (1..=5).contains(&n)
-        {
+        if let Some(n) = priority_token(tok) {
             out.priority = Some(n);
             idx += 1;
             continue;
@@ -301,7 +301,14 @@ fn parse_duration(s: &str) -> Option<i64> {
     if num_part.is_empty() {
         return None;
     }
+    // Digits only: `i64::from_str` also takes a sign (`~-30m`, `~+5m`).
+    if !num_part.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let n: i64 = num_part.parse().ok()?;
+    if n == 0 {
+        return None;
+    }
     match unit {
         'm' => Some(n),
         'h' => Some(n.checked_mul(60)?),
@@ -405,13 +412,20 @@ fn is_explicit_marker(tok: &str) -> bool {
     if tok.starts_with("//") {
         return true;
     }
-    if let Some(rest) = tok.strip_prefix('p')
-        && let Ok(n) = rest.parse::<i64>()
-        && (1..=5).contains(&n)
-    {
-        return true;
+    priority_token(tok).is_some()
+}
+
+/// `p1`..`p5` exactly. `i64::from_str` also accepted `p+1` and `p01`.
+fn priority_token(tok: &str) -> Option<i64> {
+    match tok.as_bytes() {
+        [b'p', d @ b'1'..=b'5'] => Some(i64::from(d - b'0')),
+        _ => None,
     }
-    false
+}
+
+/// Strip sentence punctuation that trails a `@label` / `#project` in prose.
+fn trim_prose_punct(s: &str) -> &str {
+    s.trim_end_matches([',', '.', ';', ':', '!', '?', ')'])
 }
 
 /// Format a quick-add into a short human echo. Convenience for `pt add` output.
@@ -910,6 +924,40 @@ mod tests {
         // p6 is out of the 1..=5 range; stays as a title word.
         let q = parse_at("foo p6 bar", anchor()).unwrap();
         assert!(q.title.contains("p6"), "got title {:?}", q.title);
+    }
+
+    #[test]
+    fn loose_marker_lookalikes_stay_title_text() {
+        // PARSE-17: i64 parsing accepted `p+1` / `p01` as priorities and
+        // `~-30m` as a negative duration, and `#123` (an issue/PR ref)
+        // became the project.
+        for input in [
+            "fix p+1 bug",
+            "fix p01 bug",
+            "fix ~-30m bug",
+            "review PR #42",
+        ] {
+            let q = parse_at(input, anchor()).unwrap();
+            assert_eq!(q.title, input, "input={input}");
+            assert_eq!(q.priority, Some(2), "input={input}");
+            assert!(q.duration_min.is_none(), "input={input}");
+            assert!(q.project.is_none(), "input={input}");
+        }
+        // Trailing prose punctuation is not part of a label or project.
+        let q = parse_at("ping @bob, @alice. about #fleet;", anchor()).unwrap();
+        assert_eq!(q.labels, vec!["bob", "alice"]);
+        assert_eq!(q.project.as_deref(), Some("fleet"));
+        assert_eq!(q.title, "ping about");
+        // A bare punctuation marker is text.
+        let q = parse_at("well @, ok", anchor()).unwrap();
+        assert!(q.labels.is_empty());
+        assert_eq!(q.title, "well @, ok");
+        // Real markers are unaffected.
+        let q = parse_at("x p3 ~0m #p-1 @a_b", anchor()).unwrap();
+        assert_eq!(q.priority, Some(3));
+        assert_eq!(q.project.as_deref(), Some("p-1"));
+        assert_eq!(q.labels, vec!["a_b"]);
+        assert_eq!(q.title, "x ~0m");
     }
 
     #[test]
