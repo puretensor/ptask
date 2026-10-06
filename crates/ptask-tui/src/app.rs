@@ -485,7 +485,12 @@ impl App {
                     format!("advanced: {} {} → next {}", pt, task.title, next_deadline);
             }
             Err(e) => {
+                // Reload anyway: the usual cause is a row another surface
+                // changed, and the stale copy would keep failing until `r`.
                 self.status_msg = format!("done failed: {}", e);
+                if let Err(e) = self.reload() {
+                    self.status_msg = format!("{} (reload failed: {e})", self.status_msg);
+                }
                 return;
             }
         }
@@ -652,6 +657,35 @@ mod tests {
         assert!(app.filtered.is_empty());
         assert_eq!(app.list_state.selected(), None);
         assert_eq!(app.selected_task_index(), None);
+    }
+
+    #[test]
+    fn a_failed_done_reloads_so_the_next_one_works() {
+        // Regression (round 2, item 4i): after another surface advanced a
+        // recurring task, the TUI's `done` failed on its stale row and kept
+        // failing until a manual `r`.
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("daily");
+        new.deadline = Some("2099-01-01".into());
+        let ext = ptask_core::Extensions {
+            recurrence: Some(ptask_core::recurrence::parse("every day").unwrap()),
+            ..Default::default()
+        };
+        let t =
+            ptask_core::tasks::create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let mut app = App::new(db.clone()).unwrap();
+        app.list_state.select(Some(0));
+        // Another surface completes the occurrence the TUI is showing.
+        ptask_core::tasks::mark_done(&db, &t, &EventCtx::test()).unwrap();
+
+        app.action_done();
+        assert!(
+            app.status_msg.starts_with("done failed"),
+            "{}",
+            app.status_msg
+        );
+        app.action_done();
+        assert!(app.status_msg.starts_with("advanced"), "{}", app.status_msg);
     }
 
     #[test]
