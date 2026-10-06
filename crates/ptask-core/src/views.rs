@@ -53,9 +53,10 @@ pub fn get(db: &Db, name: &str) -> Result<View> {
     );
     match row {
         Ok(v) => Ok(v),
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            Err(crate::Error::Other(format!("view not found: {}", name)))
-        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::Other(format!(
+            "view not found: {}",
+            crate::text::one_line(name)
+        ))),
         Err(e) => Err(e.into()),
     }
 }

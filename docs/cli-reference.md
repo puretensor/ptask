@@ -145,7 +145,7 @@ No-deadline urgency GROWS with age (aged p5 can never rank below fresh p3). `sco
 ```
 pt view save <name> '<filter-dsl>'   # store
 pt view list                          # list
-pt view show <name>                   # run
+pt view show <name> [-s all]          # run (open tasks; -s all lifts it)
 pt view rm <name>                     # delete
 ```
 
@@ -204,8 +204,12 @@ terminal theme (the `fleet-upgrade` look: gradient headline rules, box-ruled
 severity-banded tables, semantic pills — green done, amber needs a human, red
 critical). Colour is on only when stdout is a TTY; `--color always|never`,
 `--no-color`, `NO_COLOR` and `PT_COLOR=always|never` override that, and
-`--json` is always plain. `pt list`, `pt next`, `pt log` and `pt view show`
-honour `--json` too. Quick-add gains `due:<date>` (scheduled) alongside hard deadlines.
+`--json` is always plain. `pt list`, `pt next`, `pt log`, `pt view
+show|save|list|rm`, `pt bulk`, `pt review` (the stale list; no interactive
+sweep), `pt delegate` and every `pt remote` verb honour `--json` too. Untrusted
+task text is printed with control and bidi characters shown as U+FFFD;
+`--json` keeps the exact text (serde escapes C0 controls; C1 and bidi pass
+through). Quick-add gains `due:<date>` (scheduled) alongside hard deadlines.
 Statuses are the 8-state v2 model: triage/backlog/todo/in_progress/
 snoozed/done/dismissed/blocked (legacy column maintained for
 not-yet-retired consumers).
@@ -242,7 +246,7 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote start <query>` | server-side `task_start` |
 | `pt remote snooze <query> <until…>` | server-side `task_snooze` (date parsed locally) |
 | `pt remote depend <query> --on <t> [--clear]` | server-side `task_depend` |
-| `pt remote rm <query>` | server-side `task_delete` (tombstoned) |
+| `pt remote rm <query> [-y]` | server-side `task_delete` (tombstoned); asks `PT-N "title"` first, refuses without `--yes` on a non-TTY or with `--json`; a substring matches open tasks only (exact PT-N/uuid reach any status) |
 | `pt remote list --filter '<DSL>'` | SERVER-side filtered list via `GET /list` |
 | `pt remote version` | compare client vs server `GET /version`; exits non-zero on skew |
 

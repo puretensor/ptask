@@ -145,6 +145,11 @@ approved executor will see them.
 | 6 | already consumed |
 | 1 | anything else (unknown id, bad args) |
 
+`pt approve` (and `pt approval decide … approve`) exits 7 when it refuses a
+flagged payload preview without `--force` (see Authority rules). Approving
+or rejecting a request that is no longer pending exits 4 (its terminal state
+is named); the `--force` check only applies to a pending request.
+
 Both accept exactly one of `--payload-file` / `--payload-json` / `--digest`,
 canonicalised identically to `request`.
 
@@ -159,6 +164,30 @@ Local CLI (`pt approve` / `pt reject` / `pt approval decide`):
 - the requester cannot decide their own request; actor names compare
   trimmed and ASCII case-insensitively (`HAL` is `hal`), here and for
   withdraw-own-rows
+- approve (not reject) refuses without `--force` when the payload preview
+  holds control, bidi or invisible characters (a zero-width space in an
+  address, tag characters after an amount): the digest binds the stored
+  bytes, not what a screen shows. `pt approval show` marks them as U+FFFD
+  under a warning; inspect the exact bytes with
+  `pt approval payload AP-n | cat -v`, then `pt approve AP-n --force`. The
+  refusal exits **7**. The dashboard sidecar path (`--via dashboard`) is
+  gated the same way and never forces: the sidecar answers 409
+  `{"code": "payload_flagged"}` with pt's message plus "approve from the CLI
+  with `pt approve AP-n --force`", and the cockpit shows that as its toast.
+  The check only applies to a pending request.
+- what counts: control characters other than LF/tab/CRLF, bidi controls,
+  every Unicode format (Cf) and Default_Ignorable code point — **including
+  a ZWJ (U+200D) and a soft hyphen (U+00AD)**, the Khmer inherent vowels,
+  unassigned U+FFF0–FFF8 and the whole U+E0000–E0FFF block — the
+  line/paragraph separators, the blank-rendering braille blank (U+2800) and
+  ideographic space (U+3000), and variation selectors (U+FE00–FE0F, U+E0100–E01EF, the
+  "emoji smuggling" carrier) **except** exactly one VS15/VS16 directly after
+  a pictograph (real emoji, not enclosed alphanumerics or plain arrows) or
+  in a keycap — and at most 8 of those per payload: each optional selector
+  can carry about 1.6 bits that render identically, so a 9th flags it. So a lone VS16 emoji such as ❤️, ☀️ or ✔️ in
+  an email body needs no `--force`, while a second selector in a run, any
+  other selector, a ZWJ sequence such as a family emoji (👨‍👩‍👧) — the
+  preview never keeps joiners — or a soft hyphen still does.
 
 HTTP `POST /api/approvals/{id}/decide` requires **admin** scope;
 `decided_via=api`. Write-scope tokens may request and withdraw (own rows
@@ -255,6 +284,7 @@ pt approval request --kind email --title "Send the Q3 memo" \
 pt approval ls
 pt approval show AP-12
 pt approve AP-12                  # operator TTY
+pt approve AP-12 --force          # after inspecting a flagged payload
 pt reject AP-12 --via dashboard   # dashboard sidecar
 pt approval consume AP-12 --payload-file letter.html
 ```
