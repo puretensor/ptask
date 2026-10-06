@@ -222,10 +222,11 @@ fn iso_day(d: &str) -> Result<jiff::civil::Date> {
 }
 
 /// SQL for `col` falling before / on / after `day` in `now`'s (operator)
-/// timezone. A date-only value (`YYYY-MM-DD`) compares as a date; anything
-/// longer is an instant, bucketed by the day's start and end there. Stored
-/// offsets are mixed (`Z`, `+00:00`, `+01:00`), so the stored date prefix is
-/// not the operator's day: 23:30Z on 20 Oct is 00:30 on 21 Oct in London.
+/// timezone. A datetime with an explicit `Z` / `±HH:MM` offset is an
+/// instant, bucketed by the day's start and end there: offsets are mixed
+/// (`Z`, `+00:00`, `+01:00`), so 23:30Z on 20 Oct is 00:30 on 21 Oct in
+/// London. Anything else with a `YYYY-MM-DD` prefix (a date-only value, or
+/// a legacy naive / non-standard datetime) compares by that written date.
 fn day_cmp(
     col: &str,
     cmp: DayCmp,
@@ -270,8 +271,20 @@ fn day_cmp(
             )
         }
     };
+    // The instant arm only for a value SQLite reads that names its offset
+    // (`Z` or `±HH:MM`). Legacy rows stored before write-normalisation
+    // (`+0100`, `+01`, `[Europe/London]`, lowercase `t`/`z`, naive times)
+    // either read as NULL or would be taken as UTC, so they compare by
+    // their written date -- when that is a real `YYYY-MM-DD` prefix. Junk
+    // matches no day.
     Ok(format!(
-        "((length({col}) = 10 AND {col} {date_op} ?{date}) OR (length({col}) > 10 AND {instant}))"
+        "(CASE WHEN julianday({col}) IS NOT NULL \
+                AND ({col} GLOB '*Z' OR {col} GLOB '*[+-][0-9][0-9]:[0-9][0-9]') \
+               THEN {instant} \
+               WHEN substr({col},1,10) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]' \
+                AND (length({col}) = 10 OR substr({col},11,1) IN ('T','t',' ')) \
+               THEN substr({col},1,10) {date_op} ?{date} \
+               ELSE 0 END)"
     ))
 }
 
@@ -1122,6 +1135,66 @@ mod tests {
         assert_eq!(
             rows.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
             [scheduled.id.as_str()]
+        );
+    }
+
+    #[test]
+    fn day_atoms_read_legacy_deadline_forms_by_their_local_date() {
+        // Round-2 PARSE-4 regression: julianday() is NULL on forms the app
+        // stored before write-normalisation, so they vanished from `today`
+        // and showed up in `!today`; naive times were read as UTC.
+        let rows = [
+            ("d_date", "2026-10-06"),
+            ("d_z_late", "2026-10-05T23:30:00Z"),
+            ("d_z_early_prev", "2026-10-05T22:30:00Z"),
+            ("d_bst_late", "2026-10-06T23:59:59+01:00"),
+            ("d_bst_midnight", "2026-10-06T00:00:00+01:00"),
+            ("d_next_mid", "2026-10-07T00:00:00+01:00"),
+            ("d_naive_late", "2026-10-06T23:30:00"),
+            ("d_naive_space", "2026-10-06 10:00"),
+            ("d_basic_off", "2026-10-06T10:00:00+0100"),
+            ("d_short_off", "2026-10-06T10:00+01"),
+            ("d_bracket", "2026-10-06T10:00:00+01:00[Europe/London]"),
+            ("d_frac", "2026-10-06T10:00:00.123456+01:00"),
+            ("d_lower_t", "2026-10-06t10:00:00z"),
+            ("d_junk", "in two weeks"),
+            ("d_junk_prefix", "2026-10-06xyz"),
+        ];
+        let now = london(2026, 10, 6, 12);
+        let today = [
+            "d_basic_off",
+            "d_bracket",
+            "d_bst_late",
+            "d_bst_midnight",
+            "d_date",
+            "d_frac",
+            "d_lower_t",
+            "d_naive_late",
+            "d_naive_space",
+            "d_short_off",
+            "d_z_late",
+        ];
+        assert_eq!(day_titles(&rows, &Expr::Today, &now), today);
+        assert_eq!(
+            day_titles(&rows, &Expr::DueOn("2026-10-06".into()), &now),
+            today
+        );
+        assert_eq!(
+            day_titles(&rows, &Expr::Not(Box::new(Expr::Today)), &now),
+            ["d_junk", "d_junk_prefix", "d_next_mid", "d_z_early_prev"]
+        );
+        assert_eq!(
+            day_titles(&rows, &Expr::Yesterday, &now),
+            ["d_z_early_prev"]
+        );
+        assert_eq!(day_titles(&rows, &Expr::Tomorrow, &now), ["d_next_mid"]);
+        assert_eq!(
+            day_titles(&rows, &Expr::DueBefore("2026-10-06".into()), &now),
+            ["d_z_early_prev"]
+        );
+        assert_eq!(
+            day_titles(&rows, &Expr::DueAfter("2026-10-06".into()), &now),
+            ["d_next_mid"]
         );
     }
 

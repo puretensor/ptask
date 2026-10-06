@@ -49,9 +49,12 @@ Boolean expressions over field tokens. Status is not a token: use
 ### Field tokens
 
 A "day" is a calendar day in the operator timezone (`Europe/London`). A
-date-only deadline (`2026-10-02`) compares as a date; a datetime deadline
-compares as an instant against that day's local start and end, whatever
-offset it was stored with (`2026-10-20T23:30:00Z` is 21 Oct in BST).
+datetime deadline with a `Z` or `±HH:MM` offset compares as an instant
+against that day's local start and end (`2026-10-20T23:30:00Z` is 21 Oct in
+BST). A date-only deadline (`2026-10-02`), and any older row stored without
+such an offset (naive `2026-10-02T23:30`, `+0100`, `[Europe/London]`),
+compares by the date written at its start. A deadline with no readable date
+matches no day.
 
 | Token | Predicate |
 |---|---|
