@@ -9,6 +9,12 @@ Type=simple
 # Optional per-instance knobs (title, domains, bind, PTASK_ACTOR) live here.
 # Browser login env vars (PTASK_DASH_PASS/USER/SESSION_STORE/SECURE_COOKIE) are unused.
 # PTASK_DB defaults to ~/puretensor-tasks/tasks.db (read-only). Writes shell out to ~/.cargo/bin/pt.
+# Those pt children are DB writers: like every other writer (whose units load
+# ~/puretensor-tasks/.env) they must leave WAL checkpoints to Litestream.
+# Set here rather than loading .env, which would hand the server's token and
+# actor to the sidecar. On a host without Litestream, override it in
+# .dashboard.env (read after this line), e.g. PTASK_WAL_AUTOCHECKPOINT=1000.
+Environment=PTASK_WAL_AUTOCHECKPOINT=0
 EnvironmentFile=%h/puretensor-tasks/.dashboard.env
 WorkingDirectory=%h/worktrees/ptask-production/dashboard
 ExecStart=/usr/bin/python3 %h/worktrees/ptask-production/dashboard/server.py

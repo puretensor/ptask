@@ -61,6 +61,33 @@ Restore: copy a snapshot back to `~/puretensor-tasks/tasks.db` (stop Python
 services first if running). The pre-v0.1.0 baseline is at
 `~/puretensor-tasks/tasks.db.pre-ptask-backup`.
 
+### Rolling back a release
+
+Every `pt` process applies its embedded migrations on open, so the first
+command run by a new binary moves the schema forward. An older binary then
+refuses that DB ("database schema is at V20__..., newer than this pt binary
+knows"): it cannot honour constraints, triggers or columns it has never
+heard of, so running it anyway could write rows the newer schema considers
+invalid. Migrations are forward-only; there is no down-migration.
+
+To roll back a release that added a migration:
+
+1. Before deploying, check whether it adds one
+   (`git diff --stat <old-tag>..<new-tag> -- crates/ptask-core/migrations`)
+   and, if so, take a fresh snapshot first
+   (`systemctl --user start ptask-backup.service`).
+2. To roll back, stop every `pt` writer (the timers and services listed
+   under Litestream *Recovery* below, plus `ptask-serve` and
+   `ptask-dashboard`), restore the pre-upgrade snapshot (or a Litestream
+   point-in-time restore from just before the deploy) over `tasks.db`,
+   install the old binary, and start the services again.
+3. Writes made after the upgrade are in the newer DB only; re-enter them,
+   or keep the newer binary and fix forward instead.
+
+A release whose migrations only add tables or nullable columns can also be
+rolled back by fixing forward (a patch release on the newer schema); prefer
+that over a restore when the data written since the deploy matters.
+
 ## Distillation (v3.0.0)
 
 `pt distill` runs the native Rust delta pipeline over unprocessed
@@ -323,6 +350,12 @@ config — see `scripts/litestream/litestream.yml`.
    LITESTREAM_SECRET_ACCESS_KEY=...
    ```
 
+Every process that writes the DB must open it with
+`PTASK_WAL_AUTOCHECKPOINT=0` (a per-connection pragma, not stored in the
+file): the `scripts/systemd` units get it from `~/puretensor-tasks/.env`, and
+`dashboard/ptask-dashboard.service` sets it for the `pt` writers the sidecar
+spawns.
+
 ### One-time SQLite tunings
 
 ```bash
@@ -379,6 +412,12 @@ address (`PTASK_SERVE_BIND`, e.g. `http://100.x.y.z:9501`);
 that interface IP directly, keeping the API off the public/LAN NICs.
 Application-level auth is now fail-closed for non-loopback binds. Only use
 `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately isolated test deployment.
+
+The server speaks HTTP/1.1 and closes a connection whose request headers
+take longer than 30s to arrive (slow-header / slowloris protection; idle
+keep-alive connections are reaped the same way). Request bodies and streamed
+responses (the `/mcp` SSE stream) are not time-limited. On SIGTERM it
+finishes in-flight requests, then gives queued outbound webhooks up to 15s.
 
 ### Inspect
 

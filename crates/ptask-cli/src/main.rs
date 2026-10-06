@@ -234,7 +234,7 @@ struct ReapArgs {
 
 #[derive(clap::Args, Debug)]
 struct DependArgs {
-    /// The dependent task (cannot start until --on is done).
+    /// The dependent task (cannot be closed until --on is done or dismissed).
     query: String,
     /// The prerequisite task.
     #[arg(long = "on")]
@@ -1807,6 +1807,26 @@ fn gcalendar_path(explicit: Option<&Path>, home: Option<&std::ffi::OsStr>) -> Re
     Ok(PathBuf::from(home).join(".config/puretensor/gcalendar.py"))
 }
 
+/// Wall-clock window of a placement: `offset_min` into the slot, lasting
+/// `duration_min`.
+fn plan_window(
+    slot_start: ptask_core::jiff::Timestamp,
+    offset_min: i64,
+    duration_min: i64,
+) -> Result<(ptask_core::jiff::Timestamp, ptask_core::jiff::Timestamp)> {
+    use ptask_core::jiff;
+    // try_minutes: `Span::minutes` panics outside jiff's range, and these
+    // numbers come from gcalendar.py output and task durations.
+    let minutes = |n: i64| {
+        jiff::Span::new()
+            .try_minutes(n)
+            .with_context(|| format!("plan: {n} minutes is out of range"))
+    };
+    let start_ts = slot_start.checked_add(minutes(offset_min)?)?;
+    let end_ts = start_ts.checked_add(minutes(duration_min)?)?;
+    Ok((start_ts, end_ts))
+}
+
 fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
     use ptask_core::jiff;
     use std::process::Command as Proc;
@@ -1890,8 +1910,7 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
             .start
             .parse()
             .with_context(|| format!("parse slot start {}", fb.free_slots[p.slot].start))?;
-        let start_ts = slot_start.checked_add(jiff::Span::new().minutes(p.offset_min))?;
-        let end_ts = start_ts.checked_add(jiff::Span::new().minutes(p.duration_min))?;
+        let (start_ts, end_ts) = plan_window(slot_start, p.offset_min, p.duration_min)?;
         let c = &candidates[p.cand];
         scheduled.push(ScheduledItem {
             pt_id: c.pt_id.clone(),
@@ -2828,7 +2847,11 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
     use std::io::Write;
     let stale_cutoff = ptask_core::dates::now_in_operator_tz()
         .map_err(anyhow::Error::msg)?
-        .checked_sub(ptask_core::jiff::Span::new().days(a.stale_days))
+        .checked_sub(
+            ptask_core::jiff::Span::new()
+                .try_days(a.stale_days)
+                .map_err(|e| anyhow::anyhow!("--stale-days {}: {e}", a.stale_days))?,
+        )
         .map_err(|e| anyhow::anyhow!("cutoff math: {e}"))?;
     let cutoff_iso = ptask_core::dates::format_iso(&stale_cutoff);
     let stale = stale_review_tasks(db, &cutoff_iso)?;
@@ -3795,7 +3818,7 @@ fn cmd_backfill(db: &Db) -> Result<()> {
 mod tests {
     use super::{
         ExportArgs, cmd_export, delegation_command, gcalendar_path, git_has_staged_changes,
-        remote_list_filter, run_git_checked, short_id, stale_review_tasks,
+        plan_window, remote_list_filter, run_git_checked, short_id, stale_review_tasks,
     };
 
     #[test]
@@ -3865,6 +3888,18 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("{query:?}: {e:#}"));
         }
+    }
+
+    #[test]
+    fn plan_window_rejects_out_of_range_minutes_without_panicking() {
+        // `Span::new().minutes(n)` panics outside jiff's range; the minutes
+        // come from gcalendar.py output and task durations.
+        let start: ptask_core::jiff::Timestamp = "2026-10-06T09:00:00Z".parse().unwrap();
+        let (s, e) = plan_window(start, 30, 45).unwrap();
+        assert_eq!(s.to_string(), "2026-10-06T09:30:00Z");
+        assert_eq!(e.to_string(), "2026-10-06T10:15:00Z");
+        assert!(plan_window(start, i64::MAX, 30).is_err());
+        assert!(plan_window(start, 0, i64::MAX).is_err());
     }
 
     #[test]

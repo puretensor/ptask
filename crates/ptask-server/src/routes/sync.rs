@@ -365,8 +365,27 @@ async fn sync(
         );
         let cmd_state = state.clone();
         let actor = identity.client_id.clone();
-        let outcome = match crate::blocking::db_value(move || apply_one(&cmd_state, &cmd, &actor))
-            .await
+        let cmd_outbox = outbox.clone();
+        // Enqueue the webhook inside the commit-order lock, so concurrent
+        // requests' events reach subscribers in the order they committed.
+        let outcome = match crate::blocking::db_value(move || {
+            crate::webhooks::commit_ordered(|| {
+                let outcome = apply_one(&cmd_state, &cmd, &actor);
+                if let CommandOutcome::Applied {
+                    task_uuid, payload, ..
+                } = &outcome
+                {
+                    cmd_outbox.send(crate::webhooks::OutboundEvent {
+                        event_type: payload.event_type.clone(),
+                        task_uuid: task_uuid.clone(),
+                        payload: payload.payload.clone(),
+                        event_uuid: Some(cmd.uuid.clone()),
+                    });
+                }
+                outcome
+            })
+        })
+        .await
         {
             Ok(o) => o,
             Err(e) => {
@@ -388,20 +407,11 @@ async fn sync(
                 }
                 status.insert(cmd_uuid, Value::String("ok".into()));
             }
-            CommandOutcome::Applied {
-                task_uuid,
-                temp,
-                payload,
-            } => {
+            CommandOutcome::Applied { temp, .. } => {
                 if let Some((temp_id, tu)) = temp {
                     temp_map.insert(temp_id, tu);
                 }
                 needs_rescore |= rescores;
-                outbox.send(crate::webhooks::OutboundEvent {
-                    event_type: payload.event_type,
-                    task_uuid,
-                    payload: payload.payload,
-                });
                 status.insert(cmd_uuid, Value::String("ok".into()));
             }
         }

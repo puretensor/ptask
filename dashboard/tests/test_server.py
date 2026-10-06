@@ -83,6 +83,21 @@ class ReadmeDefaultsTests(unittest.TestCase):
         )
 
 
+class SystemdUnitTests(unittest.TestCase):
+    def test_spawned_pt_writers_leave_checkpoints_to_litestream(self):
+        # The unit loads .dashboard.env, not the .env every other pt writer
+        # loads, so the pt processes the sidecar spawns never saw
+        # PTASK_WAL_AUTOCHECKPOINT=0 and checkpointed on SQLite's default,
+        # racing Litestream. The unit sets it; .dashboard.env (read after)
+        # may still override it.
+        unit = (Path(server.__file__).parent / "ptask-dashboard.service").read_text()
+        lines = [l.strip() for l in unit.splitlines()]
+        setting = "Environment=PTASK_WAL_AUTOCHECKPOINT=0"
+        self.assertIn(setting, lines)
+        env_file = next(i for i, l in enumerate(lines) if l.startswith("EnvironmentFile="))
+        self.assertLess(lines.index(setting), env_file)
+
+
 class DeadlineTests(unittest.TestCase):
     def test_date_only_deadline_due_today_is_not_overdue(self):
         today = server._operator_today()
@@ -434,6 +449,38 @@ class EditFailureTests(unittest.TestCase):
             httpd.server_close()
 
 
+class DoneBlockedTests(unittest.TestCase):
+    def _post_done(self, result):
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+        try:
+            with mock.patch.object(server, "pt_exec", return_value=result):
+                connection.request("POST", "/api/tasks/PT-3/done", body=b"{}",
+                                   headers={"Content-Type": "application/json"})
+                response = connection.getresponse()
+                return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+            httpd.shutdown()
+            thread.join(timeout=2)
+            httpd.server_close()
+
+    def test_close_refused_by_open_blockers_is_a_409_with_pts_message(self):
+        # A refused close is a state conflict the operator can act on, not a
+        # server fault; it used to come back as HTTP 500.
+        msg = ("\u2716 ERROR   PT-3 is blocked by open task(s): PT-1 \u2014 complete or "
+               "dismiss them first, or drop the edge with `pt depend PT-3 --on <PT-ID> --clear`")
+        status, body = self._post_done((False, msg))
+        self.assertEqual(status, 409)
+        self.assertEqual(body, {"ok": False, "message": msg})
+
+    def test_other_done_failures_stay_500(self):
+        status, body = self._post_done((False, "exec error: timed out"))
+        self.assertEqual(status, 500)
+        self.assertFalse(body["ok"])
+
 class OriginTests(unittest.TestCase):
     def test_cross_origin_post_is_rejected_before_mutation(self):
         old_pt_exec = server.pt_exec
@@ -530,6 +577,43 @@ class EventHistoryTests(unittest.TestCase):
         self.assertEqual(events[0]["actor"], "hal")
         self.assertEqual(events[0]["payload"], {"to": "done"})
 
+
+    def test_q_task_events_orders_by_commit_not_ts_text(self):
+        # CORE-11: ts is written in the operator timezone, so across the
+        # autumn fall-back hour a later event (01:10+00:00) sorts below an
+        # earlier one (01:30+01:00) as text. History must follow commit order.
+        old_db = server.DB_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute(
+                """
+                CREATE TABLE pt_event_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT NOT NULL UNIQUE,
+                    task_uuid TEXT,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    actor TEXT
+                )
+                """
+            )
+            con.executemany(
+                """
+                INSERT INTO pt_event_log(uuid, task_uuid, event_type, payload, ts, actor)
+                VALUES (?, 'PT-1', 'task.updated', '{}', ?, 'hal')
+                """,
+                [("first-bst", "2026-10-25T01:30:00+01:00"),
+                 ("second-gmt", "2026-10-25T01:10:00+00:00")],
+            )
+            con.commit()
+            con.close()
+            server.DB_PATH = f.name
+            try:
+                events = server.q_task_events("PT-1")
+            finally:
+                server.DB_PATH = old_db
+        self.assertEqual([e["uuid"] for e in events], ["second-gmt", "first-bst"])
 
 class StatsFluxTests(unittest.TestCase):
     def test_q_stats_reports_windowed_flux_split_by_origin(self):

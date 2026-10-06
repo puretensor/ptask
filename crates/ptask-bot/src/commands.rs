@@ -81,19 +81,32 @@ pub async fn dispatch(bot: Bot, msg: Message, cmd: PtCommand, db: Db) -> Result<
         "command received"
     );
     match cmd {
-        PtCommand::Help => {
-            let text = format!(
-                "{}\n\nExamples:\n  /add Buy bread 2026-10-02 @home p1 ~30m\n  /list today | overdue\n  /done PT-42\n  /next",
-                PtCommand::descriptions()
-            );
-            send(&bot, chat_id, text).await?;
-        }
+        PtCommand::Help => send(&bot, chat_id, help_text()).await?,
         PtCommand::Add(text) => handle_add(&bot, chat_id, &db, &text).await?,
         PtCommand::List(filter) => handle_list(&bot, chat_id, &db, &filter).await?,
         PtCommand::Done(query) => handle_done(&bot, chat_id, &db, &query).await?,
         PtCommand::Next(rest) => handle_next(&bot, chat_id, &db, &rest).await?,
     }
     Ok(())
+}
+
+/// `/help` reply. The `/add` example's date is a week out, computed at
+/// send time: a fixed date goes stale, and quick-add keeps a past date as
+/// title text, so the example would stop demonstrating the deadline token.
+fn help_text() -> String {
+    let example_date = ptask_core::dates::now_in_operator_tz()
+        .ok()
+        .and_then(|now| {
+            now.date()
+                .checked_add(ptask_core::jiff::Span::new().days(7))
+                .ok()
+        })
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "2099-01-31".into());
+    format!(
+        "{}\n\nExamples:\n  /add Buy bread {example_date} @home p1 ~30m\n  /list today | overdue\n  /done PT-42\n  /next",
+        PtCommand::descriptions()
+    )
 }
 
 async fn handle_add(bot: &Bot, chat_id: ChatId, db: &Db, text: &str) -> Result<()> {
@@ -234,6 +247,23 @@ async fn send(bot: &Bot, chat_id: ChatId, text: impl Into<String>) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::PtCommand;
+
+    #[test]
+    fn help_add_example_date_is_a_live_deadline() {
+        // The example used a fixed 2026-10-02: once past, quick-add keeps a
+        // past date as title text, so the example demonstrated nothing.
+        let help = super::help_text();
+        let example = help
+            .split("Examples:")
+            .nth(1)
+            .expect("help has examples")
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("/add "))
+            .expect("help has an /add example");
+        let q = ptask_core::quickadd::parse(example).unwrap();
+        assert!(q.deadline.is_some(), "example {example:?} sets no deadline");
+        assert_eq!(q.title, "Buy bread");
+    }
 
     #[test]
     fn parses_commands_with_bot_suffix_and_args() {

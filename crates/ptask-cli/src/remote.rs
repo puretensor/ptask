@@ -25,6 +25,44 @@ pub fn default_url() -> String {
     std::env::var("PTASK_SYNC_URL").unwrap_or_else(|_| "http://127.0.0.1:9501".to_string())
 }
 
+/// A warning when the bearer token would cross the network in cleartext:
+/// plain `http` to a host that is neither loopback nor on the tailnet.
+/// Tailscale addresses (100.64.0.0/10, fd7a:115c:a1e0::/48, `*.ts.net`) ride
+/// WireGuard, so http there is already encrypted; that is the production
+/// setup, which is why this warns rather than refuses.
+fn cleartext_token_warning(base: &str, sends_token: bool) -> Option<String> {
+    if !sends_token {
+        return None;
+    }
+    let url = reqwest::Url::parse(base).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let host = url.host_str()?;
+    let trusted = match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            ip.is_loopback() || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]
+        }
+        Err(_) => {
+            let name = host.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost") || name.ends_with(".ts.net")
+        }
+    };
+    (!trusted).then(|| {
+        format!(
+            "PTASK_API_TOKEN is sent in cleartext to {base} (plain http, not loopback or \
+             tailnet); use https or a Tailscale address"
+        )
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteClient {
     base: String,
@@ -49,12 +87,17 @@ impl RemoteClient {
             .timeout(Duration::from_secs(30))
             .build()
             .context("build remote client")?;
+        let api_token = std::env::var("PTASK_API_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(warning) = cleartext_token_warning(base, api_token.is_some()) {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| eprintln!("warning: {warning}"));
+        }
         Ok(Self {
             base: base.trim_end_matches('/').to_string(),
-            api_token: std::env::var("PTASK_API_TOKEN")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
+            api_token,
             client,
             idempotency_key: None,
         })
@@ -487,6 +530,38 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn cleartext_token_warning_only_for_untrusted_http_hosts() {
+        // CLI-18: the bearer token went over plain http to any host with
+        // no warning. Loopback, the tailnet (WireGuard-encrypted) and https
+        // are fine; anything else is warned about when a token is sent.
+        for url in [
+            "http://192.168.1.20:9501",
+            "http://10.0.0.5:9501",
+            "http://tasks.example.com",
+            "HTTP://8.8.8.8",
+            "http://[2001:db8::1]:9501",
+        ] {
+            assert!(cleartext_token_warning(url, true).is_some(), "{url}");
+            assert!(cleartext_token_warning(url, false).is_none(), "{url}");
+        }
+        for url in [
+            "https://tasks.example.com",
+            "http://127.0.0.1:9501",
+            "http://127.8.0.1",
+            "http://localhost:9501",
+            "http://[::1]:9501",
+            "http://100.64.0.1:9501",
+            "http://100.127.255.254",
+            "http://[fd7a:115c:a1e0::1]:9501",
+            "http://tensor-core.tail1234.ts.net:9501",
+        ] {
+            assert!(cleartext_token_warning(url, true).is_none(), "{url}");
+        }
+        // 100.128.0.0 is outside 100.64.0.0/10.
+        assert!(cleartext_token_warning("http://100.128.0.1", true).is_some());
+    }
 
     fn existing_tasks_json() -> Vec<Value> {
         vec![

@@ -16,23 +16,26 @@ const FLAG: &str = "v2_converted";
 /// `task.created` events). Terminal parents keep their JSON as history —
 /// promoting 2,700+ steps of already-done work would be archaeology, not
 /// utility. Returns the number of children created; 0 on re-runs.
+///
+/// One IMMEDIATE transaction covers the flag check, every child and the
+/// flag: a failure part-way rolls everything back, so a retry starts clean
+/// instead of re-creating the children committed before the failure, and a
+/// concurrent run waits and then sees the flag.
 pub fn promote_subtasks_once(db: &Db) -> Result<usize> {
-    {
-        let conn = db.get()?;
-        let done: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pt_counters WHERE name = ?1",
-            [FLAG],
-            |r| r.get(0),
-        )?;
-        if done > 0 {
-            return Ok(0);
-        }
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let done: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pt_counters WHERE name = ?1",
+        [FLAG],
+        |r| r.get(0),
+    )?;
+    if done > 0 {
+        return Ok(0);
     }
 
     let ctx = EventCtx::system("migration");
     let parents: Vec<(String, Option<String>, i64, String, String)> = {
-        let conn = db.get()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT id, pt_id, priority, status_v2, COALESCE(subtasks,'[]')
              FROM tasks
              WHERE status_v2 NOT IN ('done','dismissed')
@@ -56,8 +59,6 @@ pub fn promote_subtasks_once(db: &Db) -> Result<usize> {
             }
             let child_uuid = uuid::Uuid::new_v4().to_string();
             let now = crate::dates::format_iso(&crate::dates::now_in_operator_tz()?);
-            let mut conn = db.get()?;
-            let tx = conn.transaction()?;
             let n: i64 = tx.query_row(
                 "UPDATE pt_counters SET value = value + 1 WHERE name='pt_id' RETURNING value",
                 [],
@@ -102,16 +103,15 @@ pub fn promote_subtasks_once(db: &Db) -> Result<usize> {
                 }),
                 &ctx,
             )?;
-            tx.commit()?;
             created += 1;
         }
     }
 
-    let conn = db.get()?;
-    conn.execute(
+    tx.execute(
         "INSERT OR IGNORE INTO pt_counters (name, value) VALUES (?1, 1)",
         [FLAG],
     )?;
+    tx.commit()?;
     info!(
         target: "ptask::convert",
         parents = parents.len(),
@@ -182,6 +182,45 @@ mod tests {
         })
         .unwrap();
 
+        assert_eq!(promote_subtasks_once(&db).unwrap(), 0, "idempotent");
+    }
+
+    #[test]
+    fn promotion_failing_midway_is_retried_without_duplicate_children() {
+        // CORE-10: each child committed in its own transaction and the
+        // done-flag was only set at the end, so a failure after the first
+        // child left it in place and the retry created it again.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let parent =
+            create_with_extensions(&db, NewTask::minimal("parent"), Extensions::default(), &ctx)
+                .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET subtasks='[\"step one\",\"step two\"]' WHERE id=?1",
+                [&parent.id],
+            )?;
+            c.execute_batch(
+                "CREATE TRIGGER boom BEFORE INSERT ON tasks WHEN NEW.title = 'step two'
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(promote_subtasks_once(&db).is_err());
+        db.with_conn(|c| Ok(c.execute_batch("DROP TRIGGER boom")?))
+            .unwrap();
+
+        assert_eq!(promote_subtasks_once(&db).unwrap(), 2);
+        let titles: Vec<String> = db
+            .with_conn(|c| {
+                let mut stmt =
+                    c.prepare("SELECT title FROM tasks WHERE parent_uuid = ?1 ORDER BY title")?;
+                let rows = stmt.query_map([&parent.id], |r| r.get(0))?;
+                Ok(rows.collect::<std::result::Result<_, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(titles, ["step one", "step two"]);
         assert_eq!(promote_subtasks_once(&db).unwrap(), 0, "idempotent");
     }
 }

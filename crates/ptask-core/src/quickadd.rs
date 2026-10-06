@@ -12,15 +12,15 @@
 //! - `!HH:MM`        — reminder time-of-day (a valid time only; echoed by
 //!   `pt add`, not persisted)
 //! - `//rest of line` — everything after the `//` is the description
-//! - Future ISO date — an exact `YYYY-MM-DD` token. Other date-like prose is
-//!   kept as literal title text.
+//! - Future ISO date — an exact `YYYY-MM-DD` token after today, stored
+//!   date-only. Other date-like prose is kept as literal title text.
 //! - `"quoted text"` — words inside double quotes are literal title text,
 //!   never interpreted as markers or dates (`add 'Review the "p1 incident"'`).
 //! - Anything else   — title words
 //!
 //! Example:
 //!   `Buy bread 2099-05-14 @home #fleet p1 ~30m //grocery list`
-//!   →  title="Buy bread", deadline=<2099-05-14T00:00 London>, labels=["home"],
+//!   →  title="Buy bread", deadline="2099-05-14", labels=["home"],
 //!      project="fleet", priority=1, duration_min=30, description="grocery list"
 
 use crate::dates;
@@ -111,8 +111,22 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     // or date phrases. (Note: the `//` description split above runs first,
     // so a quoted token-leading `//` still starts the description.)
     let (raw, literal) = tokenize_quoted(&head);
+    // `next_literal[i]` = index of the first quoted token at or after `i`
+    // (or `raw.len()`). Precomputed in one backwards pass: recomputing it
+    // per token rescanned to the end of input and made parsing O(n^2).
+    let mut next_literal = vec![raw.len(); raw.len()];
+    for i in (0..raw.len()).rev() {
+        next_literal[i] = if literal[i] {
+            i
+        } else {
+            next_literal.get(i + 1).copied().unwrap_or(raw.len())
+        };
+    }
     let mut idx = 0usize;
     let mut title_words: Vec<&str> = Vec::new();
+    // An explicit ISO date is the deadline whatever its position; a
+    // recurrence clause only supplies the first occurrence when there is none.
+    let mut explicit_deadline = false;
 
     while idx < raw.len() {
         let tok = raw[idx];
@@ -125,11 +139,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         }
         // Multi-token lookahead (dates, recurrence) must not consume into a
         // quoted span; bound the scan at the next literal token.
-        let scan_end = literal[idx..]
-            .iter()
-            .position(|&l| l)
-            .map(|off| idx + off)
-            .unwrap_or(raw.len());
+        let scan_end = next_literal[idx];
 
         // Explicit due:<date> — scheduled date (distinct from deadline).
         if let Some(rest) = tok.strip_prefix("due:")
@@ -141,17 +151,20 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             idx += 1;
             continue;
         }
-        // Explicit @label
-        if let Some(rest) = tok.strip_prefix('@')
+        // Explicit @label (trailing prose punctuation is not part of it:
+        // "ask @bob, then" labels `bob`).
+        if let Some(rest) = tok.strip_prefix('@').map(trim_prose_punct)
             && !rest.is_empty()
         {
             out.labels.push(rest.to_string());
             idx += 1;
             continue;
         }
-        // Explicit #project
-        if let Some(rest) = tok.strip_prefix('#')
+        // Explicit #project. An all-digit `#42` is an issue/PR reference,
+        // not a project.
+        if let Some(rest) = tok.strip_prefix('#').map(trim_prose_punct)
             && !rest.is_empty()
+            && !rest.bytes().all(|b| b.is_ascii_digit())
         {
             out.project = Some(rest.to_string());
             idx += 1;
@@ -160,10 +173,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         // Priority pN (1..=5), native pTask scale: p1=low, p2=normal,
         // p3=high, p4=urgent, p5=critical. Matches the display, `--priority`,
         // and `pt priority` — no Todoist inversion.
-        if let Some(rest) = tok.strip_prefix('p')
-            && let Ok(n) = rest.parse::<i64>()
-            && (1..=5).contains(&n)
-        {
+        if let Some(n) = priority_token(tok) {
             out.priority = Some(n);
             idx += 1;
             continue;
@@ -180,8 +190,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         // Only a real time of day: `!re:invoice` or `!note:` used to be
         // swallowed out of the title as a "reminder" nothing stores.
         if let Some(rest) = tok.strip_prefix('!')
-            && rest.len() <= 8
-            && rest.parse::<jiff::civil::Time>().is_ok()
+            && is_hh_mm(rest)
         {
             out.reminder = Some(rest.to_string());
             idx += 1;
@@ -190,36 +199,47 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
 
         // Recurrence: `every X` / `every! X`. Greedy consumption up to next
         // explicit marker. Optional trailing " at <time>" sets the time-of-day
-        // for the first (and subsequent) occurrence.
+        // for the first (and subsequent) occurrence. A rule whose first
+        // occurrence can't be computed (`every 9999999 days` overflows the
+        // calendar) stays title text rather than failing the whole add.
         if (tok.eq_ignore_ascii_case("every") || tok.eq_ignore_ascii_case("every!"))
             && let Some((rec, time_of_day, consumed, phrase)) =
                 try_recurrence_match(&raw[..scan_end], idx, &now)
+            && let Ok(deadline) = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())
         {
-            let deadline = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())?;
-            if rec.freq == recurrence::Freq::Monthly && rec.bymonthday.is_empty() {
-                let anchor = match time_of_day.as_ref() {
-                    Some(time) => crate::tasks::combine_date_with_time(&now, time)?,
-                    None => now.clone(),
-                };
-                out.recurrence_anchor = Some(dates::format_iso(&anchor));
+            // An explicit date in the text beats the rule's first occurrence.
+            if !explicit_deadline {
+                if rec.freq == recurrence::Freq::Monthly && rec.bymonthday.is_empty() {
+                    let anchor = match time_of_day.as_ref() {
+                        Some(time) => crate::tasks::combine_date_with_time(&now, time)?,
+                        None => now.clone(),
+                    };
+                    out.recurrence_anchor = Some(dates::format_iso(&anchor));
+                }
+                out.deadline_phrase = Some(phrase);
+                out.deadline = Some(dates::format_iso(&deadline));
             }
-            out.deadline_phrase = Some(phrase);
-            out.deadline = Some(dates::format_iso(&deadline));
             out.recurrence = Some(rec);
             idx += consumed;
             continue;
         }
 
         // Body-text deadline inference is deliberately narrow. Only a full,
-        // standalone ISO date that is strictly in the future is eligible;
-        // ambiguous fragments (`4/5`), natural-language dates, and past ISO
-        // dates remain ordinary title text and never set-then-warn.
+        // standalone ISO date after today is eligible; ambiguous fragments
+        // (`4/5`), natural-language dates, and past ISO dates remain
+        // ordinary title text and never set-then-warn. Today's date stays
+        // text too: agent-written bodies carry it as provenance
+        // ("discovered 2026-08-01"), which must not become a due-today
+        // deadline; `--deadline` sets one explicitly. It is stored date-only,
+        // like `--deadline 2026-06-30`: due all day, not overdue from
+        // midnight.
         if is_full_iso_date(tok)
             && let Ok(parsed) = dates::parse_at(tok, now.clone())
-            && parsed > now
+            && parsed.date() > now.date()
         {
             out.deadline_phrase = Some(tok.to_string());
-            out.deadline = Some(dates::format_iso(&parsed));
+            out.deadline = Some(parsed.date().to_string());
+            explicit_deadline = true;
             idx += 1;
             continue;
         }
@@ -294,12 +314,30 @@ fn parse_duration(s: &str) -> Option<i64> {
     if num_part.is_empty() {
         return None;
     }
+    // Digits only: `i64::from_str` also takes a sign (`~-30m`, `~+5m`).
+    if !num_part.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let n: i64 = num_part.parse().ok()?;
+    if n == 0 {
+        return None;
+    }
     match unit {
         'm' => Some(n),
         'h' => Some(n.checked_mul(60)?),
         'd' => Some(n.checked_mul(60 * 24)?),
         _ => None,
+    }
+}
+
+/// Exact `HH:MM` (00:00..=23:59). Stricter than `civil::Time` parsing,
+/// which also takes `12`, `2026`, `T12:00` and `12:00:00`.
+fn is_hh_mm(s: &str) -> bool {
+    match s.as_bytes() {
+        [h0, h1, b':', m0, m1] if [h0, h1, m0, m1].iter().all(|b| b.is_ascii_digit()) => {
+            (h0 - b'0') * 10 + (h1 - b'0') < 24 && (m0 - b'0') * 10 + (m1 - b'0') < 60
+        }
+        _ => false,
     }
 }
 
@@ -315,7 +353,7 @@ fn is_full_iso_date(tok: &str) -> bool {
 }
 
 /// Consume tokens starting at `start` (`every` / `every!`) up to the next
-/// explicit marker or end-of-input. Returns the parsed Recurrence, an optional
+/// explicit marker, ISO date, `due:` token, or end-of-input. Returns the parsed Recurrence, an optional
 /// time-of-day (from a trailing " at <time>"), the number of tokens consumed,
 /// and the original phrase string (for `deadline_phrase`).
 fn try_recurrence_match(
@@ -326,7 +364,8 @@ fn try_recurrence_match(
     let mut end = start + 1;
     while end < toks.len() {
         let t = toks[end];
-        if is_explicit_marker(t) {
+        // An explicit date is its own token, never part of the rule.
+        if is_explicit_marker(t) || is_full_iso_date(t) || t.starts_with("due:") {
             break;
         }
         // Don't fold a second `every` clause into this one.
@@ -386,13 +425,20 @@ fn is_explicit_marker(tok: &str) -> bool {
     if tok.starts_with("//") {
         return true;
     }
-    if let Some(rest) = tok.strip_prefix('p')
-        && let Ok(n) = rest.parse::<i64>()
-        && (1..=5).contains(&n)
-    {
-        return true;
+    priority_token(tok).is_some()
+}
+
+/// `p1`..`p5` exactly. `i64::from_str` also accepted `p+1` and `p01`.
+fn priority_token(tok: &str) -> Option<i64> {
+    match tok.as_bytes() {
+        [b'p', d @ b'1'..=b'5'] => Some(i64::from(d - b'0')),
+        _ => None,
     }
-    false
+}
+
+/// Strip sentence punctuation that trails a `@label` / `#project` in prose.
+fn trim_prose_punct(s: &str) -> &str {
+    s.trim_end_matches([',', '.', ';', ':', '!', '?', ')'])
 }
 
 /// Format a quick-add into a short human echo. Convenience for `pt add` output.
@@ -649,6 +695,26 @@ mod tests {
     }
 
     #[test]
+    fn iso_date_token_is_stored_date_only() {
+        // PARSE-6: the token used to be stored as a midnight timestamp, so
+        // the task read overdue for the whole of its due day.
+        let q = parse_at("Pay invoice 2026-12-25", anchor()).unwrap();
+        assert_eq!(q.deadline.as_deref(), Some("2026-12-25"));
+        let q = parse_at("Pay invoice 2026-05-14", anchor()).unwrap();
+        assert_eq!(q.title, "Pay invoice");
+        assert_eq!(q.deadline.as_deref(), Some("2026-05-14"));
+        // Today and yesterday are provenance text, not deadlines.
+        for d in ["2026-05-13", "2026-05-12"] {
+            let q = parse_at(&format!("Pay invoice {d}"), anchor()).unwrap();
+            assert_eq!(q.title, format!("Pay invoice {d}"));
+            assert!(q.deadline.is_none());
+        }
+        // Semantically invalid dates stay text.
+        let q = parse_at("Pay invoice 2026-02-30", anchor()).unwrap();
+        assert!(q.deadline.is_none());
+    }
+
+    #[test]
     fn relative_interval_is_literal() {
         let q = parse_at("Water plants 5 days", anchor()).unwrap();
         assert_eq!(q.title, "Water plants 5 days");
@@ -733,6 +799,41 @@ mod tests {
     }
 
     #[test]
+    fn recurrence_does_not_overwrite_or_swallow_an_explicit_date() {
+        // PARSE-8: the phrase scan ran past an ISO date / `due:` token and
+        // the recurrence's computed first occurrence replaced an explicit
+        // date given earlier in the input.
+        for input in [
+            "Pay rent 2026-12-25 every month",
+            "Pay rent every month 2026-12-25",
+        ] {
+            let q = parse_at(input, anchor()).unwrap();
+            assert_eq!(q.title, "Pay rent", "input={input}");
+            assert_eq!(q.deadline.as_deref(), Some("2026-12-25"), "input={input}");
+            assert_eq!(q.deadline_phrase.as_deref(), Some("2026-12-25"));
+            let rec = q.recurrence.expect("recurrence parsed");
+            assert_eq!(rec.original_input, "every month", "input={input}");
+        }
+        let q = parse_at("Standup every monday due:2026-06-01", anchor()).unwrap();
+        assert_eq!(q.title, "Standup");
+        assert_eq!(q.recurrence.unwrap().original_input, "every monday");
+        assert!(q.due.as_deref().unwrap().starts_with("2026-06-01"));
+        assert!(q.deadline.as_deref().unwrap().starts_with("2026-05-18"));
+    }
+
+    #[test]
+    fn out_of_range_recurrence_stays_title_text() {
+        // PARSE-16: a rule whose first occurrence overflows the calendar
+        // (`every 9999999 days`) failed the whole add instead of falling
+        // back to literal text like any other unusable phrase.
+        let q = parse_at("Water plants every 9999999 days @home", anchor()).unwrap();
+        assert_eq!(q.title, "Water plants every 9999999 days");
+        assert!(q.recurrence.is_none());
+        assert!(q.deadline.is_none());
+        assert_eq!(q.labels, vec!["home"]);
+    }
+
+    #[test]
     fn in_relative_interval_is_literal() {
         let q = parse_at("Water plants in 5 days", anchor()).unwrap();
         assert_eq!(q.title, "Water plants in 5 days");
@@ -795,6 +896,20 @@ mod tests {
     }
 
     #[test]
+    fn reminder_token_is_strictly_hh_mm() {
+        // PARSE-15: jiff's civil::Time parser accepts `12`, `2026`,
+        // `T12:00` and `12:00:00`, so those were swallowed as reminders
+        // although the documented grammar is `!HH:MM`.
+        for tok in ["!12", "!2026", "!T12:00", "!12:00:00", "!9:30", "!24:00"] {
+            let q = parse_at(&format!("ping ops {tok}"), anchor()).unwrap();
+            assert!(q.reminder.is_none(), "{tok} -> {:?}", q.reminder);
+            assert_eq!(q.title, format!("ping ops {tok}"));
+        }
+        let q = parse_at("ping ops !23:59", anchor()).unwrap();
+        assert_eq!(q.reminder.as_deref(), Some("23:59"));
+    }
+
+    #[test]
     fn title_punctuation_preserved() {
         let q = parse_at("Fix bug: foo bar (urgent!)", anchor()).unwrap();
         // The trailing "!)" isn't a valid !HH:MM reminder, so it stays in the title.
@@ -825,9 +940,68 @@ mod tests {
     }
 
     #[test]
+    fn loose_marker_lookalikes_stay_title_text() {
+        // PARSE-17: i64 parsing accepted `p+1` / `p01` as priorities and
+        // `~-30m` as a negative duration, and `#123` (an issue/PR ref)
+        // became the project.
+        for input in [
+            "fix p+1 bug",
+            "fix p01 bug",
+            "fix ~-30m bug",
+            "review PR #42",
+        ] {
+            let q = parse_at(input, anchor()).unwrap();
+            assert_eq!(q.title, input, "input={input}");
+            assert_eq!(q.priority, Some(2), "input={input}");
+            assert!(q.duration_min.is_none(), "input={input}");
+            assert!(q.project.is_none(), "input={input}");
+        }
+        // Trailing prose punctuation is not part of a label or project.
+        let q = parse_at("ping @bob, @alice. about #fleet;", anchor()).unwrap();
+        assert_eq!(q.labels, vec!["bob", "alice"]);
+        assert_eq!(q.project.as_deref(), Some("fleet"));
+        assert_eq!(q.title, "ping about");
+        // A bare punctuation marker is text.
+        let q = parse_at("well @, ok", anchor()).unwrap();
+        assert!(q.labels.is_empty());
+        assert_eq!(q.title, "well @, ok");
+        // Real markers are unaffected.
+        let q = parse_at("x p3 ~0m #p-1 @a_b", anchor()).unwrap();
+        assert_eq!(q.priority, Some(3));
+        assert_eq!(q.project.as_deref(), Some("p-1"));
+        assert_eq!(q.labels, vec!["a_b"]);
+        assert_eq!(q.title, "x ~0m");
+    }
+
+    #[test]
     fn token_only_input_is_rejected() {
         let err = parse_at("@ops p1 ~5m", anchor()).unwrap_err();
         assert!(format!("{}", err).contains("title is empty"));
+    }
+
+    #[test]
+    fn parse_is_linear_in_token_count() {
+        // PARSE-7: the per-token quoted-span lookahead rescanned to the end
+        // of input, so a 60k-token title (reachable via /sync task_create and
+        // MCP task_add) took ~7s in debug. 200k tokens must stay well clear
+        // of a second even unoptimised.
+        let input = "word ".repeat(200_000);
+        let started = std::time::Instant::now();
+        let q = parse_at(&input, anchor()).unwrap();
+        let took = started.elapsed();
+        assert_eq!(q.title.len(), 200_000 * 5 - 1);
+        assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+        // Recurrence lookahead and quoted spans stay linear too.
+        for input in [
+            format!("every {}", "word ".repeat(100_000)),
+            "every word ".repeat(50_000),
+            "\"q\" word ".repeat(50_000),
+        ] {
+            let started = std::time::Instant::now();
+            parse_at(&input, anchor()).unwrap();
+            let took = started.elapsed();
+            assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+        }
     }
 
     #[test]

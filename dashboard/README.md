@@ -179,6 +179,7 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_DASH_DEFAULT_DOMAIN` | first configured key | domain assigned to tasks without an explicit configured `domain:` label |
 | `PTASK_DASH_WWW` | `./www` | static dir |
 | `PTASK_ACTOR` | `dashboard` | actor stamped on dashboard-originated `pt` writes |
+| `PTASK_WAL_AUTOCHECKPOINT` | `0` in `ptask-dashboard.service` | passed to the `pt` writers the sidecar spawns, so they leave WAL checkpoints to Litestream like every other writer; set `1000` in `.dashboard.env` on a host without Litestream |
 | `PTASK_DASH_ALLOWED_HOSTS` | _(unset)_ | extra comma-separated `Host` names to serve besides IP literals, `localhost`, the machine's short hostname and `*.ts.net`; `.suffix` entries match the suffix |
 | `PTASK_DASH_DECIDE_TOKEN` | _(unset)_ | secret (≥ 16 chars) required to approve/reject from the cockpit; unset disables approval decisions here |
 | `PTASK_STT_URL` | `http://127.0.0.1:9000/transcribe` | voice STT endpoint (local Whisper); accepts `-F audio=@` |

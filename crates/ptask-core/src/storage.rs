@@ -90,7 +90,8 @@ impl Db {
         // Apply migrations on a pooled connection. The pool's init has already
         // applied pragmas.
         let mut conn = pool.get().map_err(Error::Pool)?;
-        let report = crate::migrations::run(&mut conn).map_err(Error::Migration)?;
+        let report =
+            crate::migrations::run(&mut conn).map_err(crate::migrations::describe_error)?;
         drop(conn);
         debug!(
             target: "ptask::storage",
@@ -262,5 +263,57 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn db_migrated_by_a_newer_binary_fails_with_an_actionable_error() {
+        // CORE-8: refinery's abort_missing made an older binary refuse a DB
+        // a newer one migrated, with only "migration V20__x is missing from
+        // the filesystem". Running on an unknown newer schema is unsafe (the
+        // old binary can't honour constraints it doesn't know), so the
+        // refusal stays; it must say what happened and what to do.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("newer.db");
+        drop(Db::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
+             VALUES (9999, 'from_the_future', '2099-01-01T00:00:00Z', '0')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let err = Db::open(&path).err().expect("newer schema must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("V9999"), "{msg}");
+        assert!(msg.contains("newer pt"), "{msg}");
+        assert!(msg.contains("docs/operations.md"), "{msg}");
+    }
+
+    #[test]
+    fn concurrent_first_opens_all_migrate_cleanly() {
+        // CORE-12: refinery reads the applied set and applies the pending
+        // migrations in separate transactions, so two processes opening a
+        // freshly deployed DB at once both tried to apply the same
+        // migration; the loser failed once with "duplicate column name".
+        for round in 0..8 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("race.db");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        Db::open(&path).map(drop).map_err(|e| e.to_string())
+                    })
+                })
+                .collect();
+            for h in handles {
+                let r = h.join().unwrap();
+                assert!(r.is_ok(), "round {round}: {r:?}");
+            }
+        }
     }
 }
