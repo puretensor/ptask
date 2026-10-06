@@ -263,6 +263,55 @@ fn open_incident_for_key(db: &ptask_core::Db, key: &str) -> Result<bool, ptask_c
     })
 }
 
+/// A semantic match computed before the incident lane was taken.
+struct SpeculativeMatch {
+    /// Open incidents it was computed against.
+    seen: std::collections::HashSet<String>,
+    /// Best match among them at or above the threshold.
+    best: Option<(String, f32)>,
+}
+
+/// `(uuid, title)` of every open incident.
+fn open_incident_titles(db: &ptask_core::Db) -> Vec<(String, String)> {
+    db.with_conn(|c| {
+        let mut stmt = c.prepare(
+            "SELECT id, title FROM tasks
+             WHERE source_type = 'incident' AND status_v2 NOT IN ('done','dismissed')",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    })
+    .unwrap_or_default()
+}
+
+/// The semantic match against the incidents open now, under the lane:
+/// the speculative best if it is still open, compared with a fresh match
+/// over only the incidents opened since (normally none, so the embedder
+/// is not touched under the lock). Without a speculative pass, match all.
+fn settle_semantic_match(
+    speculative: Option<&SpeculativeMatch>,
+    open_now: &[(String, String)],
+    rematch: impl FnOnce(&[(String, String)]) -> Option<(String, f32)>,
+) -> Option<(String, f32)> {
+    let Some(spec) = speculative else {
+        return rematch(open_now);
+    };
+    let still_open = spec
+        .best
+        .clone()
+        .filter(|(uuid, _)| open_now.iter().any(|(u, _)| u == uuid));
+    let new: Vec<(String, String)> = open_now
+        .iter()
+        .filter(|(u, _)| !spec.seen.contains(u))
+        .cloned()
+        .collect();
+    let fresh = if new.is_empty() { None } else { rematch(&new) };
+    match (still_open, fresh) {
+        (Some(a), Some(b)) => Some(if b.1 > a.1 { b } else { a }),
+        (a, b) => a.or(b),
+    }
+}
+
 /// SQL predicate (over `tasks`): the capture fast lane created this task.
 /// Its `task.created` journal row is keyed `capture:<raw_items id>` and
 /// commits with the insert; incidents HAL files over MCP and /sync tasks
@@ -424,6 +473,26 @@ fn capture_blocking(
     // episode so a later identical capture can create work again.
     let severity = effective_severity(&req, &source);
     let is_incident = severity.is_some_and(|s| s >= 3);
+    let title: String = text
+        .lines()
+        .next()
+        .unwrap_or(&text)
+        .chars()
+        .take(200)
+        .collect();
+    // Semantic matching (embedder start-up, embedding every open incident
+    // title) is the slow part of the lane: do it before taking the lock,
+    // against the incidents open now, and re-validate under the lock.
+    let speculative = if is_incident {
+        let open = open_incident_titles(&state.db);
+        let best = crate::dedup::best_match(&title, &open, crate::dedup::CAPTURE_THRESHOLD);
+        Some(SpeculativeMatch {
+            seen: open.into_iter().map(|(uuid, _)| uuid).collect(),
+            best,
+        })
+    } else {
+        None
+    };
     // Held until the incident's task exists with its key (or the capture
     // turned out to be a duplicate).
     let lane = is_incident.then(incident_lane);
@@ -506,13 +575,6 @@ fn capture_blocking(
     let mut pt_id = None;
     if let Some(sev) = severity.filter(|s| *s >= 3) {
         let priority = if sev >= 4 { 5 } else { 4 };
-        let title: String = text
-            .lines()
-            .next()
-            .unwrap_or(&text)
-            .chars()
-            .take(200)
-            .collect();
 
         // ---- v2.5.0 signal intelligence: refresh, don't duplicate ----------
         // The same live incident re-captured (deterministic capture_key) or
@@ -542,13 +604,14 @@ fn capture_blocking(
         let matched = if exact.is_some() {
             exact
         } else {
-            let title_owned = title.clone();
-            let cands: Vec<(String, String)> = open_incidents
+            let open_now: Vec<(String, String)> = open_incidents
                 .iter()
                 .map(|(u, t, _)| (u.clone(), t.clone()))
                 .collect();
-            crate::dedup::best_match(&title_owned, &cands, crate::dedup::CAPTURE_THRESHOLD)
-                .map(|(u, s)| (u, s, "semantic"))
+            settle_semantic_match(speculative.as_ref(), &open_now, |cands| {
+                crate::dedup::best_match(&title, cands, crate::dedup::CAPTURE_THRESHOLD)
+            })
+            .map(|(u, s)| (u, s, "semantic"))
         };
 
         if let Some((existing_uuid, score, how)) = matched {
@@ -905,6 +968,52 @@ mod tests {
             .to_string();
         refresh_matched_incident(&db, &lane_task, Some("sentinel:disk"), now).unwrap();
         assert_eq!(closed_by_resolve(&state, "sentinel:disk").await, 1);
+    }
+
+    #[test]
+    fn semantic_match_made_outside_the_lane_is_revalidated_under_it() {
+        let cand = |u: &str| (u.to_string(), format!("title {u}"));
+        let spec = SpeculativeMatch {
+            seen: ["a", "b"].iter().map(|s| s.to_string()).collect(),
+            best: Some(("a".into(), 0.9)),
+        };
+        let never = |_: &[(String, String)]| -> Option<(String, f32)> {
+            panic!("no new incidents: the embedder must not run under the lock")
+        };
+        // Nothing changed: the speculative best stands, no re-embedding.
+        assert_eq!(
+            settle_semantic_match(Some(&spec), &[cand("a"), cand("b")], never),
+            Some(("a".into(), 0.9))
+        );
+        // It was closed meanwhile: no match, rather than refreshing a closed task.
+        assert_eq!(
+            settle_semantic_match(Some(&spec), &[cand("b")], never),
+            None
+        );
+        // An incident opened meanwhile is matched under the lock, alone,
+        // and wins only on a higher score.
+        let only_c = |c: &[(String, String)]| {
+            assert_eq!(c, [cand("c")]);
+            Some(("c".to_string(), 0.95))
+        };
+        assert_eq!(
+            settle_semantic_match(Some(&spec), &[cand("a"), cand("c")], only_c),
+            Some(("c".into(), 0.95))
+        );
+        let weaker_c = |_: &[(String, String)]| Some(("c".to_string(), 0.85));
+        assert_eq!(
+            settle_semantic_match(Some(&spec), &[cand("a"), cand("c")], weaker_c),
+            Some(("a".into(), 0.9))
+        );
+        // No speculative pass: match everything open.
+        let all = |c: &[(String, String)]| {
+            assert_eq!(c.len(), 2);
+            None
+        };
+        assert_eq!(
+            settle_semantic_match(None, &[cand("a"), cand("c")], all),
+            None
+        );
     }
 
     #[test]
