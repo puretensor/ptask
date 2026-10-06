@@ -38,8 +38,11 @@ pub struct AppState {
     pub dash_throttle: Arc<routes::dashboard::BasicThrottle>,
     /// Permits for concurrent POST /email parses.
     pub email_parses: Arc<tokio::sync::Semaphore>,
-    /// The single ordered outbound-webhook queue.
+    /// The outbound-webhook queue (one ordered worker per subscriber).
     pub outbound: Arc<webhooks::OutboundQueue>,
+    /// Cancelled when the server starts shutting down; ends the MCP mount's
+    /// long-lived SSE streams so graceful shutdown can finish.
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl AppState {
@@ -57,6 +60,7 @@ impl AppState {
                 routes::email::MAX_CONCURRENT_PARSES,
             )),
             outbound: Arc::default(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -148,7 +152,11 @@ pub fn router(state: AppState) -> Router {
         // but this mount binds the tailnet IP and sits behind the hal
         // bearer gate — a rebinding page can't present that token, so
         // allow-all (empty) is sound here.
-        StreamableHttpServerConfig::default().with_allowed_hosts(Vec::<String>::new()),
+        StreamableHttpServerConfig::default()
+            .with_allowed_hosts(Vec::<String>::new())
+            // An open GET /mcp stream never ends on its own; cancelling this
+            // on shutdown closes it instead of holding SIGTERM forever.
+            .with_cancellation_token(state.shutdown.clone()),
     );
     let mcp_router: Router =
         Router::new()
@@ -227,7 +235,19 @@ async fn run(
     webhook_drain: std::time::Duration,
 ) -> Result<()> {
     let outbound = state.outbound.clone();
-    serve_router(listener, router(state), HEADER_READ_TIMEOUT, shutdown).await?;
+    let streams = state.shutdown.clone();
+    let shutdown = async move {
+        shutdown.await;
+        streams.cancel();
+    };
+    serve_router(
+        listener,
+        router(state),
+        HEADER_READ_TIMEOUT,
+        CONNECTION_GRACE,
+        shutdown,
+    )
+    .await?;
     // No request can enqueue any more; deliver what is queued, bounded.
     outbound.drain(webhook_drain).await;
     Ok(())
@@ -240,10 +260,15 @@ async fn run(
 /// streamed responses (the MCP mount's SSE) are not.
 const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long graceful shutdown lets open connections finish before closing
+/// them: an MCP SSE stream or a trickled request body never ends by itself.
+const CONNECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn serve_router(
     listener: TcpListener,
     app: Router,
     header_read_timeout: std::time::Duration,
+    connection_grace: std::time::Duration,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     use hyper_util::rt::{TokioIo, TokioTimer};
@@ -290,8 +315,19 @@ async fn serve_router(
     }
     drop(listener);
     // Like axum::serve's graceful shutdown: idle connections close now,
-    // in-flight requests finish.
-    graceful.shutdown().await;
+    // in-flight requests finish -- bounded, since a long-lived stream or a
+    // client trickling a request body never finishes on its own and would
+    // hold shutdown (and the webhook drain after it) until SIGKILL.
+    if tokio::time::timeout(connection_grace, graceful.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            target: "ptask::server",
+            grace_s = connection_grace.as_secs(),
+            "open connections outlived the shutdown grace; closing them"
+        );
+    }
     Ok(())
 }
 
@@ -1837,6 +1873,7 @@ mod tests {
             listener,
             app,
             std::time::Duration::from_millis(300),
+            std::time::Duration::from_secs(10),
             std::future::pending(),
         ));
 
@@ -1863,6 +1900,114 @@ mod tests {
 
     /// SRV-6: delivery was a detached task, so events still queued when
     /// `pt serve` got SIGTERM were dropped with the runtime.
+    /// SRV-6 round 2: graceful shutdown waited for every connection, and an
+    /// MCP client's GET /mcp SSE stream never ends on its own, so SIGTERM
+    /// never finished and the webhook drain never ran. The stream is now
+    /// cancelled on shutdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_closes_an_open_mcp_sse_stream() {
+        let db = open_test_db();
+        let token =
+            ptask_core::tokens::create(&db, "hal", ptask_core::tokens::Scope::Write).unwrap();
+        let state = AppState::new(db, AuthConfig::default(), Default::default());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(run(
+            listener,
+            state,
+            async {
+                let _ = stopped.await;
+            },
+            std::time::Duration::from_secs(10),
+        ));
+        let client = reqwest::Client::new();
+        let post = |body: serde_json::Value, session: Option<String>| {
+            let mut req = client
+                .post(&base)
+                .bearer_auth(&token)
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .body(serde_json::to_vec(&body).unwrap());
+            if let Some(id) = session {
+                req = req.header("mcp-session-id", id);
+            }
+            req.send()
+        };
+        let init = post(
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-03-26", "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"}}}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(init.status().is_success(), "{}", init.status());
+        let session = init.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        drop(init);
+        post(
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            Some(session.clone()),
+        )
+        .await
+        .unwrap();
+        let sse = client
+            .get(&base)
+            .bearer_auth(&token)
+            .header("accept", "text/event-stream")
+            .header("mcp-session-id", &session)
+            .send()
+            .await
+            .unwrap();
+        assert!(sse.status().is_success(), "{}", sse.status());
+
+        stop.send(()).unwrap();
+        let started = std::time::Instant::now();
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(15), server).await;
+        assert!(exited.is_ok(), "pt serve never finished shutting down");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "shutdown waited {:?} for the SSE stream",
+            started.elapsed()
+        );
+        drop(sse);
+    }
+
+    /// A request whose body never finishes holds its connection open; the
+    /// grace bound ends graceful shutdown anyway.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_grace_is_bounded_for_a_stalled_request_body() {
+        use tokio::io::AsyncWriteExt;
+        let app = Router::new().route(
+            "/upload",
+            axum::routing::post(|body: axum::body::Bytes| async move { body.len().to_string() }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_router(
+            listener,
+            app,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(500),
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        conn.write_all(b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nabc")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        stop.send(()).unwrap();
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        assert!(exited.is_ok(), "a stalled body held shutdown open");
+        drop(conn);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn graceful_shutdown_drains_queued_webhooks() {
         let (url, log) = recording_hook().await;

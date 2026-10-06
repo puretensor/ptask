@@ -416,8 +416,11 @@ Application-level auth is now fail-closed for non-loopback binds. Only use
 The server speaks HTTP/1.1 and closes a connection whose request headers
 take longer than 30s to arrive (slow-header / slowloris protection; idle
 keep-alive connections are reaped the same way). Request bodies and streamed
-responses (the `/mcp` SSE stream) are not time-limited. On SIGTERM it
-finishes in-flight requests, then gives queued outbound webhooks up to 15s.
+responses (the `/mcp` SSE stream) are not time-limited. On SIGTERM it stops
+accepting, closes open MCP SSE streams, gives other in-flight requests up to
+10s and then closes whatever is still open (a trickled request body, say),
+and finally gives queued outbound webhooks up to 15s: about 25s worst case,
+inside systemd's default 90s stop timeout.
 
 ### Inspect
 
