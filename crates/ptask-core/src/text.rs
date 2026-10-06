@@ -86,38 +86,61 @@ pub fn has_hazard(text: &str) -> bool {
         return false;
     }
     let chars: Vec<char> = text.chars().collect();
+    let selectors_ok = allowed_selectors(&chars) <= STRICT_SELECTOR_BUDGET;
     chars.iter().enumerate().any(|(i, &c)| {
         is_strict_blank(c)
             || (is_hazard(c)
                 && !(c == '\r' && chars.get(i + 1) == Some(&'\n'))
-                && !presentation_selector_ok(&chars, i))
+                && !(selectors_ok && presentation_selector_ok(&chars, i)))
     })
 }
 
 /// A pictograph that may carry a VS15/VS16 or sit on either side of a
-/// joining ZWJ: emoji blocks (including skin-tone modifiers), dingbats,
-/// misc symbols and arrows. Never a selector itself.
+/// joining ZWJ: the emoji/pictographic blocks (U+1F000-1FAFF incl. skin-tone
+/// modifiers, U+2600-27BF, U+2B00-2BFF) and the specific older symbols that
+/// take VS16 (©®‼⁉™ℹ, ↔-↙ ↩↪, ⌚⌛⌨⏏, ⏩-⏳ ⏸-⏺, Ⓜ, ▪▫▶◀ ◻-◾, ⤴⤵, 〰〽㊗㊙).
+/// Enclosed alphanumerics (ⓐ ①) and other arrows are not. Never a selector.
 fn is_pictograph(c: char) -> bool {
     matches!(
         c,
         '\u{1F000}'..='\u{1FAFF}'
-            | '\u{2190}'..='\u{21FF}'
-            | '\u{2300}'..='\u{23FF}'
-            | '\u{2460}'..='\u{24FF}'
-            | '\u{25A0}'..='\u{27BF}'
-            | '\u{2900}'..='\u{297F}'
+            | '\u{2600}'..='\u{27BF}'
             | '\u{2B00}'..='\u{2BFF}'
-            | '\u{3030}'
-            | '\u{303D}'
-            | '\u{3297}'
-            | '\u{3299}'
             | '\u{00A9}'
             | '\u{00AE}'
             | '\u{203C}'
             | '\u{2049}'
             | '\u{2122}'
             | '\u{2139}'
+            | '\u{2194}'..='\u{2199}'
+            | '\u{21A9}'..='\u{21AA}'
+            | '\u{231A}'..='\u{231B}'
+            | '\u{2328}'
+            | '\u{23CF}'
+            | '\u{23E9}'..='\u{23F3}'
+            | '\u{23F8}'..='\u{23FA}'
+            | '\u{24C2}'
+            | '\u{25AA}'..='\u{25AB}'
+            | '\u{25B6}'
+            | '\u{25C0}'
+            | '\u{25FB}'..='\u{25FE}'
+            | '\u{2934}'..='\u{2935}'
+            | '\u{3030}'
+            | '\u{303D}'
+            | '\u{3297}'
+            | '\u{3299}'
     )
+}
+
+/// Strict mode tolerates this many allowed presentation selectors in one
+/// text. Each optional VS15/VS16 can carry ~1.6 bits that renders
+/// identically, so a payload with more is flagged and shown.
+const STRICT_SELECTOR_BUDGET: usize = 8;
+
+fn allowed_selectors(chars: &[char]) -> usize {
+    (0..chars.len())
+        .filter(|&i| presentation_selector_ok(chars, i))
+        .count()
 }
 
 const VS15: char = '\u{FE0E}';
@@ -166,6 +189,8 @@ fn clean(text: &str, fold_lines: bool, strict: bool) -> Cow<'_, str> {
         return Cow::Borrowed(text);
     }
     let chars: Vec<char> = text.chars().collect();
+    // Past the budget, strict mode shows every selector (see has_hazard).
+    let selectors = !strict || allowed_selectors(&chars) <= STRICT_SELECTOR_BUDGET;
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < chars.len() {
@@ -180,7 +205,7 @@ fn clean(text: &str, fold_lines: bool, strict: bool) -> Cow<'_, str> {
             }
             '\r' | '\n' | '\u{2028}' | '\u{2029}' if fold_lines => out.push(LINE_MARK),
             '\u{200D}' if zwj && joining_zwj_ok(&chars, i) => out.push(c),
-            VS15 | VS16 if presentation_selector_ok(&chars, i) => out.push(c),
+            VS15 | VS16 if selectors && presentation_selector_ok(&chars, i) => out.push(c),
             c if is_hazard(c) || (strict && is_strict_blank(c)) => out.push(STAND_IN),
             c => out.push(c),
         }
@@ -370,6 +395,38 @@ mod tests {
             assert_eq!(sanitize(&s), s);
             assert_eq!(sanitize_strict(&s), "a\u{fffd}b");
             assert!(has_hazard(&s), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn many_allowed_selectors_are_flagged_in_strict_mode() {
+        // One optional VS15/VS16 per pictograph leaks ~1.6 bits a symbol.
+        let nine = "love ❤\u{fe0f}❤\u{fe0e}❤\u{fe0f}❤\u{fe0f}❤\u{fe0e}❤\u{fe0f}❤\u{fe0e}❤\u{fe0f}❤\u{fe0f}";
+        assert!(has_hazard(nine));
+        assert!(sanitize_strict(nine).contains(STAND_IN));
+        assert_eq!(sanitize(nine), nine, "general display keeps them");
+        let eight = "love ❤\u{fe0f}❤\u{fe0e}❤\u{fe0f}❤\u{fe0f}❤\u{fe0e}❤\u{fe0f}❤\u{fe0e}❤\u{fe0f}";
+        assert!(!has_hazard(eight));
+        let normal = "thanks ❤\u{fe0f} 👍\u{1f3fd}";
+        assert!(!has_hazard(normal));
+        assert_eq!(sanitize_strict(normal), normal);
+        // Only real emoji take a selector: enclosed alphanumerics and plain
+        // arrows do not; VS16-capable arrows and symbols do.
+        for bad in ["\u{24d0}\u{fe0f}", "\u{2460}\u{fe0f}", "\u{2192}\u{fe0f}"] {
+            assert!(sanitize(bad).contains(STAND_IN), "{bad:?}");
+            assert!(has_hazard(bad), "{bad:?}");
+        }
+        for ok in [
+            "\u{2194}\u{fe0f}",
+            "\u{21a9}\u{fe0f}",
+            "\u{23f3}\u{fe0f}",
+            "\u{24c2}\u{fe0f}",
+            "\u{25b6}\u{fe0f}",
+            "\u{2122}\u{fe0f}",
+            "\u{2b50}\u{fe0f}",
+        ] {
+            assert_eq!(sanitize(ok), ok, "{ok:?}");
+            assert!(!has_hazard(ok), "{ok:?}");
         }
     }
 

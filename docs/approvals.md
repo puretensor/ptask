@@ -109,7 +109,9 @@ Local CLI (`pt approve` / `pt reject` / `pt approval decide`):
   line/paragraph separators, the blank-rendering braille blank (U+2800) and
   ideographic space (U+3000), and variation selectors (U+FE00–FE0F, U+E0100–E01EF, the
   "emoji smuggling" carrier) **except** exactly one VS15/VS16 directly after
-  a pictograph or in a keycap. So a lone VS16 emoji such as ❤️, ☀️ or ✔️ in
+  a pictograph (real emoji, not enclosed alphanumerics or plain arrows) or
+  in a keycap — and at most 8 of those per payload: each optional selector
+  can carry about 1.6 bits that render identically, so a 9th flags it. So a lone VS16 emoji such as ❤️, ☀️ or ✔️ in
   an email body needs no `--force`, while a second selector in a run, any
   other selector, a ZWJ sequence such as a family emoji (👨‍👩‍👧) — the
   preview never keeps joiners — or a soft hyphen still does.
