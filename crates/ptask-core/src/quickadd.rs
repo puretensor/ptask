@@ -47,6 +47,10 @@ pub struct QuickAdd {
     /// Parsed recurrence rule, if the input contained an `every` / `every!`
     /// clause. The deadline above is the first occurrence.
     pub recurrence: Option<Recurrence>,
+    /// For a plain monthly rule: the unclamped day it was set on (`now`, at
+    /// the rule's time), which `pt_recurrence.anchor` counts months from.
+    /// The first deadline may be clamped (Jan 31 + 1 month = Feb 28).
+    pub recurrence_anchor: Option<String>,
 }
 
 impl QuickAdd {
@@ -68,6 +72,7 @@ impl QuickAdd {
             project: self.project.clone(),
             duration_min: self.duration_min,
             recurrence: self.recurrence.clone(),
+            recurrence_anchor: self.recurrence_anchor.clone(),
             due_at: self.due.clone(),
             ..Default::default()
         };
@@ -191,6 +196,13 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
                 try_recurrence_match(&raw[..scan_end], idx, &now)
         {
             let deadline = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())?;
+            if rec.freq == recurrence::Freq::Monthly && rec.bymonthday.is_empty() {
+                let anchor = match time_of_day.as_ref() {
+                    Some(time) => crate::tasks::combine_date_with_time(&now, time)?,
+                    None => now.clone(),
+                };
+                out.recurrence_anchor = Some(dates::format_iso(&anchor));
+            }
             out.deadline_phrase = Some(phrase);
             out.deadline = Some(dates::format_iso(&deadline));
             out.recurrence = Some(rec);

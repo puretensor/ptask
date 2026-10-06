@@ -33,6 +33,11 @@ pub enum Error {
     #[error(transparent)]
     Goal(#[from] crate::goals::GoalError),
 
+    /// Date arithmetic left the representable range (years 1..9999 in the
+    /// operator timezone): a recurrence with no next occurrence.
+    #[error("date out of range: {0}")]
+    OutOfRange(String),
+
     #[error("{0}")]
     Other(String),
 }

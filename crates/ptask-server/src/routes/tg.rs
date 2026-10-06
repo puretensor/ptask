@@ -121,6 +121,7 @@ fn callback_blocking(
         actor,
         source: "tg-callback".into(),
         event_uuid: Some(event_uuid),
+        command: None,
     };
     let result = match verb {
         "ptdone" => {
@@ -217,6 +218,7 @@ fn approval_callback(
         actor: "operator@telegram".into(),
         source: "tg-callback".into(),
         event_uuid: Some(event_uuid),
+        command: None,
     };
     match ptask_core::approvals::decide(
         &state.db,

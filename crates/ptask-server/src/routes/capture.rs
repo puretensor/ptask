@@ -126,6 +126,7 @@ fn resolve_blocking(
                 "capture-resolve:{}:{}:{}",
                 key, uuid, task.updated_at
             )),
+            command: None,
         };
         match ptask_core::tasks::mark_done(&state.db, &task, &ctx) {
             Ok(_) => {
@@ -560,6 +561,7 @@ fn capture_blocking(
                         actor: identity.client_id.clone(),
                         source: "capture".into(),
                         event_uuid: None,
+                        command: None,
                     };
                     let ev_uuid = format!("capture-occurrence:{}", row.id);
                     let payload = serde_json::json!({
@@ -634,6 +636,7 @@ fn capture_blocking(
             actor: identity.client_id.clone(),
             source: "capture".into(),
             event_uuid: Some(format!("capture:{}", row.id)),
+            command: None,
         };
         match ptask_core::tasks::create_with_extensions(
             &state.db,

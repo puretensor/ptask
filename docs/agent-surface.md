@@ -40,6 +40,13 @@ leave the task and journal unchanged. A successful combined edit produces one
 `task.updated` event containing the requested fields. Rescoring runs after
 commit; a scoring failure does not roll back a successful edit.
 
+- **task_done** — completes a task, or advances a recurring one in place
+  (`status=advanced`, `next_deadline`). Pass `expected_deadline` (the deadline
+  you last saw; `""` = none) to make a retry or a duplicate safe: if the task
+  has moved on, the call errors and nothing changes, instead of completing the
+  next occurrence too. The dashboard's `POST /api/tasks/{id}/done` takes the
+  same optional `{"expected_deadline": …}` body, and `/sync` `task_done` the
+  same arg. Completing an already-done task is an error.
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
 - **task_depend** — `task` depends `on` a prerequisite (`remove=true` drops the

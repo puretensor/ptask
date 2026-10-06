@@ -145,8 +145,12 @@ enum Command {
     Bulk(BulkArgs),
     /// Show a task's attributed event history (who did what, via which surface).
     Log(LogArgs),
-    /// Reverse the most recent undoable mutation (done/dismiss/create).
-    Undo,
+    /// Reverse your own most recent undoable mutation (done/dismiss/create).
+    ///
+    /// done/dismiss → reopen; create → delete. Only the caller's own events
+    /// ($PTASK_ACTOR) are candidates. Undoing a create deletes the task
+    /// permanently, so it asks first and, without a TTY, refuses unless --yes.
+    Undo(UndoArgs),
     /// Manage named scoped API tokens (create/list/revoke).
     #[command(subcommand)]
     Token(TokenCommand),
@@ -255,7 +259,8 @@ struct WhyArgs {
 
 #[derive(clap::Args, Debug)]
 struct SearchArgs {
-    /// FTS5 query (words, phrases, AND/OR/NOT).
+    /// Words to find (FTS5): every word must match; punctuation and
+    /// AND/OR/NOT are plain text; a trailing * matches a prefix.
     query: Vec<String>,
     #[arg(short = 'n', long = "limit", default_value_t = 20)]
     limit: usize,
@@ -711,6 +716,13 @@ struct RmArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct UndoArgs {
+    /// Skip the confirmation when the undo would delete a task.
+    #[arg(short = 'y', long = "yes")]
+    yes: bool,
+}
+
+#[derive(clap::Args, Debug)]
 struct GenCompletionsArgs {
     /// Target shell.
     #[arg(value_enum)]
@@ -729,6 +741,8 @@ enum ShellChoice {
 /// one command, so this is entrypoint-time config, not ambient state.
 static CLI_JSON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static CLI_IDEMPOTENCY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static CLI_COMMAND: std::sync::OnceLock<ptask_core::event_log::CommandFingerprint> =
+    std::sync::OnceLock::new();
 
 fn set_cli_globals(json: bool, idempotency_key: Option<String>) {
     let _ = CLI_JSON.set(json);
@@ -757,8 +771,37 @@ fn cli_ctx() -> ptask_core::event_log::EventCtx {
     let mut ctx = ptask_core::event_log::EventCtx::local(ptask_core::Config::from_env().actor);
     if let Some(key) = cli_idempotency_key() {
         ctx.event_uuid = Some(key);
+        ctx.command = CLI_COMMAND.get().cloned();
     }
     ctx
+}
+
+/// The variant name of a parsed command: `Add`, `Goal`, ...
+fn command_name(cmd: &Command) -> String {
+    let debug = format!("{cmd:?}");
+    debug
+        .split(|c: char| !c.is_alphanumeric())
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A keyed command's fingerprint: its parsed arguments, rendered by the
+/// derived Debug impl (fixed field order), so a retry of the same command
+/// matches and a different command under the same key does not.
+fn command_fingerprint(cmd: &Command) -> ptask_core::event_log::CommandFingerprint {
+    ptask_core::event_log::CommandFingerprint::new(&command_name(cmd), &format!("{cmd:?}"))
+}
+
+/// Commands whose retry under `--idempotency-key` is replay-safe: the keyed
+/// single-target verbs, multi-task `done`/`bulk` (keyed per task) and
+/// `remote` (the key becomes the /sync command uuid).
+fn honours_idempotency_key(cmd: &Command) -> bool {
+    keyed_replay_spec(cmd).is_some()
+        || matches!(
+            cmd,
+            Command::Done(_) | Command::Bulk(_) | Command::Remote(_)
+        )
 }
 
 fn cli_idempotency_key() -> Option<String> {
@@ -779,10 +822,129 @@ fn task_ctx(task_uuid: &str) -> ptask_core::event_log::EventCtx {
 /// True when this mutation's idempotency key already landed: the retry
 /// reports success instead of re-applying (or tripping the unique index).
 fn already_applied(db: &Db, ctx: &ptask_core::event_log::EventCtx) -> Result<bool> {
-    Ok(match ctx.event_uuid.as_deref() {
-        Some(uuid) => ptask_core::event_log::get_by_uuid(db, uuid)?.is_some(),
-        None => false,
+    let Some(key) = ctx.event_uuid.as_deref() else {
+        return Ok(false);
+    };
+    let check = ptask_core::event_log::ReplayCheck {
+        actor: &ctx.actor,
+        task_uuid: None,
+        event_types: &[],
+        command: ctx.command.as_ref(),
+    };
+    Ok(ptask_core::event_log::check_replay(db, key, &check)
+        .map_err(anyhow::Error::msg)?
+        .is_some())
+}
+
+/// What a keyed command acts on, for the replay check.
+enum KeyTarget {
+    Task(String),
+    Goal(String),
+    Untargeted,
+}
+
+/// The journal event types a keyed single-target command writes, and what
+/// it targets. `None` for commands without a single keyed event (reads,
+/// multi-task verbs, which key each task as `key:<task uuid>`).
+fn keyed_replay_spec(cmd: &Command) -> Option<(&'static [&'static str], KeyTarget)> {
+    use KeyTarget::{Goal, Task, Untargeted};
+    use goals::GoalCommand as G;
+    const UPDATED: &[&str] = &["task.updated"];
+    Some(match cmd {
+        Command::Add(_) => (&["task.created"], Untargeted),
+        Command::Done(a) if a.queries.len() == 1 => (
+            &["task.completed", "task.recurrence_advanced"],
+            Task(a.queries[0].clone()),
+        ),
+        Command::Priority(a) => (UPDATED, Task(a.query.clone())),
+        Command::Edit(a) => (UPDATED, Task(a.query.clone())),
+        Command::Reopen(a) => (UPDATED, Task(a.query.clone())),
+        Command::Dismiss(a) => (UPDATED, Task(a.query.clone())),
+        Command::Start(a) => (UPDATED, Task(a.query.clone())),
+        Command::Snooze(a) => (UPDATED, Task(a.query.clone())),
+        Command::Depend(a) => (UPDATED, Task(a.query.clone())),
+        Command::Kind(a) => (UPDATED, Task(a.query.clone())),
+        Command::Promote(a) => (&["task.promoted"], Task(a.query.clone())),
+        Command::Rm(a) => (&["task.deleted"], Task(a.query.clone())),
+        Command::Goal(G::Add(_)) => (&["goal.created"], Untargeted),
+        Command::Goal(G::Link(a)) => (&["task.goal_linked"], Task(a.task.clone())),
+        Command::Goal(G::Unlink(a)) => (&["task.goal_unlinked"], Task(a.task.clone())),
+        Command::Goal(G::Done(a) | G::Abandon(a)) => (&["goal.updated"], Goal(a.id.clone())),
+        Command::Goal(G::SetParent(a)) => (&["goal.updated"], Goal(a.id.clone())),
+        _ => return None,
     })
+}
+
+/// True when `key` already journaled this very command: report it as
+/// replayed. Errors when the key was used for another command or task —
+/// the old check only asked whether the key existed, so a reused key
+/// printed "replayed" and silently skipped the new command.
+fn replay_keyed(db: &Db, key: &str, cmd: &Command) -> Result<bool> {
+    let Some((types, target)) = keyed_replay_spec(cmd) else {
+        return Ok(false);
+    };
+    let Some(event) = ptask_core::event_log::get_by_uuid(db, key)? else {
+        return Ok(false);
+    };
+    // The target as it resolves now; a deleted task (replayed rm) no longer
+    // does, and the event type alone decides.
+    let target_uuid = match &target {
+        KeyTarget::Task(q) => tasks::resolve_for_lookup(db, q, true).ok().map(|t| t.id),
+        KeyTarget::Goal(id) => ptask_core::goals::get(db, id).ok().map(|g| g.uuid),
+        KeyTarget::Untargeted => None,
+    };
+    let ctx = cli_ctx();
+    let check = ptask_core::event_log::ReplayCheck {
+        actor: &ctx.actor,
+        task_uuid: target_uuid.as_deref(),
+        event_types: types,
+        command: ctx.command.as_ref(),
+    };
+    ptask_core::event_log::verify_replay(key, &event, &check).map_err(anyhow::Error::msg)?;
+
+    let subject = event.task_uuid.as_deref().unwrap_or_default();
+    if event.event_type.starts_with("goal.") {
+        let goal = ptask_core::goals::get(db, subject).map_err(anyhow::Error::msg)?;
+        if json_mode() {
+            println!("{}", serde_json::to_string_pretty(&goal.to_json())?);
+        } else {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Ok,
+                    "replayed",
+                    &goal.g_id(),
+                    &goal.title,
+                    "idempotency key already applied"
+                )
+            );
+        }
+        return Ok(true);
+    }
+    let task = tasks::resolve_for_lookup(db, subject, true).ok();
+    let mut out = match &task {
+        Some(t) => serde_json::to_value(t)?,
+        None => serde_json::json!({ "id": subject }),
+    };
+    out["outcome"] = serde_json::json!("replayed");
+    emit(&out, || {
+        let handle = task
+            .as_ref()
+            .and_then(|t| t.pt_id.clone())
+            .unwrap_or_else(|| short_id(subject).to_string());
+        let title = task.as_ref().map(|t| t.title.as_str()).unwrap_or("");
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Ok,
+                "replayed",
+                &handle,
+                title,
+                "idempotency key already applied"
+            )
+        );
+    })?;
+    Ok(true)
 }
 
 /// `pt remote list` filter with `-p` folded in as a DSL `pN` term.
@@ -819,6 +981,23 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     set_cli_globals(cli.json, cli.idempotency_key.clone());
+    if cli.idempotency_key.is_some() {
+        // A key on a verb that cannot replay would mint twice or hit the
+        // journal's unique index on retry: refuse it up front.
+        match &cli.command {
+            Some(cmd) if honours_idempotency_key(cmd) => {
+                let _ = CLI_COMMAND.set(command_fingerprint(cmd));
+            }
+            other => anyhow::bail!(
+                "--idempotency-key is not supported by `pt {}`: a retry would not be \
+                 replay-safe; drop the flag",
+                other
+                    .as_ref()
+                    .map(|c| command_name(c).to_ascii_lowercase())
+                    .unwrap_or_default()
+            ),
+        }
+    }
     ui::init(match cli.color {
         _ if cli.no_color || cli.json => ui::ColorMode::Never,
         ColorChoice::Auto => ui::ColorMode::Auto,
@@ -829,9 +1008,11 @@ fn run() -> Result<()> {
     // Lightweight tracing: env-controlled, off by default.
     let filter = tracing_subscriber::EnvFilter::try_from_env("PTASK_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    // Colour only for a terminal: scripts and agents read stderr as text.
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .init();
 
     let command = cli.command;
@@ -847,6 +1028,14 @@ fn run() -> Result<()> {
                 Some(p) => Db::open(p).with_context(|| format!("opening db at {}", p))?,
                 None => Db::open_default().context("opening default db")?,
             };
+
+            // A retried keyed mutation reports success without re-applying;
+            // a key reused for a different command or task is an error.
+            if let (Some(key), Some(cmd)) = (cli_idempotency_key(), other.as_ref())
+                && replay_keyed(&db, &key, cmd)?
+            {
+                return Ok(());
+            }
 
             match other {
                 Some(Command::Add(a)) => cmd_add(&db, a),
@@ -884,7 +1073,7 @@ fn run() -> Result<()> {
                 Some(Command::Why(a)) => cmd_why(&db, a),
                 Some(Command::Bulk(a)) => cmd_bulk(&db, a),
                 Some(Command::Log(a)) => cmd_log(&db, a),
-                Some(Command::Undo) => cmd_undo(&db),
+                Some(Command::Undo(a)) => cmd_undo(&db, a),
                 Some(Command::Token(c)) => cmd_token(&db, c),
                 Some(Command::Approval(c)) => cmd_approval(&db, c),
                 Some(Command::Goal(c)) => goals::run(&db, c, cli_ctx(), json_mode()),
@@ -1295,16 +1484,12 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     };
     let mut parts: Vec<String> = Vec::new();
     if has_deadline {
-        // `--deadline ''` clears too (core normalises blank to None), so the
-        // outcome line must not report an empty date as if one were set.
-        let set_to = a.deadline.as_deref().map(str::trim).unwrap_or("");
+        // Report what was stored (normalised), not the raw input; `--deadline
+        // ''` clears too, so an empty date is never reported as set.
+        let stored = tasks::resolve_for_lookup(db, &task.id, true)?.deadline;
         parts.push(format!(
             "deadline {}",
-            if a.clear_deadline || set_to.is_empty() {
-                "cleared"
-            } else {
-                set_to
-            }
+            stored.as_deref().unwrap_or("cleared")
         ));
     }
     if a.title.is_some() {
@@ -2437,24 +2622,27 @@ fn cmd_search(db: &Db, a: SearchArgs) -> Result<()> {
     if q.trim().is_empty() {
         anyhow::bail!("search needs a query");
     }
-    let conn = db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.pt_id, t.title, t.status_v2, t.priority
-         FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
-         WHERE tasks_fts MATCH ?1
-         ORDER BY rank LIMIT ?2",
-    )?;
-    let rows: Vec<serde_json::Value> = stmt
-        .query_map((&q, a.limit as i64), |r| {
-            Ok(serde_json::json!({
-                "task_uuid": r.get::<_, String>(0)?,
-                "pt_id": r.get::<_, Option<String>>(1)?,
-                "title": r.get::<_, String>(2)?,
-                "status": r.get::<_, String>(3)?,
-                "priority": r.get::<_, i64>(4)?,
-            }))
-        })?
-        .collect::<std::result::Result<_, _>>()?;
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    if let Some(fts) = tasks::fts_match_query(&q) {
+        let conn = db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.pt_id, t.title, t.status_v2, t.priority
+             FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
+             WHERE tasks_fts MATCH ?1
+             ORDER BY rank LIMIT ?2",
+        )?;
+        rows = stmt
+            .query_map((&fts, a.limit as i64), |r| {
+                Ok(serde_json::json!({
+                    "task_uuid": r.get::<_, String>(0)?,
+                    "pt_id": r.get::<_, Option<String>>(1)?,
+                    "title": r.get::<_, String>(2)?,
+                    "status": r.get::<_, String>(3)?,
+                    "priority": r.get::<_, i64>(4)?,
+                }))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+    }
     emit(&rows, || {
         print_lines(ui::headline(
             "ptask · search",
@@ -2820,22 +3008,66 @@ fn summarize_payload(payload: &str) -> String {
     parts.join(" ")
 }
 
-fn cmd_undo(db: &Db) -> Result<()> {
-    let out = tasks::undo_last(db, &cli_ctx()).map_err(anyhow::Error::msg)?;
+fn cmd_undo(db: &Db, a: UndoArgs) -> Result<()> {
+    let ctx = cli_ctx();
+    let plan = tasks::undo_plan(db, &ctx).map_err(anyhow::Error::msg)?;
+    let handle = plan
+        .pt_id
+        .clone()
+        .unwrap_or_else(|| short_id(&plan.task_uuid).to_string());
+    if plan.action == tasks::UndoAction::DeleteCreated && !a.yes {
+        // Same gate as `pt rm`: undoing a create is a permanent delete, and
+        // with no TTY to confirm, refuse rather than delete silently.
+        if json_mode() || !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "refusing to undo the creation of {handle} without --yes: it would be deleted permanently (no TTY to confirm)"
+            );
+        }
+        use std::io::Write;
+        print!(
+            "{}",
+            ui::prompt(
+                &format!(
+                    "undo the creation of {handle} \"{}\"? It will be deleted permanently.",
+                    plan.title
+                ),
+                "[y/N]"
+            )
+        );
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok();
+        if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            anyhow::bail!("aborted: {handle} not deleted");
+        }
+    }
+    let out = tasks::undo_planned(db, &ctx, &plan).map_err(anyhow::Error::msg)?;
     emit(
         &serde_json::json!({
             "description": out.description,
-            "reversed_event_id": out.reversed_event_id
+            "reversed_event_id": out.reversed_event_id,
+            "task_uuid": out.task_uuid,
+            "pt_id": out.pt_id,
+            "title": out.title,
+            "action": out.action.verb(),
+            "was": out.action.reversed(),
         }),
         || {
             println!(
                 "{}",
-                ui::section(
-                    "undo",
-                    ui::Ink::Green,
+                ui::outcome(
+                    if out.action == tasks::UndoAction::DeleteCreated {
+                        ui::Status::Bad
+                    } else {
+                        ui::Status::Changed
+                    },
+                    out.action.verb(),
+                    &handle,
+                    &out.title,
                     &format!(
-                        "{} · reversed event #{}",
-                        out.description, out.reversed_event_id
+                        "undo · was {} · reversed event #{}",
+                        out.action.reversed(),
+                        out.reversed_event_id
                     )
                 )
             )
@@ -3590,6 +3822,42 @@ mod tests {
             task.title
         );
         assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), cursor);
+    }
+
+    #[test]
+    fn search_takes_free_text_without_fts_syntax_errors() {
+        // Regression (CORE-6): the query went straight to `MATCH`, so
+        // `pt search follow-up` failed with "no such column: up", and
+        // quotes, PT-ids, c++, ?, %, bare AND/NOT and * all errored.
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("search.db")).unwrap();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("schedule the follow-up call"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        for query in [
+            "follow-up",
+            "\"don't\"",
+            "PT-2201",
+            "c++",
+            "what?",
+            "100%",
+            "NOT",
+            "AND",
+            "*",
+            "foll*",
+        ] {
+            super::cmd_search(
+                &db,
+                super::SearchArgs {
+                    query: vec![query.into()],
+                    limit: 20,
+                },
+            )
+            .unwrap_or_else(|e| panic!("{query:?}: {e:#}"));
+        }
     }
 
     #[test]

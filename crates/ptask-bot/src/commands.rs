@@ -12,6 +12,7 @@ fn bot_ctx() -> ptask_core::event_log::EventCtx {
         actor: "telegram".into(),
         source: "bot".into(),
         event_uuid: None,
+        command: None,
     }
 }
 

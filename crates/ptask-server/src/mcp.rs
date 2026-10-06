@@ -72,6 +72,18 @@ fn with_goals(
 // ------------------------------------------------------------------ args
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DoneArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// The deadline you last saw for this task. When set, the call is
+    /// refused if the task has moved on (another agent or the operator
+    /// already completed that occurrence), so a retried or duplicate
+    /// task_done never advances a recurring task twice. "" = it had none.
+    #[serde(default)]
+    pub expected_deadline: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct IdArg {
     /// Task handle: PT-N, bare number, task uuid, or a title substring.
     pub id: String,
@@ -166,7 +178,8 @@ pub struct CaptureArg {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SearchArg {
-    /// FTS5 query over titles + descriptions.
+    /// Free text over titles + descriptions: every word must match;
+    /// punctuation and AND/OR/NOT are plain text; a trailing * matches a prefix.
     pub query: String,
     #[serde(default)]
     pub limit: Option<usize>,
@@ -278,6 +291,7 @@ impl PtaskMcp {
             actor: self.actor.clone(),
             source: "mcp".into(),
             event_uuid: None,
+            command: None,
         }
     }
 
@@ -406,12 +420,17 @@ impl PtaskMcp {
     )]
     async fn task_done(
         &self,
-        Parameters(IdArg { id }): Parameters<IdArg>,
+        Parameters(DoneArg {
+            id,
+            expected_deadline,
+        }): Parameters<DoneArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
         let ctx = self.ctx();
         on_blocking(move || {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            let t = ptask_core::tasks::expect_deadline(t, expected_deadline.as_deref())
+                .map_err(domain_err)?;
             let outcome = ptask_core::tasks::mark_done(&db, &t, &ctx).map_err(domain_err)?;
             rescore_db(&db);
             match outcome {
@@ -626,17 +645,21 @@ impl PtaskMcp {
         .await
     }
 
-    #[tool(description = "Full-text search (FTS5) over task titles + descriptions, any status.")]
+    #[tool(
+        description = "Full-text search (FTS5) over task titles + descriptions, any status. Free text: every word must match; punctuation and AND/OR/NOT are literal; a trailing * matches a prefix."
+    )]
     async fn task_search(
         &self,
         Parameters(SearchArg { query, limit }): Parameters<SearchArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
         on_blocking(move || {
-            let q = query.trim().to_string();
-            if q.is_empty() {
+            if query.trim().is_empty() {
                 return Err(McpError::invalid_params("query must be non-empty", None));
             }
+            let Some(q) = ptask_core::tasks::fts_match_query(&query) else {
+                return json_ok(&Vec::<serde_json::Value>::new());
+            };
             let limit = limit.unwrap_or(20).clamp(1, 100) as i64;
             let rows: Vec<serde_json::Value> = db
                 .with_conn(|c| {
@@ -974,6 +997,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_search_takes_free_text_and_finds_the_rows() {
+        // Regression (CORE-6): agents search before task_add to avoid
+        // duplicates; a raw MATCH failed on "follow-up", "don't", "PT-2201",
+        // "c++", "what?", "100%", bare NOT/AND and "*", so they added again.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        for title in [
+            "schedule the follow-up call",
+            "don't page on disk alerts",
+            "PT-2201 tailnet gate",
+            "learn c++ templates",
+            "what? why is the queue stuck",
+            "rollout at 100% traffic",
+            "NOT a drill: rotate keys",
+        ] {
+            ptask_core::tasks::create(&db, ptask_core::NewTask::minimal(title), &EventCtx::test())
+                .unwrap();
+        }
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+        for (query, expected) in [
+            ("follow-up", Some("schedule the follow-up call")),
+            ("don't", Some("don't page on disk alerts")),
+            ("\"don't\"", Some("don't page on disk alerts")),
+            ("PT-2201", Some("PT-2201 tailnet gate")),
+            ("c++", Some("learn c++ templates")),
+            ("what?", Some("what? why is the queue stuck")),
+            ("100%", Some("rollout at 100% traffic")),
+            ("NOT drill", Some("NOT a drill: rotate keys")),
+            ("temp*", Some("learn c++ templates")),
+            ("AND", None),
+            ("*", None),
+        ] {
+            let result = mcp
+                .task_search(Parameters(SearchArg {
+                    query: query.into(),
+                    limit: None,
+                }))
+                .await
+                .unwrap_or_else(|e| panic!("{query:?}: {e:?}"));
+            let payload = serde_json::to_value(&result).unwrap();
+            let text = payload
+                .pointer("/content/0/text")
+                .unwrap()
+                .as_str()
+                .unwrap();
+            let rows: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
+            let titles: Vec<&str> = rows.iter().map(|r| r["title"].as_str().unwrap()).collect();
+            match expected {
+                Some(title) => assert!(titles.contains(&title), "{query:?}: {titles:?}"),
+                None => assert!(titles.is_empty(), "{query:?}: {titles:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn task_done_with_expected_deadline_advances_one_occurrence_once() {
+        // Round 2, item 4ii: task_done resolves the task when it runs, so a
+        // duplicate call for the occurrence an agent saw advanced it again.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let mut new = ptask_core::NewTask::minimal("daily");
+        new.deadline = Some("2099-01-01".into());
+        let t = ptask_core::tasks::create_with_extensions(
+            &db,
+            new,
+            ptask_core::Extensions {
+                recurrence: Some(ptask_core::recurrence::parse("every day").unwrap()),
+                ..Default::default()
+            },
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+        let done = || {
+            mcp.task_done(Parameters(DoneArg {
+                id: t.pt_id.clone().unwrap(),
+                expected_deadline: Some("2099-01-01".into()),
+            }))
+        };
+        done().await.unwrap();
+        assert!(done().await.is_err());
+        let after = ptask_core::tasks::resolve_for_lookup(&db, &t.id, true).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some("2099-01-02"));
+    }
+
+    #[tokio::test]
+    async fn task_done_twice_journals_one_completion() {
+        // Regression (MCP-13): task_done resolves PT-N/uuid across terminal
+        // states, so a repeated call re-completed the task and journaled a
+        // second task.completed.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("finish once"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+        let done = |id: String| {
+            mcp.task_done(Parameters(DoneArg {
+                id,
+                expected_deadline: None,
+            }))
+        };
+        done(t.pt_id.clone().unwrap()).await.unwrap();
+        let cursor = ptask_core::event_log::current_cursor(&db).unwrap();
+        assert!(done(t.pt_id.clone().unwrap()).await.is_err());
+        assert!(done(t.id.clone()).await.is_err());
+        assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), cursor);
+        let completed: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM pt_event_log WHERE event_type='task.completed'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(completed, 1);
+    }
+
+    #[tokio::test]
     async fn task_done_reports_advanced_for_a_recurring_task() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(dir.path().join("mcp.db")).unwrap();
@@ -999,8 +1145,9 @@ mod tests {
         .unwrap();
         let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
         let result = mcp
-            .task_done(Parameters(IdArg {
+            .task_done(Parameters(DoneArg {
                 id: t.pt_id.clone().unwrap(),
+                expected_deadline: None,
             }))
             .await
             .unwrap();

@@ -93,6 +93,11 @@ pub struct Extensions {
     /// `pt_recurrence` in the same transaction as the task insert.
     /// `next_occurrence` is initialised from the task's deadline.
     pub recurrence: Option<crate::recurrence::Recurrence>,
+    /// The unclamped occurrence a plain monthly rule counts from, when the
+    /// first deadline was computed from it (quick-add on Jan 31: anchor Jan
+    /// 31, first deadline Feb 28). Used only while it still leads to the
+    /// stored deadline; otherwise the deadline itself is the anchor.
+    pub recurrence_anchor: Option<String>,
 }
 
 /// Insert a task with byte-for-byte Python defaults, mint a PT-N, log a
@@ -142,19 +147,19 @@ pub fn create_with_extensions(
     ext: Extensions,
     ctx: &EventCtx,
 ) -> Result<Task> {
+    reject_blank_title(&new.title)?;
     // Every edit path validates a deadline; create stored any text, so
     // `--deadline "next friday"` read as overdue forever (julianday NULL)
-    // and made a recurring task uncompletable.
+    // and made a recurring task uncompletable. Stored in the one canonical
+    // form (see normalize_when); recurrence rows are seeded from it.
     let mut new = new;
     new.deadline = new
         .deadline
         .as_deref()
         .map(str::trim)
         .filter(|d| !d.is_empty())
-        .map(str::to_owned);
-    if let Some(d) = new.deadline.as_deref() {
-        parse_iso_zoned(d)?;
-    }
+        .map(normalize_when)
+        .transpose()?;
     let id = Uuid::new_v4().to_string();
     let now = iso_now();
 
@@ -228,11 +233,22 @@ pub fn create_with_extensions(
             crate::recurrence::Mode::Fixed => "fixed",
             crate::recurrence::Mode::Completion => "completion",
         };
+        let anchor = match ext.recurrence_anchor.as_deref() {
+            Some(a) if anchor_leads_to(rec, a, &next_occ) => normalize_when(a)?,
+            _ => next_occ.clone(),
+        };
         tx.execute(
             "INSERT INTO pt_recurrence
                  (task_uuid, rrule, mode, original_input, next_occurrence, anchor)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            params![id, rec.rrule_str, mode_str, rec.original_input, next_occ],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                rec.rrule_str,
+                mode_str,
+                rec.original_input,
+                next_occ,
+                anchor
+            ],
         )?;
     }
 
@@ -436,6 +452,11 @@ pub fn list_all(db: &Db) -> Result<Vec<Task>> {
 pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     let conn = db.get()?;
     let q = query.trim();
+    // A blank query is the LIKE pattern "%%": it matched every open task,
+    // so `pt done ""` completed the only one.
+    if q.is_empty() {
+        return Err(crate::Error::Other("empty task query".into()));
+    }
     let upper = q.to_ascii_uppercase();
 
     // PT-N exact match.
@@ -629,6 +650,32 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
     }
 }
 
+/// Free text → a safe FTS5 `MATCH` expression for `tasks_fts`.
+///
+/// Every whitespace-separated word becomes a quoted FTS5 string (inner `"`
+/// doubled), so `-`, `:`, `+`, `?`, `%`, quotes and bare AND/OR/NOT are text,
+/// not query syntax: raw user input used to fail ("no such column: up" for
+/// `follow-up`). Words are ANDed. A trailing `*` stays outside the quotes as
+/// a prefix marker (`deploy*`). `None` when no word has a letter or digit.
+pub fn fts_match_query(text: &str) -> Option<String> {
+    let terms: Vec<String> = text
+        .split_whitespace()
+        .filter_map(|word| {
+            let base = word.trim_end_matches('*');
+            if !base.chars().any(char::is_alphanumeric) {
+                return None;
+            }
+            let quoted = format!("\"{}\"", base.replace('"', "\"\""));
+            Some(if base.len() < word.len() {
+                format!("{quoted}*")
+            } else {
+                quoted
+            })
+        })
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
 /// Outcome of `mark_done`: either the task was completed, or it was
 /// recurring and the deadline was advanced in-place.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,6 +698,11 @@ struct RecurrenceRow {
 /// `interactions` row is logged.
 /// Mark done. The `task.completed` / `task.recurrence_advanced` event
 /// commits in the same transaction as the status flip, attributed to `ctx`.
+///
+/// `task` is the caller's snapshot: a recurring task advances only if its
+/// deadline is still the occurrence the caller saw, so a duplicate or stale
+/// completion is refused instead of skipping an occurrence. A task that is
+/// already done is refused too; neither refusal writes anything.
 pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -694,6 +746,9 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             other => Err(other),
         })?;
 
+    // Set when a recurring task's series has no next occurrence: this
+    // completion closes it for good.
+    let mut series_ended = false;
     if let Some(RecurrenceRow {
         mode: mode_str,
         original,
@@ -709,32 +764,78 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                 "recurring task is terminal; reopen it before completing an occurrence".into(),
             ));
         }
+        // The caller completes the occurrence it saw. If the deadline moved
+        // since (another completion advanced it, or an edit), advancing again
+        // would silently skip an occurrence: refuse and change nothing.
+        // Compare normalised forms: rows written before deadlines were
+        // normalised must still match the value a client echoes back.
+        let same_occurrence = match (task.deadline.as_deref(), current_deadline.as_deref()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => match (normalize_when(a), normalize_when(b)) {
+                (Ok(x), Ok(y)) => x == y,
+                _ => a == b,
+            },
+            _ => false,
+        };
+        if !same_occurrence {
+            let handle = task.pt_id.clone().unwrap_or_else(|| task.id.clone());
+            return Err(crate::Error::Other(format!(
+                "{handle} changed since it was read: the occurrence is now due {} \
+                 (already completed or edited); nothing was advanced",
+                current_deadline.as_deref().unwrap_or("(none)")
+            )));
+        }
         let rec = crate::recurrence::parse(&original)
             .map_err(|e| crate::Error::Other(format!("re-parse recurrence: {}", e)))?;
         let completion_now = crate::dates::now_in_operator_tz()?;
-        // Only completion mode re-applies the time of day. Rows stored before
-        // quick-add rejected unparseable times ("at 9") must stay completable.
-        let explicit_time = if mode_str == "completion" {
-            recurrence_time_of_day(&original, &completion_now)
-                .ok()
-                .flatten()
-        } else {
-            None
-        };
+        // The rule's `at` time, if any. Rows stored before quick-add rejected
+        // unparseable times ("at 9") must stay completable, so a bad one is
+        // simply absent.
+        let explicit_time = recurrence_time_of_day(&original, &completion_now)
+            .ok()
+            .flatten();
         // Where the next occurrence counts from:
         //   Fixed      → from the current deadline, or the operator-set anchor
         //                for a plain monthly rule (preserves cadence)
         //   Completion → from now (drifts forward with completions)
-        let mut next_z = match mode_str.as_str() {
+        let advanced: Result<jiff::Zoned> = match mode_str.as_str() {
             "fixed" => {
                 let current = match &current_deadline {
                     Some(d) => parse_iso_zoned(d)?,
                     None => completion_now.clone(),
                 };
                 let anchor = anchor.as_deref().map(parse_iso_zoned).transpose()?;
-                crate::recurrence::next_fixed(&rec, anchor.as_ref(), &current, &completion_now)?
+                (|| {
+                    let next = crate::recurrence::next_fixed(
+                        &rec,
+                        anchor.as_ref(),
+                        &current,
+                        &completion_now,
+                    )?;
+                    // Chaining keeps the current deadline's clock time, so one
+                    // occurrence inside a spring-forward gap (01:30 → 02:30)
+                    // moved every later one too. Re-apply the rule's wall-clock
+                    // time: its `at`, else the operator-set anchor's.
+                    let Some(time) = explicit_time.as_ref().or(anchor.as_ref()) else {
+                        return Ok(next);
+                    };
+                    let floor = current.clone().max(completion_now.clone());
+                    let mut z = combine_date_with_time(&next, time)?;
+                    while z <= floor {
+                        z = combine_date_with_time(
+                            &crate::recurrence::next_after(&rec, &z)?,
+                            time,
+                        )?;
+                    }
+                    Ok(z)
+                })()
             }
-            "completion" => crate::recurrence::next_after(&rec, &completion_now)?,
+            "completion" => crate::recurrence::next_after(&rec, &completion_now).and_then(|next| {
+                match explicit_time.as_ref() {
+                    Some(time) => combine_date_with_time(&next, time),
+                    None => Ok(next),
+                }
+            }),
             other => {
                 return Err(crate::Error::Other(format!(
                     "recurrence: unknown mode in pt_recurrence: {:?}",
@@ -742,48 +843,84 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                 )));
             }
         };
-        if mode_str == "completion"
-            && let Some(time) = explicit_time.as_ref()
-        {
-            next_z = combine_date_with_time(&next_z, time)?;
-        }
-        let next_iso = crate::dates::format_iso(&next_z);
+        // No representable next occurrence ("every 95000 months" runs past
+        // year 9999): the series is over, so this completion closes the task
+        // below instead of failing on every attempt. Only a range error ends
+        // a series; anything else is a real failure and propagates.
+        let next_z = match advanced {
+            Ok(next_z) => Some(next_z),
+            Err(e) if series_has_ended(&e) => {
+                tracing::warn!(
+                    target: "ptask::tasks", task = %task.id, error = %e,
+                    "no next occurrence; completing the recurring task"
+                );
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        series_ended = next_z.is_none();
+        if let Some(next_z) = next_z {
+            // A date-only deadline is due all day; its next occurrence must be
+            // date-only too, not a midnight timestamp that is overdue at 00:00.
+            let date_only = matches!(
+                current_deadline.as_deref().map(parse_when),
+                Some(Ok(When::Date(_)))
+            );
+            let next_iso = if date_only {
+                next_z.date().to_string()
+            } else {
+                crate::dates::format_iso(&next_z)
+            };
 
-        tx.execute(
-            "UPDATE tasks SET deadline=?1, updated_at=?2, status='pending',
+            tx.execute(
+                "UPDATE tasks SET deadline=?1, updated_at=?2, status='pending',
                               status_v2='todo', snoozed_until=NULL WHERE id=?3",
-            params![next_iso, now, task.id],
-        )?;
-        tx.execute(
-            "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
-            params![next_iso, task.id],
-        )?;
-        tx.execute(
-            "INSERT INTO interactions (task_id, action, ts, details)
+                params![next_iso, now, task.id],
+            )?;
+            tx.execute(
+                "UPDATE pt_recurrence SET next_occurrence=?1 WHERE task_uuid=?2",
+                params![next_iso, task.id],
+            )?;
+            tx.execute(
+                "INSERT INTO interactions (task_id, action, ts, details)
              VALUES (?1, 'recurrence_advance', ?2, ?3)",
-            params![
-                task.id,
-                now,
-                format!("Recurring task advanced to {}", next_iso),
-            ],
-        )?;
-        record_event_tx(
-            &tx,
-            ctx,
-            &task.id,
-            "task.recurrence_advanced",
-            &serde_json::json!({
-                "task_uuid": task.id,
-                "pt_id": task.pt_id,
-                "next_deadline": next_iso,
-            }),
-        )?;
-        tx.commit()?;
-        return Ok(DoneOutcome::Advanced {
-            next_deadline: next_iso,
-        });
+                params![
+                    task.id,
+                    now,
+                    format!("Recurring task advanced to {}", next_iso),
+                ],
+            )?;
+            record_event_tx(
+                &tx,
+                ctx,
+                &task.id,
+                "task.recurrence_advanced",
+                &serde_json::json!({
+                    "task_uuid": task.id,
+                    "pt_id": task.pt_id,
+                    "next_deadline": next_iso,
+                }),
+            )?;
+            tx.commit()?;
+            return Ok(DoneOutcome::Advanced {
+                next_deadline: next_iso,
+            });
+        }
     }
 
+    // Completing a done task is refused like dismissing a dismissed one: the
+    // repeat used to journal a second task.completed (and fire its webhook).
+    // Done ↔ dismissed stays a deliberate, journaled re-classification.
+    let status: Option<String> = tx
+        .query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&task.id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    match status.as_deref() {
+        None => return Err(crate::Error::Other("task not found".into())),
+        Some("done") => return Err(crate::Error::Other("task is already done".into())),
+        Some(_) => {}
+    }
     tx.execute(
         "UPDATE tasks SET status='done', status_v2='done', updated_at=?1 WHERE id=?2",
         params![now, task.id],
@@ -793,15 +930,36 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
          VALUES (?1, 'status_change', ?2, ?3)",
         params![task.id, now, format!("Completed via {}", ctx.source),],
     )?;
-    record_event_tx(
-        &tx,
-        ctx,
-        &task.id,
-        "task.completed",
-        &serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id }),
-    )?;
+    let mut payload = serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id });
+    if series_ended {
+        // The rule has no further occurrence: drop it, so the closed task
+        // no longer reports "recurs" (and a reopen is a plain task).
+        tx.execute("DELETE FROM pt_recurrence WHERE task_uuid=?1", [&task.id])?;
+        payload["series_ended"] = serde_json::json!(true);
+    }
+    record_event_tx(&tx, ctx, &task.id, "task.completed", &payload)?;
     tx.commit()?;
     Ok(DoneOutcome::Completed)
+}
+
+/// Pin the occurrence a caller completes: a surface that resolves the task
+/// at request time (/sync, MCP, the dashboard) passes the deadline its
+/// client last saw, and [`mark_done`] then refuses if the task has moved on.
+/// `None` leaves the snapshot as read; `""` means "it had no deadline".
+pub fn expect_deadline(mut task: Task, expected: Option<&str>) -> Result<Task> {
+    if let Some(expected) = expected {
+        task.deadline = match expected.trim() {
+            "" => None,
+            d => Some(normalize_when(d)?),
+        };
+    }
+    Ok(task)
+}
+
+/// True when an advance failed because the next occurrence is outside the
+/// representable range, i.e. the series is over.
+fn series_has_ended(e: &crate::Error) -> bool {
+    matches!(e, crate::Error::OutOfRange(_))
 }
 
 /// Open `depends_on` prerequisites of `task_uuid`, as `PT-N — title` handles
@@ -833,23 +991,41 @@ pub fn open_blockers(db: &Db, task_uuid: &str) -> Result<Vec<String>> {
     open_blockers_tx(&tx, task_uuid)
 }
 
-/// Parse an ISO-formatted deadline string (as produced by `dates::format_iso`,
-/// or any ISO-8601 with an offset) back to a `Zoned` anchored in the operator
-/// timezone. Bare date strings (`YYYY-MM-DD`) are interpreted at midnight in
-/// the operator tz.
-fn parse_iso_zoned(s: &str) -> Result<jiff::Zoned> {
+/// A deadline or snooze value, as any surface may spell it.
+enum When {
+    /// A bare calendar date: due (or waking) all day, operator-local.
+    Date(jiff::civil::Date),
+    /// An instant, in the operator timezone.
+    Instant(jiff::Zoned),
+}
+
+/// Parse a deadline / snooze string: an ISO-8601 / RFC 3339 / RFC 9557
+/// instant (any offset, a zone annotation, basic format, ...), a datetime
+/// with a zone annotation or none (read as operator-local wall time), or a
+/// bare date.
+fn parse_when(s: &str) -> Result<When> {
+    let s = s.trim();
     let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ)
         .map_err(|e| crate::Error::Other(format!("operator tz: {}", e)))?;
-    // ISO with offset → Timestamp → Zoned in operator tz.
     if let Ok(ts) = s.parse::<jiff::Timestamp>() {
-        return Ok(ts.to_zoned(tz));
+        return Ok(When::Instant(ts.to_zoned(tz)));
     }
-    // Bare date.
-    if let Ok(d) = s.parse::<jiff::civil::Date>() {
-        return d
-            .at(0, 0, 0, 0)
+    if let Ok(z) = s.parse::<jiff::Zoned>() {
+        return Ok(When::Instant(z.with_time_zone(tz)));
+    }
+    // jiff reads a date out of a datetime string too, so only a value with
+    // no time part is a bare date.
+    let date_part = s.split('[').next().unwrap_or(s);
+    if !date_part.contains(['T', 't', ' '])
+        && let Ok(d) = s.parse::<jiff::civil::Date>()
+    {
+        return Ok(When::Date(d));
+    }
+    if let Ok(dt) = s.parse::<jiff::civil::DateTime>() {
+        return dt
             .to_zoned(tz)
-            .map_err(|e| crate::Error::Other(format!("date→zoned {}: {}", s, e)));
+            .map(When::Instant)
+            .map_err(|e| crate::Error::Other(format!("datetime {s:?}: {e}")));
     }
     Err(crate::Error::Other(format!(
         "parse iso zoned {:?}: not a Timestamp or Date",
@@ -857,9 +1033,67 @@ fn parse_iso_zoned(s: &str) -> Result<jiff::Zoned> {
     )))
 }
 
+/// The one stored form for a deadline or snooze, whatever the writer sent.
+///
+/// A bare date stays `YYYY-MM-DD` (due all day). Anything else is stored as
+/// the instant rendered in the operator timezone with a colon offset
+/// (`dates::format_iso`, e.g. `2026-12-10T09:00:00+00:00`): SQLite's
+/// julianday() reads it, and its first ten characters are the operator-local
+/// date that the today/tomorrow/`due before:` filters and the dashboard
+/// compare. Raw jiff-accepted spellings (`+0100`, `t`/`z`, `[Europe/London]`,
+/// basic format) were julianday NULL: overdue forever, and a snooze that
+/// woke at once.
+pub(crate) fn normalize_when(s: &str) -> Result<String> {
+    let (year, canonical) = match parse_when(s)? {
+        When::Date(d) => (d.year(), d.to_string()),
+        When::Instant(z) => (z.year(), crate::dates::format_iso(&z)),
+    };
+    if !(1..=9999).contains(&year) {
+        return Err(crate::Error::Other(format!(
+            "date {s:?} is outside years 1..9999"
+        )));
+    }
+    Ok(canonical)
+}
+
+/// Parse a stored deadline back to a `Zoned` in the operator timezone. Bare
+/// date strings (`YYYY-MM-DD`) are interpreted at midnight in the operator tz.
+fn parse_iso_zoned(s: &str) -> Result<jiff::Zoned> {
+    match parse_when(s)? {
+        When::Instant(z) => Ok(z),
+        When::Date(d) => {
+            let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ)
+                .map_err(|e| crate::Error::Other(format!("operator tz: {}", e)))?;
+            d.at(0, 0, 0, 0)
+                .to_zoned(tz)
+                .map_err(|e| crate::Error::Other(format!("date→zoned {}: {}", s, e)))
+        }
+    }
+}
+
+/// True when a plain monthly rule counting whole intervals from `anchor`
+/// lands its first occurrence exactly on `deadline` — i.e. the anchor is the
+/// unclamped day that deadline was computed from. Anything else (another
+/// rule, an overridden deadline, an unreadable value) is not an anchor.
+fn anchor_leads_to(rec: &crate::recurrence::Recurrence, anchor: &str, deadline: &str) -> bool {
+    if rec.freq != crate::recurrence::Freq::Monthly || !rec.bymonthday.is_empty() {
+        return false;
+    }
+    let (Ok(anchor), Ok(deadline)) = (parse_iso_zoned(anchor), parse_iso_zoned(deadline)) else {
+        return false;
+    };
+    jiff::Span::new()
+        .try_months(i64::from(rec.interval))
+        .and_then(|span| anchor.checked_add(span))
+        .is_ok_and(|first| first.timestamp() == deadline.timestamp())
+}
+
 fn recurrence_time_of_day(original: &str, now: &jiff::Zoned) -> Result<Option<jiff::Zoned>> {
     let (_rule, time) = crate::recurrence::split_time_suffix(original);
-    time.map(|t| crate::dates::parse_at(&format!("today {}", t), now.clone()))
+    // Only the clock fields are used. Read them on a UTC clock, which has no
+    // gaps: on the spring-forward day "today 1:30am" in London is 02:30.
+    let utc = now.with_time_zone(jiff::tz::TimeZone::UTC);
+    time.map(|t| crate::dates::parse_at(&format!("today {}", t), utc.clone()))
         .transpose()
 }
 
@@ -878,7 +1112,7 @@ pub(crate) fn combine_date_with_time(
     );
     civil
         .to_zoned(tz)
-        .map_err(|e| crate::Error::Other(format!("combine date+time: {}", e)))
+        .map_err(|e| crate::Error::OutOfRange(format!("combine date+time: {}", e)))
 }
 
 /// Build a Linear-style branch name from a PT-N + title.
@@ -969,11 +1203,14 @@ pub fn update_deadline(
     // over /sync or MCP, a blanked dashboard field) and every one of them
     // used to reach `parse_iso_zoned` and fail with a bare parse error.
     // Normalising here keeps the recurring-task guard below correct for all
-    // of them. Surrounding whitespace is trimmed off a real date too.
-    let deadline = deadline.map(str::trim).filter(|d| !d.is_empty());
-    if let Some(d) = deadline {
-        parse_iso_zoned(d)?;
-    }
+    // of them. Surrounding whitespace is trimmed off a real date too, and a
+    // real date is stored in the canonical form (see normalize_when).
+    let deadline = deadline
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(normalize_when)
+        .transpose()?;
+    let deadline = deadline.as_deref();
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1056,6 +1293,14 @@ fn delete_task_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCt
             r.get(0)
         })
         .optional()?;
+    // task_links and task_labels (V010) carry no foreign key, so nothing
+    // cascades: without these, a deleted task stayed a prerequisite (or a
+    // dependent) of live tasks and kept its labels.
+    tx.execute(
+        "DELETE FROM task_links WHERE from_uuid=?1 OR to_uuid=?1",
+        [task_uuid],
+    )?;
+    tx.execute("DELETE FROM task_labels WHERE task_uuid=?1", [task_uuid])?;
     tx.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
     record_event_tx(
         tx,
@@ -1122,7 +1367,6 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
 /// Dismiss (soft close; reversible via reopen). The `task.updated` event
 /// commits in the same transaction, attributed to `ctx`.
 pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
-    let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let status: Option<String> = tx
@@ -1134,6 +1378,21 @@ pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     if status == "dismissed" {
         return Err(crate::Error::Other("task is already dismissed".into()));
     }
+    dismiss_in_tx(&tx, task_uuid, &status, ctx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The dismissal writes (row, interaction, attributed event) inside the
+/// caller's transaction; `status` is the legacy status being left. The
+/// reaper uses it after re-checking its own rule under the write lock.
+pub(crate) fn dismiss_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    task_uuid: &str,
+    status: &str,
+    ctx: &EventCtx,
+) -> Result<()> {
+    let now = iso_now();
     tx.execute(
         "UPDATE tasks SET status='dismissed', status_v2='dismissed', updated_at=?1 WHERE id=?2",
         params![now, task_uuid],
@@ -1144,14 +1403,52 @@ pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
         params![task_uuid, now, format!("Dismissed (was {})", status)],
     )?;
     record_event_tx(
-        &tx,
+        tx,
         ctx,
         task_uuid,
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "status": "dismissed" }),
     )?;
-    tx.commit()?;
     Ok(())
+}
+
+/// What an undo reverses: reopen a completed or dismissed task, or delete
+/// a task the caller created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UndoAction {
+    ReopenCompleted,
+    ReopenDismissed,
+    /// Irreversible: the task row goes (a tombstone is journaled).
+    DeleteCreated,
+}
+
+impl UndoAction {
+    /// The verb for operator output: `reopened` or `deleted`.
+    pub fn verb(self) -> &'static str {
+        match self {
+            UndoAction::ReopenCompleted | UndoAction::ReopenDismissed => "reopened",
+            UndoAction::DeleteCreated => "deleted",
+        }
+    }
+
+    /// What the reversed event did: `completed`, `dismissed` or `created`.
+    pub fn reversed(self) -> &'static str {
+        match self {
+            UndoAction::ReopenCompleted => "completed",
+            UndoAction::ReopenDismissed => "dismissed",
+            UndoAction::DeleteCreated => "created",
+        }
+    }
+}
+
+/// The mutation an undo would reverse right now (see [`undo_plan`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoPlan {
+    pub event_id: i64,
+    pub task_uuid: String,
+    pub pt_id: Option<String>,
+    pub title: String,
+    pub action: UndoAction,
 }
 
 /// What `undo_last` reversed, for operator feedback.
@@ -1159,86 +1456,213 @@ pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
 pub struct UndoOutcome {
     pub reversed_event_id: i64,
     pub description: String,
+    pub task_uuid: String,
+    pub pt_id: Option<String>,
+    pub title: String,
+    pub action: UndoAction,
 }
 
-/// Reverse the most recent undoable mutation in the journal.
+const NOTHING_UNDOABLE: &str =
+    "nothing undoable in your recent journal (undo covers your own done/dismiss/create)";
+
+/// Select the caller's most recent undoable mutation.
 ///
 /// Undoable (honest v1 — reversals that need no "before" snapshot):
 ///   task.completed                 → reopen
 ///   task.updated{status=dismissed} → reopen
 ///   task.created                   → delete (with tombstone)
 /// Everything else (priority/deadline/text edits, escalations) is skipped —
-/// their events don't carry the prior state yet. The reversal itself is a
-/// normal attributed mutation, so `pt log` shows both sides.
+/// their events don't carry the prior state yet.
+///
+/// Candidates are the caller's own events (`ctx.actor`): the operator's
+/// undo must not delete a task HAL created. Any later event on the task,
+/// from ANY actor, protects it — every later mutation, including newly
+/// introduced event types, and reversals already recorded by an earlier
+/// undo or a manual reopen. A created task that another task depends on
+/// (or is depended on by), or that parents another task, is never deleted:
+/// those relations are not journaled under its own uuid.
+fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<UndoPlan>> {
+    // "Own" is actor AND surface: CLI, TUI and an unconfigured `pt mcp` all
+    // default to actor "shell", so the actor alone let the operator's undo
+    // delete what an agent added over MCP. CLI and TUI are one surface.
+    let (surface_a, surface_b) = match ctx.source.as_str() {
+        "cli" | "tui" => ("cli", "tui"),
+        other => (other, other),
+    };
+    let candidates: Vec<(i64, String, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, task_uuid, event_type, payload FROM pt_event_log
+             WHERE task_uuid IS NOT NULL AND actor = ?1
+               AND json_extract(payload, '$.source') IN (?2, ?3)
+             ORDER BY id DESC LIMIT 50",
+        )?;
+        let rows = stmt.query_map(params![ctx.actor, surface_a, surface_b], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+
+    for (id, task_uuid, event_type, payload) in candidates {
+        let superseded: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2)",
+            params![task_uuid, id],
+            |r| r.get(0),
+        )?;
+        if superseded {
+            // A newer event on the task means this change is no longer the
+            // last word on it. If someone else (another actor or surface)
+            // wrote it, or this is the create of a task that still exists,
+            // the newest change is protected: refuse rather than reach
+            // further back and undo, or delete, something older instead.
+            let foreign: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
+                   AND (actor IS NOT ?3
+                        OR COALESCE(json_extract(payload, '$.source'), '') NOT IN (?4, ?5)))",
+                params![task_uuid, id, ctx.actor, surface_a, surface_b],
+                |r| r.get(0),
+            )?;
+            let live_create = event_type == "task.created"
+                && tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+                    [&task_uuid],
+                    |r| r.get::<_, bool>(0),
+                )?;
+            if foreign || live_create {
+                let (pt_id, title): (Option<String>, String) = tx
+                    .query_row(
+                        "SELECT pt_id, title FROM tasks WHERE id=?1",
+                        [&task_uuid],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?
+                    .unwrap_or((None, String::new()));
+                let handle = pt_id.unwrap_or_else(|| task_uuid.clone());
+                return Err(crate::Error::Other(format!(
+                    "your most recent undoable change, on {handle} \"{title}\", has been \
+                     changed since; nothing was undone"
+                )));
+            }
+            continue;
+        }
+        let row: Option<(String, Option<String>, String)> = tx
+            .query_row(
+                "SELECT status_v2, pt_id, title FROM tasks WHERE id=?1",
+                [&task_uuid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((status, pt_id, title)) = row else {
+            continue;
+        };
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        let action = match event_type.as_str() {
+            "task.completed" if status == "done" => UndoAction::ReopenCompleted,
+            "task.updated"
+                if status == "dismissed"
+                    && payload.get("status").and_then(|s| s.as_str()) == Some("dismissed") =>
+            {
+                UndoAction::ReopenDismissed
+            }
+            "task.created" => {
+                let related: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM task_links WHERE from_uuid=?1 OR to_uuid=?1)
+                         OR EXISTS(SELECT 1 FROM tasks WHERE parent_uuid=?1)
+                         OR EXISTS(SELECT 1 FROM approvals WHERE task_uuid=?1)",
+                    [&task_uuid],
+                    |r| r.get(0),
+                )?;
+                // Your newest undoable mutation is protected: refuse rather
+                // than reach further back and delete an older task instead.
+                if related {
+                    let handle = pt_id.clone().unwrap_or_else(|| task_uuid.clone());
+                    return Err(crate::Error::Other(format!(
+                        "your most recent undoable change is creating {handle} \"{title}\", \
+                         which other tasks or approvals now depend on; nothing was undone \
+                         (remove those links, or `pt rm {handle}` deliberately)"
+                    )));
+                }
+                UndoAction::DeleteCreated
+            }
+            _ => continue,
+        };
+        return Ok(Some(UndoPlan {
+            event_id: id,
+            task_uuid,
+            pt_id,
+            title,
+            action,
+        }));
+    }
+    Ok(None)
+}
+
+fn apply_undo(
+    tx: &rusqlite::Transaction<'_>,
+    plan: UndoPlan,
+    ctx: &EventCtx,
+) -> Result<UndoOutcome> {
+    let description = match plan.action {
+        UndoAction::ReopenCompleted | UndoAction::ReopenDismissed => {
+            reopen_in_conn(tx, &plan.task_uuid, ctx)?;
+            format!(
+                "reopened {} (was {})",
+                plan.task_uuid,
+                plan.action.reversed()
+            )
+        }
+        UndoAction::DeleteCreated => {
+            delete_task_in_conn(tx, &plan.task_uuid, ctx)?;
+            format!("deleted {} (undid create)", plan.task_uuid)
+        }
+    };
+    Ok(UndoOutcome {
+        reversed_event_id: plan.event_id,
+        description,
+        task_uuid: plan.task_uuid,
+        pt_id: plan.pt_id,
+        title: plan.title,
+        action: plan.action,
+    })
+}
+
+/// What [`undo_last`] would reverse right now, without changing anything.
+/// Lets a surface confirm an irreversible delete before [`undo_planned`].
+pub fn undo_plan(db: &Db, ctx: &EventCtx) -> Result<UndoPlan> {
+    let mut conn = db.get()?;
+    let tx = conn.transaction()?;
+    select_undo(&tx, ctx)?.ok_or_else(|| crate::Error::Other(NOTHING_UNDOABLE.into()))
+}
+
+/// Reverse `plan`, provided it is still exactly what undo would select.
+/// Errors, changing nothing, if the journal moved since the plan was made.
+pub fn undo_planned(db: &Db, ctx: &EventCtx, plan: &UndoPlan) -> Result<UndoOutcome> {
+    let mut conn = db.get()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current = select_undo(&tx, ctx)?;
+    if current.as_ref() != Some(plan) {
+        return Err(crate::Error::Other(
+            "the journal changed since this undo was planned; nothing was reversed — run undo again"
+                .into(),
+        ));
+    }
+    let outcome = apply_undo(&tx, plan.clone(), ctx)?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// Reverse the caller's most recent undoable mutation (see [`select_undo`]).
+/// The reversal itself is a normal attributed mutation, so `pt log` shows
+/// both sides.
 pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
     // Keep the selected history and current task state stable until reversal.
     // A concurrent claim/edit must not commit between validation and deletion.
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let candidates: Vec<(i64, String, String, String)> = {
-        let mut stmt = tx.prepare(
-            "SELECT id, task_uuid, event_type, payload FROM pt_event_log
-             WHERE task_uuid IS NOT NULL
-             ORDER BY id DESC LIMIT 50",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-        rows.collect::<std::result::Result<_, _>>()?
-    };
-
-    // Only a task's newest event is eligible. This protects every later
-    // mutation, including newly introduced event types, and skips reversals
-    // already recorded by an earlier undo or a manual reopen.
-    let mut seen = std::collections::HashSet::new();
-
-    for (id, task_uuid, event_type, payload) in candidates {
-        if !seen.insert(task_uuid.clone()) {
-            continue;
-        }
-        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
-        let status: Option<String> = tx
-            .query_row(
-                "SELECT status_v2 FROM tasks WHERE id=?1",
-                [&task_uuid],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let Some(status) = status else {
-            continue;
-        };
-        match event_type.as_str() {
-            "task.completed" if status == "done" => {
-                reopen_in_conn(&tx, &task_uuid, ctx)?;
-                tx.commit()?;
-                return Ok(UndoOutcome {
-                    reversed_event_id: id,
-                    description: format!("reopened {} (was completed)", task_uuid),
-                });
-            }
-            "task.updated"
-                if status == "dismissed"
-                    && payload.get("status").and_then(|s| s.as_str()) == Some("dismissed") =>
-            {
-                reopen_in_conn(&tx, &task_uuid, ctx)?;
-                tx.commit()?;
-                return Ok(UndoOutcome {
-                    reversed_event_id: id,
-                    description: format!("reopened {} (was dismissed)", task_uuid),
-                });
-            }
-            "task.created" => {
-                delete_task_in_conn(&tx, &task_uuid, ctx)?;
-                tx.commit()?;
-                return Ok(UndoOutcome {
-                    reversed_event_id: id,
-                    description: format!("deleted {} (undid create)", task_uuid),
-                });
-            }
-            _ => continue,
-        }
-    }
-    Err(crate::Error::Other(
-        "nothing undoable in the recent journal (undo covers done/dismiss/create)".into(),
-    ))
+    let plan =
+        select_undo(&tx, ctx)?.ok_or_else(|| crate::Error::Other(NOTHING_UNDOABLE.into()))?;
+    let outcome = apply_undo(&tx, plan, ctx)?;
+    tx.commit()?;
+    Ok(outcome)
 }
 
 /// Mark a task in progress (status_v2 `in_progress`; legacy stays
@@ -1476,7 +1900,8 @@ pub fn promote(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
 /// task leaves `pt next` and accountability until the wake time passes,
 /// when [`wake_expired_snoozes`] flips it back to todo.
 pub fn snooze(db: &Db, task_uuid: &str, until_iso: &str, ctx: &EventCtx) -> Result<()> {
-    parse_iso_zoned(until_iso)?;
+    let until = normalize_when(until_iso)?;
+    let until_iso = until.as_str();
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -1513,39 +1938,39 @@ pub fn snooze(db: &Db, task_uuid: &str, until_iso: &str, ctx: &EventCtx) -> Resu
 /// Invoked by the hourly scoring run so snoozes expire without their own
 /// timer. Returns the number woken; each wake is an attributed event.
 ///
-/// An unparseable `snoozed_until` wakes immediately: `julianday()` returns
-/// NULL on junk and a NULL comparison is never true, so such a row would
-/// otherwise stay `snoozed` forever with no timer that could ever fire it.
+/// Each `snoozed_until` is read with the same parser the writers use, so a
+/// row stored before writes were normalised wakes on time too. A date-only
+/// snooze wakes from operator-local midnight. An unparseable one wakes
+/// immediately: it would otherwise stay `snoozed` forever with no timer that
+/// could ever fire it.
 pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<usize> {
-    let expired: Vec<String> = {
+    let now = parse_iso_zoned(now_iso)?;
+    let snoozed: Vec<(String, String)> = {
         let conn = db.get()?;
         let mut stmt = conn.prepare(
-            "SELECT id FROM tasks
-             WHERE status_v2='snoozed' AND snoozed_until IS NOT NULL
-               AND (julianday(snoozed_until) IS NULL
-                    OR (length(snoozed_until) = 10
-                        AND snoozed_until <= substr(?1, 1, 10))
-                    OR (length(snoozed_until) > 10
-                        AND julianday(snoozed_until) <= julianday(?1)))",
+            "SELECT id, snoozed_until FROM tasks
+             WHERE status_v2='snoozed' AND snoozed_until IS NOT NULL",
         )?;
-        let rows = stmt.query_map([now_iso], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<std::result::Result<_, _>>()?
     };
+    let expired = snoozed
+        .into_iter()
+        .filter(|(_, until)| match parse_when(until) {
+            Ok(When::Date(d)) => d <= now.date(),
+            Ok(When::Instant(z)) => z.timestamp() <= now.timestamp(),
+            Err(_) => true,
+        });
     let mut woken = 0usize;
-    for uuid in &expired {
+    for (uuid, until) in expired {
         let mut conn = db.get()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Unchanged since it was read: a concurrent re-snooze is not woken.
         let changed = tx.execute(
             "UPDATE tasks SET status_v2='todo', status='pending',
                               snoozed_until=NULL, updated_at=?1
-              WHERE id=?2 AND status_v2='snoozed'
-                AND snoozed_until IS NOT NULL
-                AND (julianday(snoozed_until) IS NULL
-                     OR (length(snoozed_until) = 10
-                         AND snoozed_until <= substr(?1, 1, 10))
-                     OR (length(snoozed_until) > 10
-                         AND julianday(snoozed_until) <= julianday(?1)))",
-            params![now_iso, uuid],
+              WHERE id=?2 AND status_v2='snoozed' AND snoozed_until=?3",
+            params![now_iso, uuid, until],
         )?;
         if changed == 0 {
             continue;
@@ -1553,7 +1978,7 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
         record_event_tx(
             &tx,
             ctx,
-            uuid,
+            &uuid,
             "task.updated",
             &serde_json::json!({ "task_uuid": uuid, "status": "todo", "woke_from_snooze": true }),
         )?;
@@ -1653,12 +2078,24 @@ pub struct TaskEdit<'a> {
 
 /// Apply selected fields, side tables, interactions and one attributed event
 /// in one transaction. A rejected field or late database error changes nothing.
+/// A task title must have visible text: an empty or whitespace-only title
+/// left an unreadable row on every surface.
+fn reject_blank_title(title: &str) -> Result<()> {
+    if title.trim().is_empty() {
+        return Err(crate::Error::Other("title must not be empty".into()));
+    }
+    Ok(())
+}
+
 pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx) -> Result<()> {
     // Blank or padded deadlines normalise like update_deadline: "" clears.
     let mut edit = edit;
     edit.deadline = edit
         .deadline
         .map(|d| d.map(str::trim).filter(|d| !d.is_empty()));
+    if let Some(t) = edit.title {
+        reject_blank_title(t)?;
+    }
     let has_text = edit.title.is_some() || edit.description.is_some();
     let has_labels = !edit.labels_add.is_empty() || !edit.labels_remove.is_empty();
     if !has_text && edit.priority.is_none() && edit.deadline.is_none() && !has_labels {
@@ -1671,9 +2108,12 @@ pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx)
             "priority {p} out of range 1..=5"
         )));
     }
-    if let Some(Some(d)) = edit.deadline {
-        parse_iso_zoned(d)?;
-    }
+    // A set deadline is stored in the canonical form (see normalize_when).
+    let deadline: Option<Option<String>> = edit
+        .deadline
+        .map(|d| d.map(normalize_when).transpose())
+        .transpose()?;
+    let deadline: Option<Option<&str>> = deadline.as_ref().map(|d| d.as_deref());
     let add: Vec<&str> = edit
         .labels_add
         .iter()
@@ -1716,8 +2156,8 @@ pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx)
             edit.title,
             edit.description,
             edit.priority,
-            edit.deadline.is_some(),
-            edit.deadline.flatten(),
+            deadline.is_some(),
+            deadline.flatten(),
             now,
             task_uuid
         ],
@@ -1746,7 +2186,7 @@ pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx)
         payload["priority"] = serde_json::json!(p);
         interactions.push(("priority_change", format!("priority → {p}")));
     }
-    if let Some(deadline) = edit.deadline {
+    if let Some(deadline) = deadline {
         tx.execute(
             "UPDATE pt_recurrence SET next_occurrence=?1, anchor=?1 WHERE task_uuid=?2",
             params![deadline, task_uuid],
@@ -1802,6 +2242,9 @@ pub fn update_text(
 ) -> Result<()> {
     if title.is_none() && description.is_none() {
         return Err(crate::Error::Other("update_text: nothing to change".into()));
+    }
+    if let Some(t) = title {
+        reject_blank_title(t)?;
     }
     let now = iso_now();
     let mut conn = db.get()?;
@@ -2960,6 +3403,38 @@ mod tests {
     }
 
     #[test]
+    fn fts_match_query_quotes_words_and_keeps_a_prefix_marker() {
+        assert_eq!(
+            fts_match_query("follow-up call").as_deref(),
+            Some("\"follow-up\" \"call\"")
+        );
+        assert_eq!(
+            fts_match_query("\"don't\"").as_deref(),
+            Some("\"\"\"don't\"\"\"")
+        );
+        assert_eq!(fts_match_query("deploy*").as_deref(), Some("\"deploy\"*"));
+        assert_eq!(fts_match_query("NOT").as_deref(), Some("\"NOT\""));
+        assert_eq!(fts_match_query(" * - ** "), None);
+        assert_eq!(fts_match_query(""), None);
+    }
+
+    #[test]
+    fn resolve_rejects_an_empty_or_blank_query() {
+        // Regression (CLI-14): "" became the LIKE pattern "%%", so with one
+        // open task `pt done ""` completed it and `pt rm " " -y` deleted it.
+        let (_dir, db) = fresh_db();
+        let only = create(&db, NewTask::minimal("the only task"), &EventCtx::test()).unwrap();
+        for blank in ["", " ", "\t\n"] {
+            let err = resolve(&db, blank).unwrap_err();
+            assert!(format!("{err}").contains("empty task query"), "{err}");
+        }
+        assert_eq!(
+            resolve_for_lookup(&db, &only.id, true).unwrap().status,
+            "todo"
+        );
+    }
+
+    #[test]
     fn resolve_substring_with_multiple_matches_errors() {
         let (_dir, db) = fresh_db();
         create(&db, NewTask::minimal("Buy bread"), &EventCtx::test()).unwrap();
@@ -3193,6 +3668,41 @@ mod tests {
     }
 
     #[test]
+    fn completing_a_done_task_is_refused_and_journals_nothing() {
+        // Regression (MCP-13 / CLI-19): a second `done` on a PT-N wrote a
+        // second task.completed event, interaction and outbound webhook, so
+        // the bot's "Completed today" counted it twice.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let t = create(&db, NewTask::minimal("close once"), &ctx).unwrap();
+        mark_done(&db, &t, &ctx).unwrap();
+        let cursor = crate::event_log::current_cursor(&db).unwrap();
+
+        let again = resolve_for_lookup(&db, &t.id, true).unwrap();
+        let err = mark_done(&db, &again, &ctx).unwrap_err();
+        assert!(format!("{err}").contains("already done"), "{err}");
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor);
+        assert_eq!(event_count(&db, "task.completed"), 1);
+        let interactions: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM interactions WHERE task_id=?1 AND action='status_change'",
+                    [&t.id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(interactions, 1);
+
+        // Unchanged CLI semantics: a dismissed task can still be marked done
+        // (and a done one dismissed) — a deliberate re-classification.
+        let d = create(&db, NewTask::minimal("dropped, then done"), &ctx).unwrap();
+        dismiss(&db, &d.id, &ctx).unwrap();
+        assert_eq!(mark_done(&db, &d, &ctx).unwrap(), DoneOutcome::Completed);
+        dismiss(&db, &d.id, &ctx).unwrap();
+    }
+
+    #[test]
     fn create_with_recurrence_writes_pt_recurrence_row() {
         let (_dir, db) = fresh_db();
         let rec = crate::recurrence::parse("every monday at 9am").unwrap();
@@ -3382,6 +3892,36 @@ mod tests {
     }
 
     #[test]
+    fn expected_deadline_matches_a_legacy_stored_form() {
+        // Regression (review round 2): the caller's value was normalised but
+        // compared as a string with the raw stored deadline, so a row stored
+        // before normalisation could never be completed with it.
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every day").unwrap();
+        let mut new = NewTask::minimal("legacy daily");
+        new.deadline = Some("2099-01-01T09:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec),
+            ..Default::default()
+        };
+        let task = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET deadline='2099-01-01T09:00:00Z' WHERE id=?1",
+                [&task.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let read = resolve_for_lookup(&db, &task.id, true).unwrap();
+        let pinned = expect_deadline(read, Some("2099-01-01T09:00:00Z")).unwrap();
+        assert!(matches!(
+            mark_done(&db, &pinned, &EventCtx::test()).unwrap(),
+            DoneOutcome::Advanced { .. }
+        ));
+    }
+
+    #[test]
     fn mark_done_uses_deadline_read_inside_the_transaction() {
         let (_dir, db) = fresh_db();
         let rec = crate::recurrence::parse("every day").unwrap();
@@ -3398,7 +3938,18 @@ mod tests {
             &crate::recurrence::next_after(&rec, &parse_iso_zoned(revised).unwrap()).unwrap(),
         );
 
-        let outcome = mark_done(&db, &stale, &EventCtx::test()).unwrap();
+        // A caller holding the pre-edit occurrence is refused (CORE-4), and
+        // nothing moves; one that read the revised deadline advances from it.
+        assert!(mark_done(&db, &stale, &EventCtx::test()).is_err());
+        assert_eq!(
+            load_detail(&db, &stale.id)
+                .unwrap()
+                .recurrence_next
+                .as_deref(),
+            Some(revised)
+        );
+        let fresh = resolve_for_lookup(&db, &stale.id, true).unwrap();
+        let outcome = mark_done(&db, &fresh, &EventCtx::test()).unwrap();
         assert_eq!(
             outcome,
             DoneOutcome::Advanced {
@@ -3422,6 +3973,238 @@ mod tests {
     }
 
     #[test]
+    fn a_quick_added_monthly_rule_keeps_the_day_it_was_set_on() {
+        // Regression (PARSE-9): the quick-add path seeded pt_recurrence.anchor
+        // with its first deadline, which next_after had already clamped
+        // (Jan 31 + 1 month = Feb 28), so "pay rent every month" added on
+        // Jan 31 chained Feb 28, Mar 28, Apr 28 ... for good.
+        let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ).unwrap();
+        let jan31 = jiff::civil::date(2099, 1, 31)
+            .at(14, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        for (text, time) in [
+            ("pay rent every month", "T14:00:00"),
+            ("pay rent every month at 9am", "T09:00:00"),
+        ] {
+            let (_dir, db) = fresh_db();
+            let q = crate::quickadd::parse_at(text, jan31.clone()).unwrap();
+            let (new, ext) = q.task_parts("test");
+            let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+            let mut due = vec![t.deadline.clone().unwrap()];
+            for _ in 0..2 {
+                let fresh = resolve_for_lookup(&db, &t.id, true).unwrap();
+                let DoneOutcome::Advanced { next_deadline } =
+                    mark_done(&db, &fresh, &EventCtx::test()).unwrap()
+                else {
+                    panic!("must recur")
+                };
+                due.push(next_deadline);
+            }
+            let days: Vec<&str> = due.iter().map(|d| &d[..10]).collect();
+            assert_eq!(days, ["2099-02-28", "2099-03-31", "2099-04-30"], "{text}");
+            assert!(due.iter().all(|d| d.contains(time)), "{text}: {due:?}");
+        }
+
+        // An explicit deadline replaces the quick-add one: the rule anchors
+        // on what was stored, not on the day the phrase was parsed.
+        let (_dir, db) = fresh_db();
+        let q = crate::quickadd::parse_at("pay rent every month", jan31).unwrap();
+        let (mut new, ext) = q.task_parts("test");
+        new.deadline = Some("2099-03-15T10:00:00+00:00".into());
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let DoneOutcome::Advanced { next_deadline } =
+            mark_done(&db, &t, &EventCtx::test()).unwrap()
+        else {
+            panic!("must recur")
+        };
+        assert_eq!(&next_deadline[..10], "2099-04-15");
+    }
+
+    #[test]
+    fn a_fixed_rule_keeps_its_clock_time_after_the_spring_forward_gap() {
+        // Regression (PARSE-13): fixed mode chained from the current instant,
+        // so the one occurrence inside Europe/London's 2027-03-28 gap (01:00
+        // to 02:00 does not exist) moved to 02:xx, and every later one kept
+        // that time. Only completion mode re-applied the rule's time.
+        for (rule, first, gap_day, after) in [
+            (
+                "every sunday at 1:30am",
+                "2027-03-21T01:30:00+00:00",
+                "2027-03-28T02:30:00+01:00",
+                "2027-04-04T01:30:00+01:00",
+            ),
+            (
+                "every day at 1:15am",
+                "2027-03-27T01:15:00+00:00",
+                "2027-03-28T02:15:00+01:00",
+                "2027-03-29T01:15:00+01:00",
+            ),
+            // No `at`: the operator-set anchor carries the clock time.
+            (
+                "every sunday",
+                "2027-03-21T01:30:00+00:00",
+                "2027-03-28T02:30:00+01:00",
+                "2027-04-04T01:30:00+01:00",
+            ),
+        ] {
+            let (_dir, db) = fresh_db();
+            let mut new = NewTask::minimal("night job");
+            new.deadline = Some(first.into());
+            let ext = Extensions {
+                recurrence: Some(crate::recurrence::parse(rule).unwrap()),
+                ..Default::default()
+            };
+            let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let fresh = resolve_for_lookup(&db, &t.id, true).unwrap();
+                let DoneOutcome::Advanced { next_deadline } =
+                    mark_done(&db, &fresh, &EventCtx::test()).unwrap()
+                else {
+                    panic!("must recur")
+                };
+                seen.push(next_deadline);
+            }
+            assert_eq!(seen, [gap_day, after], "{rule}");
+        }
+    }
+
+    #[test]
+    fn a_rule_with_no_representable_next_occurrence_completes_outright() {
+        // Regression (PARSE-16): quick-add accepts "every 95000 months" (the
+        // first occurrence, ~7,900 years out, still fits), but the next one
+        // is past year 9999, so every `done` failed with "year out of range"
+        // and the task could only be dismissed.
+        let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ).unwrap();
+        let now = jiff::civil::date(2026, 10, 5)
+            .at(9, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        let (_dir, db) = fresh_db();
+        let q = crate::quickadd::parse_at("archive every 95000 months", now).unwrap();
+        let (new, ext) = q.task_parts("test");
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        assert_eq!(
+            mark_done(&db, &t, &EventCtx::test()).unwrap(),
+            DoneOutcome::Completed
+        );
+        assert_eq!(resolve_for_lookup(&db, &t.id, true).unwrap().status, "done");
+        assert_eq!(event_count(&db, "task.completed"), 1);
+
+        // Completion mode counts from now; past year 9999 from now as well.
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("archive");
+        new.deadline = Some("2099-01-01".into());
+        let ext = Extensions {
+            recurrence: Some(crate::recurrence::parse("every! 99999 months").unwrap()),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        assert_eq!(
+            mark_done(&db, &t, &EventCtx::test()).unwrap(),
+            DoneOutcome::Completed
+        );
+    }
+
+    #[test]
+    fn a_rules_clock_time_reads_exactly_on_the_spring_forward_day() {
+        let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ).unwrap();
+        let gap_day = jiff::civil::date(2027, 3, 28)
+            .at(12, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap();
+        // On a London clock, 01:30 that day does not exist.
+        let london = crate::dates::parse_at("today 1:30am", gap_day.clone()).unwrap();
+        assert_eq!((london.hour(), london.minute()), (2, 30));
+        let time = recurrence_time_of_day("every sunday at 1:30am", &gap_day)
+            .unwrap()
+            .unwrap();
+        assert_eq!((time.hour(), time.minute()), (1, 30));
+    }
+
+    #[test]
+    fn a_date_only_recurring_deadline_stays_date_only() {
+        // Regression (CORE-3): "pay rent every month" due 2026-10-01 came
+        // back as 2026-11-01T00:00:00+00:00, overdue from 00:00 on the due
+        // day, where a date-only deadline is due all day.
+        for (rule, deadline, expected) in [
+            ("every month", "2099-10-05", "2099-11-05"),
+            ("every day", "2099-10-05", "2099-10-06"),
+            ("every monday", "2099-10-05", "2099-10-12"),
+        ] {
+            let (_dir, db) = fresh_db();
+            let mut new = NewTask::minimal("pay rent");
+            new.deadline = Some(deadline.into());
+            let ext = Extensions {
+                recurrence: Some(crate::recurrence::parse(rule).unwrap()),
+                ..Default::default()
+            };
+            let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+            let outcome = mark_done(&db, &t, &EventCtx::test()).unwrap();
+            assert_eq!(
+                outcome,
+                DoneOutcome::Advanced {
+                    next_deadline: expected.into()
+                },
+                "{rule}"
+            );
+            let after = resolve_for_lookup(&db, &t.id, true).unwrap();
+            assert_eq!(after.deadline.as_deref(), Some(expected), "{rule}");
+            assert_eq!(
+                load_detail(&db, &t.id).unwrap().recurrence_next.as_deref(),
+                Some(expected),
+                "{rule}"
+            );
+        }
+        // Completion mode counts from now but keeps the date-only shape.
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("water plants");
+        new.deadline = Some("2026-10-05".into());
+        let ext = Extensions {
+            recurrence: Some(crate::recurrence::parse("every! 5 days").unwrap()),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        let DoneOutcome::Advanced { next_deadline } =
+            mark_done(&db, &t, &EventCtx::test()).unwrap()
+        else {
+            panic!("must recur")
+        };
+        assert_eq!(next_deadline.len(), 10, "{next_deadline}");
+        next_deadline.parse::<jiff::civil::Date>().unwrap();
+    }
+
+    #[test]
+    fn a_duplicate_completion_does_not_advance_a_recurring_task_twice() {
+        // Regression (CORE-4): two completions of the same occurrence (a
+        // dashboard double-click, HAL and the operator at once, a stale tap)
+        // both advanced it, silently skipping the next occurrence.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let mut new = NewTask::minimal("daily");
+        new.deadline = Some("2099-01-01T09:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(crate::recurrence::parse("every day").unwrap()),
+            ..Default::default()
+        };
+        let seen = create_with_extensions(&db, new, ext, &ctx).unwrap();
+        let first = mark_done(&db, &seen, &ctx).unwrap();
+        let DoneOutcome::Advanced { next_deadline } = first else {
+            panic!("must recur")
+        };
+        let cursor = crate::event_log::current_cursor(&db).unwrap();
+
+        // The second caller still holds the occurrence it saw.
+        let err = mark_done(&db, &seen, &ctx).unwrap_err();
+        assert!(format!("{err}").contains(&next_deadline), "{err}");
+        let after = resolve_for_lookup(&db, &seen.id, true).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some(next_deadline.as_str()));
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor);
+        assert_eq!(event_count(&db, "task.recurrence_advanced"), 1);
+    }
+
+    #[test]
     fn monthly_recurrence_returns_to_its_anchor_day_after_a_short_month() {
         let (_dir, db) = fresh_db();
         let rec = crate::recurrence::parse("every month").unwrap();
@@ -3433,10 +4216,11 @@ mod tests {
         };
         let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
         let mut days = Vec::new();
-        // mark_done reads the deadline inside its transaction.
+        // Each completion is of the occurrence the caller just read.
+        let fresh = || resolve_for_lookup(&db, &t.id, true).unwrap();
         for _ in 0..3 {
             let DoneOutcome::Advanced { next_deadline } =
-                mark_done(&db, &t, &EventCtx::test()).unwrap()
+                mark_done(&db, &fresh(), &EventCtx::test()).unwrap()
             else {
                 panic!("recurring task completed");
             };
@@ -3454,7 +4238,7 @@ mod tests {
         )
         .unwrap();
         let DoneOutcome::Advanced { next_deadline } =
-            mark_done(&db, &t, &EventCtx::test()).unwrap()
+            mark_done(&db, &fresh(), &EventCtx::test()).unwrap()
         else {
             panic!("recurring task completed");
         };
@@ -3595,6 +4379,7 @@ mod tests {
             actor: "gate".into(),
             source: "test".into(),
             event_uuid: None,
+            command: None,
         };
         let count = |db: &Db| -> i64 {
             db.with_conn(
@@ -3748,6 +4533,159 @@ mod tests {
             1,
             "date-only snooze expires at operator-local midnight"
         );
+    }
+
+    /// Every spelling jiff accepts but SQLite's julianday() does not
+    /// (CORE-2): `date +%FT%T%z`'s `+0100`, lowercase t/z, an RFC 9557 zone
+    /// suffix, hour-only times, basic format, comma fractions, the +25:00
+    /// offset bound and an expanded year.
+    const JULIANDAY_HOSTILE: [&str; 9] = [
+        "2099-12-10T09:00:00+0100",
+        "2099-12-10t09:00:00z",
+        "2099-12-10T09:00:00+00:00[Europe/London]",
+        "2099-12-10T09Z",
+        "20991210T090000Z",
+        "2099-12-10T09:00:00,5Z",
+        "2099-12-10T09:00:00+25:00",
+        "+002099-12-10",
+        "2099-12-10T09:00[Europe/London]",
+    ];
+
+    fn sql_reads(db: &Db, column: &str, uuid: &str) -> (String, bool) {
+        db.with_conn(|c| {
+            Ok(c.query_row(
+                &format!("SELECT {column}, julianday({column}) IS NOT NULL FROM tasks WHERE id=?1"),
+                [uuid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn every_deadline_and_snooze_writer_stores_a_form_sqlite_reads() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        for raw in JULIANDAY_HOSTILE {
+            let mut new = NewTask::minimal("created");
+            new.deadline = Some(raw.into());
+            let created = create(&db, new, &ctx).unwrap();
+            let (stored, readable) = sql_reads(&db, "deadline", &created.id);
+            assert!(readable, "create stored {stored:?} for {raw:?}");
+            assert_eq!(created.deadline.as_deref(), Some(stored.as_str()));
+
+            let t = create(&db, NewTask::minimal("updated"), &ctx).unwrap();
+            update_deadline(&db, &t.id, Some(raw), &ctx).unwrap();
+            let (stored, readable) = sql_reads(&db, "deadline", &t.id);
+            assert!(readable, "update_deadline stored {stored:?} for {raw:?}");
+
+            let e = create(&db, NewTask::minimal("edited"), &ctx).unwrap();
+            let edit = TaskEdit {
+                deadline: Some(Some(raw)),
+                ..Default::default()
+            };
+            edit_atomic(&db, &e.id, edit, &ctx).unwrap();
+            let (stored, readable) = sql_reads(&db, "deadline", &e.id);
+            assert!(readable, "edit_atomic stored {stored:?} for {raw:?}");
+
+            let s = create(&db, NewTask::minimal("snoozed"), &ctx).unwrap();
+            snooze(&db, &s.id, raw, &ctx).unwrap();
+            let (stored, readable) = sql_reads(&db, "snoozed_until", &s.id);
+            assert!(readable, "snooze stored {stored:?} for {raw:?}");
+        }
+        // A bare date stays a bare date (due all day).
+        let mut new = NewTask::minimal("dated");
+        new.deadline = Some("+002099-12-10".into());
+        let dated = create(&db, new, &ctx).unwrap();
+        assert_eq!(dated.deadline.as_deref(), Some("2099-12-10"));
+    }
+
+    #[test]
+    fn a_compact_offset_deadline_two_months_out_is_not_overdue() {
+        // `date +%FT%T%z` spells the offset `+0100`; stored raw, julianday()
+        // was NULL and the overdue filter reads NULL as overdue.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let later = crate::dates::now_in_operator_tz()
+            .unwrap()
+            .checked_add(jiff::Span::new().days(60))
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%S%z")
+            .to_string();
+        let mut new = NewTask::minimal("two months out");
+        new.deadline = Some(later.clone());
+        let t = create(&db, new, &ctx).unwrap();
+        let overdue = crate::filter::parse("overdue").unwrap();
+        let rows = list_with_filter(&db, Some(&overdue), None, None, 50).unwrap();
+        assert!(
+            rows.iter().all(|r| r.id != t.id),
+            "{later:?} two months out listed as overdue"
+        );
+    }
+
+    #[test]
+    fn a_compact_offset_snooze_survives_the_wake_pass() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let now = crate::dates::now_in_operator_tz().unwrap();
+        let later = now
+            .checked_add(jiff::Span::new().days(60))
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%S%z")
+            .to_string();
+        let t = create(&db, NewTask::minimal("parked"), &ctx).unwrap();
+        snooze(&db, &t.id, &later, &ctx).unwrap();
+        let woken = wake_expired_snoozes(
+            &db,
+            &crate::dates::format_iso(&now),
+            &EventCtx::system("wake-test"),
+        )
+        .unwrap();
+        assert_eq!(woken, 0, "a snooze 60 days out woke immediately");
+        assert_eq!(
+            resolve_for_lookup(&db, &t.id, true).unwrap().status,
+            "snoozed"
+        );
+    }
+
+    #[test]
+    fn today_and_tomorrow_agree_for_one_instant_spelt_two_ways() {
+        // 00:30 tomorrow, operator-local, is still "today" at -05:00: the
+        // day filters take substr(deadline, 1, 10) of whatever offset the
+        // writer used, so the same instant landed on two different days.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let tz = jiff::tz::TimeZone::get(crate::dates::OPERATOR_TZ).unwrap();
+        let tomorrow = crate::dates::now_in_operator_tz()
+            .unwrap()
+            .date()
+            .checked_add(jiff::Span::new().days(1))
+            .unwrap();
+        let instant = tomorrow.at(0, 30, 0, 0).to_zoned(tz).unwrap();
+        let local = crate::dates::format_iso(&instant);
+        let west = instant
+            .with_time_zone(jiff::tz::TimeZone::fixed(jiff::tz::offset(-5)))
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string();
+        let mut ids = Vec::new();
+        for spelling in [&local, &west] {
+            let mut new = NewTask::minimal("just after midnight");
+            new.deadline = Some(spelling.clone());
+            ids.push(create(&db, new, &ctx).unwrap().id);
+        }
+        let on = |dsl: &str| -> Vec<String> {
+            let expr = crate::filter::parse(dsl).unwrap();
+            list_with_filter(&db, Some(&expr), None, None, 50)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect()
+        };
+        let (due_tomorrow, due_today) = (on("tomorrow"), on("today"));
+        for (id, spelling) in ids.iter().zip([&local, &west]) {
+            assert!(due_tomorrow.contains(id), "{spelling} not due tomorrow");
+            assert!(!due_today.contains(id), "{spelling} due today");
+        }
     }
 
     #[test]
@@ -3916,6 +4854,347 @@ mod tests {
                 }
             );
         }
+    }
+
+    fn task_exists(db: &Db, uuid: &str) -> bool {
+        db.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+                [uuid],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn undo_after_depend_does_not_delete_the_prerequisite() {
+        // Regression (CORE-1): `pt add B; pt add A; pt depend A --on B;
+        // pt done A` (blocked) then `pt undo` deleted B. The depend event is
+        // filed under A only, so B's newest event was its create and the
+        // create arm deleted it, leaving A -> B dangling and A "ready".
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let b = create(&db, NewTask::minimal("prerequisite"), &ctx).unwrap();
+        let a = create(&db, NewTask::minimal("dependent"), &ctx).unwrap();
+        add_dependency(&db, &a.id, &b.id, &ctx).unwrap();
+        assert!(matches!(
+            mark_done(&db, &a, &ctx),
+            Err(crate::Error::Blocked(_))
+        ));
+
+        let res = undo_last(&db, &ctx);
+        assert!(
+            res.is_err(),
+            "nothing is undoable here, got {:?}",
+            res.ok().map(|o| o.description)
+        );
+        assert!(task_exists(&db, &b.id), "the prerequisite was deleted");
+        assert_eq!(load_detail(&db, &a.id).unwrap().depends_on, vec![b.id]);
+    }
+
+    #[test]
+    fn an_ended_series_is_journaled_and_no_longer_recurs() {
+        // Round 2, item 6: the completion that ends a series says so in its
+        // event, and the task stops reporting a rule (`pt show` said
+        // "recurs" for a closed, never-recurring-again task).
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("archive");
+        new.deadline = Some("2099-01-01".into());
+        let ext = Extensions {
+            recurrence: Some(crate::recurrence::parse("every! 99999 months").unwrap()),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        assert_eq!(
+            mark_done(&db, &t, &EventCtx::test()).unwrap(),
+            DoneOutcome::Completed
+        );
+        let payload: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT payload FROM pt_event_log WHERE event_type='task.completed'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["series_ended"], true, "{payload}");
+        let detail = load_detail(&db, &t.id).unwrap();
+        assert_eq!(detail.recurrence_input, None);
+        assert_eq!(detail.recurrence_next, None);
+        // A plain completion carries no such flag.
+        let plain = create(&db, NewTask::minimal("plain"), &EventCtx::test()).unwrap();
+        mark_done(&db, &plain, &EventCtx::test()).unwrap();
+        assert_eq!(event_count(&db, "task.completed"), 2);
+    }
+
+    #[test]
+    fn only_a_range_error_ends_a_series() {
+        // Round 2, item 6: any advance error used to end the series.
+        assert!(series_has_ended(&crate::Error::OutOfRange(
+            "year 10000".into()
+        )));
+        assert!(!series_has_ended(&crate::Error::Other(
+            "weekday advance: no match within 14 days (bug?)".into()
+        )));
+        assert!(!series_has_ended(&crate::Error::Sqlite(
+            rusqlite::Error::QueryReturnedNoRows
+        )));
+    }
+
+    #[test]
+    fn a_blank_title_is_refused_on_create_and_every_edit_path() {
+        // Regression (round 2, item 2): `pt edit --title ""` and MCP
+        // task_edit {"title": ""} stored an empty title.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        for blank in ["", "   ", "\t\n"] {
+            assert!(
+                create(&db, NewTask::minimal(blank), &ctx).is_err(),
+                "{blank:?}"
+            );
+        }
+        let t = create(&db, NewTask::minimal("keep me"), &ctx).unwrap();
+        let cursor = crate::event_log::current_cursor(&db).unwrap();
+        for blank in ["", "   "] {
+            let edit = TaskEdit {
+                title: Some(blank),
+                ..Default::default()
+            };
+            assert!(edit_atomic(&db, &t.id, edit, &ctx).is_err(), "{blank:?}");
+            assert!(
+                update_text(&db, &t.id, Some(blank), None, &ctx).is_err(),
+                "{blank:?}"
+            );
+        }
+        assert_eq!(
+            resolve_for_lookup(&db, &t.id, true).unwrap().title,
+            "keep me"
+        );
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor);
+    }
+
+    fn ctx_as(actor: &str, source: &str) -> EventCtx {
+        EventCtx {
+            actor: actor.into(),
+            source: source.into(),
+            event_uuid: None,
+            command: None,
+        }
+    }
+
+    #[test]
+    fn undo_skips_another_surface_sharing_the_default_actor() {
+        // Regression (round 2, 1a): an unconfigured `pt mcp` journals as
+        // actor "shell" like the CLI, so `pt undo --yes` deleted the task an
+        // agent had just added over MCP.
+        let (_dir, db) = fresh_db();
+        let agent = create(
+            &db,
+            NewTask::minimal("agent made this"),
+            &ctx_as("shell", "mcp"),
+        )
+        .unwrap();
+        let cli = ctx_as("shell", "cli");
+        assert!(undo_last(&db, &cli).is_err());
+        assert!(task_exists(&db, &agent.id));
+
+        // CLI and TUI are the same operator surface.
+        let mine = create(
+            &db,
+            NewTask::minimal("from the tui"),
+            &ctx_as("shell", "tui"),
+        )
+        .unwrap();
+        let out = undo_last(&db, &cli).unwrap();
+        assert_eq!(out.task_uuid, mine.id);
+        assert!(task_exists(&db, &agent.id));
+    }
+
+    #[test]
+    fn undo_never_deletes_a_task_an_approval_points_at() {
+        // Regression (round 2, 1b): HAL's approval request on PT-1 did not
+        // protect it, so undo deleted PT-1 and left AP-1 dangling.
+        let (_dir, db) = fresh_db();
+        let me = ctx_as("shell", "cli");
+        let t = create(&db, NewTask::minimal("send the invoice"), &me).unwrap();
+        crate::approvals::request(
+            &db,
+            crate::approvals::RequestInput {
+                kind: "email".into(),
+                title: "send it".into(),
+                request_note: None,
+                payload: crate::approvals::PayloadSource::Json(b"{}".to_vec()),
+                task_pt_id: t.pt_id.clone(),
+                expires_in: None,
+            },
+            &ctx_as("hal", "mcp"),
+        )
+        .unwrap();
+        let err = undo_last(&db, &me).unwrap_err();
+        assert!(format!("{err}").contains("PT-1"), "{err}");
+        assert!(task_exists(&db, &t.id));
+    }
+
+    #[test]
+    fn undo_refuses_instead_of_reaching_past_a_protected_create() {
+        // Regression (round 2, 1c): `add A; add B; (hal) depend C --on B`
+        // then `pt undo --yes` skipped protected B and deleted A.
+        let (_dir, db) = fresh_db();
+        let me = ctx_as("shell", "cli");
+        let a = create(&db, NewTask::minimal("older"), &me).unwrap();
+        let b = create(&db, NewTask::minimal("prerequisite"), &me).unwrap();
+        let hal = ctx_as("hal", "mcp");
+        let c = create(&db, NewTask::minimal("hal's task"), &hal).unwrap();
+        add_dependency(&db, &c.id, &b.id, &hal).unwrap();
+        let err = undo_last(&db, &me).unwrap_err();
+        assert!(format!("{err}").contains("PT-2"), "{err}");
+        assert!(task_exists(&db, &a.id) && task_exists(&db, &b.id));
+        assert!(undo_plan(&db, &me).is_err());
+    }
+
+    #[test]
+    fn undo_never_deletes_a_parent_of_another_task() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let child = create(&db, NewTask::minimal("child"), &ctx).unwrap();
+        let parent = create(&db, NewTask::minimal("parent"), &ctx).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET parent_uuid=?1 WHERE id=?2",
+                params![parent.id, child.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        // The parent's create is protected: undo refuses, and does not reach
+        // back to the child's create either.
+        assert!(undo_last(&db, &ctx).is_err());
+        assert!(task_exists(&db, &parent.id), "the parent was deleted");
+        assert!(task_exists(&db, &child.id), "undo reached past the parent");
+    }
+
+    #[test]
+    fn undo_refuses_when_its_newest_create_was_changed_since() {
+        // Regression (review round 2): another actor's edit on the newest
+        // create made undo skip it and delete an OLDER task instead.
+        let (_dir, db) = fresh_db();
+        let operator = EventCtx::local("shell");
+        let hal = EventCtx::local("hal");
+        let a = create(&db, NewTask::minimal("A"), &operator).unwrap();
+        let b = create(&db, NewTask::minimal("B"), &operator).unwrap();
+        update_priority(&db, &b.id, 5, &hal).unwrap();
+        assert!(undo_last(&db, &operator).is_err());
+        assert!(task_exists(&db, &a.id), "undo reached past B and deleted A");
+        assert!(task_exists(&db, &b.id));
+
+        // The same holds when the later events are the caller's own: done B,
+        // undo (reopens B), undo again must not delete A while B still exists.
+        let (_dir, db) = fresh_db();
+        let a = create(&db, NewTask::minimal("A"), &operator).unwrap();
+        let b = create(&db, NewTask::minimal("B"), &operator).unwrap();
+        mark_done(&db, &b, &operator).unwrap();
+        undo_last(&db, &operator).unwrap();
+        assert!(undo_last(&db, &operator).is_err());
+        assert!(
+            task_exists(&db, &a.id),
+            "chained undo deleted an older task"
+        );
+        assert!(task_exists(&db, &b.id));
+    }
+
+    #[test]
+    fn undo_reverses_only_the_callers_own_mutations() {
+        // Regression (CORE-1): undo walked every actor's events, so the
+        // operator's `pt undo` deleted a task HAL had just created.
+        let (_dir, db) = fresh_db();
+        let operator = EventCtx::local("shell");
+        let hal = EventCtx::local("hal");
+        let mine = create(&db, NewTask::minimal("operator task"), &operator).unwrap();
+        mark_done(&db, &mine, &operator).unwrap();
+        let theirs = create(&db, NewTask::minimal("hal task"), &hal).unwrap();
+
+        let out = undo_last(&db, &operator).unwrap();
+        assert!(out.description.contains(&mine.id), "{}", out.description);
+        assert!(task_exists(&db, &theirs.id), "HAL's task was deleted");
+        assert_eq!(
+            resolve_for_lookup(&db, &mine.id, true).unwrap().status,
+            "todo"
+        );
+
+        // A later event from any actor still protects a task: HAL edited the
+        // operator's completed task, so the operator's undo leaves it alone.
+        mark_done(
+            &db,
+            &resolve_for_lookup(&db, &mine.id, true).unwrap(),
+            &operator,
+        )
+        .unwrap();
+        update_priority(&db, &mine.id, 4, &hal).unwrap();
+        assert!(undo_last(&db, &operator).is_err());
+        assert_eq!(
+            resolve_for_lookup(&db, &mine.id, true).unwrap().status,
+            "done"
+        );
+    }
+
+    #[test]
+    fn undo_planned_refuses_a_plan_the_journal_moved_past() {
+        // A surface confirms a planned delete with the operator; if anything
+        // the plan depends on changed meanwhile, nothing may be reversed.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let first = create(&db, NewTask::minimal("planned"), &ctx).unwrap();
+        let plan = undo_plan(&db, &ctx).unwrap();
+        assert_eq!(plan.action, UndoAction::DeleteCreated);
+        assert_eq!(plan.pt_id.as_deref(), Some("PT-1"));
+        assert_eq!(plan.title, "planned");
+        let second = create(&db, NewTask::minimal("newer"), &ctx).unwrap();
+
+        assert!(undo_planned(&db, &ctx, &plan).is_err());
+        assert!(task_exists(&db, &first.id) && task_exists(&db, &second.id));
+
+        let fresh = undo_plan(&db, &ctx).unwrap();
+        let out = undo_planned(&db, &ctx, &fresh).unwrap();
+        assert_eq!(out.task_uuid, second.id);
+        assert_eq!(out.action, UndoAction::DeleteCreated);
+        assert!(!task_exists(&db, &second.id));
+    }
+
+    #[test]
+    fn delete_removes_the_tasks_link_and_label_rows() {
+        // Regression (CORE-1): task_links / task_labels have no FK cascade,
+        // so `pt rm` (and undo-of-create) left rows pointing at a deleted id.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let a = create(&db, NewTask::minimal("a"), &ctx).unwrap();
+        let b = create(&db, NewTask::minimal("b"), &ctx).unwrap();
+        let c = create(&db, NewTask::minimal("c"), &ctx).unwrap();
+        add_dependency(&db, &a.id, &b.id, &ctx).unwrap();
+        add_dependency(&db, &b.id, &c.id, &ctx).unwrap();
+        modify_labels(&db, &b.id, &["ops".into()], &[], &ctx).unwrap();
+
+        delete_task(&db, &b.id, &ctx).unwrap();
+
+        db.with_conn(|conn| {
+            let links: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM task_links WHERE from_uuid=?1 OR to_uuid=?1",
+                [&b.id],
+                |r| r.get(0),
+            )?;
+            let labels: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM task_labels WHERE task_uuid=?1",
+                [&b.id],
+                |r| r.get(0),
+            )?;
+            assert_eq!((links, labels), (0, 0));
+            Ok(())
+        })
+        .unwrap();
+        assert!(load_detail(&db, &a.id).unwrap().depends_on.is_empty());
+        assert!(load_detail(&db, &c.id).unwrap().blocks_tasks.is_empty());
     }
 
     // ---- list ordering: severity is the primary key -------------------------
