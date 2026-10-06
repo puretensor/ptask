@@ -547,11 +547,13 @@ fn apply_command(
                 }
             };
             tasks::update_deadline(&state.db, &task.id, new_deadline, &sync_ctx(actor, cmd))?;
+            // Echo what was stored (normalised), not the raw input.
+            let stored = tasks::resolve_for_lookup(&state.db, &task.id, true)?.deadline;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
                     event_type: "task.updated".into(),
-                    payload: serde_json::json!({ "task_uuid": task.id, "deadline": new_deadline }),
+                    payload: serde_json::json!({ "task_uuid": task.id, "deadline": stored }),
                 },
             ))
         }
@@ -622,6 +624,14 @@ fn apply_command(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ptask_core::Error::Other("task_snooze needs args.until".into()))?;
             tasks::snooze(&state.db, &task.id, until, &sync_ctx(actor, cmd))?;
+            // Echo what was stored (normalised), not the raw input.
+            let until: Option<String> = state.db.with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT snoozed_until FROM tasks WHERE id=?1",
+                    [&task.id],
+                    |r| r.get(0),
+                )?)
+            })?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -931,6 +941,45 @@ mod tests {
         let (_, my_uuid) = outcome_ok(&mine).unwrap().unwrap();
         assert_ne!(my_uuid, their_uuid);
         assert_eq!(task_count(&state), 2);
+    }
+
+    #[test]
+    fn edit_and_snooze_payloads_echo_the_stored_value() {
+        // Round 2 (cosmetic): the outbound payload echoed the raw input
+        // ("+0100") rather than what was stored.
+        let (_dir, state) = test_state();
+        let created = apply_one(&state, &create_cmd("c-1", "t-1", "report"), "hal");
+        let (_, task_uuid) = outcome_ok(&created).unwrap().unwrap();
+        let raw = "2099-12-10T09:00:00+0100";
+        for (kind, field, args) in [
+            (
+                "task_edit",
+                "deadline",
+                serde_json::json!({ "deadline": raw }),
+            ),
+            (
+                "task_snooze",
+                "snoozed_until",
+                serde_json::json!({ "until": raw }),
+            ),
+        ] {
+            let mut args = args;
+            args["task_uuid"] = serde_json::json!(task_uuid);
+            let cmd = Command {
+                kind: kind.into(),
+                uuid: format!("{kind}-1"),
+                temp_id: None,
+                args,
+            };
+            let CommandOutcome::Applied { payload, .. } = apply_one(&state, &cmd, "hal") else {
+                panic!("{kind} not applied");
+            };
+            assert_eq!(
+                payload.payload[field], "2099-12-10T08:00:00+00:00",
+                "{kind}: {}",
+                payload.payload
+            );
+        }
     }
 
     #[test]

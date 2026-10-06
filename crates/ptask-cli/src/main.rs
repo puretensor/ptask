@@ -1484,16 +1484,12 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     };
     let mut parts: Vec<String> = Vec::new();
     if has_deadline {
-        // `--deadline ''` clears too (core normalises blank to None), so the
-        // outcome line must not report an empty date as if one were set.
-        let set_to = a.deadline.as_deref().map(str::trim).unwrap_or("");
+        // Report what was stored (normalised), not the raw input; `--deadline
+        // ''` clears too, so an empty date is never reported as set.
+        let stored = tasks::resolve_for_lookup(db, &task.id, true)?.deadline;
         parts.push(format!(
             "deadline {}",
-            if a.clear_deadline || set_to.is_empty() {
-                "cleared"
-            } else {
-                set_to
-            }
+            stored.as_deref().unwrap_or("cleared")
         ));
     }
     if a.title.is_some() {
