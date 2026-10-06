@@ -191,7 +191,11 @@ A lone capture whose answer dedups against an existing task is audited:
   event records the capture and the matched task for review;
 - the exception is an unsupported match against a done or dismissed task: the
   capture is left unconsumed and uncharged rather than silently filed under
-  closed work. It is retried each run.
+  closed work. Each block is recorded as a `distill.lone_unsupported_dedup`
+  event with `"closed": true`, and the run's `distill.failed` text names the
+  raw_item. After 3 blocks, the candidate is created as a new task beside the
+  closed one. This fails toward a duplicate, as dedup does when in doubt, and
+  stops the row from failing every run.
 
 Tasks returned without `sources` cover nothing.
 They are counted as `sourceless_candidates` in the `distill.run` payload and

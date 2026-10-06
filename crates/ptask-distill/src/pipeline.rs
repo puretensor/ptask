@@ -349,7 +349,71 @@ struct Matched<'m> {
     closed: bool,
 }
 
+/// `distill.lone_unsupported_dedup`: a lone capture deduped against a task
+/// its text does not support. `closed` marks the blocked case (the matched
+/// task is done or dismissed and the capture was left unconsumed).
+fn record_lone_dedup(
+    db: &Db,
+    ctx: &EventCtx,
+    raw_item_id: i64,
+    m: &Matched<'_>,
+    candidate_title: &str,
+    closed: bool,
+) {
+    let payload = serde_json::json!({
+        "raw_item_id": raw_item_id,
+        "matched_task": m.id,
+        "matched_title": m.title,
+        "candidate_title": candidate_title,
+        "closed": closed,
+    });
+    let uuid = format!("distill-lone-dedup:{}", uuid::Uuid::new_v4());
+    if let Err(e) = event_log::record(
+        db,
+        &uuid,
+        m.id,
+        "distill.lone_unsupported_dedup",
+        &payload,
+        ctx,
+    ) {
+        warn!(target: "ptask::distill", error = %e, "lone-dedup audit event failed");
+    }
+}
+
+/// Times a capture has been blocked against closed work (see
+/// [`Coverage::escapes_closed_block`]).
+fn closed_blocks(db: &Db, raw_item_id: i64) -> usize {
+    db.with_conn(|c| {
+        Ok(c.query_row(
+            "SELECT COUNT(*) FROM pt_event_log
+              WHERE event_type = 'distill.lone_unsupported_dedup'
+                AND json_extract(payload, '$.closed') = 1
+                AND json_extract(payload, '$.raw_item_id') = ?1",
+            [raw_item_id],
+            |r| r.get::<_, i64>(0),
+        )?)
+    })
+    .unwrap_or(0) as usize
+}
+
+/// Blocks against closed work after which the candidate becomes a new task.
+const CLOSED_BLOCKS_BEFORE_CREATE: usize = 3;
+
 impl Coverage<'_> {
+    /// A lone capture already blocked `CLOSED_BLOCKS_BEFORE_CREATE` times
+    /// against the same kind of unsupported closed match stops waiting: the
+    /// candidate is created as a new task instead (failing toward a
+    /// duplicate, as dedup does when in doubt) so the row cannot sit in the
+    /// queue, failing every run, forever.
+    fn escapes_closed_block(&self, matched: &Matched<'_>, title: &str, db: &Db) -> bool {
+        self.texts.len() == 1
+            && matched.closed
+            && !matched.created_this_run
+            && !source_supports(&self.texts[0], matched.title)
+            && !source_supports(&self.texts[0], title)
+            && closed_blocks(db, self.ids[0]) >= CLOSED_BLOCKS_BEFORE_CREATE
+    }
+
     /// Mark the captures `sources` claims as covered by a candidate titled
     /// `title`, created (`matched` = None) or deduped against `matched`.
     ///
@@ -385,27 +449,12 @@ impl Coverage<'_> {
                         matched = m.title,
                         "lone capture matches a closed task its text does not support — left for review"
                     );
+                    record_lone_dedup(db, ctx, self.ids[i], m, title, true);
                     *self.blocked = true;
                     continue;
                 }
                 if !supported {
-                    let payload = serde_json::json!({
-                        "raw_item_id": self.ids[i],
-                        "matched_task": m.id,
-                        "matched_title": m.title,
-                        "candidate_title": title,
-                    });
-                    let uuid = format!("distill-lone-dedup:{}", uuid::Uuid::new_v4());
-                    if let Err(e) = event_log::record(
-                        db,
-                        &uuid,
-                        m.id,
-                        "distill.lone_unsupported_dedup",
-                        &payload,
-                        ctx,
-                    ) {
-                        warn!(target: "ptask::distill", error = %e, "lone-dedup audit event failed");
-                    }
+                    record_lone_dedup(db, ctx, self.ids[i], m, title, false);
                 }
                 self.covered[i] = true;
                 continue;
@@ -874,9 +923,12 @@ fn process_chunk<P: LlmProvider + ?Sized>(
     if blocked && covered_len == 0 {
         // Deliberately left for review (a lone capture that would otherwise
         // be filed under closed work it does not mention): not the capture's
-        // fault, so never charged — retried next run.
+        // fault, so never charged — retried next run, and created as a new
+        // task after CLOSED_BLOCKS_BEFORE_CREATE runs.
+        let ids: Vec<i64> = kept.iter().map(|&i| items[i].id).collect();
         return Err(ChunkError::local(anyhow::anyhow!(
-            "lone capture matches only a done/dismissed task its text does not support — left unconsumed"
+            "raw_item {ids:?}: lone capture matches only a done/dismissed task its text does \
+             not support — left unconsumed (see distill.lone_unsupported_dedup)"
         )));
     }
     if chunk_disposition(kept.len(), covered_len) == ChunkDisposition::Retain {
@@ -1089,10 +1141,33 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         if cand.sources.is_empty() {
             warn!(target: "ptask::distill", title = %cand.title, "candidate names no source captures — it covers none");
         }
+        let mut force_create = false;
         if let Some((id, matched_title)) = dedup
             .existing
             .iter()
             .find(|(_, t)| title_similar(t, &cand.title))
+        {
+            let matched = Matched {
+                id: Some(id),
+                title: matched_title,
+                created_this_run: dedup.created_this_run.contains(id),
+                closed: dedup.closed.contains(id),
+            };
+            if coverage.escapes_closed_block(&matched, &cand.title, db) {
+                warn!(
+                    target: "ptask::distill",
+                    raw_item = coverage.ids[0],
+                    matched = matched_title,
+                    "capture blocked against closed work {CLOSED_BLOCKS_BEFORE_CREATE} times — creating a new task"
+                );
+                force_create = true;
+            }
+        }
+        if !force_create
+            && let Some((id, matched_title)) = dedup
+                .existing
+                .iter()
+                .find(|(_, t)| title_similar(t, &cand.title))
         {
             st.skipped += 1;
             let matched = Matched {
@@ -1111,7 +1186,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         // transient database failure would make the retry disappear.
         match crate::temporal_dedup::is_temporal_duplicate(db, "distill-candidate", &cand.title, 7)
         {
-            Ok(true) => {
+            Ok(true) if !force_create => {
                 st.skipped += 1;
                 // Same candidate text distilled within 7 days: the task it
                 // made is not identified here, so it is matched by title.
@@ -1125,7 +1200,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
                 info!(target: "ptask::distill", title = %cand.title, "dedup skip (temporal)");
                 continue;
             }
-            Ok(false) => {}
+            Ok(_) => {}
             Err(e) => {
                 warn!(target: "ptask::distill", error = %e, "temporal dedup failed — failing open");
             }
@@ -1137,8 +1212,19 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             Ok(SemanticCheck {
                 best: Some((idx, score)),
                 ..
-            }) if score >= crate::semantic_dedup::DEFAULT_THRESHOLD
-                && !identifiers_conflict(&dedup.existing[idx].1, &cand.title) =>
+            }) if !force_create
+                && score >= crate::semantic_dedup::DEFAULT_THRESHOLD
+                && !identifiers_conflict(&dedup.existing[idx].1, &cand.title)
+                && !coverage.escapes_closed_block(
+                    &Matched {
+                        id: Some(dedup.existing[idx].0.as_str()),
+                        title: dedup.existing[idx].1.as_str(),
+                        created_this_run: dedup.created_this_run.contains(&dedup.existing[idx].0),
+                        closed: dedup.closed.contains(&dedup.existing[idx].0),
+                    },
+                    &cand.title,
+                    db,
+                ) =>
             {
                 let (dup_id, dup_title) = dedup.existing[idx].clone();
                 st.skipped += 1;
@@ -2586,6 +2672,57 @@ mod tests {
         );
         assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
         assert_eq!(attempts(&db, "tell hal to fix the raid"), 0);
+    }
+
+    /// Regression (final review, DIST-1a): the closed-task block left no
+    /// audit trail and no way out — the capture stayed unconsumed forever,
+    /// every run failed while it was the only row, and nothing named it.
+    /// Each block is now recorded (`closed: true`), the failure names the
+    /// raw_item, and after 3 blocks the candidate becomes a new task
+    /// (failing toward a duplicate, never toward loss).
+    #[test]
+    fn a_closed_task_block_is_audited_and_escapes_after_three_runs() {
+        let (_dir, db) = fresh_db();
+        existing_task(&db, "Replace failed disk in storage array", true);
+        let row =
+            ptask_core::raw_items::insert(&db, "tell hal to fix the raid", "test", "test://x")
+                .unwrap();
+        let provider = FixedTitle("Replace failed disk in storage array");
+        let closed_events = |db: &Db| -> i64 {
+            db.with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM pt_event_log
+                      WHERE event_type = 'distill.lone_unsupported_dedup'
+                        AND json_extract(payload, '$.closed') = 1
+                        AND json_extract(payload, '$.raw_item_id') = ?1",
+                    [row.id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap()
+        };
+        for run in 1..=3 {
+            let err = run_native(&db, &provider, 100).unwrap_err();
+            assert!(
+                err.to_string().contains(&row.id.to_string()),
+                "the failure must name the raw_item: {err:#}"
+            );
+            assert_eq!(closed_events(&db), run);
+            assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+            assert_eq!(attempts(&db, "tell hal to fix the raid"), 0);
+        }
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert_eq!((report.consumed, report.created), (1, 1));
+        let same_title: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE title = 'Replace failed disk in storage array'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(same_title, 2, "a new task beside the closed one");
     }
 
     /// Normal consolidation still covers: several captures about one thing,
