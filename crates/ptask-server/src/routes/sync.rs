@@ -209,6 +209,13 @@ enum CommandOutcome {
 
 /// Idempotency lookup + mutation for one command. Pure blocking SQLite.
 fn apply_one(state: &AppState, cmd: &Command, actor: &str) -> CommandOutcome {
+    // The capture lane's namespace: its keys mark capture-created tasks,
+    // and the legacy raw-uuid replay lookup below would read them too.
+    if event_log::is_reserved_client_key(&cmd.uuid) {
+        return CommandOutcome::Failed(
+            "command uuid: the capture prefix is reserved for the capture lane".into(),
+        );
+    }
     // A failed idempotency lookup must NOT fall through to apply: if the
     // command was already executed, re-applying double-creates. Surface
     // the error and let the client retry the whole command instead.

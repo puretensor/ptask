@@ -366,3 +366,27 @@ fn undo_of_a_completion_needs_no_confirmation() {
     let shown = ok(&db, &["--json", "show", "PT-1"]);
     assert_eq!(shown["status"], "todo");
 }
+
+#[test]
+fn idempotency_keys_in_the_capture_namespace_are_refused() {
+    // Round-2 SRV-15: the capture lane trusts task.created events keyed
+    // `capture:<raw id>`; a raw CLI key could forge that marker (and take
+    // the lane's next key, breaking its create on the unique index).
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    for key in ["capture:999999", "CAPTURE:1", "Capture-x"] {
+        let out = pt(&db, &["--idempotency-key", key, "add", "--raw", "x"]);
+        assert!(!out.status.success(), "{key} was accepted");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("reserved"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(open_titles(&db).is_empty());
+    // An ordinary key that merely contains the word is fine.
+    ok(
+        &db,
+        &["--idempotency-key", "my-capture-1", "add", "--raw", "y"],
+    );
+}

@@ -85,7 +85,7 @@ the environment variable is set on the client node.
 | `sync_token` | `"*"`, `""`, or absent → full sync. Otherwise an opaque integer string from a prior response. |
 | `resource_types` | advisory; `["tasks"]` is the only meaningful value today. |
 | `commands` | optional; pure read if empty. |
-| `commands[].uuid` | client-generated, idempotency key, scoped to the authenticated client. Replaying the *same* command (same `type`, `args` and `temp_id`) returns `"ok"` (with its `temp_id_mapping`) without re-applying; the same uuid with a different type, args or temp_id is a per-command error and nothing is applied. |
+| `commands[].uuid` | client-generated, idempotency key, scoped to the authenticated client. Replaying the *same* command (same `type`, `args` and `temp_id`) returns `"ok"` (with its `temp_id_mapping`) without re-applying; the same uuid with a different type, args or temp_id is a per-command error and nothing is applied. A uuid starting with `capture` (any case) is reserved for the capture lane and is a per-command error. |
 | `commands[].temp_id` | optional client-side handle; mapped to the real `task_uuid` in the response. |
 
 ### Response
@@ -164,7 +164,13 @@ Drops into `raw_items` for the distillation pipeline. Returns:
 ## `POST /email`
 
 Accepts a raw RFC 822 message body (`message/rfc822` or `text/plain`); parses
-subject/body into one `raw_items` row with `source_type="email"`. Returns:
+subject/body into one `raw_items` row with `source_type="email"`. Bodies over
+2 MiB get 413. An embedded message in base64 or quoted-printable (which RFC
+2046 forbids but Exchange-style gateways send) is decoded and checked like
+any other; more than 2 such encoded layers, or embedded messages nested more
+than 32 deep counting decoded ones, get 400 and nothing is stored. At most 4
+messages are parsed at once; beyond that the answer is 503 with
+`Retry-After: 5`. Returns:
 
 ```json
 { "id": 123, "subject": "Subject line", "source_file": "email:<message-id>" }
@@ -180,6 +186,14 @@ not close tasks.
 HMAC verification: the secret comes from `PTASK_GITEA_WEBHOOK_SECRET` /
 `PTASK_GITHUB_WEBHOOK_SECRET`. Body signature is `X-Hub-Signature-256`
 (GitHub) or `X-Gitea-Signature` (Gitea).
+
+One delivery closes at most 20 distinct PT-N; the rest are counted in
+`skipped_count`, the first 100 of them are listed under `skipped`, and the
+count is logged. `PTASK_GIT_CLOSE_REPOS=owner/repo,...`
+limits which repositories (`repository.full_name`, case-insensitive) may
+close tasks at all; a push from any other repository gets 200 with
+`skipped_repo` and closes nothing. Unset, any repository holding the secret
+may close tasks.
 
 ## Outbound webhooks
 

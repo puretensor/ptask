@@ -105,17 +105,18 @@ pub fn pt_ids_to_close(directives: &[Directive]) -> Vec<String> {
 /// Read a PT-N token from the start of `s` (after the verb's trailing space).
 /// Accepts `PT-N` and `pt-n` forms. Returns the canonical `PT-N` uppercased.
 fn extract_pt_id(s: &str) -> Option<String> {
+    // Look only at the token: uppercasing the whole rest of the message for
+    // every directive made a long push quadratic.
     let trimmed = s.trim_start();
-    let upper = trimmed.to_ascii_uppercase();
-    let rest = upper.strip_prefix("PT-")?;
-    let mut end = 0;
-    for (i, ch) in rest.char_indices() {
-        if ch.is_ascii_digit() {
-            end = i + ch.len_utf8();
-        } else {
-            break;
-        }
+    if !trimmed
+        .as_bytes()
+        .get(..3)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"PT-"))
+    {
+        return None;
     }
+    let rest = &trimmed[3..];
+    let end = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     if end == 0 {
         return None;
     }
@@ -125,6 +126,20 @@ fn extract_pt_id(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn many_directives_parse_in_linear_time() {
+        // Round-2 SRV-11: extract_pt_id uppercased the whole rest of the
+        // message for every directive, so a push naming 40k PT-N spent
+        // ~28 s (debug) parsing on an async worker.
+        let msg: String = (1..=40_000).map(|i| format!("Closes PT-{i}\n")).collect();
+        let started = std::time::Instant::now();
+        let ids = pt_ids_to_close(&parse(&msg));
+        let took = started.elapsed();
+        assert_eq!(ids.len(), 40_000);
+        assert_eq!(ids[39_999], "PT-40000");
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+    }
 
     #[test]
     fn fixes_extracts_canonical_pt_n() {
