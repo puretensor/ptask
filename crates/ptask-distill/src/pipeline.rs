@@ -1720,12 +1720,18 @@ fn record_skip(db: &Db, ctx: &EventCtx, lock: &str) -> usize {
 }
 
 /// Runs in which a capture's server-error charge was deferred.
+///
+/// Only deferrals since the most recent successful `distill.run` count: a
+/// success means the provider worked on real data again, so the next
+/// incident starts with the full grace instead of what an old incident left.
 fn prior_deferrals(db: &Db, raw_item_id: i64) -> Result<usize> {
     Ok(db.with_conn(|c| {
         Ok(c.query_row(
             "SELECT COUNT(*) FROM pt_event_log
               WHERE event_type = 'distill.deferred'
-                AND json_extract(payload, '$.raw_item_id') = ?1",
+                AND json_extract(payload, '$.raw_item_id') = ?1
+                AND id > COALESCE(
+                    (SELECT MAX(id) FROM pt_event_log WHERE event_type = 'distill.run'), 0)",
             [raw_item_id],
             |r| r.get::<_, i64>(0),
         )?)
@@ -3255,6 +3261,47 @@ mod tests {
         fn name(&self) -> &'static str {
             "consolidate-500-test"
         }
+    }
+
+    /// Regression (final review, DIST-5): deferrals were counted over a
+    /// row's whole life, so a row deferred during an earlier incident got
+    /// less (or no) grace in the next one. Only deferrals since the latest
+    /// successful `distill.run` count now.
+    #[test]
+    fn deferral_grace_resets_after_a_successful_run() {
+        let (_dir, db) = fresh_db();
+        let row = ptask_core::raw_items::insert(
+            &db,
+            "call the bank about the mandate",
+            "test",
+            "test://x",
+        )
+        .unwrap();
+        let ctx = EventCtx::system("distill");
+        // An earlier incident used up the grace...
+        for _ in 0..DEFERRALS_BEFORE_CHARGE {
+            record_deferral(&db, row.id, "old incident", &ctx);
+        }
+        // ...then the provider recovered and a run succeeded.
+        let ok = NativeReport {
+            consumed: 1,
+            kept: 1,
+            created: 1,
+            skipped_dedup: 0,
+            failed: 0,
+            quarantined: 0,
+            sourceless_candidates: 0,
+            provider: "test".into(),
+            duration_ms: 1,
+        };
+        record_run(&db, &ctx, &ok, true).unwrap();
+        // A new incident: the row gets its full grace again.
+        assert!(run_native(&db, &RealData500, 100).is_err());
+        assert_eq!(
+            attempts(&db, "call the bank about the mandate"),
+            0,
+            "charged on the first run of a new incident"
+        );
     }
 
     /// Regression (round 5, DIST-5): the canary does not protect against a

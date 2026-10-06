@@ -241,7 +241,9 @@ later in the same run, because a canary alone does not prove the provider
 handles real data. Otherwise the charge is deferred: a `distill.deferred`
 event is recorded and nothing is charged. Each such run fails closed (nothing
 was consumed), so `distill.failed` alerts the operator. A capture deferred in
-6 runs (`DEFERRALS_BEFORE_CHARGE`) is charged anyway. A provider that answers
+6 runs (`DEFERRALS_BEFORE_CHARGE`) is charged anyway. Only deferrals since the
+most recent successful `distill.run` count, so every new incident gets the
+full grace, whatever happened in earlier ones. A provider that answers
 the canary but fails all real data charges nothing for about 6 hours. A queue
 holding nothing but poisons still drains: those rows are quarantined after
 about 6 + 3 runs. Mixed with healthy captures, poisons are charged straight
