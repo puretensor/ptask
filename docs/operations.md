@@ -106,7 +106,10 @@ Only one run distills at a time. A run holds an exclusive OS file lock on
 `<db>.distill.lock` (e.g. `~/puretensor-tasks/tasks.db.distill.lock`) for its
 whole duration; a concurrent `pt distill` prints `distill skipped`, consumes
 nothing, records no event and exits 0. The kernel drops the lock when the
-holder exits or is killed, so a crashed run never blocks the next one.
+holder exits or is killed, so a crashed run never blocks the next one. A lock
+file this user cannot write (say, left behind by one `sudo pt distill`) is
+locked through a read-only descriptor instead. In-memory databases take no
+lock, and a `file:` URI locks beside the file it names.
 
 ### Inspect
 
