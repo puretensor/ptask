@@ -98,7 +98,9 @@ Local CLI (`pt approve` / `pt reject` / `pt approval decide`):
 - refused when stdin is not a TTY unless `--via dashboard`
 - `decided_via` is `cli` on a TTY, `dashboard` with `--via dashboard`
 - `decided_by` is `$PTASK_ACTOR`
-- the requester cannot decide their own request
+- the requester cannot decide their own request; actor names compare
+  trimmed and ASCII case-insensitively (`HAL` is `hal`), here and for
+  withdraw-own-rows
 
 HTTP `POST /api/approvals/{id}/decide` requires **admin** scope;
 `decided_via=api`. Write-scope tokens may request and withdraw (own rows
@@ -112,7 +114,11 @@ Otherwise 403 and no state change. `decided_via=telegram`,
 `ptdone:` / `ptsnooze:` / `ptdismiss:` verbs are unchanged.
 
 MCP exposes `approval_request`, `approval_list`, `approval_status`,
-`approval_withdraw`. No MCP tool can decide.
+`approval_withdraw`. No MCP tool can decide. `pt mcp` without
+`$PTASK_ACTOR` requests as `mcp`, not the CLI's default `shell`, so the
+operator's own `pt approve` (actor `shell`) is never mistaken for the
+requester. Two unconfigured MCP clients share `mcp`; set `PTASK_ACTOR` per
+client to tell them apart.
 
 ## Notify
 

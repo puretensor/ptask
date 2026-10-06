@@ -640,3 +640,30 @@ def test_mcp_can_request_but_has_no_decide_tool(env):
     [item] = pj(env, "approval", "ls")
     assert item["requester"] == "hal" and item["kind"] == "external" and item["payload_stored"] is True
     assert item["digest"] == sha256_bytes(canonical_json({"case": "raise g6 quota"}))
+
+
+def test_unconfigured_mcp_requester_is_not_the_operator(env):
+    """`pt mcp` and the CLI both used to default to actor "shell", so the
+    operator's TTY decision on an unconfigured MCP client's request was
+    refused as "requester cannot decide their own approval"."""
+    bare = {k: v for k, v in env.items() if k != "PTASK_ACTOR"}
+    proc, call = mcp_session(bare)
+    try:
+        reply = call({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "approval_request", "arguments": {
+            "kind": "other", "title": "Rotate the key", "payload": "rotate key 7"}}})
+        assert "AP-" in json.dumps(reply["result"]), reply
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=10)
+    [item] = pj(bare, "approval", "ls")
+    assert item["requester"] == "mcp", item
+    run(bare, "approve", item["id"], tty=True)  # the operator, default actor "shell"
+    assert show(bare, item["id"])["status"] == "approved"
+
+
+def test_requester_cannot_decide_by_changing_case(env, tmp_path):
+    ap = request(env, tmp_path, "case", "x")
+    for actor in ("HAL", " Hal "):
+        r = dash_decide(env, "approve", ap["id"], check=False, actor=actor)
+        assert r.returncode != 0, actor
+    assert show(env, ap["id"])["status"] == "pending"

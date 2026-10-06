@@ -390,6 +390,14 @@ fn validate_status_filter(status: &str) -> Result<()> {
     }
 }
 
+/// Requester identity comparison: trimmed, ASCII case-insensitive. "HAL"
+/// and "hal" are one actor, so neither requester != decider nor
+/// withdraw-own-rows can be dodged by changing case. ASCII folding matches
+/// SQLite's `lower()`, which the pending dedupe index uses.
+pub fn same_actor(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
 fn local_event_uuid(ctx: &EventCtx) -> String {
     ctx.event_uuid
         .clone()
@@ -787,7 +795,7 @@ pub fn decide(
             current.expires_at.as_deref().unwrap_or_default()
         ))));
     }
-    if current.requester == decider {
+    if same_actor(&current.requester, decider) {
         return Err(Error::Approval(ApprovalError::Forbidden(
             "the requester cannot decide their own approval; only the operator can".into(),
         )));
@@ -835,7 +843,7 @@ pub fn withdraw(db: &Db, id: &str, ctx: &EventCtx) -> Result<Approval> {
             current.status
         ))));
     }
-    if current.requester != actor {
+    if !same_actor(&current.requester, actor) {
         return Err(Error::Approval(ApprovalError::Forbidden(
             "only the requester can withdraw this approval".into(),
         )));
@@ -1243,6 +1251,36 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn requester_identity_ignores_case_and_padding() {
+        let (_d, db) = fresh();
+        let input = RequestInput {
+            kind: "other".into(),
+            title: "x".into(),
+            request_note: None,
+            payload: PayloadSource::Digest("d".repeat(64)),
+            task_pt_id: None,
+            expires_in: None,
+        };
+        let ap = request(&db, input, &ctx("hal")).unwrap().approval;
+        for actor in ["HAL", "Hal", " hal "] {
+            let err = decide(
+                &db,
+                &ap.ap_id(),
+                Decision::Approve,
+                DecidedVia::Dashboard,
+                None,
+                &ctx(actor),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, Error::Approval(ApprovalError::Forbidden(_))),
+                "{actor:?}: {err:?}"
+            );
+        }
+        withdraw(&db, &ap.ap_id(), &ctx("HAL")).unwrap();
     }
 
     #[test]

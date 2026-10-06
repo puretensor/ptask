@@ -18,7 +18,8 @@ carry `goal_chain` and `goal_source` per task; see [`goals.md`](goals.md)):
   tool handlers, so attribution is pinned `actor=<token-name>, source=mcp`.
   Other agents use the scoped REST API with their own named tokens.
 - **stdio** via `pt mcp` — local registration without a network hop; actor
-  from `$PTASK_ACTOR`.
+  from `$PTASK_ACTOR`, default `mcp` (deliberately not the CLI's `shell`, so
+  the operator can decide an unconfigured client's approval request).
 
 Registration (`~/.claude.json` → `mcpServers`):
 

@@ -215,7 +215,7 @@ not-yet-retired consumers).
 
 Server auth resolves, in order: legacy env `PTASK_API_TOKEN` → env metrics
 token → `pt_api_tokens` lookup. Named-token requests are journaled under
-their client_id; local mutations under `$PTASK_ACTOR` (default `shell`).
+their client_id; local mutations under `$PTASK_ACTOR` (default `shell`; `pt mcp` defaults to `mcp`).
 
 ## Remote (`pt remote`)
 

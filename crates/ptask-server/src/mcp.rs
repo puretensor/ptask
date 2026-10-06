@@ -6,7 +6,7 @@
 //!     surface exists for; other agents use the scoped REST API. Every
 //!     mutation is journaled `actor=hal, source=mcp`.
 //!   - stdio via `pt mcp` for local registration without a network hop;
-//!     actor comes from `$PTASK_ACTOR` (config), source=mcp.
+//!     actor comes from `$PTASK_ACTOR` (config, default "mcp"), source=mcp.
 //!
 //! Tools return compact JSON text — the consumer is a model, not a human.
 
