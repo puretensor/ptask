@@ -792,24 +792,53 @@ fn ok_json(pt_id: Option<&str>, message: &str) -> Response {
 // the calling thread for up to 30s under contention. They run on tokio's
 // blocking pool so a burst of dashboard writers cannot starve the async
 // workers that serve everything else.
+/// Optional body of `POST /api/tasks/{id}/done`. `expected_deadline` pins
+/// the occurrence the client saw: if the task has moved on (another tab or
+/// surface already completed it), the request is refused instead of
+/// advancing a recurring task a second time.
+#[derive(Debug, Default, serde::Deserialize)]
+struct DoneBody {
+    expected_deadline: Option<String>,
+}
+
 async fn act_done(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Response {
-    crate::blocking::db_response(move || act_done_blocking(state, headers, id)).await
+    crate::blocking::db_response(move || act_done_blocking(state, headers, id, body)).await
 }
 
-fn act_done_blocking(state: AppState, headers: HeaderMap, id: String) -> Response {
+fn act_done_blocking(
+    state: AppState,
+    headers: HeaderMap,
+    id: String,
+    body: axum::body::Bytes,
+) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
     if !origin_ok(&headers) {
         return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
+    // The body stays optional: clients that post nothing (or `{}`) complete
+    // the current occurrence as before.
+    let body: DoneBody = if body.iter().all(u8::is_ascii_whitespace) {
+        DoneBody::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(b) => b,
+            Err(e) => return jerr(StatusCode::BAD_REQUEST, &format!("invalid body: {e}")),
+        }
+    };
     let task = match resolve_task(&state, &id) {
         Ok(t) => t,
         Err(r) => return r,
+    };
+    let task = match ptask_core::tasks::expect_deadline(task, body.expected_deadline.as_deref()) {
+        Ok(t) => t,
+        Err(e) => return jerr(StatusCode::BAD_REQUEST, &e.to_string()),
     };
     match ptask_core::tasks::mark_done(&state.db, &task, &dash_ctx()) {
         Ok(ptask_core::tasks::DoneOutcome::Completed) => {
@@ -1487,7 +1516,12 @@ mod tests {
         ready_rx.recv().unwrap();
 
         let started = Instant::now();
-        let handler = act_done(State(state), HeaderMap::new(), Path(task.id.clone()));
+        let handler = act_done(
+            State(state),
+            HeaderMap::new(),
+            Path(task.id.clone()),
+            axum::body::Bytes::new(),
+        );
         let timer = async {
             tokio::time::sleep(Duration::from_millis(50)).await;
             started.elapsed()

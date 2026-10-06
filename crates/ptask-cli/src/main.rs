@@ -741,6 +741,8 @@ enum ShellChoice {
 /// one command, so this is entrypoint-time config, not ambient state.
 static CLI_JSON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static CLI_IDEMPOTENCY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static CLI_COMMAND: std::sync::OnceLock<ptask_core::event_log::CommandFingerprint> =
+    std::sync::OnceLock::new();
 
 fn set_cli_globals(json: bool, idempotency_key: Option<String>) {
     let _ = CLI_JSON.set(json);
@@ -769,8 +771,37 @@ fn cli_ctx() -> ptask_core::event_log::EventCtx {
     let mut ctx = ptask_core::event_log::EventCtx::local(ptask_core::Config::from_env().actor);
     if let Some(key) = cli_idempotency_key() {
         ctx.event_uuid = Some(key);
+        ctx.command = CLI_COMMAND.get().cloned();
     }
     ctx
+}
+
+/// The variant name of a parsed command: `Add`, `Goal`, ...
+fn command_name(cmd: &Command) -> String {
+    let debug = format!("{cmd:?}");
+    debug
+        .split(|c: char| !c.is_alphanumeric())
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A keyed command's fingerprint: its parsed arguments, rendered by the
+/// derived Debug impl (fixed field order), so a retry of the same command
+/// matches and a different command under the same key does not.
+fn command_fingerprint(cmd: &Command) -> ptask_core::event_log::CommandFingerprint {
+    ptask_core::event_log::CommandFingerprint::new(&command_name(cmd), &format!("{cmd:?}"))
+}
+
+/// Commands whose retry under `--idempotency-key` is replay-safe: the keyed
+/// single-target verbs, multi-task `done`/`bulk` (keyed per task) and
+/// `remote` (the key becomes the /sync command uuid).
+fn honours_idempotency_key(cmd: &Command) -> bool {
+    keyed_replay_spec(cmd).is_some()
+        || matches!(
+            cmd,
+            Command::Done(_) | Command::Bulk(_) | Command::Remote(_)
+        )
 }
 
 fn cli_idempotency_key() -> Option<String> {
@@ -791,10 +822,18 @@ fn task_ctx(task_uuid: &str) -> ptask_core::event_log::EventCtx {
 /// True when this mutation's idempotency key already landed: the retry
 /// reports success instead of re-applying (or tripping the unique index).
 fn already_applied(db: &Db, ctx: &ptask_core::event_log::EventCtx) -> Result<bool> {
-    Ok(match ctx.event_uuid.as_deref() {
-        Some(uuid) => ptask_core::event_log::get_by_uuid(db, uuid)?.is_some(),
-        None => false,
-    })
+    let Some(key) = ctx.event_uuid.as_deref() else {
+        return Ok(false);
+    };
+    let check = ptask_core::event_log::ReplayCheck {
+        actor: &ctx.actor,
+        task_uuid: None,
+        event_types: &[],
+        command: ctx.command.as_ref(),
+    };
+    Ok(ptask_core::event_log::check_replay(db, key, &check)
+        .map_err(anyhow::Error::msg)?
+        .is_some())
 }
 
 /// What a keyed command acts on, for the replay check.
@@ -854,8 +893,14 @@ fn replay_keyed(db: &Db, key: &str, cmd: &Command) -> Result<bool> {
         KeyTarget::Goal(id) => ptask_core::goals::get(db, id).ok().map(|g| g.uuid),
         KeyTarget::Untargeted => None,
     };
-    ptask_core::event_log::verify_replay(key, &event, target_uuid.as_deref(), types)
-        .map_err(anyhow::Error::msg)?;
+    let ctx = cli_ctx();
+    let check = ptask_core::event_log::ReplayCheck {
+        actor: &ctx.actor,
+        task_uuid: target_uuid.as_deref(),
+        event_types: types,
+        command: ctx.command.as_ref(),
+    };
+    ptask_core::event_log::verify_replay(key, &event, &check).map_err(anyhow::Error::msg)?;
 
     let subject = event.task_uuid.as_deref().unwrap_or_default();
     if event.event_type.starts_with("goal.") {
@@ -936,6 +981,23 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     set_cli_globals(cli.json, cli.idempotency_key.clone());
+    if cli.idempotency_key.is_some() {
+        // A key on a verb that cannot replay would mint twice or hit the
+        // journal's unique index on retry: refuse it up front.
+        match &cli.command {
+            Some(cmd) if honours_idempotency_key(cmd) => {
+                let _ = CLI_COMMAND.set(command_fingerprint(cmd));
+            }
+            other => anyhow::bail!(
+                "--idempotency-key is not supported by `pt {}`: a retry would not be \
+                 replay-safe; drop the flag",
+                other
+                    .as_ref()
+                    .map(|c| command_name(c).to_ascii_lowercase())
+                    .unwrap_or_default()
+            ),
+        }
+    }
     ui::init(match cli.color {
         _ if cli.no_color || cli.json => ui::ColorMode::Never,
         ColorChoice::Auto => ui::ColorMode::Auto,
@@ -946,9 +1008,11 @@ fn run() -> Result<()> {
     // Lightweight tracing: env-controlled, off by default.
     let filter = tracing_subscriber::EnvFilter::try_from_env("PTASK_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    // Colour only for a terminal: scripts and agents read stderr as text.
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .init();
 
     let command = cli.command;
@@ -1420,16 +1484,12 @@ fn cmd_edit(db: &Db, a: EditArgs) -> Result<()> {
     };
     let mut parts: Vec<String> = Vec::new();
     if has_deadline {
-        // `--deadline ''` clears too (core normalises blank to None), so the
-        // outcome line must not report an empty date as if one were set.
-        let set_to = a.deadline.as_deref().map(str::trim).unwrap_or("");
+        // Report what was stored (normalised), not the raw input; `--deadline
+        // ''` clears too, so an empty date is never reported as set.
+        let stored = tasks::resolve_for_lookup(db, &task.id, true)?.deadline;
         parts.push(format!(
             "deadline {}",
-            if a.clear_deadline || set_to.is_empty() {
-                "cleared"
-            } else {
-                set_to
-            }
+            stored.as_deref().unwrap_or("cleared")
         ));
     }
     if a.title.is_some() {

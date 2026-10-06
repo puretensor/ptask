@@ -905,11 +905,20 @@ mod tests {
             .unwrap();
         assert_eq!(t["priority"], 5);
 
-        // Idempotent replay of the same command uuid → ok, and NO double-apply.
-        // Replay carries a DIFFERENT priority (1) under the same uuid c-2: if the
-        // event-log guard ever broke, this would flip the task to 1. The assertion
-        // that it stays 5 is what proves the short-circuit (a replay of the same
-        // value could not distinguish "skipped" from "re-applied").
+        // The same command replayed under its uuid → ok, no double-apply.
+        let same = post_sync(
+            &app,
+            &serde_json::json!({
+                "sync_token": "*",
+                "commands": [{ "type": "task_priority", "uuid": "c-2",
+                               "args": { "task_uuid": uuid, "priority": 5 } }]
+            }),
+        )
+        .await;
+        assert_eq!(same["sync_status"]["c-2"], "ok");
+
+        // A DIFFERENT priority (1) under the same uuid c-2 is not a replay:
+        // it is refused, and the task must stay 5 (never re-applied).
         let replay = post_sync(
             &app,
             &serde_json::json!({
@@ -919,7 +928,13 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(replay["sync_status"]["c-2"], "ok");
+        assert!(
+            replay["sync_status"]["c-2"]["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("different command or arguments")),
+            "{}",
+            replay["sync_status"]
+        );
         let t = replay["resources"]["tasks"]
             .as_array()
             .unwrap()
@@ -2103,7 +2118,7 @@ Don't forget the sourdough.\r\n";
             .with_conn(|c| {
                 // The command uuid is journaled scoped to its client.
                 Ok(c.query_row(
-                    "SELECT actor, payload FROM pt_event_log WHERE uuid='sync:hal:cmd-hal-1'",
+                    "SELECT actor, payload FROM pt_event_log WHERE uuid='sync:3:hal:cmd-hal-1'",
                     [],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?)
@@ -2571,6 +2586,42 @@ Don't forget the sourdough.\r\n";
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Round 2, item 4ii: two POST /api/tasks/{id}/done for the same
+    /// occurrence advanced it twice, because the route resolves the task at
+    /// request time. An `expected_deadline` body pins the occurrence.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_done_with_expected_deadline_advances_once() {
+        let db = open_test_db();
+        let mut new = ptask_core::NewTask::minimal("daily");
+        new.deadline = Some("2099-01-01".into());
+        let task = ptask_core::tasks::create_with_extensions(
+            &db,
+            new,
+            ptask_core::Extensions {
+                recurrence: Some(ptask_core::recurrence::parse("every day").unwrap()),
+                ..Default::default()
+            },
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let uri = format!("/api/tasks/{}/done", task.id);
+        let body = serde_json::json!({ "expected_deadline": "2099-01-01" });
+        let (first, _) = post_json(&app, &uri, &body).await;
+        assert_eq!(first, StatusCode::OK);
+        let (second, v) = post_json(&app, &uri, &body).await;
+        assert_eq!(second, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+        let after = ptask_core::tasks::resolve_for_lookup(&db, &task.id, true).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some("2099-01-02"));
+        // Absent, the current occurrence completes as before.
+        let (third, _) = post_json(&app, &uri, &serde_json::json!({})).await;
+        assert_eq!(third, StatusCode::OK);
     }
 
     /// Cross-origin writes must be rejected even with valid Basic creds —

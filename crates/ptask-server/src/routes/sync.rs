@@ -95,18 +95,34 @@ fn sync_read_error(stage: &str, e: ptask_core::Error) -> axum::response::Respons
         .into_response()
 }
 
-/// Attribution for one /sync command: the authenticated client identity +
-/// the command uuid, scoped to that client, as the idempotency key.
-fn sync_ctx(actor: &str, cmd_uuid: &str) -> EventCtx {
-    EventCtx::sync(actor, sync_event_uuid(actor, cmd_uuid))
+/// Attribution for one /sync command: the authenticated client identity,
+/// the command uuid scoped to that client as the idempotency key, and the
+/// command's fingerprint (kind + canonical args + temp_id).
+fn sync_ctx(actor: &str, cmd: &Command) -> EventCtx {
+    EventCtx::sync(actor, sync_event_uuid(actor, &cmd.uuid)).with_command(command_fingerprint(cmd))
+}
+
+/// What makes two commands under one uuid the same command. serde_json's
+/// map is ordered by key, so the rendering is canonical.
+fn command_fingerprint(cmd: &Command) -> event_log::CommandFingerprint {
+    let canonical = serde_json::json!({ "args": cmd.args, "temp_id": cmd.temp_id });
+    event_log::CommandFingerprint::new(&cmd.kind, &canonical.to_string())
 }
 
 /// The journal key for a client's command uuid. Client uuids shared one
 /// namespace with every other client and with server-derived keys
 /// (`capture:<id>`, `tg-cb:<id>`, `git:…:close`), so two clients that
 /// picked the same uuid had the second command swallowed as a "replay".
+/// The actor is length-prefixed: client ids may contain ':', and
+/// `sync:{actor}:{uuid}` let "hal:x" + "c1" collide with "hal" + "x:c1".
 fn sync_event_uuid(actor: &str, cmd_uuid: &str) -> String {
-    format!("sync:{actor}:{cmd_uuid}")
+    format!("sync:{}:{actor}:{cmd_uuid}", actor.len())
+}
+
+/// Keys journaled before the current format, newest first: the v3.36.0
+/// `sync:{actor}:{uuid}` and the raw client uuid.
+fn legacy_event_uuids(actor: &str, cmd_uuid: &str) -> [String; 2] {
+    [format!("sync:{actor}:{cmd_uuid}"), cmd_uuid.to_string()]
 }
 
 /// The journal event types each command kind writes; a prior event under the
@@ -132,13 +148,20 @@ enum Prior {
 }
 
 fn prior_command(state: &AppState, cmd: &Command, actor: &str) -> ptask_core::Result<Prior> {
-    let event = match event_log::get_by_uuid(&state.db, &sync_event_uuid(actor, &cmd.uuid))? {
-        Some(event) => Some(event),
-        // Commands journaled before keys were scoped carry the raw uuid;
-        // only the same client's count as its replay.
-        None => event_log::get_by_uuid(&state.db, &cmd.uuid)?
-            .filter(|event| event.actor.as_deref() == Some(actor)),
-    };
+    // Only this client's own events count. Older key formats were
+    // ambiguous (or unscoped), so an event under one of them that another
+    // client journaled is simply not this command's.
+    let mut event = None;
+    let keys = std::iter::once(sync_event_uuid(actor, &cmd.uuid))
+        .chain(legacy_event_uuids(actor, &cmd.uuid));
+    for key in keys {
+        if let Some(found) = event_log::get_by_uuid(&state.db, &key)?
+            && found.actor.as_deref() == Some(actor)
+        {
+            event = Some(found);
+            break;
+        }
+    }
     let Some(event) = event else {
         return Ok(Prior::None);
     };
@@ -156,8 +179,12 @@ fn prior_command(state: &AppState, cmd: &Command, actor: &str) -> ptask_core::Re
         match event_log::verify_replay(
             &cmd.uuid,
             &event,
-            target.as_deref(),
-            command_event_types(&cmd.kind),
+            &event_log::ReplayCheck {
+                actor,
+                task_uuid: target.as_deref(),
+                event_types: command_event_types(&cmd.kind),
+                command: Some(&command_fingerprint(cmd)),
+            },
         ) {
             Ok(()) => Prior::Replay(event),
             Err(e) => Prior::Conflict(e.to_string()),
@@ -446,8 +473,7 @@ fn apply_command(
                 .and_then(Value::as_str)
                 .unwrap_or("sync");
             let (new, ext) = ptask_core::quickadd::parse(text)?.task_parts(source_type);
-            let t =
-                tasks::create_with_extensions(&state.db, new, ext, &sync_ctx(actor, &cmd.uuid))?;
+            let t = tasks::create_with_extensions(&state.db, new, ext, &sync_ctx(actor, cmd))?;
             let payload = serde_json::to_value(&t)?;
             Ok((
                 Some(t.id.clone()),
@@ -458,8 +484,17 @@ fn apply_command(
             ))
         }
         "task_done" => {
-            let task = resolve_task(state, &cmd.args)?;
-            let outcome = tasks::mark_done(&state.db, &task, &sync_ctx(actor, &cmd.uuid))?;
+            let expected = match cmd.args.get("expected_deadline") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.as_str()),
+                Some(_) => {
+                    return Err(anyhow::anyhow!(
+                        "task_done: args.expected_deadline must be a string"
+                    ));
+                }
+            };
+            let task = tasks::expect_deadline(resolve_task(state, &cmd.args)?, expected)?;
+            let outcome = tasks::mark_done(&state.db, &task, &sync_ctx(actor, cmd))?;
             let (event_type, payload) = match outcome {
                 DoneOutcome::Completed => (
                     "task.completed".to_string(),
@@ -489,7 +524,7 @@ fn apply_command(
                 .get("priority")
                 .and_then(Value::as_i64)
                 .ok_or_else(|| anyhow::anyhow!("task_priority: args.priority required"))?;
-            tasks::update_priority(&state.db, &task.id, priority, &sync_ctx(actor, &cmd.uuid))?;
+            tasks::update_priority(&state.db, &task.id, priority, &sync_ctx(actor, cmd))?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -511,23 +546,20 @@ fn apply_command(
                     ));
                 }
             };
-            tasks::update_deadline(
-                &state.db,
-                &task.id,
-                new_deadline,
-                &sync_ctx(actor, &cmd.uuid),
-            )?;
+            tasks::update_deadline(&state.db, &task.id, new_deadline, &sync_ctx(actor, cmd))?;
+            // Echo what was stored (normalised), not the raw input.
+            let stored = tasks::resolve_for_lookup(&state.db, &task.id, true)?.deadline;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
                     event_type: "task.updated".into(),
-                    payload: serde_json::json!({ "task_uuid": task.id, "deadline": new_deadline }),
+                    payload: serde_json::json!({ "task_uuid": task.id, "deadline": stored }),
                 },
             ))
         }
         "task_reopen" => {
             let task = resolve_task(state, &cmd.args)?;
-            tasks::reopen(&state.db, &task.id, &sync_ctx(actor, &cmd.uuid))?;
+            tasks::reopen(&state.db, &task.id, &sync_ctx(actor, cmd))?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -550,7 +582,7 @@ fn apply_command(
                 &task.id,
                 title,
                 description,
-                &sync_ctx(actor, &cmd.uuid),
+                &sync_ctx(actor, cmd),
             )?;
             Ok((
                 Some(task.id.clone()),
@@ -564,7 +596,7 @@ fn apply_command(
         }
         "task_dismiss" => {
             let task = resolve_task(state, &cmd.args)?;
-            tasks::dismiss(&state.db, &task.id, &sync_ctx(actor, &cmd.uuid))?;
+            tasks::dismiss(&state.db, &task.id, &sync_ctx(actor, cmd))?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -575,7 +607,7 @@ fn apply_command(
         }
         "task_start" => {
             let task = resolve_task(state, &cmd.args)?;
-            tasks::start(&state.db, &task.id, &sync_ctx(actor, &cmd.uuid))?;
+            tasks::start(&state.db, &task.id, &sync_ctx(actor, cmd))?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -591,7 +623,15 @@ fn apply_command(
                 .get("until")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ptask_core::Error::Other("task_snooze needs args.until".into()))?;
-            tasks::snooze(&state.db, &task.id, until, &sync_ctx(actor, &cmd.uuid))?;
+            tasks::snooze(&state.db, &task.id, until, &sync_ctx(actor, cmd))?;
+            // Echo what was stored (normalised), not the raw input.
+            let until: Option<String> = state.db.with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT snoozed_until FROM tasks WHERE id=?1",
+                    [&task.id],
+                    |r| r.get(0),
+                )?)
+            })?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -616,19 +656,9 @@ fn apply_command(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             if clear {
-                tasks::remove_dependency(
-                    &state.db,
-                    &task.id,
-                    &on_task.id,
-                    &sync_ctx(actor, &cmd.uuid),
-                )?;
+                tasks::remove_dependency(&state.db, &task.id, &on_task.id, &sync_ctx(actor, cmd))?;
             } else {
-                tasks::add_dependency(
-                    &state.db,
-                    &task.id,
-                    &on_task.id,
-                    &sync_ctx(actor, &cmd.uuid),
-                )?;
+                tasks::add_dependency(&state.db, &task.id, &on_task.id, &sync_ctx(actor, cmd))?;
             }
             let key = if clear {
                 "depends_on_removed"
@@ -647,7 +677,7 @@ fn apply_command(
         }
         "task_delete" => {
             let task = resolve_task(state, &cmd.args)?;
-            tasks::delete_task(&state.db, &task.id, &sync_ctx(actor, &cmd.uuid))?;
+            tasks::delete_task(&state.db, &task.id, &sync_ctx(actor, cmd))?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -823,6 +853,133 @@ mod tests {
             .db
             .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?))
             .unwrap()
+    }
+
+    #[test]
+    fn task_done_with_expected_deadline_completes_one_occurrence_once() {
+        // Regression (round 2, item 4ii): /sync resolved the task when each
+        // command ran, so [task_done d1, task_done d2] for the same
+        // occurrence advanced it twice. expected_deadline pins the
+        // occurrence the client saw.
+        let (_dir, state) = test_state();
+        let mut new = tasks::NewTask::minimal("daily");
+        new.deadline = Some("2099-01-01".into());
+        let ext = ptask_core::Extensions {
+            recurrence: Some(ptask_core::recurrence::parse("every day").unwrap()),
+            ..Default::default()
+        };
+        let t = tasks::create_with_extensions(&state.db, new, ext, &EventCtx::test()).unwrap();
+        let done = |uuid: &str| Command {
+            kind: "task_done".into(),
+            uuid: uuid.into(),
+            temp_id: None,
+            args: serde_json::json!({ "task_uuid": t.id, "expected_deadline": "2099-01-01" }),
+        };
+        assert!(outcome_ok(&apply_one(&state, &done("d1"), "hal")).is_ok());
+        let second = outcome_ok(&apply_one(&state, &done("d2"), "hal"));
+        assert!(second.is_err(), "second completion of the same occurrence");
+        let after = task_by_uuid(&state.db, &t.id).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some("2099-01-02"));
+
+        // Without it, behaviour is unchanged: the current occurrence.
+        let plain = Command {
+            kind: "task_done".into(),
+            uuid: "d3".into(),
+            temp_id: None,
+            args: serde_json::json!({ "task_uuid": t.id }),
+        };
+        assert!(outcome_ok(&apply_one(&state, &plain, "hal")).is_ok());
+        let after = task_by_uuid(&state.db, &t.id).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some("2099-01-03"));
+    }
+
+    #[test]
+    fn a_command_uuid_reused_with_different_arguments_is_an_error() {
+        // Regression (round 2, 9a): every task.updated kind looked alike, and
+        // arguments were never compared.
+        let (_dir, state) = test_state();
+        let created = apply_one(&state, &create_cmd("c-1", "t-1", "write report"), "hal");
+        let (_, task_uuid) = outcome_ok(&created).unwrap().unwrap();
+        let on_task = |kind: &str| Command {
+            kind: kind.into(),
+            uuid: "c-2".into(),
+            temp_id: None,
+            args: serde_json::json!({ "task_uuid": task_uuid }),
+        };
+        assert!(outcome_ok(&apply_one(&state, &on_task("task_dismiss"), "hal")).is_ok());
+        assert!(outcome_ok(&apply_one(&state, &on_task("task_reopen"), "hal")).is_err());
+        assert_eq!(
+            task_by_uuid(&state.db, &task_uuid).unwrap().status,
+            "dismissed"
+        );
+        // The same command is still a replay.
+        assert!(matches!(
+            apply_one(&state, &on_task("task_dismiss"), "hal"),
+            CommandOutcome::Replayed(_)
+        ));
+
+        // task_create: same uuid, different text or temp_id.
+        for other in [
+            create_cmd("c-1", "t-1", "something else"),
+            create_cmd("c-1", "t-9", "write report"),
+        ] {
+            assert!(outcome_ok(&apply_one(&state, &other, "hal")).is_err());
+        }
+        assert_eq!(task_count(&state), 1);
+    }
+
+    #[test]
+    fn a_client_id_containing_a_colon_cannot_alias_another_clients_uuid() {
+        // Regression (round 2, 9b): the scoped key `sync:{actor}:{uuid}` was
+        // ambiguous — token "hal:x" sending uuid c1 and token "hal" sending
+        // uuid x:c1 shared one key, and hal got hal:x's task back.
+        let (_dir, state) = test_state();
+        let theirs = apply_one(&state, &create_cmd("c1", "t", "hal:x's task"), "hal:x");
+        let (_, their_uuid) = outcome_ok(&theirs).unwrap().unwrap();
+        let mine = apply_one(&state, &create_cmd("x:c1", "t", "hal's task"), "hal");
+        assert!(matches!(mine, CommandOutcome::Applied { .. }), "aliased");
+        let (_, my_uuid) = outcome_ok(&mine).unwrap().unwrap();
+        assert_ne!(my_uuid, their_uuid);
+        assert_eq!(task_count(&state), 2);
+    }
+
+    #[test]
+    fn edit_and_snooze_payloads_echo_the_stored_value() {
+        // Round 2 (cosmetic): the outbound payload echoed the raw input
+        // ("+0100") rather than what was stored.
+        let (_dir, state) = test_state();
+        let created = apply_one(&state, &create_cmd("c-1", "t-1", "report"), "hal");
+        let (_, task_uuid) = outcome_ok(&created).unwrap().unwrap();
+        let raw = "2099-12-10T09:00:00+0100";
+        for (kind, field, args) in [
+            (
+                "task_edit",
+                "deadline",
+                serde_json::json!({ "deadline": raw }),
+            ),
+            (
+                "task_snooze",
+                "snoozed_until",
+                serde_json::json!({ "until": raw }),
+            ),
+        ] {
+            let mut args = args;
+            args["task_uuid"] = serde_json::json!(task_uuid);
+            let cmd = Command {
+                kind: kind.into(),
+                uuid: format!("{kind}-1"),
+                temp_id: None,
+                args,
+            };
+            let CommandOutcome::Applied { payload, .. } = apply_one(&state, &cmd, "hal") else {
+                panic!("{kind} not applied");
+            };
+            assert_eq!(
+                payload.payload[field], "2099-12-10T08:00:00+00:00",
+                "{kind}: {}",
+                payload.payload
+            );
+        }
     }
 
     #[test]

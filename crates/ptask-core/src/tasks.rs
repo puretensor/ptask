@@ -147,6 +147,7 @@ pub fn create_with_extensions(
     ext: Extensions,
     ctx: &EventCtx,
 ) -> Result<Task> {
+    reject_blank_title(&new.title)?;
     // Every edit path validates a deadline; create stored any text, so
     // `--deadline "next friday"` read as overdue forever (julianday NULL)
     // and made a recurring task uncompletable. Stored in the one canonical
@@ -745,6 +746,9 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             other => Err(other),
         })?;
 
+    // Set when a recurring task's series has no next occurrence: this
+    // completion closes it for good.
+    let mut series_ended = false;
     if let Some(RecurrenceRow {
         mode: mode_str,
         original,
@@ -832,17 +836,20 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         };
         // No representable next occurrence ("every 95000 months" runs past
         // year 9999): the series is over, so this completion closes the task
-        // below instead of failing on every attempt.
+        // below instead of failing on every attempt. Only a range error ends
+        // a series; anything else is a real failure and propagates.
         let next_z = match advanced {
             Ok(next_z) => Some(next_z),
-            Err(e) => {
+            Err(e) if series_has_ended(&e) => {
                 tracing::warn!(
                     target: "ptask::tasks", task = %task.id, error = %e,
                     "no next occurrence; completing the recurring task"
                 );
                 None
             }
+            Err(e) => return Err(e),
         };
+        series_ended = next_z.is_none();
         if let Some(next_z) = next_z {
             // A date-only deadline is due all day; its next occurrence must be
             // date-only too, not a midnight timestamp that is overdue at 00:00.
@@ -914,15 +921,36 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
          VALUES (?1, 'status_change', ?2, ?3)",
         params![task.id, now, format!("Completed via {}", ctx.source),],
     )?;
-    record_event_tx(
-        &tx,
-        ctx,
-        &task.id,
-        "task.completed",
-        &serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id }),
-    )?;
+    let mut payload = serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id });
+    if series_ended {
+        // The rule has no further occurrence: drop it, so the closed task
+        // no longer reports "recurs" (and a reopen is a plain task).
+        tx.execute("DELETE FROM pt_recurrence WHERE task_uuid=?1", [&task.id])?;
+        payload["series_ended"] = serde_json::json!(true);
+    }
+    record_event_tx(&tx, ctx, &task.id, "task.completed", &payload)?;
     tx.commit()?;
     Ok(DoneOutcome::Completed)
+}
+
+/// Pin the occurrence a caller completes: a surface that resolves the task
+/// at request time (/sync, MCP, the dashboard) passes the deadline its
+/// client last saw, and [`mark_done`] then refuses if the task has moved on.
+/// `None` leaves the snapshot as read; `""` means "it had no deadline".
+pub fn expect_deadline(mut task: Task, expected: Option<&str>) -> Result<Task> {
+    if let Some(expected) = expected {
+        task.deadline = match expected.trim() {
+            "" => None,
+            d => Some(normalize_when(d)?),
+        };
+    }
+    Ok(task)
+}
+
+/// True when an advance failed because the next occurrence is outside the
+/// representable range, i.e. the series is over.
+fn series_has_ended(e: &crate::Error) -> bool {
+    matches!(e, crate::Error::OutOfRange(_))
 }
 
 /// Open `depends_on` prerequisites of `task_uuid`, as `PT-N — title` handles
@@ -1075,7 +1103,7 @@ pub(crate) fn combine_date_with_time(
     );
     civil
         .to_zoned(tz)
-        .map_err(|e| crate::Error::Other(format!("combine date+time: {}", e)))
+        .map_err(|e| crate::Error::OutOfRange(format!("combine date+time: {}", e)))
 }
 
 /// Build a Linear-style branch name from a PT-N + title.
@@ -1445,13 +1473,21 @@ const NOTHING_UNDOABLE: &str =
 /// (or is depended on by), or that parents another task, is never deleted:
 /// those relations are not journaled under its own uuid.
 fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<UndoPlan>> {
+    // "Own" is actor AND surface: CLI, TUI and an unconfigured `pt mcp` all
+    // default to actor "shell", so the actor alone let the operator's undo
+    // delete what an agent added over MCP. CLI and TUI are one surface.
+    let (surface_a, surface_b) = match ctx.source.as_str() {
+        "cli" | "tui" => ("cli", "tui"),
+        other => (other, other),
+    };
     let candidates: Vec<(i64, String, String, String)> = {
         let mut stmt = tx.prepare(
             "SELECT id, task_uuid, event_type, payload FROM pt_event_log
              WHERE task_uuid IS NOT NULL AND actor = ?1
+               AND json_extract(payload, '$.source') IN (?2, ?3)
              ORDER BY id DESC LIMIT 50",
         )?;
-        let rows = stmt.query_map([&ctx.actor], |r| {
+        let rows = stmt.query_map(params![ctx.actor, surface_a, surface_b], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
         rows.collect::<std::result::Result<_, _>>()?
@@ -1488,12 +1524,20 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
             "task.created" => {
                 let related: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM task_links WHERE from_uuid=?1 OR to_uuid=?1)
-                         OR EXISTS(SELECT 1 FROM tasks WHERE parent_uuid=?1)",
+                         OR EXISTS(SELECT 1 FROM tasks WHERE parent_uuid=?1)
+                         OR EXISTS(SELECT 1 FROM approvals WHERE task_uuid=?1)",
                     [&task_uuid],
                     |r| r.get(0),
                 )?;
+                // Your newest undoable mutation is protected: refuse rather
+                // than reach further back and delete an older task instead.
                 if related {
-                    continue;
+                    let handle = pt_id.clone().unwrap_or_else(|| task_uuid.clone());
+                    return Err(crate::Error::Other(format!(
+                        "your most recent undoable change is creating {handle} \"{title}\", \
+                         which other tasks or approvals now depend on; nothing was undone \
+                         (remove those links, or `pt rm {handle}` deliberately)"
+                    )));
                 }
                 UndoAction::DeleteCreated
             }
@@ -1992,12 +2036,24 @@ pub struct TaskEdit<'a> {
 
 /// Apply selected fields, side tables, interactions and one attributed event
 /// in one transaction. A rejected field or late database error changes nothing.
+/// A task title must have visible text: an empty or whitespace-only title
+/// left an unreadable row on every surface.
+fn reject_blank_title(title: &str) -> Result<()> {
+    if title.trim().is_empty() {
+        return Err(crate::Error::Other("title must not be empty".into()));
+    }
+    Ok(())
+}
+
 pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx) -> Result<()> {
     // Blank or padded deadlines normalise like update_deadline: "" clears.
     let mut edit = edit;
     edit.deadline = edit
         .deadline
         .map(|d| d.map(str::trim).filter(|d| !d.is_empty()));
+    if let Some(t) = edit.title {
+        reject_blank_title(t)?;
+    }
     let has_text = edit.title.is_some() || edit.description.is_some();
     let has_labels = !edit.labels_add.is_empty() || !edit.labels_remove.is_empty();
     if !has_text && edit.priority.is_none() && edit.deadline.is_none() && !has_labels {
@@ -2144,6 +2200,9 @@ pub fn update_text(
 ) -> Result<()> {
     if title.is_none() && description.is_none() {
         return Err(crate::Error::Other("update_text: nothing to change".into()));
+    }
+    if let Some(t) = title {
+        reject_blank_title(t)?;
     }
     let now = iso_now();
     let mut conn = db.get()?;
@@ -4248,6 +4307,7 @@ mod tests {
             actor: "gate".into(),
             source: "test".into(),
             event_uuid: None,
+            command: None,
         };
         let count = |db: &Db| -> i64 {
             db.with_conn(
@@ -4762,6 +4822,168 @@ mod tests {
     }
 
     #[test]
+    fn an_ended_series_is_journaled_and_no_longer_recurs() {
+        // Round 2, item 6: the completion that ends a series says so in its
+        // event, and the task stops reporting a rule (`pt show` said
+        // "recurs" for a closed, never-recurring-again task).
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("archive");
+        new.deadline = Some("2099-01-01".into());
+        let ext = Extensions {
+            recurrence: Some(crate::recurrence::parse("every! 99999 months").unwrap()),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        assert_eq!(
+            mark_done(&db, &t, &EventCtx::test()).unwrap(),
+            DoneOutcome::Completed
+        );
+        let payload: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT payload FROM pt_event_log WHERE event_type='task.completed'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["series_ended"], true, "{payload}");
+        let detail = load_detail(&db, &t.id).unwrap();
+        assert_eq!(detail.recurrence_input, None);
+        assert_eq!(detail.recurrence_next, None);
+        // A plain completion carries no such flag.
+        let plain = create(&db, NewTask::minimal("plain"), &EventCtx::test()).unwrap();
+        mark_done(&db, &plain, &EventCtx::test()).unwrap();
+        assert_eq!(event_count(&db, "task.completed"), 2);
+    }
+
+    #[test]
+    fn only_a_range_error_ends_a_series() {
+        // Round 2, item 6: any advance error used to end the series.
+        assert!(series_has_ended(&crate::Error::OutOfRange(
+            "year 10000".into()
+        )));
+        assert!(!series_has_ended(&crate::Error::Other(
+            "weekday advance: no match within 14 days (bug?)".into()
+        )));
+        assert!(!series_has_ended(&crate::Error::Sqlite(
+            rusqlite::Error::QueryReturnedNoRows
+        )));
+    }
+
+    #[test]
+    fn a_blank_title_is_refused_on_create_and_every_edit_path() {
+        // Regression (round 2, item 2): `pt edit --title ""` and MCP
+        // task_edit {"title": ""} stored an empty title.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        for blank in ["", "   ", "\t\n"] {
+            assert!(
+                create(&db, NewTask::minimal(blank), &ctx).is_err(),
+                "{blank:?}"
+            );
+        }
+        let t = create(&db, NewTask::minimal("keep me"), &ctx).unwrap();
+        let cursor = crate::event_log::current_cursor(&db).unwrap();
+        for blank in ["", "   "] {
+            let edit = TaskEdit {
+                title: Some(blank),
+                ..Default::default()
+            };
+            assert!(edit_atomic(&db, &t.id, edit, &ctx).is_err(), "{blank:?}");
+            assert!(
+                update_text(&db, &t.id, Some(blank), None, &ctx).is_err(),
+                "{blank:?}"
+            );
+        }
+        assert_eq!(
+            resolve_for_lookup(&db, &t.id, true).unwrap().title,
+            "keep me"
+        );
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor);
+    }
+
+    fn ctx_as(actor: &str, source: &str) -> EventCtx {
+        EventCtx {
+            actor: actor.into(),
+            source: source.into(),
+            event_uuid: None,
+            command: None,
+        }
+    }
+
+    #[test]
+    fn undo_skips_another_surface_sharing_the_default_actor() {
+        // Regression (round 2, 1a): an unconfigured `pt mcp` journals as
+        // actor "shell" like the CLI, so `pt undo --yes` deleted the task an
+        // agent had just added over MCP.
+        let (_dir, db) = fresh_db();
+        let agent = create(
+            &db,
+            NewTask::minimal("agent made this"),
+            &ctx_as("shell", "mcp"),
+        )
+        .unwrap();
+        let cli = ctx_as("shell", "cli");
+        assert!(undo_last(&db, &cli).is_err());
+        assert!(task_exists(&db, &agent.id));
+
+        // CLI and TUI are the same operator surface.
+        let mine = create(
+            &db,
+            NewTask::minimal("from the tui"),
+            &ctx_as("shell", "tui"),
+        )
+        .unwrap();
+        let out = undo_last(&db, &cli).unwrap();
+        assert_eq!(out.task_uuid, mine.id);
+        assert!(task_exists(&db, &agent.id));
+    }
+
+    #[test]
+    fn undo_never_deletes_a_task_an_approval_points_at() {
+        // Regression (round 2, 1b): HAL's approval request on PT-1 did not
+        // protect it, so undo deleted PT-1 and left AP-1 dangling.
+        let (_dir, db) = fresh_db();
+        let me = ctx_as("shell", "cli");
+        let t = create(&db, NewTask::minimal("send the invoice"), &me).unwrap();
+        crate::approvals::request(
+            &db,
+            crate::approvals::RequestInput {
+                kind: "email".into(),
+                title: "send it".into(),
+                request_note: None,
+                payload: crate::approvals::PayloadSource::Json(b"{}".to_vec()),
+                task_pt_id: t.pt_id.clone(),
+                expires_in: None,
+            },
+            &ctx_as("hal", "mcp"),
+        )
+        .unwrap();
+        let err = undo_last(&db, &me).unwrap_err();
+        assert!(format!("{err}").contains("PT-1"), "{err}");
+        assert!(task_exists(&db, &t.id));
+    }
+
+    #[test]
+    fn undo_refuses_instead_of_reaching_past_a_protected_create() {
+        // Regression (round 2, 1c): `add A; add B; (hal) depend C --on B`
+        // then `pt undo --yes` skipped protected B and deleted A.
+        let (_dir, db) = fresh_db();
+        let me = ctx_as("shell", "cli");
+        let a = create(&db, NewTask::minimal("older"), &me).unwrap();
+        let b = create(&db, NewTask::minimal("prerequisite"), &me).unwrap();
+        let hal = ctx_as("hal", "mcp");
+        let c = create(&db, NewTask::minimal("hal's task"), &hal).unwrap();
+        add_dependency(&db, &c.id, &b.id, &hal).unwrap();
+        let err = undo_last(&db, &me).unwrap_err();
+        assert!(format!("{err}").contains("PT-2"), "{err}");
+        assert!(task_exists(&db, &a.id) && task_exists(&db, &b.id));
+        assert!(undo_plan(&db, &me).is_err());
+    }
+
+    #[test]
     fn undo_never_deletes_a_parent_of_another_task() {
         let (_dir, db) = fresh_db();
         let ctx = EventCtx::test();
@@ -4775,11 +4997,11 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        // The parent's create is protected, so undo moves past it to the
-        // child's bare create.
-        let out = undo_last(&db, &ctx).unwrap();
-        assert!(out.description.contains(&child.id), "{}", out.description);
+        // The parent's create is protected: undo refuses, and does not reach
+        // back to the child's create either.
+        assert!(undo_last(&db, &ctx).is_err());
         assert!(task_exists(&db, &parent.id), "the parent was deleted");
+        assert!(task_exists(&db, &child.id), "undo reached past the parent");
     }
 
     #[test]

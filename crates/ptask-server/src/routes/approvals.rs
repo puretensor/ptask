@@ -82,6 +82,7 @@ fn ctx_for(actor: &str, source: &str) -> EventCtx {
         actor: actor.to_string(),
         source: source.into(),
         event_uuid: None,
+        command: None,
     }
 }
 

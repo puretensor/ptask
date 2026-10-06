@@ -225,7 +225,7 @@ pub fn next_after(rec: &Recurrence, after: &Zoned) -> Result<Zoned> {
         Freq::Monthly => jiff::Span::new().try_months(n),
     };
     span.and_then(|span| after.checked_add(span))
-        .map_err(|e| Error::Other(format!("recurrence advance: {}", e)))
+        .map_err(|e| Error::OutOfRange(format!("recurrence advance: {}", e)))
 }
 
 /// Next fixed-mode occurrence: the first one strictly after both `current`
@@ -246,7 +246,7 @@ pub fn next_fixed(
             let next = jiff::Span::new()
                 .try_months(k * n)
                 .and_then(|span| anchor.checked_add(span))
-                .map_err(|e| Error::Other(format!("recurrence advance: {}", e)))?;
+                .map_err(|e| Error::OutOfRange(format!("recurrence advance: {}", e)))?;
             if next > *floor {
                 return Ok(next);
             }
@@ -264,7 +264,7 @@ fn next_weekday(after: &Zoned, days: &[Weekday]) -> Result<Zoned> {
     for delta in 1..=14 {
         let candidate = after
             .checked_add(jiff::Span::new().days(delta))
-            .map_err(|e| Error::Other(format!("weekday advance: {}", e)))?;
+            .map_err(|e| Error::OutOfRange(format!("weekday advance: {}", e)))?;
         if days.contains(&candidate.weekday()) {
             return Ok(candidate);
         }
@@ -280,7 +280,7 @@ fn next_monthday(after: &Zoned, days: &[i8]) -> Result<Zoned> {
     for delta in 1..=370 {
         let candidate = after
             .checked_add(jiff::Span::new().days(delta))
-            .map_err(|e| Error::Other(format!("monthday advance: {}", e)))?;
+            .map_err(|e| Error::OutOfRange(format!("monthday advance: {}", e)))?;
         if days.contains(&(candidate.day())) {
             return Ok(candidate);
         }

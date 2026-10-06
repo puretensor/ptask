@@ -194,8 +194,11 @@ Globals (v2.0.0): `--json` on task-facing verbs emits machine-readable
 output; `--idempotency-key <k>` keys the mutation's event so retries are
 safe: a retry of the same command on the same task prints `replayed` and
 exits 0 without re-applying (a retried `add` returns the task it created);
-a key already used for a different command or task is an error. Over
-`/sync`, command uuids are scoped to the authenticated client. Since v3.25.0 the human output renders through the shared PureTensor
+a key already used for a different command, different arguments, another
+task or by another actor is an error. Verbs that cannot replay safely
+(`undo`, `token`, `approval`, `approve`/`reject`, `reap`, `review`, reads)
+refuse the flag outright. Over `/sync`, command uuids are scoped to the
+authenticated client. Since v3.25.0 the human output renders through the shared PureTensor
 terminal theme (the `fleet-upgrade` look: gradient headline rules, box-ruled
 severity-banded tables, semantic pills — green done, amber needs a human, red
 critical). Colour is on only when stdout is a TTY; `--color always|never`,
@@ -211,7 +214,7 @@ not-yet-retired consumers).
 | Verb | Use |
 |---|---|
 | `pt log <query> [-n N]` | attributed event history for a task: when, who (actor), via which surface, what |
-| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor: `$PTASK_ACTOR`, default `shell`) within your last 50 task events (done/dismiss → reopen, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, or that parents another task, is never deleted. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
+| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor, `$PTASK_ACTOR`, default `shell`, through the CLI/TUI surface: a task an unconfigured `pt mcp` added as `shell` is not yours) within your last 50 task events (done/dismiss → reopen, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, that parents another task, or that an approval references, is never deleted: when your most recent undoable change is such a create, undo refuses and names it rather than reaching further back. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
 | `pt token create <client_id> [--scope read\|capture\|write\|admin]` | mint a named scoped API token (plain value shown ONCE; only the sha256 is stored) |
 | `pt token list` | client, scope, active/revoked, created/last-used |
 | `pt token revoke <client_id>` | revoke all active tokens for a client |

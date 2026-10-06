@@ -29,6 +29,32 @@ pub struct EventCtx {
     /// uuid — replays return ok without re-applying). `None` = a generated
     /// `local:` uuid.
     pub event_uuid: Option<String>,
+    /// What the keyed command was (verb + a hash of its canonical
+    /// arguments), journaled as `payload.cmd` so a retry under the same key
+    /// can be told apart from a different command that reused it.
+    pub command: Option<CommandFingerprint>,
+}
+
+/// Identity of one keyed command: its verb and the SHA-256 of its canonical
+/// arguments. Two commands under one idempotency key are the same command
+/// only when both match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandFingerprint {
+    pub verb: String,
+    pub args_sha256: String,
+}
+
+impl CommandFingerprint {
+    /// `canonical_args` must be deterministic for the same command (sorted
+    /// JSON, a fixed Debug rendering, ...).
+    pub fn new(verb: &str, canonical_args: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(canonical_args.as_bytes());
+        Self {
+            verb: verb.to_string(),
+            args_sha256: digest.iter().map(|b| format!("{b:02x}")).collect(),
+        }
+    }
 }
 
 impl EventCtx {
@@ -38,6 +64,7 @@ impl EventCtx {
             actor: actor.into(),
             source: "cli".into(),
             event_uuid: None,
+            command: None,
         }
     }
 
@@ -47,6 +74,7 @@ impl EventCtx {
             actor: client_id.into(),
             source: "sync".into(),
             event_uuid: Some(cmd_uuid.into()),
+            command: None,
         }
     }
 
@@ -57,6 +85,7 @@ impl EventCtx {
             actor: name.into(),
             source: name.into(),
             event_uuid: None,
+            command: None,
         }
     }
 
@@ -66,6 +95,7 @@ impl EventCtx {
             actor: format!("webhook:{provider}"),
             source: "webhook".into(),
             event_uuid: Some(delivery_uuid.into()),
+            command: None,
         }
     }
 
@@ -75,6 +105,7 @@ impl EventCtx {
             actor: "test".into(),
             source: "test".into(),
             event_uuid: None,
+            command: None,
         }
     }
 
@@ -84,7 +115,14 @@ impl EventCtx {
             actor: self.actor.clone(),
             source: self.source.clone(),
             event_uuid: Some(uuid.into()),
+            command: self.command.clone(),
         }
+    }
+
+    /// Same identity, carrying the keyed command's fingerprint.
+    pub fn with_command(mut self, command: CommandFingerprint) -> Self {
+        self.command = Some(command);
+        self
     }
 }
 
@@ -95,6 +133,9 @@ pub struct LoggedEvent {
     pub event_type: String,
     /// NULL for events from before actor attribution (V009).
     pub actor: Option<String>,
+    /// The keyed command's fingerprint; `None` for events journaled before
+    /// fingerprints, or without a key.
+    pub command: Option<CommandFingerprint>,
 }
 
 /// Record an attributed event. Returns the new `pt_event_log.id`.
@@ -132,6 +173,12 @@ pub fn record_in_conn(
     if let Some(obj) = enveloped.as_object_mut() {
         obj.insert("actor".into(), serde_json::json!(ctx.actor));
         obj.insert("source".into(), serde_json::json!(ctx.source));
+        if let Some(cmd) = &ctx.command {
+            obj.insert(
+                "cmd".into(),
+                serde_json::json!({ "verb": cmd.verb, "args_sha256": cmd.args_sha256 }),
+            );
+        }
     }
     let payload_str = enveloped.to_string();
     conn.execute(
@@ -147,14 +194,22 @@ pub fn get_by_uuid(db: &Db, uuid: &str) -> Result<Option<LoggedEvent>> {
     let conn = db.get()?;
     let found = conn
         .query_row(
-            "SELECT id, task_uuid, event_type, actor FROM pt_event_log WHERE uuid = ?1",
+            "SELECT id, task_uuid, event_type, actor,
+                    json_extract(payload, '$.cmd.verb'),
+                    json_extract(payload, '$.cmd.args_sha256')
+             FROM pt_event_log WHERE uuid = ?1",
             [uuid],
             |r| {
+                let verb: Option<String> = r.get(4)?;
+                let args_sha256: Option<String> = r.get(5)?;
                 Ok(LoggedEvent {
                     id: r.get(0)?,
                     task_uuid: r.get(1)?,
                     event_type: r.get(2)?,
                     actor: r.get(3)?,
+                    command: verb
+                        .zip(args_sha256)
+                        .map(|(verb, args_sha256)| CommandFingerprint { verb, args_sha256 }),
                 })
             },
         )
@@ -162,30 +217,49 @@ pub fn get_by_uuid(db: &Db, uuid: &str) -> Result<Option<LoggedEvent>> {
     Ok(found)
 }
 
+/// What a retried keyed command expects its earlier event to look like.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplayCheck<'a> {
+    /// The caller: a key journaled by another actor is never its replay.
+    pub actor: &'a str,
+    /// The task the command names, when it still resolves.
+    pub task_uuid: Option<&'a str>,
+    /// Event types the command writes; empty skips this check.
+    pub event_types: &'a [&'a str],
+    /// The command's fingerprint, compared with the journaled one.
+    pub command: Option<&'a CommandFingerprint>,
+}
+
 /// Is `event` (already journaled under idempotency key `key`) a replay of
-/// the command now being retried? It is when it has one of `event_types`
-/// and, if `task_uuid` is given, belongs to that task. Anything else is a
-/// key reused for a different command: an error, never a silent "ok" that
-/// skips the new command.
-pub fn verify_replay(
-    key: &str,
-    event: &LoggedEvent,
-    task_uuid: Option<&str>,
-    event_types: &[&str],
-) -> Result<()> {
-    if !event_types.contains(&event.event_type.as_str()) {
-        return Err(crate::Error::Other(format!(
-            "idempotency key {key:?} was already used for a different command ({}); \
-             use a fresh key",
-            event.event_type
-        )));
+/// the command now being retried? Only when the same actor journaled it,
+/// with the same command fingerprint (verb and canonical arguments) — or,
+/// for an event from before fingerprints, one of the expected event types —
+/// on the same task. Anything else is a key reused for a different command:
+/// an error, never a silent "ok" that skips the new command.
+pub fn verify_replay(key: &str, event: &LoggedEvent, expect: &ReplayCheck<'_>) -> Result<()> {
+    let reused = |what: &str| {
+        Err(crate::Error::Other(format!(
+            "idempotency key {key:?} was already used {what}; nothing was applied — use a fresh key"
+        )))
+    };
+    if event.actor.as_deref() != Some(expect.actor) {
+        return reused("by another client");
     }
-    if let Some(expected) = task_uuid
+    if !expect.event_types.is_empty() && !expect.event_types.contains(&event.event_type.as_str()) {
+        return reused(&format!("for a different command ({})", event.event_type));
+    }
+    if let (Some(journaled), Some(now)) = (&event.command, expect.command)
+        && journaled != now
+    {
+        return reused(&format!(
+            "for a different command or arguments ({})",
+            journaled.verb
+        ));
+    }
+    if let Some(expected) = expect.task_uuid
         && event.task_uuid.as_deref() != Some(expected)
     {
-        return Err(crate::Error::Other(format!(
-            "idempotency key {key:?} was already used for another task; use a fresh key"
-        )));
+        return reused("for another task");
     }
     Ok(())
 }
@@ -194,16 +268,11 @@ pub fn verify_replay(
 /// has not been used, `Ok(Some(event))` when this is a retry of the same
 /// command (report success without re-applying), and an error when the key
 /// was used for something else (see [`verify_replay`]).
-pub fn check_replay(
-    db: &Db,
-    key: &str,
-    task_uuid: Option<&str>,
-    event_types: &[&str],
-) -> Result<Option<LoggedEvent>> {
+pub fn check_replay(db: &Db, key: &str, expect: &ReplayCheck<'_>) -> Result<Option<LoggedEvent>> {
     let Some(event) = get_by_uuid(db, key)? else {
         return Ok(None);
     };
-    verify_replay(key, &event, task_uuid, event_types)?;
+    verify_replay(key, &event, expect)?;
     Ok(Some(event))
 }
 
@@ -364,16 +433,47 @@ mod tests {
             &EventCtx::test(),
         )
         .unwrap();
+        let expect = |task: &'static str, types: &'static [&'static str]| ReplayCheck {
+            actor: "test",
+            task_uuid: Some(task),
+            event_types: types,
+            command: None,
+        };
+        let created: &[&str] = &["task.created"];
         assert!(
-            check_replay(&db, "unused", None, &["task.created"])
+            check_replay(&db, "unused", &expect("task-1", created))
                 .unwrap()
                 .is_none()
         );
-        let replay = check_replay(&db, "k1", Some("task-1"), &["task.created"]).unwrap();
+        let replay = check_replay(&db, "k1", &expect("task-1", created)).unwrap();
         assert_eq!(replay.unwrap().actor.as_deref(), Some("test"));
-        // Same key, different command or different task: an error.
-        assert!(check_replay(&db, "k1", Some("task-1"), &["task.completed"]).is_err());
-        assert!(check_replay(&db, "k1", Some("task-2"), &["task.created"]).is_err());
+        // Same key, different command, task or actor: an error.
+        assert!(check_replay(&db, "k1", &expect("task-1", &["task.completed"])).is_err());
+        assert!(check_replay(&db, "k1", &expect("task-2", created)).is_err());
+        let other_actor = ReplayCheck {
+            actor: "hal",
+            ..expect("task-1", created)
+        };
+        assert!(check_replay(&db, "k1", &other_actor).is_err());
+
+        // A fingerprinted event matches only the same command.
+        let add = CommandFingerprint::new("add", r#"{"title":"x"}"#);
+        record(
+            &db,
+            "k2",
+            Some("task-3"),
+            "task.created",
+            &serde_json::json!({}),
+            &EventCtx::test().with_uuid("k2").with_command(add.clone()),
+        )
+        .unwrap();
+        let with = |cmd| ReplayCheck {
+            command: Some(cmd),
+            ..expect("task-3", created)
+        };
+        assert!(check_replay(&db, "k2", &with(&add)).unwrap().is_some());
+        let other = CommandFingerprint::new("add", r#"{"title":"y"}"#);
+        assert!(check_replay(&db, "k2", &with(&other)).is_err());
     }
 
     #[test]
