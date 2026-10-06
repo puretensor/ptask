@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Tag + push helper. Runs the standard release verification then tags the
-# current commit and pushes the tag to the canonical GitHub remote. The tag
-# drives both forges' release workflows: GitHub runs
-# `.github/workflows/release.yml` (self-hosted tensor-core runner) and
-# publishes the GitHub Release; the Gitea mirror syncs the tag from GitHub
-# and runs `.gitea/workflows/release.yml`, publishing the same per-arch
-# assets (each with a .sha256) to the Gitea release, the sovereign copy.
+# current commit and pushes the tag to the canonical GitHub remote. GitHub
+# runs `.github/workflows/release.yml` (self-hosted tensor-core runner) and
+# publishes the GitHub Release. `.gitea/workflows/release.yml` publishes the
+# same per-arch asset names (each with a .sha256) to the Gitea release, but
+# it is UNVERIFIED that a tag arriving by mirror sync triggers it (Gitea may
+# not fire push events for mirror updates): check the Gitea release page
+# and, if it is missing, push the tag to the Gitea remote directly. The
+# binaries differ: GitHub's x86_64 build runs on tensor-core (glibc 2.39
+# floor), Gitea's on ubuntu-22.04 (glibc 2.35 floor).
 #
 # Usage: scripts/release.sh v0.10.0
 set -euo pipefail
@@ -56,10 +59,11 @@ git push origin "$TAG"
 
 cat <<EOF
 
-Release $TAG tagged + pushed. Both forges build and publish it:
-  GitHub (.github/workflows/release.yml):
+Release $TAG tagged + pushed to GitHub, which builds and publishes it:
     https://github.com/puretensor/ptask/releases/tag/$TAG
-  Gitea mirror (.gitea/workflows/release.yml, once the mirror syncs the tag):
+  Gitea mirror (.gitea/workflows/release.yml). Whether a mirror-synced tag
+  triggers it is unverified: check this page, and push the tag to Gitea
+  directly if no release appears:
     http://100.92.245.5:3002/puretensor/ptask/releases/tag/$TAG
 
 EOF

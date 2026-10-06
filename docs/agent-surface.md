@@ -67,13 +67,16 @@ commit; a scoring failure does not roll back a successful edit.
   snoozes it (it wakes as todo) or dismisses and reopens it.
 - **task_depend** — `task` depends `on` a prerequisite (`remove=true` drops the
   edge). **A task with open prerequisites cannot be closed** — `task_done`
-  (and `pt done`, the dashboard, Telegram, sync, git-webhook auto-close) all
-  refuse with a `Blocked` error naming every open blocker. How each surface
-  reports it: `pt serve`'s dashboard route (`POST /api/tasks/{id}/done`)
-  returns 409; Telegram's `/tg/callback` returns 422; `/sync` answers 200
-  with the error in that command's `sync_status` entry; the git webhook lists
-  it under `errors`; the cockpit sidecar relays `pt done`'s refusal; MCP
-  answers with a JSON-RPC invalid-params error. Chains (`3 on 2 on 1`) enforce strict order; fan-out (`2 on 1`,
+  (and `pt done`, the dashboard, Telegram, sync, git-webhook auto-close,
+  capture close-on-recovery) all refuse with a `Blocked` error naming every
+  open blocker. How each surface reports it: `pt serve`'s dashboard route
+  (`POST /api/tasks/{id}/done`) returns 409; Telegram's `/tg/callback`
+  returns 422; `/sync` answers 200 with the error in that command's
+  `sync_status` entry; the git webhook lists it under `errors`;
+  `POST /capture/resolve` answers 200 and simply leaves the blocked task
+  open (it is missing from `closed` and `pt_ids`; the refusal is only in the
+  server log); the cockpit sidecar relays `pt done`'s refusal with HTTP 500;
+  MCP answers with a JSON-RPC invalid-params error. Chains (`3 on 2 on 1`) enforce strict order; fan-out (`2 on 1`,
   `3 on 1`) lets 2 and 3 close in any order once 1 is done. A dismissed
   prerequisite counts as satisfied. `task_show` returns `blocked_by`.
 - **task_promote** — flips an investigation into implementation work

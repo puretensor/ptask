@@ -9,8 +9,10 @@
 # Usage from the workstation. The playbook downloads nothing: it installs
 # dist/pt-<triple> from the controller, so populate dist/ with the per-arch
 # release artifacts first (the fleet is heterogeneous: mon3 is aarch64).
-# Every tag publishes the same assets, each with a .sha256, on both forges
-# (.github and .gitea release workflows); fetch from either:
+# Both forges' release workflows publish the same asset names, each with a
+# .sha256 (the Gitea one only if the tag reached Gitea's workflow; see
+# scripts/release.sh). The x86_64 binaries differ in glibc floor; fetch from
+# either, and keep each binary with its own .sha256:
 #
 #   cd ~/ptask
 #   TAG=vX.Y.Z

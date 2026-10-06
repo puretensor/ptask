@@ -419,12 +419,15 @@ loginctl enable-linger "$USER"
 
 The canonical host also runs the Rust HTTP server so fleet clients can
 hit `/sync`. The unit binds a non-loopback Tailscale address and always mounts
-the dashboard, so both `PTASK_API_TOKEN` and `PTASK_DASH_PASS` must be present
-in `~/puretensor-tasks/.env` before the service will start:
+the dashboard, so it refuses to start without both machine-API auth and a
+dashboard password: `PTASK_DASH_PASS` in `~/puretensor-tasks/.env`, and either
+an active named token (`pt token create`, checked with `pt token list`) or the
+legacy `PTASK_API_TOKEN` in the same file:
 
 ```bash
-grep '^PTASK_API_TOKEN=' ~/puretensor-tasks/.env
 grep '^PTASK_DASH_PASS=' ~/puretensor-tasks/.env
+pt token list                                  # at least one active token, or:
+grep '^PTASK_API_TOKEN=' ~/puretensor-tasks/.env
 # Optional: allow only the Command Center to frame the cockpit. Without this
 # exact HTTPS origin, dashboard documents retain X-Frame-Options: DENY.
 grep '^PTASK_DASH_FRAME_ANCESTOR=' ~/puretensor-tasks/.env || true
@@ -437,10 +440,7 @@ systemctl --user enable --now ptask-serve.service
 # it actually binds: loopback does not answer a tailnet-only bind.
 BIND=$(sed -n 's/^PTASK_SERVE_BIND=//p' ~/puretensor-tasks/.env); BIND=${BIND:-127.0.0.1:9501}
 curl "http://$BIND/healthz"   # → ok
-# The header goes through stdin (-H @-), never argv: any local user can read
-# a process's command line from /proc.
-sed -n 's/^PTASK_API_TOKEN=/Authorization: Bearer /p' ~/puretensor-tasks/.env \
-  | curl -H @- "http://$BIND/version"   # → {"ptask_core":"<current version>"}
+curl "http://$BIND/version"   # → {"ptask_core":"<current version>"} (no token needed)
 ```
 
 Fleet clients reach this over Tailscale at the canonical host's tailnet
@@ -502,8 +502,15 @@ systemctl --user list-units 'ptask-*' --state=active,activating,deactivating --n
 #    ^ must print nothing
 
 # 3. Nothing may still hold the files (pt bot, pt tui, an open sqlite3 shell);
-#    use sudo if a reader runs as another user. Silence means go.
-if fuser -v "$DBDIR"/tasks.db*; then echo "STOP: the processes above still hold the DB"; fi
+#    use sudo if a reader runs as another user. Go only on "nothing holds".
+#    Without fuser (psmisc) the check cannot run, which is not a "go".
+if ! command -v fuser >/dev/null; then
+    echo "STOP: fuser not installed (apt install psmisc), so nothing is checked"
+elif fuser -v "$DBDIR"/tasks.db*; then
+    echo "STOP: the processes above still hold the DB"
+else
+    echo "nothing holds the DB"
+fi
 
 # 4. Move the database AND its -wal/-shm aside (kept as the way back).
 ASIDE="$DBDIR/pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
