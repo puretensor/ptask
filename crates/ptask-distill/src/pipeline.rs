@@ -276,6 +276,9 @@ struct RunState {
     /// No new provider call starts after this instant.
     stop_at: Option<std::time::Instant>,
     budget_exhausted: bool,
+    /// The provider became unavailable mid-run (see `ProviderUnavailable`):
+    /// no further call starts and nothing more is charged.
+    aborted: bool,
 }
 
 /// Why a chunk failed, and whether the capture may be blamed for it.
@@ -287,13 +290,20 @@ struct ChunkError {
     /// Gemini client already retries transient transport/5xx failures three
     /// times, so a failure here is much more likely to be the data.
     chargeable: bool,
+    /// The provider itself is down/rate-limited/timing out. Bisecting would
+    /// only multiply calls against the outage, so the run stops instead.
+    abort: bool,
 }
 
 impl ChunkError {
     fn provider(e: anyhow::Error) -> Self {
+        let outage = e
+            .downcast_ref::<crate::providers::ProviderUnavailable>()
+            .is_some();
         Self {
             reason: format!("{e:#}"),
-            chargeable: true,
+            chargeable: !outage,
+            abort: outage,
         }
     }
 
@@ -303,6 +313,7 @@ impl ChunkError {
         Self {
             reason: format!("{e:#}"),
             chargeable: false,
+            abort: false,
         }
     }
 }
@@ -366,7 +377,7 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
     st: &mut RunState,
     ctx: &EventCtx,
 ) {
-    if items.is_empty() {
+    if items.is_empty() || st.aborted {
         return;
     }
     if st.calls >= MAX_PROVIDER_CALLS || st.stop_at.is_some_and(|t| std::time::Instant::now() >= t)
@@ -377,8 +388,18 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
     let Err(e) = process_chunk(db, provider, items, dedup, st, ctx) else {
         return;
     };
-    if st.first_error.is_none() {
+    if st.first_error.is_none() || e.abort {
         st.first_error = Some(e.reason.clone());
+    }
+    if e.abort {
+        warn!(
+            target: "ptask::distill",
+            chunk = items.len(),
+            error = %e.reason,
+            "provider unavailable — aborting the run; remaining rows deferred, uncharged"
+        );
+        st.aborted = true;
+        return;
     }
     if items.len() == 1 {
         warn!(
@@ -533,9 +554,15 @@ fn create_candidates<P: LlmProvider + ?Sized>(
 /// queue. Only provider/classification failures are chargeable; a database
 /// failure during task creation is not.
 ///
+/// A provider *outage* (rate limit, 5xx, timeout, unreachable, rejected
+/// credentials — `ProviderUnavailable`) is different: it aborts the run at
+/// once, without bisecting and without charging anything, and the run fails
+/// closed after marking the chunks that finished.
+///
 /// A run in which nothing got through still fails closed. Note what that does
 /// NOT mean: an attempt is charged whether or not anything else succeeded this
-/// run, so a total provider outage charges every row it bisects down to (~31
+/// run, so a provider that keeps *answering* with unusable output (a schema
+/// regression, a bad model deploy) charges every row it bisects down to (~31
 /// captures at the current CHUNK / MAX_PROVIDER_CALLS settings). That is
 /// bounded and recoverable rather than prevented — quarantined rows are
 /// retained and countable via `pt_distill_quarantined_captures`. See the
@@ -629,6 +656,18 @@ fn run_native_within<P: LlmProvider + ?Sized>(
                 warn!(target: "ptask::distill", error = %e, raw_item = id, "could not charge a distill failure");
             }
         }
+    }
+
+    // The provider went away mid-run. What finished is kept (marked above)
+    // and nothing was charged for the outage, but the run fails closed so
+    // the outage is reported rather than looking like a short queue.
+    if st.aborted {
+        bail!(
+            "{} ({} capture(s) completed before the outage; the rest are deferred, uncharged)",
+            st.first_error
+                .unwrap_or_else(|| "provider unavailable".into()),
+            st.consumed_ids.len()
+        );
     }
 
     // Nothing at all got through. Attempts are charged (above) so the queue
@@ -1131,6 +1170,79 @@ mod tests {
             "only the poison row is left"
         );
         assert_eq!(attempts(&db, "REDACTED trips the safety filter"), 1);
+    }
+
+    /// Regression (DIST-5): a 429/5xx/timeout was charged to the captures as
+    /// a chargeable failure, and bisection multiplied the calls against the
+    /// outage (7 classify calls and 4 charges for a 4-row batch).
+    #[test]
+    fn a_provider_outage_aborts_without_charging_or_bisecting() {
+        struct OutageProvider {
+            calls: std::cell::Cell<usize>,
+            healthy_calls: usize,
+        }
+        impl LlmProvider for OutageProvider {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                self.calls.set(self.calls.get() + 1);
+                if self.calls.get() > self.healthy_calls {
+                    return Err(anyhow::Error::new(crate::providers::ProviderUnavailable(
+                        "http 503: overloaded".into(),
+                    )));
+                }
+                PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                PoisonProvider { poison: "\u{0}" }.consolidate(items)
+            }
+            fn preflight(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "outage-test"
+            }
+        }
+
+        // Total outage after preflight: nothing charged, one call, fail closed.
+        let (_dir, db) = fresh_db();
+        let texts = [
+            "call the bank about the mandate",
+            "book the Reykjavik flight",
+            "renew the office lease",
+            "email Alan the revised quote",
+        ];
+        seed_inbox(&db, &texts);
+        let provider = OutageProvider {
+            calls: std::cell::Cell::new(0),
+            healthy_calls: 0,
+        };
+        let err = run_native(&db, &provider, 100).unwrap_err();
+        assert!(err.to_string().contains("provider unavailable"), "{err:#}");
+        assert_eq!(provider.calls.get(), 1, "an outage must not be bisected");
+        for t in texts {
+            assert_eq!(attempts(&db, t), 0, "{t} was charged for an outage");
+        }
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 4);
+
+        // Outage mid-run: the finished chunk is kept, the rest waits uncharged.
+        let (_dir, db) = fresh_db();
+        let many: Vec<String> = (0..CHUNK * 3)
+            .map(|i| format!("distinct capture number {i} about topic {}", i * 7919))
+            .collect();
+        for t in &many {
+            ptask_core::raw_items::insert(&db, t, "test", "test://x").unwrap();
+        }
+        let provider = OutageProvider {
+            calls: std::cell::Cell::new(0),
+            healthy_calls: 1,
+        };
+        assert!(run_native(&db, &provider, 200).is_err());
+        assert_eq!(provider.calls.get(), 2, "the run stops at the first outage");
+        assert_eq!(
+            ptask_core::raw_items::unprocessed_count(&db).unwrap(),
+            (CHUNK * 2) as i64,
+            "the first chunk landed before the outage"
+        );
+        assert!(many.iter().all(|t| attempts(&db, t) == 0));
     }
 
     /// The poison row must not become a permanent head-of-queue block either:

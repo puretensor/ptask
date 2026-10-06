@@ -153,6 +153,14 @@ oldest-first queue and block newer captures. A *database* failure (as opposed
 to a provider/classification failure) is never charged — a local outage must
 not push a good capture toward quarantine.
 
+A provider **outage** is not charged either. Once retries are exhausted, a
+timeout, connection failure, HTTP 408/429/5xx, or a 401/403/404 (credentials
+or model gone) aborts the run immediately: no bisection, no attempt charged,
+the chunks that already finished are still marked processed, and the run
+fails closed with `distill.failed` ("provider unavailable: …"). Retries honour
+a `Retry-After` header of up to 30 s; a longer one aborts at once instead of
+waiting.
+
 Quarantine is visible, never silent:
 
 - `pt_distill_quarantined_captures` (Prometheus gauge on `/metrics`) — alert
@@ -164,13 +172,14 @@ Quarantine is visible, never silent:
   cross the ceiling, so reporting it only on success would hide it exactly
   when it matters.
 
-#### Known exposure: a total provider outage still charges attempts
+#### Known exposure: a provider answering with garbage still charges attempts
 
 An attempt is charged whether or not anything else succeeded in the same run.
 This is a deliberate simplification, and it has a cost worth stating rather
-than discovering: a *total* provider failure — a bad model deploy, a schema
-regression in the structured output, an expired key — charges every row the
-bisection reaches, not just genuinely-unprocessable ones.
+than discovering: a provider that keeps *answering* but with unusable output
+— a bad model deploy, a schema regression in the structured output — charges
+every row the bisection reaches, not just genuinely-unprocessable ones.
+(Outages and rejected keys no longer do; see above.)
 
 Measured at the current `CHUNK = 25` / `MAX_PROVIDER_CALLS = 64` settings, a
 fully-failing run charges roughly **31 captures**. Three consecutive fully
