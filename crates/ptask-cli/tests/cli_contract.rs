@@ -74,9 +74,9 @@ fn remote_rm_confirms_and_matches_active_tasks_only() {
     assert!(!pt.exists("PT-1"));
 }
 
-/// Two incident tasks idle past the reaper's TTL; dismissing the second is
-/// made to fail inside SQLite.
-fn seed_reap_failure(pt: &Pt) {
+/// Two incident tasks idle past the reaper's TTL; dismissing the ones at
+/// the `stuck` indices is made to fail inside SQLite.
+fn seed_reap_failure(pt: &Pt, stuck: &[usize]) {
     let db = ptask_core::Db::open(pt.dir.path().join("tasks.db")).unwrap();
     let ctx = ptask_core::event_log::EventCtx::test();
     let mut ids = Vec::new();
@@ -104,21 +104,30 @@ fn seed_reap_failure(pt: &Pt) {
             "UPDATE tasks SET updated_at = strftime('%Y-%m-%dT%H:%M:%f','now','-10 days') || '+00:00'",
             [],
         )?;
+        let stuck_ids: Vec<String> = stuck.iter().map(|&i| format!("'{}'", ids[i])).collect();
         c.execute_batch(&format!(
             "CREATE TRIGGER test_stuck BEFORE UPDATE ON tasks
-             WHEN OLD.id = '{}' AND NEW.status = 'dismissed'
+             WHEN OLD.id IN ({}) AND NEW.status = 'dismissed'
              BEGIN SELECT RAISE(ABORT, 'dismiss refused by test'); END;",
-            ids[1]
+            stuck_ids.join(",")
         ))?;
         Ok(())
     })
     .unwrap();
 }
 
+/// An outcome row `<glyph> <verb> <id> ...` (the verb column is padded).
+fn has_row(stdout: &str, verb: &str, id: &str) -> bool {
+    stdout.lines().any(|l| {
+        let words: Vec<&str> = l.split_whitespace().collect();
+        words.windows(2).any(|w| w[0] == verb && w[1] == id)
+    })
+}
+
 #[test]
 fn reap_exits_non_zero_when_a_dismiss_fails() {
     let pt = Pt::new();
-    seed_reap_failure(&pt);
+    seed_reap_failure(&pt, &[1]);
     let out = pt.run(&["--no-color", "reap"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -130,12 +139,40 @@ fn reap_exits_non_zero_when_a_dismiss_fails() {
         !stdout.contains("dismissed PT-2"),
         "PT-2 was not dismissed:\n{stdout}"
     );
+    assert!(has_row(&stdout, "failed", "PT-2"), "{stdout}");
+    assert!(stdout.contains("1 of 2"), "{stdout}");
     assert_ne!(pt.json(&["show", "PT-2"])["status"], "dismissed");
     // --json still prints the report, and still fails the unit.
     let out = pt.run(&["reap", "--json"]);
     assert!(!out.status.success());
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["errors"], 1, "{report:#}");
+    assert_eq!(report["failed"][0]["pt_id"], "PT-2", "{report:#}");
+    assert!(
+        report["failed"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("refused")
+    );
+}
+
+/// Core only lists successful dismisses in `reaped`, so when every dismiss
+/// failed the CLI printed "REAP OK nothing stale" and exited 0.
+#[test]
+fn reap_fails_when_every_dismiss_fails() {
+    let pt = Pt::new();
+    seed_reap_failure(&pt, &[0, 1]);
+    let out = pt.run(&["--no-color", "reap"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stdout}{stderr}");
+    assert!(!stdout.contains("nothing stale"), "{stdout}");
+    assert!(stdout.contains("REAP FAILED"), "{stdout}");
+    assert!(
+        has_row(&stdout, "failed", "PT-1") && has_row(&stdout, "failed", "PT-2"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("2 of 2"), "{stderr}");
 }
 
 #[test]

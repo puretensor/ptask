@@ -3755,41 +3755,32 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
 fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
     let ctx = ptask_core::event_log::EventCtx::system("reap");
     let report = ptask_core::reap::run(db, a.dry_run, &ctx)?;
-    // A failed dismiss fails the unit: the reaper's OnFailure alert fires
-    // on a non-zero exit, and "REAP OK … 1 error(s)" used to exit 0.
+    // Core lists only successful dismisses in `reaped` and the failed ones
+    // in `failed`, so the attempted count is their sum. Any failure fails
+    // the unit (the reaper's OnFailure alert fires on a non-zero exit), even
+    // when nothing was dismissed.
+    let attempted = report.reaped.len() + report.errors;
     let outcome = || {
         if report.errors == 0 {
             return Ok(());
         }
         Err(anyhow::anyhow!(
-            "reap: {} of {} dismiss(es) failed",
-            report.errors,
-            report.reaped.len()
+            "reap: {} of {attempted} dismiss(es) failed",
+            report.errors
         ))
     };
     if a.json {
-        crate::print_json(&report)?;
+        print_json(&report)?;
         return outcome();
     }
-    if report.reaped.is_empty() {
+    if attempted == 0 {
         println!(
             "{}",
             ui::section("reap ok", ui::Ink::Green, "nothing stale")
         );
         return Ok(());
     }
-    for r in &report.reaped {
-        // The report counts failures but not which: read the row back so a
-        // failed dismiss is never shown as dismissed.
-        let (status, verb) = if report.dry_run {
-            (ui::Status::Warn, "would drop")
-        } else if tasks::resolve_for_lookup(db, &r.uuid, true)
-            .is_ok_and(|t| t.status == "dismissed")
-        {
-            (ui::Status::Mute, "dismissed")
-        } else {
-            (ui::Status::Bad, "failed")
-        };
+    let row = |status, verb, r: &ptask_core::reap::Reaped, extra: &str| {
         println!(
             "{}",
             ui::outcome(
@@ -3797,34 +3788,45 @@ fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
                 verb,
                 r.pt_id.as_deref().unwrap_or(&r.uuid),
                 &r.title,
-                &format!("[{}] idle since {}", r.source_type, r.updated_at)
+                &format!("[{}] idle since {}{extra}", r.source_type, r.updated_at)
             )
         );
+    };
+    for r in &report.reaped {
+        if report.dry_run {
+            row(ui::Status::Warn, "would drop", r, "");
+        } else {
+            row(ui::Status::Mute, "dismissed", r, "");
+        }
     }
+    for f in &report.failed {
+        row(
+            ui::Status::Bad,
+            "failed",
+            &f.task,
+            &format!(" · {}", f.error),
+        );
+    }
+    let summary = if report.errors > 0 {
+        format!(
+            "{} of {attempted} dismissed, {} failed · reverse with `pt reopen <PT-N>`",
+            report.reaped.len(),
+            report.errors
+        )
+    } else {
+        format!(
+            "{} task(s){} · reverse with `pt reopen <PT-N>`",
+            report.reaped.len(),
+            if report.dry_run { " (dry-run)" } else { "" }
+        )
+    };
     println!(
         "{}",
-        ui::section(
-            if report.errors > 0 {
-                "reap failed"
-            } else {
-                "reap ok"
-            },
-            if report.errors > 0 {
-                ui::Ink::Red
-            } else {
-                ui::Ink::Green
-            },
-            &format!(
-                "{} task(s){}{} · reverse with `pt reopen <PT-N>`",
-                report.reaped.len(),
-                if report.dry_run { " (dry-run)" } else { "" },
-                if report.errors > 0 {
-                    format!(", {} error(s)", report.errors)
-                } else {
-                    String::new()
-                }
-            )
-        )
+        if report.errors > 0 {
+            ui::section("reap failed", ui::Ink::Red, &summary)
+        } else {
+            ui::section("reap ok", ui::Ink::Green, &summary)
+        }
     );
     outcome()
 }
