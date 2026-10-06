@@ -119,6 +119,9 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     }
     let mut idx = 0usize;
     let mut title_words: Vec<&str> = Vec::new();
+    // An explicit ISO date is the deadline whatever its position; a
+    // recurrence clause only supplies the first occurrence when there is none.
+    let mut explicit_deadline = false;
 
     while idx < raw.len() {
         let tok = raw[idx];
@@ -197,9 +200,11 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
             && let Some((rec, time_of_day, consumed, phrase)) =
                 try_recurrence_match(&raw[..scan_end], idx, &now)
         {
-            let deadline = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())?;
-            out.deadline_phrase = Some(phrase);
-            out.deadline = Some(dates::format_iso(&deadline));
+            if !explicit_deadline {
+                let deadline = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())?;
+                out.deadline_phrase = Some(phrase);
+                out.deadline = Some(dates::format_iso(&deadline));
+            }
             out.recurrence = Some(rec);
             idx += consumed;
             continue;
@@ -220,6 +225,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         {
             out.deadline_phrase = Some(tok.to_string());
             out.deadline = Some(parsed.date().to_string());
+            explicit_deadline = true;
             idx += 1;
             continue;
         }
@@ -315,7 +321,7 @@ fn is_full_iso_date(tok: &str) -> bool {
 }
 
 /// Consume tokens starting at `start` (`every` / `every!`) up to the next
-/// explicit marker or end-of-input. Returns the parsed Recurrence, an optional
+/// explicit marker, ISO date, `due:` token, or end-of-input. Returns the parsed Recurrence, an optional
 /// time-of-day (from a trailing " at <time>"), the number of tokens consumed,
 /// and the original phrase string (for `deadline_phrase`).
 fn try_recurrence_match(
@@ -326,7 +332,8 @@ fn try_recurrence_match(
     let mut end = start + 1;
     while end < toks.len() {
         let t = toks[end];
-        if is_explicit_marker(t) {
+        // An explicit date is its own token, never part of the rule.
+        if is_explicit_marker(t) || is_full_iso_date(t) || t.starts_with("due:") {
             break;
         }
         // Don't fold a second `every` clause into this one.
@@ -750,6 +757,29 @@ mod tests {
         assert_eq!(q.labels, vec!["gym"]);
         let rec = q.recurrence.expect("recurrence parsed");
         assert!(rec.rrule_str.contains("BYDAY=MO,WE,FR"));
+    }
+
+    #[test]
+    fn recurrence_does_not_overwrite_or_swallow_an_explicit_date() {
+        // PARSE-8: the phrase scan ran past an ISO date / `due:` token and
+        // the recurrence's computed first occurrence replaced an explicit
+        // date given earlier in the input.
+        for input in [
+            "Pay rent 2026-12-25 every month",
+            "Pay rent every month 2026-12-25",
+        ] {
+            let q = parse_at(input, anchor()).unwrap();
+            assert_eq!(q.title, "Pay rent", "input={input}");
+            assert_eq!(q.deadline.as_deref(), Some("2026-12-25"), "input={input}");
+            assert_eq!(q.deadline_phrase.as_deref(), Some("2026-12-25"));
+            let rec = q.recurrence.expect("recurrence parsed");
+            assert_eq!(rec.original_input, "every month", "input={input}");
+        }
+        let q = parse_at("Standup every monday due:2026-06-01", anchor()).unwrap();
+        assert_eq!(q.title, "Standup");
+        assert_eq!(q.recurrence.unwrap().original_input, "every monday");
+        assert!(q.due.as_deref().unwrap().starts_with("2026-06-01"));
+        assert!(q.deadline.as_deref().unwrap().starts_with("2026-05-18"));
     }
 
     #[test]

@@ -27,7 +27,9 @@ Body-text deadline inference is deliberately narrow: only a standalone
 future ISO date (`2099-10-02`) sets the deadline. Other date prose
 (`tomorrow`, `next friday`, `4/5`, a past date) stays title text instead of
 silently setting a wrong deadline; pass `--deadline` for anything else.
-Recurrence phrases (`every monday at 9am`) set the first occurrence.
+Recurrence phrases (`every monday at 9am`) set the first occurrence, unless
+the text also carries an explicit ISO date: that date is the first deadline
+wherever it appears, and is never folded into the rule.
 
 Operator timezone: `Europe/London` (DST-correct via jiff).
 
