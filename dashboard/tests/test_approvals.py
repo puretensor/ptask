@@ -46,6 +46,12 @@ if "approval" in args and "ls" in args:
 if args[:2] in (["approve", "AP-8"], ["reject", "AP-8"]):
     print("error: AP-8 is already approved", file=sys.stderr)
     sys.exit(1)
+if args[:2] == ["approve", "AP-9"]:
+    # pt's refusal of a flagged payload preview, exactly as it prints it.
+    print("  \u2716 ERROR   AP-9: the payload preview has control, bidi or invisible "
+          "characters; inspect the exact bytes with `pt approval payload AP-9 | cat -v`, "
+          "then approve with --force", file=sys.stderr)
+    sys.exit(7)
 print("ok")
 """.replace("CANNED", repr(CANNED).replace("'", '"'))
 
@@ -206,6 +212,20 @@ class ApprovalsPanelTests(unittest.TestCase):
         status, _ = self.request("POST", "/api/approvals/AP-7/approve", {"note": 5})
         self.assertEqual(status, 400)
         self.assertEqual(self.calls(), [])
+
+    def test_flagged_payload_refusal_is_a_legible_conflict(self):
+        # pt refuses to approve a payload whose preview holds control, bidi
+        # or invisible characters (exit 7); the sidecar has no --force, so
+        # the toast must say to inspect and approve from the CLI.
+        status, data = self.request("POST", "/api/approvals/AP-9/approve", {})
+        self.assertEqual(status, 409, data)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["code"], "payload_flagged")
+        self.assertTrue(data["message"].startswith("AP-9:"), data["message"])
+        self.assertIn("pt approval payload AP-9 | cat -v", data["message"])
+        self.assertIn("pt approve AP-9 --force", data["message"])
+        self.assertNotIn("ERROR", data["message"])
+        self.assertNotIn("--force", self.calls()[-1]["args"])
 
     def test_pt_refusal_surfaces_as_conflict(self):
         status, data = self.request("POST", "/api/approvals/AP-8/approve", {})

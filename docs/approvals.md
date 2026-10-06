@@ -74,6 +74,9 @@ pt approval consume AP-12 --payload-file /tmp/letter.html
 | 6 | already consumed |
 | 1 | anything else (unknown id, bad args) |
 
+`pt approve` (and `pt approval decide … approve`) exits 7 when it refuses a
+flagged payload preview without `--force` (see Authority rules).
+
 Both accept exactly one of `--payload-file` / `--payload-json` / `--digest`,
 canonicalised identically to `request`.
 
@@ -92,7 +95,10 @@ Local CLI (`pt approve` / `pt reject` / `pt approval decide`):
   bytes, not what a screen shows. `pt approval show` marks them as U+FFFD
   under a warning; inspect the exact bytes with
   `pt approval payload AP-n | cat -v`, then `pt approve AP-n --force`. The
-  dashboard sidecar path (`--via dashboard`) is gated the same way.
+  refusal exits **7**. The dashboard sidecar path (`--via dashboard`) is
+  gated the same way and never forces: the sidecar answers 409
+  `{"code": "payload_flagged"}` with pt's message plus "approve from the CLI
+  with `pt approve AP-n --force`", and the cockpit shows that as its toast.
 
 HTTP `POST /api/approvals/{id}/decide` requires **admin** scope;
 `decided_via=api`. Write-scope tokens may request and withdraw (own rows

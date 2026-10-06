@@ -294,7 +294,11 @@ fn approval_preview_flags_invisible_characters() {
     // (Without --via the TTY guardrail answers first in a test; the --force
     // gate runs on both paths.)
     let out = pt.run_as("operator", &["approve", "AP-1", "--via", "dashboard"]);
-    assert!(!out.status.success(), "must refuse without --force");
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "must refuse without --force (exit 7)"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("--force") && stderr.contains("cat -v"),

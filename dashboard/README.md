@@ -147,7 +147,7 @@ transaction.
 | POST | `/api/voice` (raw audio body) | Whisper STT → Bedrock Claude draft → `{transcript, fields:{title,description,priority,deadline,labels,domain,reason}}` to pre-fill the composer |
 | POST | `/api/voice/task` (raw audio body) | The same pipeline, then `pt add` — the header capture bar's one-press path. Returns `{ok, pt_id, id, transcript, fields, stt, llm}`. Rejects silence and Whisper artefacts with `ok:false` and creates nothing |
 | GET | `/api/approvals?status=` | `pt --json approval ls --status <s>` (whitelisted statuses; default pending) |
-| POST | `/api/approvals/AP-n/approve\|reject` `{note?}` | shells `pt approve\|reject AP-n --via dashboard [--note=…]`; needs `X-PTask-Decide-Token` = `PTASK_DASH_DECIDE_TOKEN` (403 `decide_token_required` / `decide_disabled` otherwise) |
+| POST | `/api/approvals/AP-n/approve\|reject` `{note?}` | shells `pt approve\|reject AP-n --via dashboard [--note=…]`; needs `X-PTask-Decide-Token` = `PTASK_DASH_DECIDE_TOKEN` (403 `decide_token_required` / `decide_disabled` otherwise); a pt refusal is 409 with pt's message, and a flagged payload preview (control, bidi or invisible characters; pt exits 7) is 409 `{"code": "payload_flagged"}` — the cockpit never forces, so inspect with `pt approval payload AP-n \| cat -v` and approve from the CLI with `pt approve AP-n --force` |
 | GET | `/api/stream` | SSE `change` events when the journal grows; at most 32 open streams (503 beyond) |
 
 Every request's `Host` (except `/healthz`) must name this sidecar — an IP literal, `localhost`,

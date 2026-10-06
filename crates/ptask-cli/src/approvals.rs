@@ -507,6 +507,10 @@ pub fn cmd_long_decide(db: &Db, a: LongDecideArgs, ctx: EventCtx, json: bool) ->
     )
 }
 
+/// Exit code of `pt approve` refusing a flagged preview without --force; the
+/// dashboard sidecar maps it to a 409 `payload_flagged`.
+pub const EXIT_PAYLOAD_FLAGGED: i32 = 7;
+
 /// The digest binds the stored bytes, not what a screen shows: approving a
 /// payload whose preview holds control, bidi or invisible characters (a
 /// zero-width space in an address, tag characters after an amount) needs an
@@ -515,7 +519,7 @@ fn refuse_hazardous_preview(db: &Db, id: &str) -> Result<()> {
     let ap = approvals::get(db, id).map_err(map_core)?;
     if ui::has_hazard(&ap.preview()) {
         return Err(ExitCodeError {
-            code: 1,
+            code: EXIT_PAYLOAD_FLAGGED,
             message: format!(
                 "{0}: the payload preview has control, bidi or invisible characters; \
                  inspect the exact bytes with `pt approval payload {0} | cat -v`, \
