@@ -80,7 +80,7 @@ pub struct SetParentArgs {
 
 fn emit_goal(goal: &Goal, json: bool, text: impl FnOnce()) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&goal.to_json())?);
+        crate::print_json(&goal.to_json())?;
     } else {
         text();
     }
@@ -114,7 +114,7 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
             let items = goals::list(db, a.all)?;
             if json {
                 let v: Vec<serde_json::Value> = items.iter().map(GoalListItem::to_json).collect();
-                println!("{}", serde_json::to_string_pretty(&v)?);
+                crate::print_json(&v)?;
                 return Ok(());
             }
             if items.is_empty() {
@@ -144,7 +144,7 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
         GoalCommand::Show(a) => {
             let shown = goals::show(db, &a.id)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&shown.to_json())?);
+                crate::print_json(&shown.to_json())?;
                 return Ok(());
             }
             print_human_show(&shown);
@@ -153,14 +153,11 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
         GoalCommand::Link(a) => {
             let task = goals::link(db, &a.task, &a.goal, &ctx)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
-                        "pt_id": task.pt_id,
-                        "goal": a.goal,
-                    }))?
-                );
+                crate::print_json(&serde_json::json!({
+                    "ok": true,
+                    "pt_id": task.pt_id,
+                    "goal": a.goal,
+                }))?;
                 return Ok(());
             }
             println!(
@@ -178,13 +175,10 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
         GoalCommand::Unlink(a) => {
             let task = goals::unlink(db, &a.task, &ctx)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
-                        "pt_id": task.pt_id,
-                    }))?
-                );
+                crate::print_json(&serde_json::json!({
+                    "ok": true,
+                    "pt_id": task.pt_id,
+                }))?;
                 return Ok(());
             }
             println!(
@@ -217,7 +211,7 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
             let items = goals::orphans(db)?;
             if json {
                 let v: Vec<serde_json::Value> = items.iter().map(GoalTask::to_json).collect();
-                println!("{}", serde_json::to_string_pretty(&v)?);
+                crate::print_json(&v)?;
                 return Ok(());
             }
             if items.is_empty() {

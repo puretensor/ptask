@@ -361,7 +361,7 @@ pub fn cmd_list(db: &Db, a: ListArgs, json: bool) -> Result<()> {
     let items = approvals::list(db, Some(&a.status)).map_err(map_core)?;
     if json {
         let v: Vec<serde_json::Value> = items.iter().map(|ap| ap.to_json(None)).collect();
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        crate::print_json(&v)?;
         return Ok(());
     }
     print_lines_headline(&format!("approvals · {}", a.status), items.len());
@@ -489,7 +489,7 @@ fn emit_one(
     json: bool,
 ) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&ap.to_json(events))?);
+        crate::print_json(&ap.to_json(events))?;
     } else {
         print_human(&ap, events);
     }

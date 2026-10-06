@@ -770,9 +770,22 @@ fn json_mode() -> bool {
 
 /// Print a value as pretty JSON when --json is set; otherwise run the
 /// human-text closure.
+/// Pretty JSON that is safe on a terminal: serde_json escapes C0 controls
+/// only, so DEL, C1 and bidi/invisible characters are re-escaped as \uXXXX
+/// (still valid JSON with the same value). Every JSON printer uses this.
+pub(crate) fn json_pretty<T: serde::Serialize + ?Sized>(value: &T) -> Result<String> {
+    let raw = serde_json::to_string_pretty(value)?;
+    Ok(ptask_core::text::json_terminal_safe(&raw).into_owned())
+}
+
+pub(crate) fn print_json<T: serde::Serialize + ?Sized>(value: &T) -> Result<()> {
+    println!("{}", json_pretty(value)?);
+    Ok(())
+}
+
 fn emit<T: serde::Serialize>(value: &T, text: impl FnOnce()) -> Result<()> {
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(value)?);
+        print_json(value)?;
     } else {
         text();
     }
@@ -921,7 +934,7 @@ fn replay_keyed(db: &Db, key: &str, cmd: &Command) -> Result<bool> {
     if event.event_type.starts_with("goal.") {
         let goal = ptask_core::goals::get(db, subject).map_err(anyhow::Error::msg)?;
         if json_mode() {
-            println!("{}", serde_json::to_string_pretty(&goal.to_json())?);
+            crate::print_json(&goal.to_json())?;
         } else {
             println!(
                 "{}",
@@ -1293,7 +1306,7 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
     let rows =
         tasks::list_with_filter_sorted(db, filter_expr.as_ref(), status_filter, p, a.limit, sort)?;
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        crate::print_json(&rows)?;
         return Ok(());
     }
     let mut note = format!("{} · sorted by {}", a.status, a.sort);
@@ -1399,7 +1412,7 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
         }
     }
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        crate::print_json(&results)?;
     }
     if failed > 0 {
         anyhow::bail!("{failed} of {} task(s) not completed", a.queries.len());
@@ -1625,7 +1638,7 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         let mut v = serde_json::to_value(&t)?;
         v["goal_chain"] = ptask_core::goals::chain_json(&eg.chain);
         v["goal_source"] = serde_json::json!(eg.source.as_str());
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        crate::print_json(&v)?;
         return Ok(());
     }
     print_lines(render_show(&t, Some(&d), &blocked, &eg.chain));
@@ -1652,7 +1665,7 @@ fn cmd_context(db: &Db, a: ContextArgs) -> Result<()> {
             })).collect::<Vec<_>>(),
             "markdown": ptask_core::goals::context_markdown(db, &t)?,
         });
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        crate::print_json(&v)?;
         return Ok(());
     }
     print!(
@@ -1827,7 +1840,7 @@ fn cmd_rm(db: &Db, a: RmArgs) -> Result<()> {
 fn cmd_next(db: &Db, a: NextArgs) -> Result<()> {
     let rows = dag::next_ready(db, a.limit)?;
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        crate::print_json(&rows)?;
         return Ok(());
     }
     print_lines(ui::headline(
@@ -2125,7 +2138,7 @@ fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
             let status = (status != "all").then_some(status.as_str());
             let rows = tasks::list_with_filter(db, Some(&expr), status, None, limit)?;
             if json_mode() {
-                println!("{}", serde_json::to_string_pretty(&rows)?);
+                crate::print_json(&rows)?;
                 return Ok(());
             }
             print_lines(ui::headline(
@@ -2181,7 +2194,7 @@ fn cmd_mcp(db: Db) -> Result<()> {
 
 fn cmd_digest(db: &Db, a: DigestArgs) -> Result<()> {
     let v = ptask_core::digest::build(db, a.days)?;
-    println!("{}", serde_json::to_string_pretty(&v)?);
+    crate::print_json(&v)?;
     Ok(())
 }
 
@@ -2216,7 +2229,11 @@ fn cmd_export(db: &Db, a: ExportArgs) -> Result<()> {
                     },
                 );
             }
-            lines.push(serde_json::to_string(&m)?);
+            // Terminal-safe like every JSON printer: `cat` on an export
+            // must not replay escape or bidi characters.
+            lines.push(
+                ptask_core::text::json_terminal_safe(&serde_json::to_string(&m)?).into_owned(),
+            );
         }
         std::fs::write(out.join(file), lines.join("\n") + "\n")?;
         Ok(lines.len())
@@ -2958,7 +2975,7 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        crate::print_json(&rows)?;
         return Ok(());
     }
 
@@ -3083,7 +3100,7 @@ fn cmd_log(db: &Db, a: LogArgs) -> Result<()> {
     let pt = task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id));
     let events = ptask_core::event_log::history_for_task(db, &task.id, a.limit)?;
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(&events)?);
+        crate::print_json(&events)?;
         return Ok(());
     }
     print_lines(ui::headline(
@@ -3399,7 +3416,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let filter = remote_list_filter(a.filter.as_deref(), priority_filter);
             let tasks_out = client.list_filtered(filter.as_deref(), &a.status, a.limit)?;
             if json_mode() {
-                println!("{}", serde_json::to_string_pretty(&tasks_out)?);
+                crate::print_json(&tasks_out)?;
                 return Ok(());
             }
             let mut note = format!("{} · {}", a.status, client.url());
@@ -3556,7 +3573,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let client = remote_client(a.url.as_deref())?;
             let rows = client.next(a.limit)?;
             if json_mode() {
-                println!("{}", serde_json::to_string_pretty(&rows)?);
+                crate::print_json(&rows)?;
                 return Ok(());
             }
             print_lines(ui::headline(
@@ -3749,7 +3766,7 @@ fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
         ))
     };
     if a.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::print_json(&report)?;
         return outcome();
     }
     if report.reaped.is_empty() {

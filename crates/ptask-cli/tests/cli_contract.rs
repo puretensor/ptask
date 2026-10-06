@@ -213,3 +213,48 @@ fn json_flag_is_honoured_by_remote_verbs() {
     assert_eq!(remote(&["rm", "PT-2", "--yes"])["deleted"], true);
     assert_eq!(remote(&["version"])["in_sync"], true);
 }
+
+/// serde_json escapes C0 only; DEL, C1 and bidi/invisible characters used
+/// to reach the terminal raw from every JSON printer (`pt digest` is
+/// JSON-only, so even a plain run leaked them).
+#[test]
+fn json_output_escapes_del_c1_bidi_and_invisible_characters() {
+    let pt = Pt::new();
+    let title = "pay del\u{7f} csi\u{9b}31m rlo\u{202e} zw\u{200b} tag\u{e0041} ls\u{2028}";
+    pt.ok(&["add", "--raw", title, "--deadline", "2020-01-01"]);
+    pt.ok(&["goal", "add", title]);
+    let raw_hazard = |c: char| {
+        ('\u{7f}'..='\u{9f}').contains(&c)
+            || matches!(
+                c,
+                '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{200B}'..='\u{200F}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{E0000}'..='\u{E007F}'
+            )
+    };
+    for (args, carries_title) in [
+        (vec!["digest"], true),
+        (vec!["--json", "list"], true),
+        (vec!["--json", "show", "PT-1"], true),
+        (vec!["--json", "search", "pay"], true),
+        (vec!["--json", "goal", "ls"], false),
+        (vec!["--json", "context", "PT-1"], true),
+        (vec!["--json", "log", "PT-1"], false),
+    ] {
+        let out = pt.run(&args);
+        assert!(out.status.success(), "{args:?}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            !stdout.chars().any(raw_hazard),
+            "{args:?} printed a raw hazard:\n{stdout:?}"
+        );
+        // Still valid JSON, and the value is the exact title.
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        if carries_title {
+            assert!(v.to_string().contains(title), "{args:?}: {v}");
+        }
+    }
+}
