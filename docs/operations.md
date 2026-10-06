@@ -235,6 +235,12 @@ cooldown per task between reminders.
 Each SMTP send is bounded at 30 s end to end (connect through DATA); a
 stalled mail server counts as a failed email send instead of hanging the run.
 
+The From, To and CC addresses are validated before anything is sent. If one
+is invalid, the run prints `email misconfigured`, disables email for that run
+(nudges still go out on Telegram and are stamped), then exits non-zero. A
+channel error during a send (for example a rejected address) only fails that
+channel: the run continues and stamps what was delivered elsewhere.
+
 ### Config (env)
 
 | Variable | Purpose |
@@ -244,6 +250,7 @@ stalled mail server counts as a failed email send instead of hanging the run.
 | `PTASK_SMTP_HOST` *(or `SMTP_HOST`)* | SMTP server |
 | `PTASK_SMTP_PORT` *(or `SMTP_PORT`)* | default 587 |
 | `PTASK_SMTP_USER` / `PTASK_SMTP_PASS` *(or `SMTP_USER` / `SMTP_PASS`)* | STARTTLS creds |
+| `PTASK_SMTP_FROM` *(or `SMTP_FROM`)* | From mailbox, e.g. `HAL <hal@puretensor.ai>`; defaults to `HAL <SMTP_USER>`, so set it whenever the SMTP login is not an address |
 | `PTASK_NOTIFY_EMAIL` *(or `NOTIFY_EMAIL`)* | escalation recipient |
 | `PTASK_NOTIFY_CC` *(or `PTASK_OPS_EMAIL`)* | always CC'd (defaults to `ops@puretensor.ai` per CLAUDE.md) |
 | `PTASK_HAL_NUDGE_URL` | optional HAL endpoint that POSTs back `{message: "..."}`; falls back to static templates if unset |

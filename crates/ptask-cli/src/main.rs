@@ -2120,6 +2120,23 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
             if a.dry_run {
                 cfg.dry_run = true;
             }
+            // Validate From/To/CC before anything is sent. A bad address used
+            // to surface mid-run, after Telegram had delivered but before the
+            // reminder was stamped, so every later run repeated the nudge.
+            // Email is switched off for this run (the ladder falls back to
+            // Telegram) and the unit fails at the end, after stamping.
+            let email_misconfigured = ptask_notify::validate_email_cfg(&cfg).err();
+            if let Some(err) = &email_misconfigured {
+                eprintln!(
+                    "{}",
+                    ui::section(
+                        "email misconfigured",
+                        ui::Ink::Red,
+                        &format!("{err} — email disabled for this run")
+                    )
+                );
+                cfg.smtp_host = None;
+            }
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -2195,13 +2212,22 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     ui::bullet(
                         &d.task_uuid,
                         &format!(
-                            "level {} · telegram {} · email {}",
-                            d.level, d.telegram_sent, d.email_sent
+                            "level {} · telegram {} · email {}{}",
+                            d.level,
+                            d.telegram_sent,
+                            d.email_sent,
+                            d.error
+                                .as_deref()
+                                .map(|e| format!(" · error: {e}"))
+                                .unwrap_or_default()
                         ),
                         ui::Ink::Cyan,
                         36
                     )
                 );
+            }
+            if let Some(err) = email_misconfigured {
+                anyhow::bail!("accountability email misconfigured: {err}");
             }
             if all_dead {
                 anyhow::bail!(

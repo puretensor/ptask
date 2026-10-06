@@ -342,7 +342,9 @@ pub struct NudgeRequest {
 /// env or dialing unroutable ports.
 ///
 /// Contract for the send methods: `Ok(true)` = delivered, `Ok(false)` =
-/// attempted but failed (network / non-2xx), `Err` = misconfiguration.
+/// attempted but failed (network / non-2xx / timeout), `Err` =
+/// misconfiguration. [`run_check_at`] treats an `Err` as that channel's
+/// failure for that task (recorded in `DispatchedFor::error`) and carries on.
 /// Config-missing and dry-run short-circuits are handled by the CALLER
 /// ([`run_check_at`]) — implementations may assume real config and a live
 /// send is wanted.
@@ -386,6 +388,28 @@ pub fn nudge_buttons(task_uuid: &str) -> Vec<(String, String)> {
         ),
         ("\u{1f5d1} Dismiss".into(), format!("ptdismiss:{task_uuid}")),
     ]
+}
+
+/// Fold one channel's send result into delivered / not delivered. A channel
+/// `Err` (misconfiguration, e.g. an unparseable address) is that channel's
+/// failure only: propagating it used to abort the run after another channel
+/// had already delivered but before the reminder was stamped, so every later
+/// run repeated the nudge.
+fn delivered(result: Result<bool>, channel: &str, dispatched: &mut DispatchedFor) -> bool {
+    match result {
+        Ok(ok) => ok,
+        Err(e) => {
+            error!(
+                target: "ptask::accountability",
+                channel,
+                task_uuid = %dispatched.task_uuid,
+                error = %e,
+                "channel misconfigured — counted as a failed send"
+            );
+            dispatched.error = Some(format!("{channel}: {e}"));
+            false
+        }
+    }
 }
 
 /// Run one accountability cycle. Mirrors `engine.run_check()`.
@@ -495,7 +519,11 @@ pub async fn run_check_at<D: Dispatch>(
                         let r = if cfg.dry_run {
                             true
                         } else {
-                            dispatch.send_telegram(cfg, &prefixed, &buttons).await?
+                            delivered(
+                                dispatch.send_telegram(cfg, &prefixed, &buttons).await,
+                                "telegram",
+                                &mut dispatched,
+                            )
                         };
                         if r {
                             telegram_consecutive_failures = 0;
@@ -531,7 +559,11 @@ pub async fn run_check_at<D: Dispatch>(
                         let r = if cfg.dry_run {
                             true
                         } else {
-                            dispatch.send_email(cfg, &subject, &message).await?
+                            delivered(
+                                dispatch.send_email(cfg, &subject, &message).await,
+                                "email",
+                                &mut dispatched,
+                            )
                         };
                         if r {
                             dispatched.email_sent = true;
@@ -1206,6 +1238,81 @@ mod tests {
         assert_eq!(report.dispatched.len(), 1);
         assert_eq!(report.dispatched[0].level, 5);
         assert_eq!(level_and_updated_at(&db, &task_uuid).0, 5);
+    }
+
+    /// Telegram delivers; email reports misconfiguration (`Err`), the way a
+    /// bad NOTIFY_EMAIL/CC address used to.
+    struct TelegramOkEmailErr;
+    impl Dispatch for TelegramOkEmailErr {
+        async fn send_telegram(
+            &self,
+            _cfg: &DispatchCfg,
+            _text: &str,
+            _buttons: &[(String, String)],
+        ) -> Result<bool> {
+            Ok(true)
+        }
+        async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {
+            Err(Error::Other(
+                "invalid NOTIFY_EMAIL \"not an address\"".into(),
+            ))
+        }
+        async fn compose_via_hal(&self, _cfg: &DispatchCfg, _req: &NudgeRequest) -> Option<String> {
+            None
+        }
+    }
+
+    /// Regression (DIST-8): an email `Err` was propagated with `?` after the
+    /// Telegram nudge had already gone out but before the reminder stamp was
+    /// written, aborting the run — so every following run re-sent it.
+    #[tokio::test]
+    async fn an_email_error_does_not_skip_stamping_the_delivered_telegram() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        let task_uuid = aged_task_before(&db, "escalated with broken email", 20, &anchor);
+        let other = aged_task_before(&db, "second escalated task", 20, &anchor);
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET escalation_level=3, level_changed_at=?1",
+                params![crate::dates::format_iso(&anchor)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let cfg = DispatchCfg {
+            telegram_token: Some("test".into()),
+            telegram_chat_id: Some(1),
+            ..email_cfg()
+        };
+        let report = run_check_at(&db, &cfg, &TelegramOkEmailErr, &anchor)
+            .await
+            .expect("one channel's misconfiguration must not abort the run");
+        assert_eq!(report.dispatched.len(), 2, "both tasks still nudged");
+        assert!(
+            report
+                .dispatched
+                .iter()
+                .all(|d| d.telegram_sent && !d.email_sent)
+        );
+        assert!(report.dispatched[0].error.is_some());
+        assert_eq!(report.send_failures, 2);
+        for id in [&task_uuid, &other] {
+            let last: Option<String> = db
+                .with_conn(|c| {
+                    Ok(
+                        c.query_row("SELECT last_reminded FROM tasks WHERE id=?1", [id], |r| {
+                            r.get(0)
+                        })?,
+                    )
+                })
+                .unwrap();
+            assert!(last.is_some(), "delivered nudge was not stamped");
+        }
+        // The stamp holds: an immediate re-run sends nothing new.
+        let again = run_check_at(&db, &cfg, &TelegramOkEmailErr, &anchor)
+            .await
+            .unwrap();
+        assert!(again.dispatched.is_empty());
     }
 
     /// Records every Telegram body it is asked to send.

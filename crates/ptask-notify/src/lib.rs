@@ -260,13 +260,76 @@ impl Dispatch for HttpDispatch {
 /// the accountability run until systemd kills it.
 pub const SMTP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Parsed (From, To, CC) mailboxes, or `None` when email is unconfigured.
+fn mailboxes(
+    cfg: &DispatchCfg,
+) -> std::result::Result<
+    Option<(
+        lettre::message::Mailbox,
+        lettre::message::Mailbox,
+        Option<lettre::message::Mailbox>,
+    )>,
+    String,
+> {
+    use lettre::message::Mailbox;
+    if !cfg.email_configured() {
+        return Ok(None);
+    }
+    let (user, to) = (
+        cfg.smtp_user.as_deref().unwrap_or_default(),
+        cfg.notify_email.as_deref().unwrap_or_default(),
+    );
+    let from: Mailbox = match cfg.smtp_from.as_deref() {
+        Some(from) => from
+            .parse()
+            .map_err(|e| format!("invalid PTASK_SMTP_FROM {from:?}: {e}"))?,
+        None => format!("HAL <{user}>").parse().map_err(|e| {
+            format!("SMTP_USER {user:?} is not an address and PTASK_SMTP_FROM is unset: {e}")
+        })?,
+    };
+    let to: Mailbox = to
+        .parse()
+        .map_err(|e| format!("invalid NOTIFY_EMAIL {to:?}: {e}"))?;
+    let cc = match cfg.cc_email.as_deref() {
+        Some(cc) => Some(
+            cc.parse()
+                .map_err(|e| format!("invalid CC address {cc:?}: {e}"))?,
+        ),
+        None => None,
+    };
+    Ok(Some((from, to, cc)))
+}
+
+/// Check every configured email address before anything is sent, so a bad
+/// From/To/CC is reported up front instead of failing mid-run after other
+/// channels have already delivered. `Ok` when email is unconfigured.
+pub fn validate_email_cfg(cfg: &DispatchCfg) -> std::result::Result<(), String> {
+    mailboxes(cfg).map(|_| ())
+}
+
+fn build_email(cfg: &DispatchCfg, subject: &str, body: &str) -> Result<lettre::Message> {
+    let (from, to, cc) = mailboxes(cfg)
+        .map_err(Error::Other)?
+        .ok_or_else(|| Error::Other("email is not configured".into()))?;
+    let mut builder = lettre::Message::builder()
+        .from(from)
+        .to(to)
+        .subject(subject);
+    if let Some(cc) = cc {
+        builder = builder.cc(cc);
+    }
+    builder
+        .body(body.to_string())
+        .map_err(|e| Error::Other(format!("build email: {}", e)))
+}
+
 async fn send_email_within(
     cfg: &DispatchCfg,
     subject: &str,
     body: &str,
     timeout: std::time::Duration,
 ) -> Result<bool> {
-    let (Some(host), Some(user), Some(pass), Some(to)) = (
+    let (Some(host), Some(user), Some(pass), Some(_)) = (
         cfg.smtp_host.as_deref(),
         cfg.smtp_user.as_deref(),
         cfg.smtp_pass.as_deref(),
@@ -274,27 +337,12 @@ async fn send_email_within(
     ) else {
         return Ok(false);
     };
-    use lettre::message::Mailbox;
+    use lettre::AsyncTransport;
+    use lettre::Tokio1Executor;
     use lettre::transport::smtp::AsyncSmtpTransport;
     use lettre::transport::smtp::authentication::Credentials;
-    use lettre::{AsyncTransport, Message, Tokio1Executor};
 
-    let from: Mailbox = format!("HAL <{}>", user)
-        .parse()
-        .map_err(|e| Error::Other(format!("invalid SMTP_USER address {:?}: {}", user, e)))?;
-    let to: Mailbox = to
-        .parse()
-        .map_err(|e| Error::Other(format!("invalid NOTIFY_EMAIL {:?}: {}", to, e)))?;
-    let mut builder = Message::builder().from(from).to(to).subject(subject);
-    if let Some(cc) = cfg.cc_email.as_deref() {
-        let cc: Mailbox = cc
-            .parse()
-            .map_err(|e| Error::Other(format!("invalid CC {:?}: {}", cc, e)))?;
-        builder = builder.cc(cc);
-    }
-    let email = builder
-        .body(body.to_string())
-        .map_err(|e| Error::Other(format!("build email: {}", e)))?;
+    let email = build_email(cfg, subject, body)?;
     let creds = Credentials::new(user.to_string(), pass.to_string());
     let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
         .map_err(|e| Error::Other(format!("smtp transport: {}", e)))?
@@ -467,6 +515,37 @@ mod tests {
         assert!(!sent.unwrap(), "a timed-out send is a delivery failure");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         assert!(SMTP_SEND_TIMEOUT <= std::time::Duration::from_secs(60));
+    }
+
+    /// Regression (DIST-8): SMTP_USER was used as the From address, so a
+    /// relay login that is not an address ("apikey") made every email fail,
+    /// and a bad NOTIFY_EMAIL/CC was only discovered mid-run.
+    #[test]
+    fn from_address_is_configurable_and_addresses_validate_up_front() {
+        let mut cfg = smtp_cfg(587);
+        cfg.smtp_user = Some("apikey".into());
+        assert!(validate_email_cfg(&cfg).is_err(), "login is not an address");
+        cfg.smtp_from = Some("HAL <hal@puretensor.ai>".into());
+        validate_email_cfg(&cfg).unwrap();
+        let email = build_email(&cfg, "subject", "body").unwrap();
+        let headers = String::from_utf8(email.formatted()).unwrap();
+        assert!(
+            headers.contains("From: HAL <hal@puretensor.ai>"),
+            "{headers}"
+        );
+
+        let mut bad_to = smtp_cfg(587);
+        bad_to.notify_email = Some("not an address".into());
+        let err = validate_email_cfg(&bad_to).unwrap_err();
+        assert!(err.contains("NOTIFY_EMAIL"), "{err}");
+
+        let mut bad_cc = smtp_cfg(587);
+        bad_cc.cc_email = Some("ops@@example".into());
+        let err = validate_email_cfg(&bad_cc).unwrap_err();
+        assert!(err.contains("CC"), "{err}");
+
+        // Unconfigured email is not an error; there is nothing to validate.
+        validate_email_cfg(&DispatchCfg::default()).unwrap();
     }
 
     #[tokio::test]
