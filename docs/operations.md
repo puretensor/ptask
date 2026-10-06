@@ -597,3 +597,29 @@ a workflow of its own that targets `[self-hosted, tensor-core]`.
   diff for `.github/` changes before approving a run.
 - To test a fork's change, push its branch into this repository after reading
   it. CI then runs as a same-repository pull request.
+
+## Release tags (who can publish a release)
+
+Both release workflows refuse a tag whose commit is not on `main` (the
+"verify the tagged commit is on main" step). That stops accidents only. A
+tag push runs the workflow file from the tagged commit, so whoever can push
+a `v*` tag can also delete that step in the commit they tag, and
+`scripts/release.sh`'s clean-`main` check runs only on the operator's
+machine. Who can publish a release is decided by who can push `v*` tags,
+and these forge settings are the real controls:
+
+- **GitHub tag ruleset**: Settings → Rules → Rulesets → New tag ruleset,
+  targeting `refs/tags/v*`: restrict creation, update and deletion to the
+  release maintainers (bypass list) and block force pushes.
+- **GitHub `release` environment**: the publishing job of
+  `.github/workflows/release.yml` declares `environment: release`. In
+  Settings → Environments → `release`, limit deployment branches and tags
+  to the protected `v*` tags (optionally add a required reviewer). A run
+  from any other ref then cannot publish. Until rules are set the
+  environment gates nothing.
+- **Gitea protected tags**: repository Settings → Tags → protect `v*` and
+  allow only the release maintainers, so a tag pushed straight to the
+  mirror cannot publish the Gitea release either.
+
+A tag that edits the workflow to drop the `environment:` line escapes the
+environment rule too, which is why the tag ruleset comes first.

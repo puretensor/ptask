@@ -119,6 +119,10 @@ jobs:
     name: github release
     needs: build
     runs-on: [self-hosted, tensor-core]
+    # The publishing job runs in the `release` environment, so deployment
+    # rules there (only protected v* tags may deploy) gate publishing; see
+    # docs/operations.md "Release tags". Without rules it changes nothing.
+    environment: release
     permissions:
       contents: write
     steps:
