@@ -29,8 +29,37 @@ pub fn default_url() -> String {
 /// plain `http` to a host that is neither loopback nor on the tailnet.
 /// Tailscale addresses (100.64.0.0/10, fd7a:115c:a1e0::/48, `*.ts.net`) ride
 /// WireGuard, so http there is already encrypted; that is the production
-/// setup, which is why this warns rather than refuses.
+/// setup, which is why this warns rather than refuses. A single-label host
+/// (a MagicDNS short name such as `tensor-core`) is resolved and trusted
+/// when every address it resolves to is on the tailnet.
 fn cleartext_token_warning(base: &str, sends_token: bool) -> Option<String> {
+    cleartext_token_warning_with(base, sends_token, |host, port| {
+        use std::net::ToSocketAddrs;
+        (host, port)
+            .to_socket_addrs()
+            .map(|addrs| addrs.map(|a| a.ip()).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// Loopback or Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48).
+fn is_trusted_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            ip.is_loopback() || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
+        }
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback() || ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]
+        }
+    }
+}
+
+/// [`cleartext_token_warning`] with an injectable resolver (tests).
+fn cleartext_token_warning_with(
+    base: &str,
+    sends_token: bool,
+    resolve: impl Fn(&str, u16) -> Vec<std::net::IpAddr>,
+) -> Option<String> {
     if !sends_token {
         return None;
     }
@@ -44,15 +73,16 @@ fn cleartext_token_warning(base: &str, sends_token: bool) -> Option<String> {
         .trim_end_matches(']')
         .parse::<std::net::IpAddr>()
     {
-        Ok(std::net::IpAddr::V4(ip)) => {
-            ip.is_loopback() || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
-        }
-        Ok(std::net::IpAddr::V6(ip)) => {
-            ip.is_loopback() || ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]
-        }
+        Ok(ip) => is_trusted_ip(ip),
         Err(_) => {
             let name = host.trim_end_matches('.').to_ascii_lowercase();
-            name == "localhost" || name.ends_with(".localhost") || name.ends_with(".ts.net")
+            name == "localhost"
+                || name.ends_with(".localhost")
+                || name.ends_with(".ts.net")
+                || (!name.contains('.') && {
+                    let ips = resolve(&name, url.port_or_known_default().unwrap_or(80));
+                    !ips.is_empty() && ips.into_iter().all(is_trusted_ip)
+                })
         }
     };
     (!trusted).then(|| {
@@ -561,6 +591,33 @@ mod tests {
         }
         // 100.128.0.0 is outside 100.64.0.0/10.
         assert!(cleartext_token_warning("http://100.128.0.1", true).is_some());
+    }
+
+    #[test]
+    fn short_magicdns_name_on_the_tailnet_is_not_warned_about() {
+        // `http://tensor-core:9501` is how MagicDNS short names look; they
+        // resolve to the tailnet, so the token is WireGuard-encrypted.
+        let tailnet = |_: &str, _: u16| vec!["100.100.7.9".parse().unwrap()];
+        let tailnet6 = |_: &str, _: u16| vec!["fd7a:115c:a1e0::9".parse().unwrap()];
+        let lan = |_: &str, _: u16| vec!["192.168.1.9".parse().unwrap()];
+        let mixed = |_: &str, _: u16| {
+            vec![
+                "100.100.7.9".parse().unwrap(),
+                "192.168.1.9".parse().unwrap(),
+            ]
+        };
+        let unresolved = |_: &str, _: u16| Vec::new();
+        let url = "http://tensor-core:9501";
+        assert!(cleartext_token_warning_with(url, true, tailnet).is_none());
+        assert!(cleartext_token_warning_with(url, true, tailnet6).is_none());
+        assert!(cleartext_token_warning_with(url, true, lan).is_some());
+        assert!(cleartext_token_warning_with(url, true, mixed).is_some());
+        assert!(cleartext_token_warning_with(url, true, unresolved).is_some());
+        // Only single-label names are resolved: a dotted public name is
+        // judged by its spelling, never looked up.
+        let never = |h: &str, _: u16| -> Vec<std::net::IpAddr> { panic!("resolved {h}") };
+        assert!(cleartext_token_warning_with("http://tasks.example.com", true, never).is_some());
+        assert!(cleartext_token_warning_with("http://tensor-core", false, never).is_none());
     }
 
     fn existing_tasks_json() -> Vec<Value> {

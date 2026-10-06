@@ -250,7 +250,9 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 `$PTASK_API_TOKEN` is sent as a bearer token; when the URL is plain `http`
 to a host that is neither loopback nor a Tailscale address (100.64.0.0/10,
 `fd7a:115c:a1e0::/48`, `*.ts.net`, all WireGuard-encrypted) the client
-prints a one-line cleartext-token warning on stderr. Use `https` there.
+prints a one-line cleartext-token warning on stderr (once per process). A
+single-label MagicDNS name (`http://tensor-core:9501`) is resolved and counts
+as Tailscale when every address it resolves to does. Use `https` elsewhere.
 
 Every remote error also runs the version handshake: a 401/404 from a
 mismatched deploy appends `version skew: client vX vs server vY` to the
