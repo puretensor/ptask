@@ -697,13 +697,15 @@ pub fn record_run(db: &Db, ctx: &EventCtx, report: &NativeReport, success: bool)
 }
 
 /// Record a failure manifest (provider/preflight errors happen before a
-/// report exists).
-pub fn record_failure(db: &Db, provider: &str, error: &str) {
+/// report exists). Takes the error itself, not a string, and stores the
+/// alternate (`{:#}`) form: the outermost context alone ("provider preflight
+/// failed") hides the provider's actual answer underneath it.
+pub fn record_failure(db: &Db, provider: &str, error: &anyhow::Error) {
     let ctx = EventCtx::system("distill");
     let payload = serde_json::json!({
         "native": true,
         "provider": provider,
-        "error": error,
+        "error": format!("{error:#}"),
     });
     let uuid = format!("distill-native:{}", uuid::Uuid::new_v4());
     if let Err(e) = event_log::record(db, &uuid, None, "distill.failed", &payload, &ctx) {
@@ -1260,6 +1262,29 @@ mod tests {
         assert_eq!(report.consumed, CHUNK + 1);
         assert_eq!(report.created, 1, "the second chunk deduped, not recreated");
         assert!(report.skipped_dedup >= 1);
+    }
+
+    /// Regression (DIST-10): the failure manifest stored `e.to_string()`,
+    /// which is only the outermost context, so `distill.failed` said
+    /// "classify failed" and dropped the actual provider error underneath.
+    #[test]
+    fn record_failure_keeps_the_whole_error_chain() {
+        let (_dir, db) = fresh_db();
+        let e = anyhow::anyhow!("http 400: context length exceeded")
+            .context("provider preflight failed — nothing consumed");
+        record_failure(&db, "mock", &e);
+        let stored: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT json_extract(payload, '$.error') FROM pt_event_log
+                      WHERE event_type='distill.failed'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(stored.contains("preflight failed"), "{stored}");
+        assert!(stored.contains("context length exceeded"), "{stored}");
     }
 
     #[test]

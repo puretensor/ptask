@@ -3504,7 +3504,7 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            ptask_distill::pipeline::record_failure(db, provider_name, &e.to_string());
+            ptask_distill::pipeline::record_failure(db, provider_name, &e);
             // The fail-closed run is precisely the one on which rows cross the
             // ceiling, so the quarantine count matters MORE here than on the Ok
             // path. run_native returns Err without a report, so read the count
