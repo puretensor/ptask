@@ -1445,13 +1445,21 @@ const NOTHING_UNDOABLE: &str =
 /// (or is depended on by), or that parents another task, is never deleted:
 /// those relations are not journaled under its own uuid.
 fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<UndoPlan>> {
+    // "Own" is actor AND surface: CLI, TUI and an unconfigured `pt mcp` all
+    // default to actor "shell", so the actor alone let the operator's undo
+    // delete what an agent added over MCP. CLI and TUI are one surface.
+    let (surface_a, surface_b) = match ctx.source.as_str() {
+        "cli" | "tui" => ("cli", "tui"),
+        other => (other, other),
+    };
     let candidates: Vec<(i64, String, String, String)> = {
         let mut stmt = tx.prepare(
             "SELECT id, task_uuid, event_type, payload FROM pt_event_log
              WHERE task_uuid IS NOT NULL AND actor = ?1
+               AND json_extract(payload, '$.source') IN (?2, ?3)
              ORDER BY id DESC LIMIT 50",
         )?;
-        let rows = stmt.query_map([&ctx.actor], |r| {
+        let rows = stmt.query_map(params![ctx.actor, surface_a, surface_b], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
         rows.collect::<std::result::Result<_, _>>()?
@@ -1488,12 +1496,20 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
             "task.created" => {
                 let related: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM task_links WHERE from_uuid=?1 OR to_uuid=?1)
-                         OR EXISTS(SELECT 1 FROM tasks WHERE parent_uuid=?1)",
+                         OR EXISTS(SELECT 1 FROM tasks WHERE parent_uuid=?1)
+                         OR EXISTS(SELECT 1 FROM approvals WHERE task_uuid=?1)",
                     [&task_uuid],
                     |r| r.get(0),
                 )?;
+                // Your newest undoable mutation is protected: refuse rather
+                // than reach further back and delete an older task instead.
                 if related {
-                    continue;
+                    let handle = pt_id.clone().unwrap_or_else(|| task_uuid.clone());
+                    return Err(crate::Error::Other(format!(
+                        "your most recent undoable change is creating {handle} \"{title}\", \
+                         which other tasks or approvals now depend on; nothing was undone \
+                         (remove those links, or `pt rm {handle}` deliberately)"
+                    )));
                 }
                 UndoAction::DeleteCreated
             }
@@ -4761,6 +4777,84 @@ mod tests {
         assert_eq!(load_detail(&db, &a.id).unwrap().depends_on, vec![b.id]);
     }
 
+    fn ctx_as(actor: &str, source: &str) -> EventCtx {
+        EventCtx {
+            actor: actor.into(),
+            source: source.into(),
+            event_uuid: None,
+        }
+    }
+
+    #[test]
+    fn undo_skips_another_surface_sharing_the_default_actor() {
+        // Regression (round 2, 1a): an unconfigured `pt mcp` journals as
+        // actor "shell" like the CLI, so `pt undo --yes` deleted the task an
+        // agent had just added over MCP.
+        let (_dir, db) = fresh_db();
+        let agent = create(
+            &db,
+            NewTask::minimal("agent made this"),
+            &ctx_as("shell", "mcp"),
+        )
+        .unwrap();
+        let cli = ctx_as("shell", "cli");
+        assert!(undo_last(&db, &cli).is_err());
+        assert!(task_exists(&db, &agent.id));
+
+        // CLI and TUI are the same operator surface.
+        let mine = create(
+            &db,
+            NewTask::minimal("from the tui"),
+            &ctx_as("shell", "tui"),
+        )
+        .unwrap();
+        let out = undo_last(&db, &cli).unwrap();
+        assert_eq!(out.task_uuid, mine.id);
+        assert!(task_exists(&db, &agent.id));
+    }
+
+    #[test]
+    fn undo_never_deletes_a_task_an_approval_points_at() {
+        // Regression (round 2, 1b): HAL's approval request on PT-1 did not
+        // protect it, so undo deleted PT-1 and left AP-1 dangling.
+        let (_dir, db) = fresh_db();
+        let me = ctx_as("shell", "cli");
+        let t = create(&db, NewTask::minimal("send the invoice"), &me).unwrap();
+        crate::approvals::request(
+            &db,
+            crate::approvals::RequestInput {
+                kind: "email".into(),
+                title: "send it".into(),
+                request_note: None,
+                payload: crate::approvals::PayloadSource::Json(b"{}".to_vec()),
+                task_pt_id: t.pt_id.clone(),
+                expires_in: None,
+            },
+            &ctx_as("hal", "mcp"),
+        )
+        .unwrap();
+        let err = undo_last(&db, &me).unwrap_err();
+        assert!(format!("{err}").contains("PT-1"), "{err}");
+        assert!(task_exists(&db, &t.id));
+    }
+
+    #[test]
+    fn undo_refuses_instead_of_reaching_past_a_protected_create() {
+        // Regression (round 2, 1c): `add A; add B; (hal) depend C --on B`
+        // then `pt undo --yes` skipped protected B and deleted A.
+        let (_dir, db) = fresh_db();
+        let me = ctx_as("shell", "cli");
+        let a = create(&db, NewTask::minimal("older"), &me).unwrap();
+        let b = create(&db, NewTask::minimal("prerequisite"), &me).unwrap();
+        let hal = ctx_as("hal", "mcp");
+        let c = create(&db, NewTask::minimal("hal's task"), &hal).unwrap();
+        add_dependency(&db, &c.id, &b.id, &hal).unwrap();
+        let err = undo_last(&db, &me).unwrap_err();
+        assert!(format!("{err}").contains("PT-2"), "{err}");
+        assert!(task_exists(&db, &a.id) && task_exists(&db, &b.id));
+        assert!(undo_plan(&db, &me).is_err());
+    }
+
     #[test]
     fn undo_never_deletes_a_parent_of_another_task() {
         let (_dir, db) = fresh_db();
@@ -4775,11 +4869,11 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        // The parent's create is protected, so undo moves past it to the
-        // child's bare create.
-        let out = undo_last(&db, &ctx).unwrap();
-        assert!(out.description.contains(&child.id), "{}", out.description);
+        // The parent's create is protected: undo refuses, and does not reach
+        // back to the child's create either.
+        assert!(undo_last(&db, &ctx).is_err());
         assert!(task_exists(&db, &parent.id), "the parent was deleted");
+        assert!(task_exists(&db, &child.id), "undo reached past the parent");
     }
 
     #[test]
