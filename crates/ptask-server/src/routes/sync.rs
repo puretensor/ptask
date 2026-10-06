@@ -379,7 +379,9 @@ async fn sync(
                         event_type: payload.event_type.clone(),
                         task_uuid: task_uuid.clone(),
                         payload: payload.payload.clone(),
-                        event_uuid: Some(cmd.uuid.clone()),
+                        // The journal key, so the envelope carries the
+                        // committed row's ts and event_id.
+                        event_uuid: Some(sync_event_uuid(&actor, &cmd.uuid)),
                     });
                 }
                 outcome
