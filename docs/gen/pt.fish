@@ -234,6 +234,7 @@ complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_f
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from list" -l no-color -d 'Plain output — shorthand for `--color never`'
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -s n -l limit -d 'Override row limit' -r
+complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -s s -l status -d 'Filter by status (or `all`), as in `pt list`' -r
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -l idempotency-key -d 'Idempotency key recorded with the mutation\'s event — a retried command with the same key returns ok without re-applying' -r
 complete -c pt -n "__fish_pt_using_subcommand view; and __fish_seen_subcommand_from show" -l color -d 'Colour: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never' -r -f -a "auto\t''
@@ -396,7 +397,7 @@ complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcom
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss start snooze depend rm version help" -f -a "start" -d '`pt remote start <query>` — mark in progress on the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss start snooze depend rm version help" -f -a "snooze" -d '`pt remote snooze <query> <until>` — snooze on the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss start snooze depend rm version help" -f -a "depend" -d '`pt remote depend <query> --on <target> [--clear]`'
-complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss start snooze depend rm version help" -f -a "rm" -d '`pt remote rm <query>` — permanent delete (tombstoned)'
+complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss start snooze depend rm version help" -f -a "rm" -d '`pt remote rm <query>` — permanent delete (tombstoned). Asks first; refuses without --yes when there is no TTY to ask on'
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss start snooze depend rm version help" -f -a "version" -d '`pt remote version` — compare this client\'s version against the canonical server\'s `GET /version`. Exits non-zero on skew'
 complete -c pt -n "__fish_pt_using_subcommand remote; and not __fish_seen_subcommand_from add list done priority edit reopen show next dismiss start snooze depend rm version help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from add" -l url -d 'Override the canonical endpoint' -r
@@ -524,6 +525,7 @@ complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from rm" -l color -d 'Colour: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from rm" -s y -l yes -d 'Skip the confirmation prompt'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from rm" -l json -d 'Emit machine-readable JSON instead of human text (task-facing verbs)'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from rm" -l no-color -d 'Plain output — shorthand for `--color never`'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from rm" -s h -l help -d 'Print help'
@@ -548,7 +550,7 @@ complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "start" -d '`pt remote start <query>` — mark in progress on the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "snooze" -d '`pt remote snooze <query> <until>` — snooze on the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "depend" -d '`pt remote depend <query> --on <target> [--clear]`'
-complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "rm" -d '`pt remote rm <query>` — permanent delete (tombstoned)'
+complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "rm" -d '`pt remote rm <query>` — permanent delete (tombstoned). Asks first; refuses without --yes when there is no TTY to ask on'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "version" -d '`pt remote version` — compare this client\'s version against the canonical server\'s `GET /version`. Exits non-zero on skew'
 complete -c pt -n "__fish_pt_using_subcommand remote; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c pt -n "__fish_pt_using_subcommand promote" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
@@ -1039,7 +1041,7 @@ complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_f
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "start" -d '`pt remote start <query>` — mark in progress on the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "snooze" -d '`pt remote snooze <query> <until>` — snooze on the canonical host'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "depend" -d '`pt remote depend <query> --on <target> [--clear]`'
-complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "rm" -d '`pt remote rm <query>` — permanent delete (tombstoned)'
+complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "rm" -d '`pt remote rm <query>` — permanent delete (tombstoned). Asks first; refuses without --yes when there is no TTY to ask on'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from remote" -f -a "version" -d '`pt remote version` — compare this client\'s version against the canonical server\'s `GET /version`. Exits non-zero on skew'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from token" -f -a "create" -d 'Mint a token for a client. Prints the plain token ONCE — store it with the consumer; only its hash is kept'
 complete -c pt -n "__fish_pt_using_subcommand help; and __fish_seen_subcommand_from token" -f -a "list" -d 'List all tokens (client, scope, created/last-used/revoked)'

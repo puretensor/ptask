@@ -130,10 +130,13 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
                     .map(|w| format!("  {w}"))
                     .unwrap_or_default();
                 println!(
-                    "{indent}{}  {}  {}{why}",
-                    item.goal.g_id(),
-                    item.goal.title,
-                    item.goal.status
+                    "{indent}{}",
+                    ui::sanitize(&format!(
+                        "{}  {}  {}{why}",
+                        item.goal.g_id(),
+                        item.goal.title,
+                        item.goal.status
+                    ))
                 );
             }
             Ok(())
@@ -256,21 +259,25 @@ fn print_human_show(shown: &GoalShow) {
         println!();
         println!("{}", ui::section("chain", ui::Ink::Steel, "nearest first"));
         for a in &shown.chain {
-            println!("  {}  {}", a.g_id(), a.title);
+            println!("  {}  {}", a.g_id(), ui::sanitize(&a.title));
         }
     }
     if !shown.children.is_empty() {
         println!();
         println!("{}", ui::section("children", ui::Ink::Cyan, ""));
         for c in &shown.children {
-            println!("  {}  {}", c.g_id(), c.title);
+            println!("  {}  {}", c.g_id(), ui::sanitize(&c.title));
         }
     }
     if !shown.tasks.is_empty() {
         println!();
         println!("{}", ui::section("tasks", ui::Ink::Paper, "effective goal"));
         for t in &shown.tasks {
-            println!("  {}  {}", t.pt_id.as_deref().unwrap_or(&t.id), t.title);
+            println!(
+                "  {}  {}",
+                t.pt_id.as_deref().unwrap_or(&t.id),
+                ui::sanitize(&t.title)
+            );
         }
     }
     println!();

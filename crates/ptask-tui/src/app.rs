@@ -248,8 +248,16 @@ impl App {
             ViewSel::Saved { dsl, .. } => {
                 let expr = ptask_core::filter::parse(dsl)
                     .map_err(|e| anyhow::anyhow!("saved view DSL parse failed: {}", e))?;
-                tasks::list_with_filter(&self.db, Some(&expr), None, None, TUI_TASK_LIMIT)
-                    .context("reloading saved view")?
+                // Open tasks only, like the pending list and the bot: the DSL
+                // has no status predicate, so done/dismissed rows crowded in.
+                tasks::list_with_filter(
+                    &self.db,
+                    Some(&expr),
+                    Some("pending"),
+                    None,
+                    TUI_TASK_LIMIT,
+                )
+                .context("reloading saved view")?
             }
         };
         self.apply_filter();
@@ -317,9 +325,13 @@ impl App {
     }
 
     fn handle(&mut self, ev: Event) {
-        let Event::Key(key) = ev else {
-            self.pending_g = false;
-            return;
+        let key = match ev {
+            Event::Key(key) => key,
+            Event::Paste(text) => return self.handle_paste(&text),
+            Event::Resize | Event::Tick => {
+                self.pending_g = false;
+                return;
+            }
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -446,6 +458,21 @@ impl App {
             }
             KeyCode::Delete => self.action_delete_prompt(),
             _ => {}
+        }
+    }
+
+    /// A paste is text for the open input, never keystrokes: its newlines
+    /// must not press Enter, and with no input open (including a pending
+    /// delete confirmation) nothing in it may fire an action.
+    fn handle_paste(&mut self, text: &str) {
+        self.pending_g = false;
+        let text = paste_text(text);
+        if let Some(prompt) = self.prompt.as_mut() {
+            text.chars().for_each(|c| prompt.push(c));
+        } else if let Some(buf) = self.filter_input.as_mut() {
+            buf.push_str(&text);
+            self.filter_query = buf.clone();
+            self.apply_filter();
         }
     }
 
@@ -591,6 +618,27 @@ impl App {
     }
 }
 
+/// Pasted text for a one-line input: each line break (CRLF, CR or LF) and
+/// tab becomes a space; other control characters are dropped.
+fn paste_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push(' ');
+            }
+            '\n' | '\t' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +706,89 @@ mod tests {
         assert!(app.filtered.is_empty());
         assert_eq!(app.list_state.selected(), None);
         assert_eq!(app.selected_task_index(), None);
+    }
+
+    /// (pt_id, status, priority, title) of every task, any status.
+    fn snapshot(db: &Db) -> Vec<(Option<String>, String, i64, String)> {
+        ptask_core::tasks::list_with_filter(db, None, None, None, 100)
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.pt_id, t.status, t.priority, t.title))
+            .collect()
+    }
+
+    fn app_with(titles: &[&str]) -> (tempfile::TempDir, App) {
+        let (dir, db) = fresh_db();
+        for t in titles {
+            ptask_core::tasks::create(&db, NewTask::minimal(*t), &EventCtx::test()).unwrap();
+        }
+        (dir, App::new(db).unwrap())
+    }
+
+    #[test]
+    fn paste_into_the_prompt_is_text_not_keystrokes() {
+        let (_dir, mut app) = app_with(&["Renew TLS cert", "Book dentist"]);
+        let before = snapshot(&app.db);
+        app.prompt = Some(Prompt::Create { buf: String::new() });
+        app.handle(Event::Paste("a\rGood deal".into()));
+        assert_eq!(app.prompt.as_ref().map(Prompt::buf), Some("a Good deal"));
+        // CRLF and LF fold to one space each; other controls are dropped.
+        app.handle(Event::Paste(", ping\r\nme\n\x1b[2J".into()));
+        assert_eq!(
+            app.prompt.as_ref().map(Prompt::buf),
+            Some("a Good deal, ping me [2J")
+        );
+        assert_eq!(snapshot(&app.db), before, "a paste must not touch any task");
+        assert!(!app.quit);
+    }
+
+    #[test]
+    fn paste_into_the_filter_bar_flattens_newlines() {
+        let (_dir, mut app) = app_with(&["alpha task", "beta task"]);
+        app.filter_input = Some(String::new());
+        app.handle(Event::Paste("alp\r\nha".into()));
+        assert_eq!(app.filter_input.as_deref(), Some("alp ha"));
+        assert_eq!(app.filter_query, "alp ha");
+    }
+
+    #[test]
+    fn paste_with_no_input_open_fires_no_action() {
+        let (_dir, mut app) = app_with(&["Renew TLS cert", "Book dentist"]);
+        let before = snapshot(&app.db);
+        // d = done, p = priority, c = create, q = quit, Enter: none may fire.
+        app.handle(Event::Paste("dpcq\r".into()));
+        assert!(app.prompt.is_none() && app.filter_input.is_none() && !app.quit);
+        // Nor may a pasted "y" answer a pending delete confirmation.
+        let target = app.selected_task().cloned().unwrap();
+        app.confirm = Some(Confirm::Delete {
+            task_uuid: target.id.clone(),
+            title: target.title.clone(),
+        });
+        app.handle(Event::Paste("y".into()));
+        assert_eq!(snapshot(&app.db), before);
+    }
+
+    #[test]
+    fn saved_view_shows_open_tasks_not_done_ones() {
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        for i in 0..22 {
+            let t =
+                ptask_core::tasks::create(&db, NewTask::minimal(format!("done task {i}")), &ctx)
+                    .unwrap();
+            ptask_core::tasks::mark_done(&db, &t, &ctx).unwrap();
+        }
+        let gone =
+            ptask_core::tasks::create(&db, NewTask::minimal("dismissed task"), &ctx).unwrap();
+        ptask_core::tasks::dismiss(&db, &gone.id, &ctx).unwrap();
+        ptask_core::tasks::create(&db, NewTask::minimal("open task"), &ctx).unwrap();
+        views::create(&db, "everything", "search: task").unwrap();
+
+        let mut app = App::new(db).unwrap();
+        app.action_cycle_view();
+        assert_eq!(app.view.label(), "view:everything");
+        let titles: Vec<&str> = app.tasks.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["open task"]);
     }
 
     #[test]
