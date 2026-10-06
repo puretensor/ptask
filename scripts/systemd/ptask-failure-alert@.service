@@ -6,10 +6,17 @@ Documentation=https://github.com/puretensor/ptask
 # accountability/distill/backup run must reach the operator even when
 # Prometheus is down — this is the zero-dependency last-resort lane.
 # Uses the same bot credentials the accountability dispatcher uses.
+#
+# Both env files are optional ("-"): a missing ~/puretensor-tasks/.env is one
+# of the failures this unit reports, so it must not stop the unit starting.
+# ~/.config/ptask/alert.env (0600) keeps alert credentials independent of
+# .env and wins when both set a key. With neither file the helper exits 64
+# and logs "not configured" at err priority (journalctl --user -p err).
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/puretensor-tasks/.env
+EnvironmentFile=-%h/puretensor-tasks/.env
+EnvironmentFile=-%h/.config/ptask/alert.env
 ExecStart=%h/.local/libexec/ptask-failure-alert %i %H
 StandardOutput=journal
 StandardError=journal

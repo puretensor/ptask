@@ -67,6 +67,30 @@ verify it as above, then put it live with
 [Promote a restored copy over the live DB](#promote-a-restored-copy-over-the-live-db).
 The pre-v0.1.0 baseline is at `~/puretensor-tasks/tasks.db.pre-ptask-backup`.
 
+### Failure alerts
+
+Every pTask oneshot (backup, restore drill, distill, accountability,
+scoring, reaper, export) and `ptask-litestream.service` carry
+`OnFailure=ptask-failure-alert@%n.service`, which sends one Telegram message
+naming the failed unit and host. The alert unit reads
+`~/puretensor-tasks/.env` and then `~/.config/ptask/alert.env`; both are
+optional and the second wins. Keep the alert credentials in `alert.env` so
+alerts still go out when `.env` itself is missing or broken (one of the
+failures they report):
+
+```bash
+install -d -m 0700 ~/.config/ptask
+install -m 0600 /dev/null ~/.config/ptask/alert.env
+cat >> ~/.config/ptask/alert.env <<'EOF'
+PTASK_TELEGRAM_BOT_TOKEN=...
+PTASK_ACCOUNTABILITY_CHAT_ID=...
+EOF
+```
+
+With no token in either file the helper exits 64 and logs "not configured"
+at err priority; a failed send logs "delivery failed" at err priority. Both
+show in `journalctl --user -p err`, the backstop when Telegram is down.
+
 ## Distillation (v3.0.0)
 
 `pt distill` runs the native Rust delta pipeline over unprocessed

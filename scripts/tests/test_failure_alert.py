@@ -126,6 +126,42 @@ class FailureAlertTests(unittest.TestCase):
             'dest: "{{ ptask_libexec_dir }}/ptask-failure-alert"', ansible
         )
 
+    def test_alert_unit_starts_without_dot_env(self):
+        # The alert must still run when ~/puretensor-tasks/.env is gone (that
+        # is one of the failures it reports), and may take its credentials
+        # from a file independent of .env, which wins when both set a key.
+        root = Path(__file__).parents[2]
+        unit = (root / "scripts/systemd/ptask-failure-alert@.service").read_text()
+        env_lines = [l for l in unit.splitlines() if l.startswith("EnvironmentFile=")]
+        self.assertEqual(
+            env_lines,
+            [
+                "EnvironmentFile=-%h/puretensor-tasks/.env",
+                "EnvironmentFile=-%h/.config/ptask/alert.env",
+            ],
+        )
+
+    def test_no_credentials_at_all_exits_64_at_err_priority(self):
+        # What the unit does when neither env file exists: no token, exit 64,
+        # and on the journal the line carries the err priority.
+        import subprocess
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryFile() as err:
+            st = os.fstat(err.fileno())
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                   "JOURNAL_STREAM": f"{st.st_dev}:{st.st_ino}"}
+            rc = subprocess.run(
+                [sys.executable, str(SCRIPT), "ptask-distill.service", "host1"],
+                env=env, stderr=err, timeout=30,
+            ).returncode
+            err.seek(0)
+            line = err.read().decode()
+        self.assertEqual(rc, 64)
+        self.assertTrue(line.startswith("<3>"), line)
+        self.assertIn("ptask-distill.service failed on host1", line)
+
 
 if __name__ == "__main__":
     unittest.main()
