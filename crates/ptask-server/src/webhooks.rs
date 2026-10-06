@@ -26,9 +26,9 @@ use ptask_core::Db;
 use ptask_core::config::WebhookConfig;
 use ptask_core::webhook_log::{Direction, record};
 use sha2::Sha256;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -61,6 +61,7 @@ pub fn sign(body: &[u8], secret: &str) -> String {
 }
 
 /// One journal event bound for the outbound subscribers.
+#[derive(Clone)]
 pub struct OutboundEvent {
     pub event_type: String,
     pub task_uuid: Option<String>,
@@ -73,55 +74,116 @@ pub struct OutboundEvent {
 /// Process-wide order for "commit, then enqueue". Holding it across both
 /// makes enqueue order equal commit order for concurrent requests; SQLite
 /// serialises the writes anyway, so it costs no write concurrency.
-static COMMIT_ORDER: Mutex<()> = Mutex::new(());
+pub(crate) static COMMIT_ORDER: Mutex<()> = Mutex::new(());
 
 /// Run a blocking mutation that enqueues its outbound event before
-/// returning, so no other request can commit and enqueue in between.
-pub fn commit_ordered<T>(f: impl FnOnce() -> T) -> T {
+/// returning, so no other request can commit and enqueue in between. With
+/// no subscriber configured there is nothing to order and no lock is taken.
+pub fn commit_ordered<T>(outbox: &Outbox, f: impl FnOnce() -> T) -> T {
+    if outbox.0.is_none() {
+        return f();
+    }
     let _order = COMMIT_ORDER.lock().unwrap_or_else(|e| e.into_inner());
     f()
 }
 
-/// The server's single outbound queue, shared by every request through
-/// [`AppState`]. The worker starts on first use (inside the runtime) and
-/// holds only the DB and webhook config, so dropping the queue's sender
-/// at shutdown ends it once the backlog is delivered.
-#[derive(Default)]
+/// Per-URL backlog cap. A subscriber that is down or hanging (10s per POST)
+/// falls behind; past this many queued events, new ones for that URL are
+/// dropped (logged and counted in `pt_webhook_dropped_total`) instead of
+/// growing memory without bound.
+const MAX_BACKLOG_PER_URL: usize = 10_000;
+
+/// One subscriber's ordered queue.
+struct Lane {
+    url: String,
+    tx: tokio::sync::mpsc::Sender<OutboundEvent>,
+}
+
+/// What a request's [`Outbox`] holds: every lane plus the drop counter.
+struct Lanes {
+    lanes: Vec<Lane>,
+    dropped: Arc<AtomicU64>,
+}
+
+/// The server's outbound queue, shared by every request through
+/// [`AppState`]: one bounded, ordered worker per subscriber URL, so a hung
+/// subscriber delays only its own deliveries. Workers start on first use
+/// (inside the runtime) and hold only the DB and webhook config; dropping
+/// the senders at shutdown ends each once its backlog is delivered.
 pub struct OutboundQueue {
-    tx: Mutex<Option<UnboundedSender<OutboundEvent>>>,
-    worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    lanes: Mutex<Option<Arc<Lanes>>>,
+    workers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     closed: std::sync::atomic::AtomicBool,
+    dropped: Arc<AtomicU64>,
+    backlog: usize,
+}
+
+impl Default for OutboundQueue {
+    fn default() -> Self {
+        Self::with_backlog(MAX_BACKLOG_PER_URL)
+    }
 }
 
 impl OutboundQueue {
-    fn sender(&self, db: &Db, cfg: &Arc<WebhookConfig>) -> Option<UnboundedSender<OutboundEvent>> {
-        if cfg.outbound_urls.is_empty() || self.closed.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
+    /// A queue whose lanes each hold at most `backlog` undelivered events.
+    pub fn with_backlog(backlog: usize) -> Self {
+        Self {
+            lanes: Mutex::default(),
+            workers: Mutex::default(),
+            closed: Default::default(),
+            dropped: Arc::default(),
+            backlog: backlog.max(1),
         }
-        let mut tx = self.tx.lock().unwrap_or_else(|e| e.into_inner());
-        if tx.is_none() {
-            let (sender, mut rx) = tokio::sync::mpsc::unbounded_channel::<OutboundEvent>();
-            let (db, cfg) = (db.clone(), cfg.clone());
-            let worker = tokio::spawn(async move {
-                while let Some(e) = rx.recv().await {
-                    dispatch(&db, &cfg, e).await;
-                }
-            });
-            *self.worker.lock().unwrap_or_else(|e| e.into_inner()) = Some(worker);
-            *tx = Some(sender);
-        }
-        tx.clone()
     }
 
-    /// Stop accepting events and wait up to `timeout` for the backlog to be
-    /// delivered. Call after the server stopped taking requests.
+    /// Events dropped because a subscriber's backlog was full.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    fn lanes(&self, db: &Db, cfg: &Arc<WebhookConfig>) -> Option<Arc<Lanes>> {
+        if cfg.outbound_urls.is_empty() || self.closed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let mut lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
+        if lanes.is_none() {
+            let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
+            let mut all = Vec::with_capacity(cfg.outbound_urls.len());
+            for url in &cfg.outbound_urls {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<OutboundEvent>(self.backlog);
+                let db = db.clone();
+                let one = WebhookConfig {
+                    outbound_urls: vec![url.clone()],
+                    ..(**cfg).clone()
+                };
+                workers.push(tokio::spawn(async move {
+                    while let Some(e) = rx.recv().await {
+                        dispatch(&db, &one, e).await;
+                    }
+                }));
+                all.push(Lane {
+                    url: url.clone(),
+                    tx,
+                });
+            }
+            *lanes = Some(Arc::new(Lanes {
+                lanes: all,
+                dropped: self.dropped.clone(),
+            }));
+        }
+        lanes.clone()
+    }
+
+    /// Stop accepting events and wait up to `timeout` for every backlog to
+    /// be delivered. Call after the server stopped taking requests.
     pub async fn drain(&self, timeout: Duration) {
-        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
-        // Dropping the last sender closes the channel once it is empty.
-        drop(self.tx.lock().unwrap_or_else(|e| e.into_inner()).take());
-        let worker = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(worker) = worker
-            && tokio::time::timeout(timeout, worker).await.is_err()
+        self.closed.store(true, Ordering::SeqCst);
+        // Dropping the senders closes each channel once it is empty.
+        drop(self.lanes.lock().unwrap_or_else(|e| e.into_inner()).take());
+        let workers = std::mem::take(&mut *self.workers.lock().unwrap_or_else(|e| e.into_inner()));
+        if tokio::time::timeout(timeout, futures_util::future::join_all(workers))
+            .await
+            .is_err()
         {
             warn!(
                 target: "ptask::webhook",
@@ -135,17 +197,32 @@ impl OutboundQueue {
 /// One request's handle on the outbound queue. A no-op when no URL is
 /// configured.
 #[derive(Clone)]
-pub struct Outbox(Option<UnboundedSender<OutboundEvent>>);
+pub struct Outbox(Option<Arc<Lanes>>);
 
 impl Outbox {
     pub fn start(state: &AppState) -> Self {
-        Self(state.outbound.sender(&state.db, &state.webhooks))
+        Self(state.outbound.lanes(&state.db, &state.webhooks))
     }
 
+    /// Enqueue `event` for every subscriber without waiting. A subscriber
+    /// whose backlog is full loses this event (logged and counted).
     pub fn send(&self, event: OutboundEvent) {
-        if let Some(tx) = &self.0 {
-            // Fails only after shutdown closed the queue.
-            let _ = tx.send(event);
+        let Some(lanes) = &self.0 else { return };
+        for lane in &lanes.lanes {
+            match lane.tx.try_send(event.clone()) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(e)) => {
+                    lanes.dropped.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        target: "ptask::webhook",
+                        url = %lane.url,
+                        event = %e.event_type,
+                        "outbound webhook backlog full; event dropped for this subscriber"
+                    );
+                }
+                // Closed only after shutdown.
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+            }
         }
     }
 }

@@ -1544,8 +1544,10 @@ mod tests {
         assert!(id > 0);
     }
 
-    /// A hung subscriber no longer holds up `/sync`: delivery runs on its own
-    /// task, in order, and still reaches the live subscriber.
+    /// A hung subscriber holds up neither `/sync` nor the other subscribers:
+    /// each URL has its own ordered worker, so the live one gets every event
+    /// while the hung one is still timing out on the first (round-2 SRV-5:
+    /// one serial worker cost every subscriber 10s per event).
     #[tokio::test]
     async fn sync_returns_without_waiting_on_a_hung_webhook_subscriber() {
         // Accepts connections (kernel backlog) and never answers: each send
@@ -1562,9 +1564,11 @@ mod tests {
             db.clone(),
             Default::default(),
             WebhookConfig {
+                // Hung first: a serial fan-out reaches the live URL only
+                // after each 10s timeout.
                 outbound_urls: vec![
-                    live_url.clone(),
                     format!("http://{}/hook", hung.local_addr().unwrap()),
+                    live_url.clone(),
                 ],
                 ..Default::default()
             },
@@ -1601,13 +1605,160 @@ mod tests {
             .unwrap()
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while delivered() == 0 && std::time::Instant::now() < deadline {
+        while delivered() < 3 && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert_eq!(
             delivered(),
-            1,
-            "the first event reached the live subscriber"
+            3,
+            "every event reached the live subscriber despite the hung one"
+        );
+    }
+
+    /// The per-URL backlog is bounded: a subscriber that stops answering
+    /// costs at most `backlog` queued events, the rest are dropped, counted
+    /// and exported, and the other subscribers still get everything.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_subscriber_backlog_drops_and_counts_instead_of_growing() {
+        let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let live = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_url = format!("http://{}/hook", live.local_addr().unwrap());
+        let count = received.clone();
+        tokio::spawn(async move {
+            let app = Router::new().route(
+                "/hook",
+                axum::routing::post(move || {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { "ok" }
+                }),
+            );
+            axum::serve(live, app).await.unwrap();
+        });
+        let db = open_test_db();
+        let mut state = AppState::new(
+            db.clone(),
+            Default::default(),
+            WebhookConfig {
+                outbound_urls: vec![
+                    format!("http://{}/hook", hung.local_addr().unwrap()),
+                    live_url,
+                ],
+                ..Default::default()
+            },
+        );
+        state.outbound = Arc::new(webhooks::OutboundQueue::with_backlog(2));
+        let outbox = webhooks::Outbox::start(&state);
+        for i in 0..6 {
+            outbox.send(webhooks::OutboundEvent {
+                event_type: "task.created".into(),
+                task_uuid: None,
+                payload: serde_json::json!({"title": format!("e{i}")}),
+                event_uuid: None,
+            });
+            // Let each lane's worker pick up its first event.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // Hung lane: one in flight + 2 queued, 3 dropped. Live lane: none.
+        assert_eq!(state.outbound.dropped(), 3);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while received.load(std::sync::atomic::Ordering::SeqCst) < 6
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(received.load(std::sync::atomic::Ordering::SeqCst), 6);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("pt_webhook_dropped_total 3")
+        );
+    }
+
+    /// Holds the commit-order lock on another thread for `hold`.
+    fn hold_commit_order(hold: std::time::Duration) {
+        let (locked, is_locked) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _guard = webhooks::COMMIT_ORDER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            locked.send(()).unwrap();
+            std::thread::sleep(hold);
+        });
+        is_locked.recv().unwrap();
+    }
+
+    /// The git-webhook close commits and enqueues under the same
+    /// commit-order lock as `/sync`, so its event can't be enqueued out of
+    /// commit order against a concurrent /sync command.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn git_close_commits_under_the_commit_order_lock() {
+        let db = open_test_db();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("ship it"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            outbound_urls: vec![format!("http://{}/hook", hung.local_addr().unwrap())],
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), Default::default(), hooks));
+        hold_commit_order(std::time::Duration::from_millis(600));
+        let started = std::time::Instant::now();
+        let resp = signed_gitea_push(
+            &app,
+            &serde_json::json!({
+                "ref": "refs/heads/main",
+                "commits": [{"id": "c1", "message": "Fixes PT-1"}],
+            }),
+        )
+        .await;
+        assert_eq!(resp["closed"].as_array().unwrap().len(), 1, "{resp}");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(400),
+            "the close did not wait for the commit-order lock"
+        );
+    }
+
+    /// Without outbound URLs there is nothing to order, so /sync must not
+    /// queue behind the process-wide lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_without_webhooks_skips_the_commit_order_lock() {
+        let app = router(AppState::new(
+            open_test_db(),
+            Default::default(),
+            Default::default(),
+        ));
+        hold_commit_order(std::time::Duration::from_millis(1500));
+        let started = std::time::Instant::now();
+        post_sync(
+            &app,
+            &serde_json::json!({"sync_token": "*", "commands": [{
+                "type": "task_create", "uuid": "no-hooks", "args": {"text": "plain"},
+            }]}),
+        )
+        .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1000),
+            "/sync waited {:?} on the commit-order lock",
+            started.elapsed()
         );
     }
 

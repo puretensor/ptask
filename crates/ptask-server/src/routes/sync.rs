@@ -369,7 +369,7 @@ async fn sync(
         // Enqueue the webhook inside the commit-order lock, so concurrent
         // requests' events reach subscribers in the order they committed.
         let outcome = match crate::blocking::db_value(move || {
-            crate::webhooks::commit_ordered(|| {
+            crate::webhooks::commit_ordered(&cmd_outbox, || {
                 let outcome = apply_one(&cmd_state, &cmd, &actor);
                 if let CommandOutcome::Applied {
                     task_uuid, payload, ..

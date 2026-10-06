@@ -223,17 +223,22 @@ Body:
 ```
 
 `ts` is the event's commit time (its `pt_event_log.ts`, operator timezone)
-and `event_id` its journal id, not the delivery time. One worker per server
-delivers every event, one at a time and in commit order, to each URL in
-turn; no retries, 10s timeout per POST. On graceful shutdown (SIGTERM /
-SIGINT) the server finishes in-flight requests and then gives the queued
-events up to 15s to go out; whatever is left after that is dropped (and
-logged).
+and `event_id` its journal id, not the delivery time. `/sync` commands and
+git-webhook closes commit and enqueue under one process-wide lock, so events
+are enqueued in commit order. Each URL has its own worker that delivers its
+events one at a time in that order, so a slow or dead subscriber delays only
+itself; no retries, 10s timeout per POST. Each URL's backlog is capped at
+10,000 events: past that, new events for that URL are dropped, logged and
+counted in `pt_webhook_dropped_total`. On graceful shutdown (SIGTERM /
+SIGINT) the server finishes in-flight requests (up to 10s) and then gives the
+queued events up to 15s to go out; whatever is left after that is dropped
+(and logged).
 
 ## Metrics
 
-`/metrics` exposes these gauges, all computed from the database at scrape
-time (there are no in-process counters):
+`/metrics` exposes these series. All but `pt_webhook_dropped_total` (an
+in-process counter, reset on restart) are computed from the database at
+scrape time:
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -249,6 +254,7 @@ time (there are no in-process counters):
 | `pt_distill_last_run_ok` | gauge | — (`1` ok / `0` failed) |
 | `pt_distill_quarantined_captures` | gauge | — |
 | `pt_notifications_last_sent_age_seconds` | gauge | `channel` |
+| `pt_webhook_dropped_total` | counter | — (outbound events dropped on a full per-URL backlog) |
 
 ## Dashboard surface (v2.3.0)
 
