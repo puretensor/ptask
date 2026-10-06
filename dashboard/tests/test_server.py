@@ -531,6 +531,43 @@ class EventHistoryTests(unittest.TestCase):
         self.assertEqual(events[0]["payload"], {"to": "done"})
 
 
+    def test_q_task_events_orders_by_commit_not_ts_text(self):
+        # CORE-11: ts is written in the operator timezone, so across the
+        # autumn fall-back hour a later event (01:10+00:00) sorts below an
+        # earlier one (01:30+01:00) as text. History must follow commit order.
+        old_db = server.DB_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute(
+                """
+                CREATE TABLE pt_event_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT NOT NULL UNIQUE,
+                    task_uuid TEXT,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    actor TEXT
+                )
+                """
+            )
+            con.executemany(
+                """
+                INSERT INTO pt_event_log(uuid, task_uuid, event_type, payload, ts, actor)
+                VALUES (?, 'PT-1', 'task.updated', '{}', ?, 'hal')
+                """,
+                [("first-bst", "2026-10-25T01:30:00+01:00"),
+                 ("second-gmt", "2026-10-25T01:10:00+00:00")],
+            )
+            con.commit()
+            con.close()
+            server.DB_PATH = f.name
+            try:
+                events = server.q_task_events("PT-1")
+            finally:
+                server.DB_PATH = old_db
+        self.assertEqual([e["uuid"] for e in events], ["second-gmt", "first-bst"])
+
 class StatsFluxTests(unittest.TestCase):
     def test_q_stats_reports_windowed_flux_split_by_origin(self):
         old_db = server.DB_PATH

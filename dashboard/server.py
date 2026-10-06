@@ -560,7 +560,11 @@ def q_heatmap():
 
 
 def q_task_events(task_uuid: str, limit: int = 60):
-    """Return attributed event history for the detail drawer."""
+    """Return attributed event history for the detail drawer, newest first.
+
+    Ordered by id (commit order), not ts: ts carries the operator-timezone
+    offset, so across the autumn fall-back hour the text sorts in reverse.
+    """
     con = connect()
     try:
         rows = con.execute(
@@ -568,7 +572,7 @@ def q_task_events(task_uuid: str, limit: int = 60):
             SELECT uuid, task_uuid, event_type, actor, ts, payload
             FROM pt_event_log
             WHERE task_uuid=?
-            ORDER BY ts DESC
+            ORDER BY id DESC
             LIMIT ?
             """,
             (task_uuid, limit),
