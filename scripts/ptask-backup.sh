@@ -21,6 +21,8 @@
 #                            (default: dr-host:dr-backup/ptask)
 #                            set to "none" to skip (e.g. non-canonical hosts)
 #   PTASK_BACKUP_RETAIN    — retain N days (default: 30)
+#   PTASK_BACKUP_STEP_TIMEOUT — seconds per remote command (default: 60)
+#   PTASK_BACKUP_XFER_TIMEOUT — seconds per upload (default: 600)
 set -euo pipefail
 
 DB="${PTASK_DB:-$HOME/puretensor-tasks/tasks.db}"
@@ -50,26 +52,45 @@ finally:
 PY
 SIZE=$(stat -c%s "$TMP")
 
-# Every ssh/scp gets a connect timeout and keepalives: a hung CephFS mount or
-# a dead peer otherwise blocks forever, the oneshot never fails, and
-# OnFailure never alerts (the unit also carries TimeoutStartSec).
+# Every ssh/scp gets a connect timeout and keepalives, which catch a dead
+# peer. They cannot catch a live peer whose command hangs: a remote mkdir or
+# find stuck in D-state on a hung CephFS mount keeps answering keepalives.
+# So every remote step also runs under coreutils timeout; without it the
+# unit's TimeoutStartSec kills the whole run inside the nearby leg and the
+# off-site leg never starts.
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+STEP_TIMEOUT=${PTASK_BACKUP_STEP_TIMEOUT:-60}
+XFER_TIMEOUT=${PTASK_BACKUP_XFER_TIMEOUT:-600}
+rssh() { timeout -k 10 "$STEP_TIMEOUT" ssh "${SSH_OPTS[@]}" "$@"; }
+rscp() { timeout -k 10 "$XFER_TIMEOUT" scp -q "${SSH_OPTS[@]}" "$@"; }
+# Worst case with the defaults: a leg is 4 rssh steps (mkdir, mv, prune,
+# count) of at most 60+10 s plus one rscp of at most 600+10 s = 890 s, and
+# two legs = 1780 s. ptask-backup.service allows TimeoutStartSec=40min
+# (2400 s), which leaves 620 s for the local snapshot. If you raise either
+# timeout, keep TimeoutStartSec above 2 * (4 * (STEP+10) + XFER+10) plus
+# the snapshot time.
 
-# Upload the snapshot to one target, prune it to RETAIN_DAYS, count what is
-# retained. Called from `||`, where bash suspends errexit (also inside the
-# function), so every step carries its own `|| return 1`.
+# Upload the snapshot to one target under a .partial name and rename it into
+# place, so a cut-off transfer never leaves a truncated file under the
+# "newest nightly" name. Then prune to RETAIN_DAYS (also dropping .partial
+# files a killed run left behind) and count what is retained. Called from
+# `||`, where bash suspends errexit (also inside the function), so every
+# step carries its own `|| return 1`.
 upload_leg() {
     local label=$1 target=$2
     local host="${target%%:*}" dir="${target#*:}" retained
-    ssh "${SSH_OPTS[@]}" "$host" "mkdir -p '$dir'" || return 1
-    scp -q "${SSH_OPTS[@]}" "$TMP" "$target/ptask-tasks-$DATE.db" || return 1
+    local final="$dir/ptask-tasks-$DATE.db"
+    rssh "$host" "mkdir -p '$dir'" || return 1
+    rscp "$TMP" "$host:$final.partial" || return 1
+    rssh "$host" "mv -f '$final.partial' '$final'" || return 1
     # Retention prune. `-mtime +N` means strictly older than N days.
-    ssh "${SSH_OPTS[@]}" "$host" \
-        "find '$dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' \
-         -mtime +$((RETAIN_DAYS - 1)) -delete" || return 1
-    retained=$(ssh "${SSH_OPTS[@]}" "$host" \
+    rssh "$host" \
+        "find '$dir' -maxdepth 1 -type f \
+         \\( \\( -name 'ptask-tasks-*.db' -mtime +$((RETAIN_DAYS - 1)) \\) \
+         -o \\( -name 'ptask-tasks-*.db.partial' -mmin +720 \\) \\) -delete" || return 1
+    retained=$(rssh "$host" \
         "find '$dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' | wc -l") || return 1
-    echo "ptask-backup: $label ok ${target}/ptask-tasks-${DATE}.db (${SIZE} bytes, ${retained} backups retained)"
+    echo "ptask-backup: $label ok $host:$final (${SIZE} bytes, ${retained} backups retained)"
 }
 
 failed=()

@@ -33,6 +33,12 @@
 #   PTASK_LITESTREAM_CONFIG — (default ~/.config/litestream/litestream.yml)
 #   PTASK_BACKUP_REMOTE     — nearby backup target (default backup-host:/var/backups/ptask)
 #   PTASK_BACKUP_OFFSITE    — off-site target (default dr-host:dr-backup/ptask)
+#   PTASK_VERIFY_STEP_TIMEOUT    — seconds per remote command (default 30)
+#   PTASK_VERIFY_XFER_TIMEOUT    — seconds to copy the nearby nightly (default 120)
+#   PTASK_VERIFY_RESTORE_TIMEOUT — seconds for `litestream restore` (default 300)
+#
+# Nightlies are matched as ptask-tasks-*.db, so the .partial name an upload
+# carries until ptask-backup.sh renames it is never taken for the newest.
 set -euo pipefail
 
 DB="${PTASK_DB:-$HOME/puretensor-tasks/tasks.db}"
@@ -46,9 +52,20 @@ NIGHTLY_MIN_PCT=90    # nightly task count vs live
 FLOOR_MIN_BYTES=65536
 FLOOR_PCT=50
 
-# Same options as ptask-backup.sh: a dead peer or a hung mount must fail the
-# drill (and alert), not hang it until TimeoutStartSec.
+# Same options as ptask-backup.sh: keepalives catch a dead peer, and
+# coreutils timeout catches a live peer whose command hangs (D-state on a
+# hung mount), so one stuck leg fails its own check instead of the unit's
+# TimeoutStartSec killing the drill before the other checks run.
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+STEP_TIMEOUT=${PTASK_VERIFY_STEP_TIMEOUT:-30}
+XFER_TIMEOUT=${PTASK_VERIFY_XFER_TIMEOUT:-120}
+RESTORE_TIMEOUT=${PTASK_VERIFY_RESTORE_TIMEOUT:-300}
+rssh() { timeout -k 10 "$STEP_TIMEOUT" ssh "${SSH_OPTS[@]}" "$@"; }
+rscp() { timeout -k 10 "$XFER_TIMEOUT" scp -q "${SSH_OPTS[@]}" "$@"; }
+# Worst case with the defaults: restore 300+10 s; nearby 2 rssh (40 s each)
+# + 1 rscp (130 s) = 210 s; off-site 2 rssh = 80 s; total 600 s.
+# ptask-restore-verify.service allows TimeoutStartSec=15min (900 s), which
+# leaves 300 s for the local sqlite checks. Raise it with the timeouts.
 
 SCRATCH=$(mktemp -d -t ptask-restore-verify-XXXXXX)
 cleanup() { rm -rf "$SCRATCH"; }
@@ -85,8 +102,8 @@ floor=$(( live_bytes * FLOOR_PCT / 100 ))
 check_replica() {
     local ic stats count settled settled_iso live_after lo hi
     command -v litestream >/dev/null || { fail "litestream binary not on PATH"; return 1; }
-    litestream restore -config "$LS_CONFIG" -o "$SCRATCH/restored.db" "$DB" \
-        || { fail "litestream restore returned non-zero"; return 1; }
+    timeout -k 10 "$RESTORE_TIMEOUT" litestream restore -config "$LS_CONFIG" -o "$SCRATCH/restored.db" "$DB" \
+        || { fail "litestream restore failed or ran past ${RESTORE_TIMEOUT}s"; return 1; }
     ic=$(sqlite3 "$SCRATCH/restored.db" "PRAGMA integrity_check;") \
         || { fail "litestream restore is unreadable"; return 1; }
     [ "$ic" = "ok" ] || { fail "litestream restore integrity_check: $ic"; return 1; }
@@ -114,15 +131,15 @@ check_replica() {
 # ---- 2. Nearby nightly freshness, size, integrity, content ---------------
 check_nightly() {
     local host="${REMOTE%%:*}" dir="${REMOTE#*:}" latest age_h bytes ic count
-    latest=$(ssh "${SSH_OPTS[@]}" "$host" \
+    latest=$(rssh "$host" \
         "ls -1t '$dir'/ptask-tasks-*.db 2>/dev/null | head -1") \
         || { fail "cannot list nightlies at $REMOTE"; return 1; }
     [ -n "$latest" ] || { fail "no nightly backups found at $REMOTE"; return 1; }
-    age_h=$(ssh "${SSH_OPTS[@]}" "$host" \
+    age_h=$(rssh "$host" \
         "echo \$(( ( \$(date +%s) - \$(stat -c %Y '$latest') ) / 3600 ))") \
         || { fail "cannot stat $latest on $host"; return 1; }
     [ "$age_h" -lt 48 ] || { fail "newest nearby nightly is ${age_h}h old (>48h): $latest"; return 1; }
-    scp -q "${SSH_OPTS[@]}" "$host:$latest" "$SCRATCH/nightly.db" \
+    rscp "$host:$latest" "$SCRATCH/nightly.db" \
         || { fail "cannot copy $latest from $host"; return 1; }
     bytes=$(stat -c %s "$SCRATCH/nightly.db")
     [ "$bytes" -ge "$floor" ] \
@@ -140,11 +157,11 @@ check_nightly() {
 # ---- 3. Off-site freshness + size ------------------------------------------
 check_offsite() {
     local host="${OFFSITE%%:*}" dir="${OFFSITE#*:}" latest age_size age_h bytes
-    latest=$(ssh "${SSH_OPTS[@]}" "$host" \
+    latest=$(rssh "$host" \
         "ls -1t '$dir'/ptask-tasks-*.db 2>/dev/null | head -1") \
         || { fail "cannot list off-site backups at $OFFSITE"; return 1; }
     [ -n "$latest" ] || { fail "no off-site backups found at $OFFSITE"; return 1; }
-    age_size=$(ssh "${SSH_OPTS[@]}" "$host" \
+    age_size=$(rssh "$host" \
         "echo \$(( ( \$(date +%s) - \$(stat -c %Y '$latest') ) / 3600 )) \$(stat -c %s '$latest')") \
         || { fail "cannot stat $latest on $host"; return 1; }
     read -r age_h bytes <<<"$age_size"

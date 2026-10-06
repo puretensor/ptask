@@ -2,8 +2,11 @@
 
 Everything runs in a temp sandbox: HOME, TMPDIR and the "remote" hosts are
 local directories, ssh runs the remote command locally, and hosts listed in
-STUB_DOWN_HOSTS refuse connections. sqlite3 is a Python shim (list mode,
-URI filenames) so the suite needs no sqlite3 CLI on the runner.
+STUB_DOWN_HOSTS refuse connections. STUB_HANG ("host:glob ...") makes a
+matching remote command hang the way a D-state CephFS mount does: the ssh
+session stays alive (keepalives answer) but the command never returns;
+STUB_HANG_SCP ("host ...") does the same to a transfer. sqlite3 is a Python
+shim (list mode, URI filenames) so the suite needs no sqlite3 CLI.
 """
 
 from __future__ import annotations
@@ -26,6 +29,10 @@ args=("$@"); host=${args[${#args[@]}-2]}; cmd=${args[${#args[@]}-1]}
 for h in $STUB_DOWN_HOSTS; do
     [ "$h" = "$host" ] && { echo "ssh: connect to host $host port 22: Connection timed out" >&2; exit 255; }
 done
+for spec in $STUB_HANG; do
+    # shellcheck disable=SC2254
+    [ "${spec%%:*}" = "$host" ] && case "$cmd" in ${spec#*:}) exec sleep 300 ;; esac
+done
 exec bash -c "$cmd"
 """,
     "scp": r"""#!/usr/bin/env bash
@@ -33,12 +40,17 @@ echo "scp $*" >> "$STUB_LOG"
 src=${@: -2:1}; dst=${@: -1}
 for p in "$src" "$dst"; do
     case "$p" in *:*) for h in $STUB_DOWN_HOSTS; do [ "$h" = "${p%%:*}" ] && exit 1; done ;; esac
+    case "$p" in *:*) for h in $STUB_HANG_SCP; do
+        [ "$h" = "${p%%:*}" ] && { printf 'SQLite format 3' > "${dst#*:}"; exec sleep 300; }
+    done ;; esac
 done
 exec cp "${src#*:}" "${dst#*:}"
 """,
     "litestream": r"""#!/usr/bin/env bash
 out=
 while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift ;; esac; shift; done
+[ -n "$STUB_LITESTREAM_PRE" ] && eval "$STUB_LITESTREAM_PRE"
+[ -n "$STUB_LITESTREAM_HANG" ] && exec sleep 300
 exec cp "$STUB_REPLICA" "$out"
 """,
     "sqlite3": r"""#!/usr/bin/env python3
@@ -116,6 +128,10 @@ class Sandbox:
             "TMPDIR": str(self.root / "tmp"),
             "STUB_LOG": str(self.log),
             "STUB_DOWN_HOSTS": "",
+            "STUB_HANG": "",
+            "STUB_HANG_SCP": "",
+            "STUB_LITESTREAM_HANG": "",
+            "STUB_LITESTREAM_PRE": "",
             "LC_ALL": "C",
         }
         full.update(env)
@@ -171,6 +187,50 @@ class BackupLegsTests(unittest.TestCase):
             self.assertEqual(n, 200)
 
 
+    FAST = {"PTASK_BACKUP_STEP_TIMEOUT": "2", "PTASK_BACKUP_XFER_TIMEOUT": "2"}
+
+    def test_hung_remote_mount_does_not_cost_the_offsite_leg(self):
+        # The nearby host answers keepalives but its mkdir never returns
+        # (CephFS in D-state). ServerAlive* cannot see that; the per-step
+        # timeout must, and the off-site leg must still run.
+        t0 = dt.datetime.now()
+        r = self.sb.run("ptask-backup.sh", STUB_HANG="mon1:mkdir*", **self.FAST, **self.env)
+        elapsed = (dt.datetime.now() - t0).total_seconds()
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertLess(elapsed, 30, "a hung step must be cut off by its timeout")
+        self.assertIn("FAILED leg(s): nearby", r.stderr)
+        self.assertEqual(len(list(self.dr.glob("ptask-tasks-*.db"))), 1)
+
+    def test_hung_prune_is_cut_off_too(self):
+        r = self.sb.run("ptask-backup.sh", STUB_HANG="dr:find*", **self.FAST, **self.env)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("FAILED leg(s): off-site", r.stderr)
+        self.assertEqual(len(list(self.near.glob("ptask-tasks-*.db"))), 1)
+
+    def test_killed_transfer_never_leaves_a_truncated_nightly(self):
+        r = self.sb.run("ptask-backup.sh", STUB_HANG_SCP="mon1", **self.FAST, **self.env)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        # The cut-off upload may leave a .partial behind, never a final name.
+        self.assertEqual(list(self.near.glob("ptask-tasks-*.db")), [])
+        self.assertEqual(len(list(self.dr.glob("ptask-tasks-*.db"))), 1)
+
+    def test_uploads_go_to_a_partial_name_then_rename(self):
+        r = self.sb.run("ptask-backup.sh", **self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        scps = [c for c in self.sb.calls() if c.startswith("scp ")]
+        self.assertTrue(scps and all(c.endswith(".db.partial") for c in scps), scps)
+        for d in (self.near, self.dr):
+            self.assertEqual(list(d.glob("*.partial")), [])
+
+    def test_stale_partials_are_pruned(self):
+        stale = self.near / "ptask-tasks-2020-01-01.db.partial"
+        stale.write_bytes(b"x")
+        backdate(stale, days=2)
+        r = self.sb.run("ptask-backup.sh", **self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(stale.exists())
+
+
 class RestoreDrillTests(unittest.TestCase):
     ROWS = 1000
 
@@ -195,12 +255,13 @@ class RestoreDrillTests(unittest.TestCase):
             self.snapshot_live(nightly)
             backdate(nightly, hours=2)
 
-    def drill(self, offsite: bool = True) -> subprocess.CompletedProcess:
+    def drill(self, offsite: bool = True, **env: str) -> subprocess.CompletedProcess:
         return self.sb.run(
             "ptask-restore-verify.sh",
             STUB_REPLICA=str(self.replica),
             PTASK_BACKUP_REMOTE=f"mon1:{self.near}",
             PTASK_BACKUP_OFFSITE=f"dr:{self.dr}" if offsite else "none",
+            **env,
         )
 
     # -- passes -------------------------------------------------------------
@@ -280,6 +341,33 @@ class RestoreDrillTests(unittest.TestCase):
         r = self.drill()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("3 check(s) failed: litestream nearby offsite", r.stderr)
+
+    # -- round 2: hangs, partial uploads, races, cross-leg digest ------------
+    FAST = {"PTASK_VERIFY_STEP_TIMEOUT": "2", "PTASK_VERIFY_XFER_TIMEOUT": "2",
+            "PTASK_VERIFY_RESTORE_TIMEOUT": "2"}
+
+    def test_hung_nearby_listing_is_cut_off_and_offsite_still_checked(self):
+        self.healthy_backups()
+        t0 = dt.datetime.now()
+        r = self.drill(STUB_HANG="mon1:ls*", **self.FAST)
+        self.assertLess((dt.datetime.now() - t0).total_seconds(), 30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("1 check(s) failed: nearby", r.stderr)
+        self.assertIn("offsite ok", r.stdout)
+
+    def test_hung_litestream_restore_is_cut_off(self):
+        self.healthy_backups()
+        r = self.drill(STUB_LITESTREAM_HANG="1", **self.FAST)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("1 check(s) failed: litestream", r.stderr)
+
+    def test_partial_upload_is_not_taken_for_the_newest_nightly(self):
+        self.healthy_backups()
+        # A killed upload's leftover, newer than every real nightly.
+        (self.near / "ptask-tasks-2026-10-05.db.partial").write_bytes(b"SQLite format 3")
+        (self.dr / "ptask-tasks-2026-10-05.db.partial").write_bytes(b"")
+        r = self.drill()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_ssh_calls_carry_connect_timeout(self):
         self.healthy_backups()
