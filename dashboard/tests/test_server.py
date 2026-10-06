@@ -2,7 +2,10 @@ import http.client
 import io
 import json
 import os
+import socket
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -306,23 +309,43 @@ class HostAllowlistTests(unittest.TestCase):
     """DNS rebinding: a page under the attacker's own name must not be served."""
 
     def test_host_allowed_accepts_the_sidecars_own_names(self):
+        own = socket.gethostname().split(".", 1)[0]
         for host in (
             None, "127.0.0.1", "127.0.0.1:9510", "100.121.42.54:9510", "[::1]",
-            "[::1]:9510", "localhost", "localhost:9510", "LOCALHOST.", "tensor-core",
-            "tensor-core:9510", "ptask.tail07f9ef.ts.net",
-            "ptask.tail07f9ef.ts.net:443",
+            "[::1]:9510", "localhost", "localhost:9510", "LOCALHOST.", own,
+            f"{own}:9510", "ptask.tail07f9ef.ts.net", "ptask.tail07f9ef.ts.net:443",
         ):
             self.assertTrue(server.host_allowed(host, extra=frozenset()), host)
         self.assertTrue(server.host_allowed(
             "cockpit.example.org", extra=frozenset({"cockpit.example.org"})))
+        self.assertTrue(server.host_allowed(
+            "a.cockpit.example.org:8443", extra=frozenset({".cockpit.example.org"})))
 
     def test_host_allowed_rejects_foreign_names(self):
         for host in (
             "", "evil.example", "evil.example:9510", "rebind.attacker.example:9510",
-            "ts.net.evil.example", "evilts.net", "[::1", "[evil]:80", "127.0.0.1:x",
-            "localhost:99999999", "-bad-", "a b",
+            "ts.net.evil.example", "evilts.net", "ts.net", "[::1", "[evil]:80",
+            "127.0.0.1:x", "localhost:99999999", "a b",
+            # A hostile LAN can resolve any other dotless name (DHCP search
+            # domain, LLMNR, NBT-NS), so only localhost and our own name pass.
+            "evil", "wpad", "xn--e1afmkfd", "[fe80::1%evil.example]",
         ):
             self.assertFalse(server.host_allowed(host, extra=frozenset()), host)
+        self.assertFalse(server.host_allowed(
+            "cockpit.example.org.evil", extra=frozenset({".cockpit.example.org"})))
+
+    def test_allowed_host_entries_drop_ports_and_trailing_dots(self):
+        self.assertEqual(server._allowed_host_entry(" Cockpit.Example.org.:8443 "),
+                         "cockpit.example.org")
+        self.assertEqual(server._allowed_host_entry("[fd7a::1]:9510"), "fd7a::1")
+
+    def test_decide_token_is_not_inherited_by_child_processes(self):
+        code = ("import os; os.environ['PTASK_DASH_DECIDE_TOKEN'] = 'x' * 20; "
+                "import server; print('PTASK_DASH_DECIDE_TOKEN' in os.environ, "
+                "len(server.DECIDE_TOKEN))")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             cwd=Path(server.__file__).parent, timeout=30)
+        self.assertEqual(out.stdout.split(), ["False", "20"], out.stderr)
 
     def test_foreign_host_gets_no_data_and_no_write(self):
         old_pt_exec = server.pt_exec

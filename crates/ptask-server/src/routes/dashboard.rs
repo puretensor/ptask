@@ -199,7 +199,14 @@ pub async fn basic_throttle(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let presented = state.dash.pass.is_some() && req.headers().contains_key(header::AUTHORIZATION);
+    // Only a Basic header is a guess at the dashboard password; a bearer token
+    // aimed at this route is just refused by the handler, uncounted.
+    let presented = state.dash.pass.is_some()
+        && req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.as_bytes().get(..6))
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"basic "));
     if !presented {
         return next.run(req).await;
     }
@@ -242,61 +249,18 @@ pub async fn host_guard(
     }
     let extra = &state.dash.allowed_hosts;
     let allowed = match req.headers().get(header::HOST) {
-        Some(value) => value.to_str().is_ok_and(|h| host_allowed(h, extra)),
+        Some(value) => value
+            .to_str()
+            .is_ok_and(|h| crate::auth::host_allowed(h, extra)),
         None => req
             .uri()
             .authority()
-            .is_none_or(|a| host_allowed(a.as_str(), extra)),
+            .is_none_or(|a| crate::auth::host_allowed(a.as_str(), extra)),
     };
     if !allowed {
         return jerr(StatusCode::MISDIRECTED_REQUEST, "unknown host");
     }
     next.run(req).await
-}
-
-fn host_allowed(value: &str, extra: &[String]) -> bool {
-    let host = value.trim().to_ascii_lowercase();
-    if let Some(rest) = host.strip_prefix('[') {
-        let Some((name, after)) = rest.split_once(']') else {
-            return false;
-        };
-        if !after.is_empty() && !after.strip_prefix(':').is_some_and(valid_port) {
-            return false;
-        }
-        return name.parse::<std::net::Ipv6Addr>().is_ok();
-    }
-    let (name, port) = match host.split_once(':') {
-        Some((name, port)) => (name, Some(port)),
-        None => (host.as_str(), None),
-    };
-    if port.is_some_and(|p| !valid_port(p)) {
-        return false;
-    }
-    let name = name.trim_end_matches('.');
-    if name.is_empty() {
-        return false;
-    }
-    if name.parse::<std::net::Ipv4Addr>().is_ok() || extra.iter().any(|h| h == name) {
-        return true;
-    }
-    if !name.contains('.') {
-        return valid_label(name);
-    }
-    name.ends_with(".ts.net")
-}
-
-fn valid_port(port: &str) -> bool {
-    (1..=5).contains(&port.len()) && port.bytes().all(|b| b.is_ascii_digit())
-}
-
-fn valid_label(label: &str) -> bool {
-    let bytes = label.as_bytes();
-    (1..=63).contains(&bytes.len())
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
-        && bytes[0] != b'-'
-        && bytes[bytes.len() - 1] != b'-'
 }
 
 /// Sidecar rule: no configured password = open (local/dev); otherwise
@@ -1415,9 +1379,10 @@ pub async fn root(State(state): State<AppState>, headers: HeaderMap) -> Response
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, HeaderMap, Path, State, act_done, host_allowed, parse_deadline, serve_www_file,
+        AppState, HeaderMap, Path, State, act_done, parse_deadline, serve_www_file,
         valid_frame_ancestor,
     };
+    use crate::auth::host_allowed;
     use ptask_core::config::DashConfig;
     use std::time::{Duration, Instant};
 
@@ -1755,6 +1720,29 @@ mod tests {
         }
     }
 
+    /// A bearer token aimed at a dashboard route is not a password guess, so
+    /// it must not count toward the operator's lockout.
+    #[tokio::test]
+    async fn bearer_headers_do_not_count_as_password_guesses() {
+        use super::THROTTLE_MAX_FAILURES;
+        use axum::http::{Request, header};
+        let app = throttled_app();
+        for _ in 0..THROTTLE_MAX_FAILURES + 1 {
+            let req = Request::builder()
+                .uri("/manifest.webmanifest")
+                .header(header::AUTHORIZATION, "Bearer some-api-token")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            status_of(&app, req).await;
+        }
+        let req = Request::builder()
+            .uri("/api/stats")
+            .header(header::AUTHORIZATION, basic_header("correct horse"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(status_of(&app, req).await, 200);
+    }
+
     #[tokio::test]
     async fn dashboard_routes_refuse_a_foreign_host() {
         use axum::http::{Request, header};
@@ -1765,7 +1753,8 @@ mod tests {
             Default::default(),
         )
         .with_dash(DashConfig {
-            allowed_hosts: vec!["cockpit.example.org".into()],
+            // Config::from_env adds the machine's own short name to the list.
+            allowed_hosts: vec!["cockpit.example.org".into(), "tensor-core".into()],
             ..Default::default()
         });
         let app = crate::router(state);
@@ -1805,7 +1794,8 @@ mod tests {
             .body(axum::body::Body::from(r#"{"title":"must not be created"}"#))
             .unwrap();
         assert_eq!(status_of(&app, write).await, 421);
-        // Machine API routes are bearer-gated and keep answering any Host.
+        // /healthz carries nothing and keeps answering any Host, so monitors
+        // probing by a public name still work.
         assert_eq!(
             status_of(&app, get("/healthz", "rebind.attacker.example")).await,
             200
@@ -1834,10 +1824,27 @@ mod tests {
             "[::1]:9510",
             "localhost",
             "LOCALHOST.",
-            "tensor-core:9510",
             "ptask.tail07f9ef.ts.net:443",
         ] {
             assert!(host_allowed(host, &none), "{host}");
+        }
+        // Other dotless names resolve however a hostile LAN likes (DHCP search
+        // domain, LLMNR, NBT-NS); only configured ones (our own name) pass.
+        let own = vec![
+            "tensor-core".to_string(),
+            ".cockpit.example.org".to_string(),
+        ];
+        assert!(host_allowed("tensor-core:9510", &own));
+        assert!(host_allowed("a.cockpit.example.org", &own));
+        assert!(!host_allowed("cockpit.example.org.evil", &own));
+        for host in [
+            "tensor-core",
+            "evil",
+            "wpad",
+            "ts.net",
+            "[fe80::1%evil.example]",
+        ] {
+            assert!(!host_allowed(host, &none), "{host}");
         }
         for host in [
             "",

@@ -37,8 +37,8 @@ Endpoints
   (no login page, session cookie, HTTP Basic, or 401 on UI paths). Two checks
   keep that gate meaningful:
   - Every request's Host (except /healthz) must be one of this sidecar's own
-    names (an IP literal, a single-label name such as `localhost`, a
-    `*.ts.net` name, or PTASK_DASH_ALLOWED_HOSTS), else 421. Without it a
+    names (an IP literal, localhost, this machine's short name, a `*.ts.net`
+    name, or PTASK_DASH_ALLOWED_HOSTS), else 421. Without it a
     DNS-rebinding page could address the sidecar under the attacker's own
     name and read or write as same-origin. State-changing POSTs also need a
     same-origin Origin header when one is sent.
@@ -59,6 +59,7 @@ Config (env)
   PTASK_ACTOR      actor stamped on dashboard-originated pt writes
                    (default "dashboard")
   PTASK_DASH_ALLOWED_HOSTS  extra comma-separated Host names to serve
+                            (".example.org" entries match the suffix)
   PTASK_DASH_DECIDE_TOKEN   secret the cockpit sends to approve/reject
                             (unset = approval decisions disabled here)
 """
@@ -69,6 +70,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -134,17 +136,29 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
 VERSION = "0.22.0"
-# Host names served besides IP literals, single-label names and *.ts.net.
+
+
+def _allowed_host_entry(entry: str) -> str:
+    """One PTASK_DASH_ALLOWED_HOSTS entry as host_allowed compares it."""
+    host = entry.strip().lower()
+    if host.startswith("["):
+        host = host[1:].split("]", 1)[0]
+    else:
+        host = host.split(":", 1)[0]
+    return host.rstrip(".")
+
+
+# Host names served besides IP literals, localhost, this machine's own name and
+# *.ts.net. An entry starting with "." matches that suffix.
 ALLOWED_HOSTS = frozenset(
-    h.strip().lower().rstrip(".")
-    for h in os.environ.get("PTASK_DASH_ALLOWED_HOSTS", "").split(",")
-    if h.strip()
+    filter(None, (_allowed_host_entry(h)
+                  for h in os.environ.get("PTASK_DASH_ALLOWED_HOSTS", "").split(",")))
 )
 # Shared secret for approval decisions. Shorter values are refused rather than
 # trusted: a guessable secret would put decisions back within any tailnet
-# agent's reach.
+# agent's reach. Popped from the environment so no pt or aws child inherits it.
 DECIDE_TOKEN_MIN = 16
-DECIDE_TOKEN = os.environ.get("PTASK_DASH_DECIDE_TOKEN", "").strip()
+DECIDE_TOKEN = os.environ.pop("PTASK_DASH_DECIDE_TOKEN", "").strip()
 DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
 DASH_DOMAINS = parse_domains(os.environ.get("PTASK_DASH_DOMAINS"))
 DASH_DEFAULT_DOMAIN = resolve_default_domain(
@@ -251,17 +265,25 @@ def parse_limit(raw: str | None, default: int, maximum: int) -> int:
 
 
 _PORT_RE = re.compile(r"[0-9]{1,5}")
-_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
+
+# Dotless names a request may use: a hostile LAN can resolve (and so rebind)
+# any other single label through its DHCP search domain, LLMNR or NBT-NS.
+_LOCAL_LABELS = frozenset(filter(None, {
+    "localhost", socket.gethostname().split(".", 1)[0].lower(),
+}))
 
 
 def host_allowed(value: str | None, extra=None) -> bool:
     """True when a Host header names this sidecar rather than a stranger.
 
-    A DNS-rebinding page can only use a name its author controls, so the
-    sidecar answers to names nobody outside the operator can point at it: IP
-    literals, single-label names (localhost, MagicDNS short names), the
-    tailnet's `*.ts.net` names, and PTASK_DASH_ALLOWED_HOSTS. A request with
-    no Host header is not a browser's and passes.
+    A DNS-rebinding page can only use a name whose DNS its author controls, so
+    the sidecar answers only to names nobody outside the operator can point at
+    it: IP literals, localhost, this machine's own short name, `*.ts.net`
+    (Tailscale serves that zone; a page cannot rebind one of its names to an
+    address of its choosing) and PTASK_DASH_ALLOWED_HOSTS (entries starting
+    with "." are suffixes). A request with no Host header is not a browser's
+    and passes.
     """
     if value is None:
         return True
@@ -273,6 +295,8 @@ def host_allowed(value: str | None, extra=None) -> bool:
             return False
         name, rest = host[1:end], host[end + 1:]
         if rest and not (rest[0] == ":" and _PORT_RE.fullmatch(rest[1:])):
+            return False
+        if "%" in name:  # zone ids never come from a browser
             return False
         try:
             ipaddress.IPv6Address(name)
@@ -290,11 +314,11 @@ def host_allowed(value: str | None, extra=None) -> bool:
         return True
     except ValueError:
         pass
-    if name in extra:
+    if name in extra or name in _LOCAL_LABELS:
         return True
-    if "." not in name:
-        return bool(_LABEL_RE.fullmatch(name))
-    return name.endswith(".ts.net")
+    if any(e.startswith(".") and name.endswith(e) for e in extra):
+        return True
+    return "." in name and name.endswith(".ts.net")
 
 
 # --------------------------------------------------------------------------- db
@@ -1332,8 +1356,6 @@ class Handler(BaseHTTPRequestHandler):
             if refusal is not None:
                 code, message = refusal
                 return self._json({"ok": False, "code": code, "error": message}, 403)
-            if not isinstance(body, dict):
-                return self._json({"error": "note must be a string"}, 400)
             note = body.get("note", _UNSET)
             note_arg = None
             if note is not _UNSET:

@@ -150,11 +150,14 @@ transaction.
 | POST | `/api/approvals/AP-n/approve\|reject` `{note?}` | shells `pt approve\|reject AP-n --via dashboard [--note=…]`; needs `X-PTask-Decide-Token` = `PTASK_DASH_DECIDE_TOKEN` (403 `decide_token_required` / `decide_disabled` otherwise) |
 | GET | `/api/stream` | SSE `change` events when the journal grows; at most 32 open streams (503 beyond) |
 
-Every request's `Host` (except `/healthz`) must name this sidecar — an IP literal, a single-label
-name (`localhost`, a MagicDNS short name), a `*.ts.net` name, or one listed in
-`PTASK_DASH_ALLOWED_HOSTS` — or it gets 421. That stops a DNS-rebinding page
-from addressing the sidecar under the attacker's own name and reading or
-writing as same-origin.
+Every request's `Host` (except `/healthz`) must name this sidecar — an IP literal, `localhost`,
+this machine's own short hostname, a `*.ts.net` name, or one listed in
+`PTASK_DASH_ALLOWED_HOSTS` (an entry starting with `.` matches that suffix) — or it gets 421.
+That stops a DNS-rebinding page from addressing the sidecar under the attacker's own name and
+reading or writing as same-origin. Other dotless names are refused because a hostile LAN can
+resolve any of them (DHCP search domain, LLMNR, NBT-NS); list a MagicDNS short alias explicitly
+if you use one. To pin the cockpit to your own tailnet, set
+`PTASK_DASH_ALLOWED_HOSTS=.tail07f9ef.ts.net`-style suffixes and rely on those.
 
 ## Run locally
 
@@ -176,7 +179,7 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_DASH_DEFAULT_DOMAIN` | first configured key | domain assigned to tasks without an explicit configured `domain:` label |
 | `PTASK_DASH_WWW` | `./www` | static dir |
 | `PTASK_ACTOR` | `dashboard` | actor stamped on dashboard-originated `pt` writes |
-| `PTASK_DASH_ALLOWED_HOSTS` | _(unset)_ | extra comma-separated `Host` names to serve besides IP literals, single-label names and `*.ts.net` |
+| `PTASK_DASH_ALLOWED_HOSTS` | _(unset)_ | extra comma-separated `Host` names to serve besides IP literals, `localhost`, the machine's short hostname and `*.ts.net`; `.suffix` entries match the suffix |
 | `PTASK_DASH_DECIDE_TOKEN` | _(unset)_ | secret (≥ 16 chars) required to approve/reject from the cockpit; unset disables approval decisions here |
 | `PTASK_STT_URL` | `http://127.0.0.1:9000/transcribe` | voice STT endpoint (local Whisper); accepts `-F audio=@` |
 | `PTASK_VOICE_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model for voice→task extraction |
@@ -269,8 +272,8 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
-- **v0.22.0** — The Host header must name the sidecar (IP literal, single-label
-  name, `*.ts.net`, or `PTASK_DASH_ALLOWED_HOSTS`), else 421: since v0.21.0 a
+- **v0.22.0** — The Host header must name the sidecar (IP literal, `localhost`, the
+  machine's short hostname, `*.ts.net`, or `PTASK_DASH_ALLOWED_HOSTS`), else 421: since v0.21.0 a
   DNS-rebinding page could read every task and pass the Origin check, which only
   compared Origin with the client-supplied Host. Approve/reject now requires
   `X-PTask-Decide-Token` = `PTASK_DASH_DECIDE_TOKEN` (unset = decisions disabled):
