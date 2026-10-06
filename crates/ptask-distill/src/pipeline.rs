@@ -488,7 +488,19 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             covered[i] = true;
         }
     };
-    for cand in candidates {
+    for mut cand in candidates {
+        // A blank title is not a task. It is skipped without covering its
+        // sources, so those captures go round again instead of being
+        // consumed — and it never reaches the temporal hash, where every
+        // later blank would "dedup" against the first.
+        let trimmed = cand.title.trim();
+        if trimmed.is_empty() {
+            warn!(target: "ptask::distill", sources = ?cand.sources, "candidate with a blank title — skipped");
+            continue;
+        }
+        if trimmed.len() != cand.title.len() {
+            cand.title = trimmed.to_string();
+        }
         if cand.sources.is_empty() {
             warn!(target: "ptask::distill", title = %cand.title, "candidate names no source captures — it covers none");
         }
@@ -1329,6 +1341,63 @@ mod tests {
         assert_eq!(report.failed, 1);
         assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
         assert_eq!(attempts(&db, "IGNORED commitment the model drops"), 1);
+    }
+
+    /// Regression (DIST-3): a blank/whitespace candidate title created a
+    /// task (and consumed its capture); the next blank was then "deduped" by
+    /// the temporal hash of the empty string, consuming that capture too.
+    #[test]
+    fn a_blank_candidate_title_creates_nothing_and_consumes_nothing() {
+        struct BlankForBank;
+        impl LlmProvider for BlankForBank {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                Ok(PoisonProvider { poison: "\u{0}" }
+                    .consolidate(items)?
+                    .into_iter()
+                    .map(|mut c| {
+                        if c.title.contains("bank") {
+                            c.title = " \t\u{a0} ".into();
+                        }
+                        c
+                    })
+                    .collect())
+            }
+            fn preflight(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "blank-test"
+            }
+        }
+        let (_dir, db) = fresh_db();
+        seed_inbox(
+            &db,
+            &[
+                "call the bank about the mandate",
+                "book the Reykjavik flight",
+            ],
+        );
+        let report = run_native(&db, &BlankForBank, 100).unwrap();
+        assert_eq!(report.created, 1);
+        assert_eq!(report.consumed, 1, "the blank's capture is retained");
+        assert_eq!(report.failed, 1);
+        seed_inbox(&db, &["ring the bank again about the loan"]);
+        let report = run_native(&db, &BlankForBank, 100).unwrap_err();
+        assert!(report.to_string().contains("covered none"), "{report:#}");
+        let blank_tasks: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE trim(title, ' ' || char(9) || char(160)) = ''",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(blank_tasks, 0, "no task may have a blank title");
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 2);
     }
 
     /// Regression (DIST-5): a 429/5xx/timeout was charged to the captures as
