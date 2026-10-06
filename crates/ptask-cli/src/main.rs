@@ -3503,6 +3503,15 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
             }
             Ok(())
         }
+        Err(e) if e.is::<ptask_distill::pipeline::DistillBusy>() => {
+            // Another run (usually the timer) is already distilling. Nothing
+            // was consumed and nothing failed, so no `distill.failed` event.
+            println!(
+                "{}",
+                ui::section("distill skipped", ui::Ink::Slate, &e.to_string())
+            );
+            Ok(())
+        }
         Err(e) => {
             ptask_distill::pipeline::record_failure(db, provider_name, &e);
             // The fail-closed run is precisely the one on which rows cross the

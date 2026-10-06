@@ -663,6 +663,44 @@ pub fn run_native<P: LlmProvider + ?Sized>(
     run_native_within(db, provider, batch, RUN_WALL_BUDGET)
 }
 
+/// Another distill run holds the run lock; this one consumed nothing.
+#[derive(Debug)]
+pub struct DistillBusy(pub String);
+
+impl std::fmt::Display for DistillBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "another distill run is already running (lock {}) — nothing consumed",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for DistillBusy {}
+
+/// Exclusive per-database run lock (`<db>.distill.lock`). Nothing claims
+/// `raw_items` rows, so two concurrent runs would fetch, classify and create
+/// tasks from the same captures. An OS file lock is released by the kernel
+/// when its holder exits or is killed, so a crashed run can never wedge the
+/// next one the way a lease row could.
+fn acquire_run_lock(db: &Db) -> Result<std::fs::File> {
+    let path = format!("{}.distill.lock", db.path().display());
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open distill run lock {path}"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(anyhow::Error::new(DistillBusy(path))),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(anyhow::Error::new(e).context(format!("lock distill run lock {path}")))
+        }
+    }
+}
+
 fn run_native_within<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
@@ -671,6 +709,8 @@ fn run_native_within<P: LlmProvider + ?Sized>(
 ) -> Result<NativeReport> {
     let start = std::time::Instant::now();
     let ctx = EventCtx::system("distill");
+    // Held until this function returns (dropping the File unlocks it).
+    let _run_lock = acquire_run_lock(db)?;
 
     provider
         .preflight()
@@ -1416,6 +1456,31 @@ mod tests {
             .unwrap();
         assert_eq!(blank_tasks, 0, "no task may have a blank title");
         assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 2);
+    }
+
+    /// Regression (DIST-12): nothing claimed the rows, so two concurrent runs
+    /// (the hourly timer and a manual `pt distill`) both fetched, classified
+    /// and created tasks from the same captures.
+    #[test]
+    fn a_concurrent_run_is_refused_without_touching_the_queue() {
+        let (_dir, db) = fresh_db();
+        seed_inbox(&db, &["call the bank about the mandate"]);
+        let lock_path = format!("{}.distill.lock", db.path().display());
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        held.lock().unwrap();
+
+        let err = run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100).unwrap_err();
+        assert!(err.to_string().contains("already running"), "{err:#}");
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+
+        held.unlock().unwrap();
+        let report = run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100).unwrap();
+        assert_eq!(report.consumed, 1, "the lock is released with its holder");
     }
 
     /// Regression (DIST-5): a 429/5xx/timeout was charged to the captures as

@@ -102,6 +102,12 @@ work, whichever comes first, and marks what finished as processed. The unit's
 30-minute `TimeoutStartSec` therefore never kills a run mid-batch; rows left
 over wait for the next hourly run.
 
+Only one run distills at a time. A run holds an exclusive OS file lock on
+`<db>.distill.lock` (e.g. `~/puretensor-tasks/tasks.db.distill.lock`) for its
+whole duration; a concurrent `pt distill` prints `distill skipped`, consumes
+nothing, records no event and exits 0. The kernel drops the lock when the
+holder exits or is killed, so a crashed run never blocks the next one.
+
 ### Inspect
 
 ```bash
