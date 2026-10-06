@@ -463,14 +463,13 @@ def test_notify_is_at_least_once_via_sweep(env, tmp_path, tg):
 # --------------------------------------------------------------------------- HTTP + /tg/callback
 
 
-@pytest.fixture()
-def server(env):
+def serve_with_tokens(env, **extra_env):
     tokens = {}
     for client, scope in (("hal", "write"), ("nexus", "write"), ("operator-shared", "admin"), ("scraper", "read")):
         out = run(env, "token", "create", client, "--scope", scope)
         tokens[client] = TOKEN_RE.search(out.stdout + out.stderr).group(0)
     port = free_port()
-    e = dict(env, PTASK_API_TOKEN="legacy-" + "z" * 40)
+    e = dict(env, PTASK_API_TOKEN="legacy-" + "z" * 40, **extra_env)
     proc = subprocess.Popen([PT, "serve", "--bind", f"127.0.0.1:{port}"], env=e,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     base = f"http://127.0.0.1:{port}"
@@ -486,6 +485,17 @@ def server(env):
     yield base, tokens
     proc.terminate()
     proc.wait(timeout=10)
+
+
+@pytest.fixture()
+def server(env):
+    # Decide buttons on: the switch that lets a forwarder relay approval taps.
+    yield from serve_with_tokens(env, PTASK_TG_APPROVAL_BUTTONS="1")
+
+
+@pytest.fixture()
+def server_no_buttons(env):
+    yield from serve_with_tokens(env)
 
 
 def call_api(base: str, method: str, path: str, token: str | None, body: dict | None = None):
@@ -576,6 +586,44 @@ def test_tg_callback_requires_forwarder_and_operator_from_id(server):
     assert tap(t["nexus"], f"ptapprove:{a['id']}", "cb-1", int(OPERATOR_CHAT)) == 200, "a replayed tap is a no-op"
     assert tap(t["nexus"], f"ptreject:{b['id']}", "cb-2", int(OPERATOR_CHAT)) == 200
     assert status(b)["status"] == "rejected"
+
+
+def test_tg_approval_taps_refused_while_buttons_are_off(server_no_buttons):
+    base, t = server_no_buttons
+    _, a = create_via_http(base, t["hal"], "A", {"n": 3})
+    body = {"data": f"ptapprove:{a['id']}", "callback_id": "cb-off", "from_id": int(OPERATOR_CHAT)}
+    assert call_api(base, "POST", "/tg/callback", t["nexus"], body)[0] == 403
+    assert call_api(base, "GET", f"/api/approvals/{a['id']}", t["scraper"])[1]["status"] == "pending"
+
+
+def tap_actor(env: dict, key: str) -> str:
+    with sqlite3.connect(env["PTASK_DB"]) as db:
+        row = db.execute("SELECT actor FROM pt_event_log WHERE uuid = ?",
+                         (f"tg-cb:{key}",)).fetchone()
+    assert row, f"no journal entry for {key}"
+    return row[0]
+
+
+def test_tg_task_taps_are_the_operators_only_from_a_forwarder(server, env):
+    base, t = server
+    run(env, "add", "tap target")
+    run(env, "add", "second target")
+    # An agent's write token may still act, but as itself, never as the operator.
+    body = {"data": "ptdismiss:PT-1", "callback_id": "cb-agent"}
+    assert call_api(base, "POST", "/tg/callback", t["hal"], body)[0] == 200
+    assert tap_actor(env, "hal:cb-agent") == "telegram via hal"
+    body = {"data": "ptdismiss:PT-2", "callback_id": "cb-nexus"}
+    assert call_api(base, "POST", "/tg/callback", t["nexus"], body)[0] == 200
+    assert tap_actor(env, "cb-nexus") == "telegram"
+    # An agent can't pre-claim the operator's callback id and swallow the tap.
+    run(env, "add", "third target")
+    body = {"data": "ptdismiss:PT-3", "callback_id": "cb-claimed"}
+    assert call_api(base, "POST", "/tg/callback", t["hal"], body)[0] == 200
+    run(env, "reopen", "PT-3")
+    body = {"data": "ptdone:PT-3", "callback_id": "cb-claimed"}
+    code, resp = call_api(base, "POST", "/tg/callback", t["nexus"], body)
+    assert code == 200 and not resp.get("duplicate"), resp
+    assert pj(env, "show", "PT-3")["status"] == "done"
 
 
 # --------------------------------------------------------------------------- MCP

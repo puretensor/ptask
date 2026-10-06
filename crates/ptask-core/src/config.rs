@@ -35,6 +35,8 @@ pub struct Config {
 
 /// Triage-cockpit surface served by `pt serve` (v2.3.0 — absorbed from the
 /// Python sidecar). Basic auth, NOT bearer tokens: the consumer is a browser.
+/// (The Python sidecar in dashboard/ has no login since PT-2201; this one
+/// keeps Basic auth.)
 #[derive(Debug, Clone, Default)]
 pub struct DashConfig {
     /// Basic-auth user (`$PTASK_DASH_USER`, default "ops").
@@ -55,19 +57,36 @@ pub struct DashConfig {
     /// Public dashboard origin (`$PTASK_DASH_URL`), used as the approval
     /// Telegram URL-button target. None = omit the button.
     pub url: Option<String>,
+    /// Host names the dashboard routes answer to besides IP literals,
+    /// `localhost` and `*.ts.net`: `$PTASK_DASH_ALLOWED_HOSTS`
+    /// (comma-separated; an entry starting with "." matches that suffix), the
+    /// host of `$PTASK_DASH_URL`, and this machine's own short hostname.
+    /// Lower-cased, without port or trailing dot.
+    pub allowed_hosts: Vec<String>,
 }
 
 /// API-token material for `pt serve` (enforce-if-configured).
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
     /// Write token — gates `/sync`, `/capture`, `/email` (and reads, as a
-    /// superset credential). `None` = unauthenticated back-compat mode.
+    /// superset credential). With neither env token nor an unrevoked named
+    /// token configured, loopback listeners stay in unauthenticated
+    /// back-compat mode.
     pub api_token: Option<String>,
     /// Read-only token accepted by `/metrics` and the read routes, so a
     /// Prometheus scraper doesn't hold the fleet-wide write token.
     pub metrics_token: Option<String>,
     /// Operator escape hatch for deliberately isolated deployments.
     pub allow_unauthenticated: bool,
+    /// Host names an anonymous request may use (the dashboard's list): a
+    /// DNS-rebinding page carries no credential either, so back-compat
+    /// anonymous access answers only to our own names.
+    pub allowed_hosts: Vec<String>,
+    /// Refuse anonymous callers whatever the token table says. `pt serve` sets
+    /// it for non-loopback listeners without `PTASK_ALLOW_UNAUTHENTICATED`, so
+    /// revoking the last named token can't turn such a listener anonymous.
+    /// Not read from the environment.
+    pub anonymous_forbidden: bool,
 }
 
 /// Outbound + inbound webhook secrets/targets for `pt serve`.
@@ -140,6 +159,15 @@ impl Config {
     /// Read the full configuration from the process environment. Call once
     /// per binary, at the entrypoint.
     pub fn from_env() -> Self {
+        let mut allowed_hosts = dash_allowed_hosts(
+            env_nonempty("PTASK_DASH_ALLOWED_HOSTS").as_deref(),
+            env_nonempty("PTASK_DASH_URL").as_deref(),
+        );
+        if let Some(own) = own_short_hostname()
+            && !allowed_hosts.contains(&own)
+        {
+            allowed_hosts.push(own);
+        }
         Config {
             db_path: env_db_path(),
             actor: env_nonempty("PTASK_ACTOR").unwrap_or_else(|| "shell".into()),
@@ -147,6 +175,8 @@ impl Config {
                 api_token: env_nonempty("PTASK_API_TOKEN"),
                 metrics_token: env_nonempty("PTASK_METRICS_TOKEN"),
                 allow_unauthenticated: env_truthy("PTASK_ALLOW_UNAUTHENTICATED"),
+                allowed_hosts: allowed_hosts.clone(),
+                anonymous_forbidden: false,
             },
             notify: DispatchCfg {
                 telegram_token: env_first(&["PTASK_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"]),
@@ -203,11 +233,50 @@ impl Config {
                     .unwrap_or_else(|| "http://127.0.0.1:9510".into()),
                 frame_ancestor: env_nonempty("PTASK_DASH_FRAME_ANCESTOR"),
                 url: env_nonempty("PTASK_DASH_URL"),
+                allowed_hosts,
             },
             tg_forwarders: parse_forwarders(env_nonempty("PTASK_TG_FORWARDERS")),
             tg_approval_buttons: env_truthy("PTASK_TG_APPROVAL_BUTTONS"),
         }
     }
+}
+
+/// `$PTASK_DASH_ALLOWED_HOSTS` entries plus the host part of
+/// `$PTASK_DASH_URL`, normalised the way the Host check compares them (lower
+/// case, no port, no trailing dot; a leading "." marks a suffix entry).
+fn dash_allowed_hosts(list: Option<&str>, url: Option<&str>) -> Vec<String> {
+    let mut hosts: Vec<String> = list
+        .unwrap_or("")
+        .split(',')
+        .map(host_without_port)
+        .filter(|h| !h.is_empty())
+        .collect();
+    if let Some(url) = url {
+        let rest = url.split_once("://").map_or(url, |(_, r)| r);
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host = host_without_port(authority.rsplit_once('@').map_or(authority, |(_, h)| h));
+        if !host.is_empty() && !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
+fn host_without_port(host_port: &str) -> String {
+    let host_port = host_port.trim();
+    let host = match host_port.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map_or("", |(h, _)| h),
+        None => host_port.split(':').next().unwrap_or(""),
+    };
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// This machine's short hostname (Linux), so a dotless request to the box's
+/// own name passes the Host check that refuses every other dotless name.
+fn own_short_hostname() -> Option<String> {
+    let raw = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
+    let short = raw.trim().split('.').next()?.to_ascii_lowercase();
+    (!short.is_empty()).then_some(short)
 }
 
 fn parse_forwarders(raw: Option<String>) -> Vec<String> {
@@ -269,6 +338,27 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    #[test]
+    fn dash_allowed_hosts_normalises_the_list_and_adds_the_dashboard_url_host() {
+        assert_eq!(
+            dash_allowed_hosts(
+                Some(" Cockpit.Example.org. ,,other.example:8443,.tail07f9ef.ts.net "),
+                Some("https://ops@ptask.example.net:8443/cockpit?x=1"),
+            ),
+            vec![
+                "cockpit.example.org",
+                "other.example",
+                ".tail07f9ef.ts.net",
+                "ptask.example.net"
+            ]
+        );
+        assert_eq!(
+            dash_allowed_hosts(Some("[fd7a::2]:1"), Some("http://[fd7a::1]:9510/")),
+            vec!["fd7a::2", "fd7a::1"]
+        );
+        assert!(dash_allowed_hosts(None, None).is_empty());
+    }
 
     #[test]
     fn dispatch_cfg_configured_helpers() {

@@ -9,14 +9,35 @@ on:
 permissions:
   contents: read
 
+# Every job runs on the self-hosted tensor-core runner, which is also the
+# production host (canonical store, `pt serve`, timers). This repository is
+# public, so each job runs only for pushes and for pull requests whose head
+# branch lives in this repository (opening one needs write access). The test
+# is on the head repo's name, not `head.repo.fork`: a PR whose fork was deleted
+# has a null head repo, and `!null` would let it through. A fork can still
+# rewrite this file in its PR; the repository's fork-approval setting is the
+# control for that (docs/operations.md, "CI runner").
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  # A job skipped by `if:` reports success, so without this a fork PR would
+  # show green CI with nothing run. GitHub-hosted: it never touches tensor-core.
+  fork-pr:
+    name: fork PR (CI not run)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - run: |
+          echo "::error::CI does not run fork pull requests on the self-hosted runner. A maintainer can push this branch into the repository to test it."
+          exit 1
+
   actionlint:
     name: actionlint
     runs-on: [self-hosted, tensor-core]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: install actionlint
@@ -35,6 +56,7 @@ jobs:
   fmt:
     name: rustfmt
     runs-on: [self-hosted, tensor-core]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -46,6 +68,7 @@ jobs:
   clippy:
     name: clippy
     runs-on: [self-hosted, tensor-core]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -60,6 +83,7 @@ jobs:
   test:
     name: test
     runs-on: [self-hosted, tensor-core]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # This self-hosted runner reuses one workspace across runs, and
@@ -93,6 +117,7 @@ jobs:
   dashboard-test:
     name: dashboard python tests
     runs-on: [self-hosted, tensor-core]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -107,6 +132,7 @@ jobs:
   security:
     name: dependency policy check
     runs-on: [self-hosted, tensor-core]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -123,6 +149,7 @@ jobs:
   schema-check:
     name: schema sanity
     runs-on: [self-hosted, tensor-core]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # This self-hosted runner reuses one workspace across runs, and

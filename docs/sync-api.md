@@ -20,13 +20,25 @@
 ## Auth
 
 Loopback `pt serve` binds keep the original local-dev mode and accept requests
-without application credentials. Because the machine APIs and the always-
+without application credentials until a token is configured: `PTASK_API_TOKEN`,
+`PTASK_METRICS_TOKEN`, or any unrevoked named token (`pt token create`) closes
+anonymous access. While anonymous access is open, a request is served only
+when its `Host` names the server itself (IP literal, `localhost`, the machine's short
+hostname, `*.ts.net`, `PTASK_DASH_ALLOWED_HOSTS`), because a DNS-rebinding
+page carries no credential either. A `.suffix` entry does not match the apex
+name itself (list it separately), a request with no `Host` header passes, and
+`pt serve` learns the machine's short hostname only on Linux. Tokenless clients
+that address `pt serve` by another DNS name (a reverse proxy forwarding its own
+`Host`, a LAN name in `PTASK_SYNC_URL`) need that name in
+`PTASK_DASH_ALLOWED_HOSTS`. Because the machine APIs and the always-
 mounted dashboard use separate auth schemes, non-loopback binds fail closed
-unless both `PTASK_API_TOKEN` and `PTASK_DASH_PASS` are set.
+unless machine-API auth (`PTASK_API_TOKEN` or a named token) and
+`PTASK_DASH_PASS` are both set, and a non-loopback listener never serves
+anonymous callers, even after its last named token is revoked.
 `PTASK_ALLOW_UNAUTHENTICATED=1` is an explicit test-only override for isolated
 deployments.
 
-`PTASK_API_TOKEN` gates `POST /sync`, `POST /capture`,
+Machine-API auth (the env token or a named token) gates `POST /sync`, `POST /capture`,
 `POST /capture/resolve`, `POST /email`, `POST /tg/callback`, and the read APIs
 (`GET /next`, `GET /detail/{uuid}`, `GET /resolve`, `GET /list`,
 `GET /metrics`). The `/mcp` mount separately requires a non-revoked named
@@ -190,10 +202,20 @@ Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
 
 ## Dashboard surface (v2.3.0)
 
-The Triage Cockpit's API lives in `pt serve` (the Python sidecar shrank to a
-voice shim). HTTP **Basic** auth (`PTASK_DASH_USER`/`PTASK_DASH_PASS`; open
-when no password configured — local/dev only). Same shapes as the sidecar
-v0.6.0 contract.
+The Triage Cockpit's API also lives in `pt serve`. HTTP **Basic** auth
+(`PTASK_DASH_USER`/`PTASK_DASH_PASS`; open when no password configured —
+local/dev only). Same shapes as the sidecar v0.6.0 contract. While no password
+is configured, these routes (and `GET /`) answer only to the server's own names
+— IP literals, `localhost`, the machine's short hostname, `*.ts.net`,
+`PTASK_DASH_ALLOWED_HOSTS` (`.suffix` entries match the suffix) and the host of
+`PTASK_DASH_URL` — and refuse any other `Host` with 421. Together with the
+Host check on anonymous machine-API access (see Auth), a DNS-rebinding page
+cannot drive the server.
+
+The Python sidecar in `dashboard/` (the live tailnet cockpit) is a different
+process with a different posture: no login at all since PT-2201, the same Host
+check on every request, and approval decisions gated by
+`PTASK_DASH_DECIDE_TOKEN` (see `dashboard/README.md`).
 
 Reads: `GET /api/stats · /api/tasks?status=&limit= · /api/critical?limit= ·
 /api/timeline · /api/heatmap · /api/tasks/{id}/events` (journal history) ·
@@ -213,7 +235,10 @@ proxy forwards only the path it is given, never the query string.
 ## POST /tg/callback (v2.2.0)
 
 Executes a Telegram inline-button tap forwarded by nexus (the bot's single
-`getUpdates` owner). Requires `write` scope.
+`getUpdates` owner). Requires `write` scope. Only a client named in
+`PTASK_TG_FORWARDERS` (default `nexus`) acts as the operator's tap; any other
+write client's task tap is journaled as `telegram via <client_id>`, and its
+approval taps get 403.
 
 ```json
 {"data": "ptdone:<task-uuid>", "callback_id": "<telegram callback id>"}
@@ -221,8 +246,10 @@ Executes a Telegram inline-button tap forwarded by nexus (the bot's single
 
 Verbs: `ptdone` | `ptsnooze` (3 days) | `ptdismiss`. Idempotent per
 `callback_id` (journal uuid `tg-cb:<id>`); duplicate taps return
-`{"ok":true,"duplicate":true}`. Actions land in the journal as
-`actor=telegram`, `source=tg-callback`.
+`{"ok":true,"duplicate":true}`. Forwarded actions land in the journal as
+`actor=telegram`, `source=tg-callback`. Approval verbs (`ptapprove:AP-n`,
+`ptreject:AP-n`) are refused with 403 unless `PTASK_TG_APPROVAL_BUTTONS=1`; see
+`docs/approvals.md`.
 
 ## GET /list (v2.0.0)
 

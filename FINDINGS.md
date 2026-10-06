@@ -5,6 +5,43 @@ Running register of review findings. One verb per item: **fixed** (version), **d
 why). Companion ledger: `review-ledger.jsonl`; the Opus reader report this section was
 triaged from is archived at `~/reports/cc/fable-pass-2026-09/reports/report-ptask.md`.
 
+## 2026-10-05 — adversarial pass (3.35.0)
+
+Scope: the whole tree at `bd2c5cb` (3.34.0, after PT-2201 removed the cockpit login).
+Eight adversarial readers (server, dashboard, MCP and approvals, core storage, parsers,
+CLI/TUI/bot, distill and notify, CI and ops) reported about 115 candidate findings, with
+overlaps. Each was re-checked against the code, and most were reproduced against the built
+`pt` or a scratch sidecar before fixing. Fixes land as several PRs. Every fix carries a
+regression test that fails on the old code. Each PR gets an independent second review
+before merge.
+
+### Fixed (3.35.0) — access gates
+
+| Area | Finding | Fix |
+|---|---|---|
+| CI | The repository is public, and every CI job ran on the self-hosted `tensor-core` runner, which is the production host, including `pull_request` runs from forks. | Jobs run only for pushes and same-repository PRs; a GitHub-hosted job fails fork PRs so skipped CI never reads green. GitHub runs a fork's own workflow file, so the real control is the fork-approval setting: `docs/operations.md`, "CI runner". |
+| Dashboard sidecar | After PT-2201 the sidecar had no credential and never checked Host. The CSRF check only compared Origin with the client-supplied Host. A DNS-rebinding page under the attacker's own name could read every task and pass that check on writes. | Every request's Host must be an IP literal, `localhost`, the machine's short hostname, `*.ts.net`, or in `PTASK_DASH_ALLOWED_HOSTS` (`.suffix` entries allowed), else 421. Other dotless names are refused: a hostile LAN can resolve them. The decide token is removed from the environment so no `pt`/`aws` child inherits it. |
+| Dashboard sidecar / approvals | Any tailnet caller, with no credential and no Origin header, could approve or reject any AP-n. The sidecar runs `pt approve --via dashboard` with `CLAUDECODE` stripped, which defeats "only the operator decides". | Approve/reject requires `X-PTask-Decide-Token` = `PTASK_DASH_DECIDE_TOKEN` (16+ characters). With it unset, decisions are refused. The cockpit asks for the token once per browser. |
+| Dashboard sidecar | A decision note starting with `-` reached clap as a flag, and the decision failed. A non-string `title` or `deadline` dropped the connection. `/api/stream` had no cap on threads. | `--note=…`. 400 on type errors. At most 32 streams (503 beyond). |
+| `pt serve` dashboard | Basic-auth lockout bypasses: `GET /` checked the password with no throttle, and any non-401 response (the auth-exempt manifest, an extractor rejection) wiped the failure count. | The throttle judges Basic credentials itself (a bearer header is not a guess). `/` sits behind it. A password-less cockpit gets the same Host guard, and anonymous machine-API access answers only to the server's own names. |
+| Auth | Named tokens never closed anonymous access. Finishing the rotation off `PTASK_API_TOKEN` and setting the override the bind error suggests would have given every unauthenticated caller Write. | An unrevoked named token closes anonymous access and counts as API auth for the bind check. A non-loopback listener never serves anonymous callers, so revoking the last named token can't open it. |
+| Telegram | `/tg/callback` approve/reject worked with decide buttons switched off. `ptdone`/`ptdismiss`/`ptsnooze` accepted any write token and journaled the action as the operator's tap. | Approval taps need `PTASK_TG_APPROVAL_BUTTONS=1` and a `PTASK_TG_FORWARDERS` client. Task taps from any other client are journaled as `telegram via <client_id>`. |
+
+### Operator actions (outside the repository)
+
+- GitHub → Settings → Actions → General: require approval for all external contributors.
+  Without it a fork's PR can still target the self-hosted runner.
+- Set `PTASK_DASH_DECIDE_TOKEN` in `~/puretensor-tasks/.dashboard.env` (both instances)
+  to decide from the cockpit.
+- If any cloudflared tunnel still routes to the sidecar (README v0.20.1 documents one),
+  remove it. The sidecar has no login. Unknown public Host names now get 421.
+- If you reach the cockpit by a MagicDNS short alias other than the box's own hostname,
+  add it to `PTASK_DASH_ALLOWED_HOSTS`; consider `PTASK_DASH_ALLOWED_HOSTS=.<tailnet>.ts.net`.
+- Tokenless clients that reach `pt serve` by a DNS name other than `localhost`, the short
+  hostname or `*.ts.net` (reverse proxy, LAN name) need that name in `PTASK_DASH_ALLOWED_HOSTS`.
+- Check that nexus forwards taps with its `nexus` token (`pt token list` shows last use);
+  on the legacy env token its taps are journaled as `telegram via legacy-env`.
+
 ## 2026-09-25 — residue follow-up (3.34.0)
 
 Scope: the 3.33.0 residue below, plus what the follow-up read turned up. Every fix has a

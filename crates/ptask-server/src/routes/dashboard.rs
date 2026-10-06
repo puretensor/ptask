@@ -111,6 +111,7 @@ pub fn router() -> Router<AppState> {
             "/api/voice/task",
             post(api_voice_task).layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES)),
         )
+        .route("/", get(root))
         .route("/index.html", get(serve_index))
         .route("/manifest.webmanifest", get(serve_manifest))
 }
@@ -188,14 +189,24 @@ impl BasicThrottle {
 }
 
 /// Route layer for the dashboard: refuses a locked-out client before the
-/// handler runs, and counts a 401 on a request that presented credentials
-/// as a failed guess. Handlers keep calling [`authed`] unchanged.
+/// handler runs, and judges presented credentials itself. A wrong guess is
+/// counted and answered 401 here, so no route (the auth-exempt manifest
+/// included) and no extractor rejection can stand in for a success and wipe
+/// the client's failure count. Handlers keep calling [`authed`] for the
+/// credential-free case.
 pub async fn basic_throttle(
     State(state): State<AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let presented = state.dash.pass.is_some() && req.headers().contains_key(header::AUTHORIZATION);
+    // Only a Basic header is a guess at the dashboard password; a bearer token
+    // aimed at this route is just refused by the handler, uncounted.
+    let presented = state.dash.pass.is_some()
+        && req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.as_bytes().get(..6))
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"basic "));
     if !presented {
         return next.run(req).await;
     }
@@ -211,13 +222,45 @@ pub async fn basic_throttle(
         )
             .into_response();
     }
-    let resp = next.run(req).await;
-    if resp.status() == StatusCode::UNAUTHORIZED {
+    if !authed(&state, req.headers()) {
         state.dash_throttle.failure(peer);
-    } else {
-        state.dash_throttle.success(peer);
+        return need_auth();
     }
-    resp
+    state.dash_throttle.success(peer);
+    next.run(req).await
+}
+
+/// DNS-rebinding guard for the dashboard routes (the sidecar's
+/// `host_allowed`). A rebinding page can only address us under a name its
+/// author controls, so open (password-less) dashboard routes answer only to
+/// names nobody outside the operator can point here: IP literals,
+/// `localhost`, `*.ts.net`, and `DashConfig::allowed_hosts` (which carries
+/// the machine's own short name). With `PTASK_DASH_PASS` set the browser never
+/// sends the Basic credentials to the rebinding page's origin, so the guard
+/// stands down and any public name in front of the cockpit keeps working. A
+/// request with neither a Host header nor an authority is not a browser's.
+pub async fn host_guard(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if state.dash.pass.is_some() {
+        return next.run(req).await;
+    }
+    let extra = &state.dash.allowed_hosts;
+    let allowed = match req.headers().get(header::HOST) {
+        Some(value) => value
+            .to_str()
+            .is_ok_and(|h| crate::auth::host_allowed(h, extra)),
+        None => req
+            .uri()
+            .authority()
+            .is_none_or(|a| crate::auth::host_allowed(a.as_str(), extra)),
+    };
+    if !allowed {
+        return jerr(StatusCode::MISDIRECTED_REQUEST, "unknown host");
+    }
+    next.run(req).await
 }
 
 /// Sidecar rule: no configured password = open (local/dev); otherwise
@@ -232,7 +275,13 @@ pub fn authed(state: &AppState, headers: &HeaderMap) -> bool {
     else {
         return false;
     };
-    let Some(b64) = hdr.strip_prefix("Basic ") else {
+    // The scheme is case-insensitive (RFC 7235), read exactly as the throttle
+    // reads it so a header is counted iff it is checked.
+    let Some(b64) = hdr
+        .get(..6)
+        .filter(|s| s.eq_ignore_ascii_case("basic "))
+        .map(|_| &hdr[6..])
+    else {
         return false;
     };
     let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64) else {
@@ -1339,6 +1388,7 @@ mod tests {
         AppState, HeaderMap, Path, State, act_done, parse_deadline, serve_www_file,
         valid_frame_ancestor,
     };
+    use crate::auth::host_allowed;
     use ptask_core::config::DashConfig;
     use std::time::{Duration, Instant};
 
@@ -1598,6 +1648,237 @@ mod tests {
             .unwrap();
         assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(locked.headers().contains_key(header::RETRY_AFTER));
+    }
+
+    fn throttled_app() -> axum::Router {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            ptask_core::Db::open(dir.path().join("test.db")).unwrap(),
+            Default::default(),
+            Default::default(),
+        )
+        .with_dash(DashConfig {
+            user: "ops".into(),
+            pass: Some("correct horse".into()),
+            ..Default::default()
+        });
+        std::mem::forget(dir);
+        crate::router(state)
+    }
+
+    fn basic_header(pw: &str) -> String {
+        use base64::Engine;
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("ops:{pw}"))
+        )
+    }
+
+    async fn status_of(app: &axum::Router, req: axum::http::Request<axum::body::Body>) -> u16 {
+        use tower::ServiceExt;
+        app.clone().oneshot(req).await.unwrap().status().as_u16()
+    }
+
+    /// Every route that sees a wrong password counts it, and nothing but a
+    /// correct password clears the count: not the auth-exempt manifest, not
+    /// an extractor rejection, and `/` is no longer an unthrottled oracle.
+    #[tokio::test]
+    async fn basic_auth_lockout_cannot_be_dodged_through_other_routes() {
+        use super::THROTTLE_MAX_FAILURES;
+        use axum::http::{Request, header};
+        let get = |uri: &str, pw: &str| {
+            Request::builder()
+                .uri(uri)
+                .header(header::AUTHORIZATION, basic_header(pw))
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        let text_post = |pw: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/tasks")
+                .header(header::AUTHORIZATION, basic_header(pw))
+                .header(header::CONTENT_TYPE, "text/plain")
+                .body(axum::body::Body::from("x"))
+                .unwrap()
+        };
+        for dodge in ["manifest", "extractor", "root"] {
+            let app = throttled_app();
+            for _ in 0..THROTTLE_MAX_FAILURES - 1 {
+                assert_eq!(status_of(&app, get("/api/stats", "guess")).await, 401);
+            }
+            let status = match dodge {
+                "manifest" => status_of(&app, get("/manifest.webmanifest", "guess")).await,
+                "extractor" => status_of(&app, text_post("guess")).await,
+                _ => status_of(&app, get("/", "guess")).await,
+            };
+            assert_eq!(status, 401, "{dodge}: a wrong password must be refused");
+            assert_eq!(
+                status_of(&app, get("/api/stats", "correct horse")).await,
+                429,
+                "{dodge}: the fifth wrong guess must lock the client"
+            );
+            assert_eq!(
+                status_of(&app, get("/", "correct horse")).await,
+                429,
+                "{dodge}"
+            );
+        }
+    }
+
+    /// A bearer token aimed at a dashboard route is not a password guess, so
+    /// it must not count toward the operator's lockout.
+    #[tokio::test]
+    async fn bearer_headers_do_not_count_as_password_guesses() {
+        use super::THROTTLE_MAX_FAILURES;
+        use axum::http::{Request, header};
+        let app = throttled_app();
+        for _ in 0..THROTTLE_MAX_FAILURES + 1 {
+            let req = Request::builder()
+                .uri("/manifest.webmanifest")
+                .header(header::AUTHORIZATION, "Bearer some-api-token")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            status_of(&app, req).await;
+        }
+        let req = Request::builder()
+            .uri("/api/stats")
+            .header(header::AUTHORIZATION, basic_header("correct horse"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(status_of(&app, req).await, 200);
+        // The scheme name is case-insensitive (RFC 7235).
+        let lower = basic_header("correct horse").replacen("Basic ", "basic ", 1);
+        let req = Request::builder()
+            .uri("/api/stats")
+            .header(header::AUTHORIZATION, lower)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(status_of(&app, req).await, 200);
+    }
+
+    #[tokio::test]
+    async fn dashboard_routes_refuse_a_foreign_host() {
+        use axum::http::{Request, header};
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(
+            ptask_core::Db::open(dir.path().join("test.db")).unwrap(),
+            Default::default(),
+            Default::default(),
+        )
+        .with_dash(DashConfig {
+            // Config::from_env adds the machine's own short name to the list.
+            allowed_hosts: vec!["cockpit.example.org".into(), "tensor-core".into()],
+            ..Default::default()
+        });
+        let app = crate::router(state);
+        let get = |uri: &str, host: &str| {
+            Request::builder()
+                .uri(uri)
+                .header(header::HOST, host)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        for host in [
+            "127.0.0.1:9501",
+            "localhost",
+            "tensor-core:9501",
+            "ptask.tail07f9ef.ts.net",
+            "cockpit.example.org",
+        ] {
+            assert_eq!(
+                status_of(&app, get("/api/stats", host)).await,
+                200,
+                "{host}"
+            );
+        }
+        for uri in ["/api/stats", "/api/tasks", "/", "/api/stream"] {
+            assert_eq!(
+                status_of(&app, get(uri, "rebind.attacker.example:9501")).await,
+                421,
+                "{uri}"
+            );
+        }
+        let write = Request::builder()
+            .method("POST")
+            .uri("/api/tasks")
+            .header(header::HOST, "rebind.attacker.example:9501")
+            .header(header::ORIGIN, "http://rebind.attacker.example:9501")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"title":"must not be created"}"#))
+            .unwrap();
+        assert_eq!(status_of(&app, write).await, 421);
+        // /healthz carries nothing and keeps answering any Host, so monitors
+        // probing by a public name still work.
+        assert_eq!(
+            status_of(&app, get("/healthz", "rebind.attacker.example")).await,
+            200
+        );
+
+        // With Basic auth configured the credentials do the work: a public
+        // name in front of the cockpit keeps answering.
+        let authed = throttled_app();
+        let req = Request::builder()
+            .uri("/api/stats")
+            .header(header::HOST, "ptask.example.com")
+            .header(header::AUTHORIZATION, basic_header("correct horse"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(status_of(&authed, req).await, 200);
+    }
+
+    #[test]
+    fn host_allowed_matches_the_sidecar_rules() {
+        let none: Vec<String> = Vec::new();
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:9510",
+            "100.121.42.54:9510",
+            "[::1]",
+            "[::1]:9510",
+            "localhost",
+            "LOCALHOST.",
+            "ptask.tail07f9ef.ts.net:443",
+        ] {
+            assert!(host_allowed(host, &none), "{host}");
+        }
+        // Other dotless names resolve however a hostile LAN likes (DHCP search
+        // domain, LLMNR, NBT-NS); only configured ones (our own name) pass.
+        let own = vec![
+            "tensor-core".to_string(),
+            ".cockpit.example.org".to_string(),
+        ];
+        assert!(host_allowed("tensor-core:9510", &own));
+        assert!(host_allowed("a.cockpit.example.org", &own));
+        assert!(!host_allowed("cockpit.example.org.evil", &own));
+        for host in [
+            "tensor-core",
+            "evil",
+            "wpad",
+            "ts.net",
+            "[fe80::1%evil.example]",
+        ] {
+            assert!(!host_allowed(host, &none), "{host}");
+        }
+        for host in [
+            "",
+            "evil.example",
+            "rebind.attacker.example:9510",
+            "ts.net.evil.example",
+            "evilts.net",
+            "[::1",
+            "[evil]:80",
+            "127.0.0.1:x",
+            "localhost:99999999",
+            "-bad-",
+            "a b",
+        ] {
+            assert!(!host_allowed(host, &none), "{host}");
+        }
+        assert!(host_allowed(
+            "Cockpit.Example.org:8443",
+            &["cockpit.example.org".to_string()]
+        ));
     }
 
     #[test]

@@ -1,9 +1,12 @@
 //! Optional application-level auth for mutating HTTP routes.
 //!
-//! Loopback `pt serve` keeps unauthenticated local-development compatibility.
-//! Non-loopback listeners require both `PTASK_API_TOKEN` and dashboard Basic
-//! auth unless the explicit unauthenticated override is set. The API token
-//! requires machine-API callers to send either:
+//! Loopback `pt serve` keeps unauthenticated local-development compatibility
+//! until a token is configured (the env token or any unrevoked named token),
+//! and in that mode answers anonymous requests only when they address one of
+//! the server's own names (DNS rebinding). Non-loopback listeners require API auth
+//! (`PTASK_API_TOKEN` or a named token) and dashboard Basic auth unless the
+//! explicit unauthenticated override is set, and never serve anonymous callers.
+//! Machine-API callers send either:
 //!   - `Authorization: Bearer <token>`
 //!   - `X-PTask-Token: <token>`
 
@@ -30,8 +33,10 @@ const TOKEN_HEADER: &str = "x-ptask-token";
 ///   3. `pt_api_tokens` hash lookup → named identity + its scope
 ///
 /// No credential presented: allowed only in unauthenticated back-compat
-/// mode (no env token configured) as `anonymous` (Write) — identical
-/// enforcement semantics to the pre-v1.17 single-token gate.
+/// mode — no env token configured and no unrevoked named token — as
+/// `anonymous` (Write). An active named token closes anonymous access just as
+/// the env token does, so finishing the rotation off `PTASK_API_TOKEN` does
+/// not reopen every route.
 #[allow(clippy::result_large_err)] // the Err IS the ready-made 401 Response
 pub fn authenticate(
     db: &Db,
@@ -71,13 +76,28 @@ pub fn authenticate(
             }
         }
         None => {
-            if auth.api_token.is_none() && auth.metrics_token.is_none() {
-                Identity {
+            if auth.api_token.is_some() || auth.metrics_token.is_some() || auth.anonymous_forbidden
+            {
+                return Err(unauthorized());
+            }
+            // A DNS-rebinding page has no credential either: anonymous access
+            // answers only to requests addressed to one of our own names.
+            if headers.get(header::HOST).is_some_and(|h| {
+                !h.to_str()
+                    .is_ok_and(|h| host_allowed(h, &auth.allowed_hosts))
+            }) {
+                return Err(unauthorized());
+            }
+            match tokens::any_active(db) {
+                Ok(false) => Identity {
                     client_id: "anonymous".into(),
                     scope: Scope::Write,
+                },
+                Ok(true) => return Err(unauthorized()),
+                Err(e) => {
+                    warn!(target: "ptask::auth", error = %e, "named-token check failed");
+                    return Err(unauthorized());
                 }
-            } else {
-                return Err(unauthorized());
             }
         }
     };
@@ -114,18 +134,20 @@ fn unauthorized() -> Response {
 /// Refuse externally reachable unauthenticated API listeners by default.
 ///
 /// Loopback keeps the old local-dev behaviour. Any non-loopback bind must have
-/// both machine-API bearer auth and dashboard Basic auth configured, unless an
-/// operator explicitly sets `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately
-/// isolated deployment. The dashboard routes are always mounted, so an API
-/// token alone does not make the listener safe.
+/// both machine-API bearer auth (the env token or an unrevoked named token)
+/// and dashboard Basic auth configured, unless an operator explicitly sets
+/// `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately isolated deployment. The
+/// dashboard routes are always mounted, so an API token alone does not make
+/// the listener safe.
 pub fn validate_bind_auth(
     addr: &SocketAddr,
     auth: &AuthConfig,
     dash: &DashConfig,
+    named_tokens_active: bool,
 ) -> Result<(), String> {
     validate_bind_auth_state(
         addr,
-        auth.api_token.is_some(),
+        auth.api_token.is_some() || named_tokens_active,
         dash.pass.is_some(),
         auth.allow_unauthenticated,
     )
@@ -145,23 +167,23 @@ fn validate_bind_auth_state(
     }
 
     Err(format!(
-        "refusing to bind {addr} without complete application auth; non-loopback listeners require both {API_TOKEN_ENV} for machine APIs and {DASH_PASS_ENV} for the always-mounted dashboard. Set the missing credential(s) or bind to 127.0.0.1. For an intentional isolated deployment only, set {ALLOW_UNAUTH_ENV}=1."
+        "refusing to bind {addr} without complete application auth; non-loopback listeners require machine-API auth ({API_TOKEN_ENV} or a named token from `pt token create`) and {DASH_PASS_ENV} for the always-mounted dashboard. Set the missing credential(s) or bind to 127.0.0.1. For an intentional isolated deployment only, set {ALLOW_UNAUTH_ENV}=1."
     ))
 }
 
-/// Emit a single loud warning at startup if `PTASK_API_TOKEN` is unset, so an
-/// operator running unauthenticated sees it once in the log without flooding
-/// it on every `/metrics` scrape. Mirrors the fail-open-but-warn-when-unset
-/// posture: auth enforces only once a token is configured.
-pub fn warn_if_unconfigured(auth: &AuthConfig) {
+/// Emit a single loud warning at startup when no API credential at all is
+/// configured (no env token, no named token), so an operator running
+/// unauthenticated sees it once in the log without flooding it on every
+/// `/metrics` scrape.
+pub fn warn_if_unconfigured(auth: &AuthConfig, named_tokens_active: bool) {
     static WARNED: Once = Once::new();
-    if auth.api_token.is_none() {
+    if auth.api_token.is_none() && !named_tokens_active {
         WARNED.call_once(|| {
             warn!(
                 target: "ptask::auth",
-                "{} is unset — only loopback or {}=1 binds may run unauthenticated. \
-                 Set {} (and send `Authorization: Bearer <token>` from callers) before exposing pt serve.",
-                API_TOKEN_ENV, ALLOW_UNAUTH_ENV, API_TOKEN_ENV
+                "no API token is configured ({} unset, no named tokens) — only loopback or {}=1 binds may run unauthenticated. \
+                 Create one with `pt token create` (and send `Authorization: Bearer <token>` from callers) before exposing pt serve.",
+                API_TOKEN_ENV, ALLOW_UNAUTH_ENV
             );
         });
     }
@@ -180,6 +202,50 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// True when a Host header names this server rather than a stranger: IP
+/// literals, `localhost`, `*.ts.net` (Tailscale serves that zone, so a page
+/// cannot rebind one of its names to an address of its choosing), and the
+/// configured list — which carries the machine's own short name and suffix
+/// entries starting with ".". Every other dotless name is refused: a hostile
+/// LAN can resolve one through its DHCP search domain, LLMNR or NBT-NS.
+pub(crate) fn host_allowed(value: &str, extra: &[String]) -> bool {
+    let host = value.trim().to_ascii_lowercase();
+    if let Some(rest) = host.strip_prefix('[') {
+        let Some((name, after)) = rest.split_once(']') else {
+            return false;
+        };
+        if !after.is_empty() && !after.strip_prefix(':').is_some_and(valid_port) {
+            return false;
+        }
+        return name.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    let (name, port) = match host.split_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (host.as_str(), None),
+    };
+    if port.is_some_and(|p| !valid_port(p)) {
+        return false;
+    }
+    let name = name.trim_end_matches('.');
+    if name.is_empty() {
+        return false;
+    }
+    if name.parse::<std::net::Ipv4Addr>().is_ok() || name == "localhost" {
+        return true;
+    }
+    if extra
+        .iter()
+        .any(|e| e == name || (e.starts_with('.') && name.ends_with(e.as_str())))
+    {
+        return true;
+    }
+    name.contains('.') && name.ends_with(".ts.net")
+}
+
+fn valid_port(port: &str) -> bool {
+    (1..=5).contains(&port.len()) && port.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn presented_token(headers: &HeaderMap) -> Option<String> {
@@ -240,6 +306,18 @@ mod tests {
     fn validate_bind_auth_allows_non_loopback_with_both_credentials() {
         let addr: SocketAddr = "10.0.0.10:9501".parse().unwrap();
         assert!(validate_bind_auth_state(&addr, true, true, false).is_ok());
+    }
+
+    #[test]
+    fn validate_bind_auth_counts_named_tokens_as_api_auth() {
+        let addr: SocketAddr = "10.0.0.10:9501".parse().unwrap();
+        let auth = AuthConfig::default();
+        let dash = DashConfig {
+            pass: Some("pw".into()),
+            ..Default::default()
+        };
+        assert!(validate_bind_auth(&addr, &auth, &dash, true).is_ok());
+        assert!(validate_bind_auth(&addr, &auth, &dash, false).is_err());
     }
 
     #[test]

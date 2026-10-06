@@ -8,6 +8,11 @@
 //!
 //! Idempotent per tap: the Telegram callback id becomes the journal event
 //! uuid, so a retried forward of the same tap is a no-op.
+//!
+//! Every verb is journaled as the operator's tap (`telegram`,
+//! `operator@telegram`), so only a client named in `$PTASK_TG_FORWARDERS` may
+//! post here; approval verbs additionally need `$PTASK_TG_APPROVAL_BUTTONS`,
+//! the switch that puts decide buttons on the pings in the first place.
 
 use crate::AppState;
 use axum::Router;
@@ -57,6 +62,7 @@ fn callback_blocking(
         Ok(id) => id,
         Err(resp) => return resp,
     };
+    let from_forwarder = state.tg_forwarders.iter().any(|n| n == &identity.client_id);
     let Some((verb, rest)) = req.data.split_once(':') else {
         return err(StatusCode::BAD_REQUEST, "malformed callback data");
     };
@@ -71,7 +77,13 @@ fn callback_blocking(
     }
     let uuid = rest;
 
-    let event_uuid = format!("tg-cb:{}", req.callback_id);
+    // A non-forwarder's key is namespaced by its client id, so it can never
+    // pre-claim (and so swallow) the callback id of the operator's real tap.
+    let event_uuid = if from_forwarder {
+        format!("tg-cb:{}", req.callback_id)
+    } else {
+        format!("tg-cb:{}:{}", identity.client_id, req.callback_id)
+    };
     let already = match ptask_core::event_log::get_by_uuid(&state.db, &event_uuid) {
         Ok(found) => found.is_some(),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)),
@@ -93,9 +105,20 @@ fn callback_blocking(
             .into_response();
     }
 
-    // The operator tapped the button; Telegram is the acting surface.
+    // A configured forwarder relays the operator's tap, so Telegram is the
+    // acting surface. Any other write client is journaled as itself: holding a
+    // write token must not let a caller pass its action off as the operator's.
+    let actor = if from_forwarder {
+        "telegram".to_string()
+    } else {
+        tracing::warn!(
+            client = %identity.client_id,
+            "telegram tap from a client outside PTASK_TG_FORWARDERS; journaled as that client"
+        );
+        format!("telegram via {}", identity.client_id)
+    };
     let ctx = EventCtx {
-        actor: "telegram".into(),
+        actor,
         source: "tg-callback".into(),
         event_uuid: Some(event_uuid),
     };
@@ -148,6 +171,14 @@ fn approval_callback(
 ) -> axum::response::Response {
     if req.callback_id.is_empty() {
         return err(StatusCode::BAD_REQUEST, "callback_id must be non-empty");
+    }
+    // pTask only offers decide buttons when this switch is on; without it a
+    // forwarder (or anyone holding its token) could decide by naming any AP-n.
+    if !state.tg_approval_buttons {
+        return err(
+            StatusCode::FORBIDDEN,
+            "approval taps are disabled (PTASK_TG_APPROVAL_BUTTONS is off)",
+        );
     }
     let allowed = state.tg_forwarders.iter().any(|n| n == &identity.client_id);
     let operator_chat = state.notify.telegram_chat_id;

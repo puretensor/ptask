@@ -153,10 +153,17 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::base::router())
         .merge(routes::capture::router())
         .merge(
-            routes::dashboard::router().route_layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                routes::dashboard::basic_throttle,
-            )),
+            routes::dashboard::router()
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    routes::dashboard::basic_throttle,
+                ))
+                // Outermost: a foreign Host is refused before any credential
+                // check can count a failure against the peer.
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    routes::dashboard::host_guard,
+                )),
         )
         .merge(routes::email::router())
         .merge(routes::sync::router())
@@ -173,11 +180,18 @@ pub fn router(state: AppState) -> Router {
 /// Run the server on `addr` until SIGINT / SIGTERM. Blocks the current task.
 /// `auth`/`webhooks` come from the entrypoint's one `Config::from_env()` —
 /// the server itself never reads the process environment.
-pub async fn serve(db: Db, addr: SocketAddr, config: Config) -> Result<()> {
-    if let Err(e) = auth::validate_bind_auth(&addr, &config.auth, &config.dash) {
+pub async fn serve(db: Db, addr: SocketAddr, mut config: Config) -> Result<()> {
+    // A failed lookup counts as "no named tokens": the stricter answer.
+    let named_tokens_active = ptask_core::tokens::any_active(&db).unwrap_or(false);
+    if let Err(e) = auth::validate_bind_auth(&addr, &config.auth, &config.dash, named_tokens_active)
+    {
         anyhow::bail!(e);
     }
-    auth::warn_if_unconfigured(&config.auth);
+    // A network listener never falls back to anonymous access, even if the
+    // last named token is revoked while it runs.
+    config.auth.anonymous_forbidden =
+        !addr.ip().is_loopback() && !config.auth.allow_unauthenticated;
+    auth::warn_if_unconfigured(&config.auth, named_tokens_active);
     let state = AppState::new(db, config.auth, config.webhooks)
         .with_dash(config.dash)
         .with_notify(
@@ -1576,6 +1590,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Finishing the rotation off PTASK_API_TOKEN leaves only named tokens.
+    /// They must keep anonymous callers out exactly as the env token did.
+    #[tokio::test(flavor = "current_thread")]
+    async fn named_tokens_alone_close_anonymous_access() {
+        let db = open_test_db();
+        let token =
+            ptask_core::tokens::create(&db, "hal", ptask_core::tokens::Scope::Write).unwrap();
+        let app = router(AppState::new(db, AuthConfig::default(), Default::default()));
+        let sync = |auth: Option<&str>| {
+            let mut req = Request::builder()
+                .uri("/sync")
+                .method("POST")
+                .header("content-type", "application/json");
+            if let Some(token) = auth {
+                req = req.header("authorization", format!("Bearer {token}"));
+            }
+            req.body(Body::from(r#"{"sync_token":"*","commands":[]}"#))
+                .unwrap()
+        };
+        let resp = app.clone().oneshot(sync(None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = app.clone().oneshot(sync(Some(&token))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A network listener started on named tokens must stay closed when the
+    /// last token is revoked while it runs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn anonymous_forbidden_survives_revoking_the_last_named_token() {
+        let db = open_test_db();
+        ptask_core::tokens::create(&db, "hal", ptask_core::tokens::Scope::Write).unwrap();
+        let auth = AuthConfig {
+            anonymous_forbidden: true,
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), auth, Default::default()));
+        let list = || Request::builder().uri("/list").body(Body::empty()).unwrap();
+        assert_eq!(
+            app.clone().oneshot(list()).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        ptask_core::tokens::revoke(&db, "hal").unwrap();
+        assert_eq!(
+            app.clone().oneshot(list()).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// Back-compat anonymous access answers only to our own names: a
+    /// DNS-rebinding page carries no credential either.
+    #[tokio::test(flavor = "current_thread")]
+    async fn anonymous_access_refuses_a_foreign_host() {
+        let db = open_test_db();
+        let app = router(AppState::new(db, AuthConfig::default(), Default::default()));
+        let list = |host: &str| {
+            Request::builder()
+                .uri("/list")
+                .header("host", host)
+                .body(Body::empty())
+                .unwrap()
+        };
+        for host in ["127.0.0.1:9501", "localhost", "ptask.tail07f9ef.ts.net"] {
+            let resp = app.clone().oneshot(list(host)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{host}");
+        }
+        for host in ["rebind.attacker.example", "evil", "wpad:80"] {
+            let resp = app.clone().oneshot(list(host)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{host}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

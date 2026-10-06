@@ -24,7 +24,8 @@ Endpoints
   GET  /api/approvals?status=   -> `pt --json approval ls --status <s>`
                                    (status whitelist; default pending)
   POST /api/approvals/AP-n/approve|reject {note?}
-                                -> `pt approve|reject AP-n --via dashboard [--note]`
+                                -> `pt approve|reject AP-n --via dashboard [--note=]`
+                                   (needs X-PTask-Decide-Token; see below)
   POST /api/voice  (raw audio body) -> Whisper STT + Bedrock Claude draft
                                 -> {transcript, fields:{title,description,priority,
                                    deadline,labels,domain,reason}} for the
@@ -33,9 +34,18 @@ Endpoints
                                 -> {ok, pt_id, id, transcript, fields, stt, llm}
 
   The tailnet is the access gate. This process never challenges the browser
-  (no login page, session cookie, HTTP Basic, or 401/403 on UI paths).
-  State-changing POSTs still require a same-origin Origin header when one is
-  sent, so a foreign site cannot mutate tasks from a tailnet browser.
+  (no login page, session cookie, HTTP Basic, or 401 on UI paths). Two checks
+  keep that gate meaningful:
+  - Every request's Host (except /healthz) must be one of this sidecar's own
+    names (an IP literal, localhost, this machine's short name, a `*.ts.net`
+    name, or PTASK_DASH_ALLOWED_HOSTS), else 421. Without it a
+    DNS-rebinding page could address the sidecar under the attacker's own
+    name and read or write as same-origin. State-changing POSTs also need a
+    same-origin Origin header when one is sent.
+  - Approval decisions are operator-only, and the tailnet does not separate
+    the operator from the fleet's agents. Approve/reject needs the
+    X-PTask-Decide-Token header to match PTASK_DASH_DECIDE_TOKEN; with the
+    variable unset (or shorter than 16 characters) decisions are refused.
 
 Config (env)
 ------------
@@ -48,15 +58,23 @@ Config (env)
   PTASK_DASH_WWW   static dir (default ./www next to this file)
   PTASK_ACTOR      actor stamped on dashboard-originated pt writes
                    (default "dashboard")
+  PTASK_DASH_ALLOWED_HOSTS  extra comma-separated Host names to serve
+                            (".example.org" entries match the suffix)
+  PTASK_DASH_DECIDE_TOKEN   secret the cockpit sends to approve/reject
+                            (unset = approval decisions disabled here)
 """
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 from datetime import date, datetime, timezone
@@ -117,7 +135,30 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
-VERSION = "0.21.0"
+VERSION = "0.22.0"
+
+
+def _allowed_host_entry(entry: str) -> str:
+    """One PTASK_DASH_ALLOWED_HOSTS entry as host_allowed compares it."""
+    host = entry.strip().lower()
+    if host.startswith("["):
+        host = host[1:].split("]", 1)[0]
+    else:
+        host = host.split(":", 1)[0]
+    return host.rstrip(".")
+
+
+# Host names served besides IP literals, localhost, this machine's own name and
+# *.ts.net. An entry starting with "." matches that suffix.
+ALLOWED_HOSTS = frozenset(
+    filter(None, (_allowed_host_entry(h)
+                  for h in os.environ.get("PTASK_DASH_ALLOWED_HOSTS", "").split(",")))
+)
+# Shared secret for approval decisions. Shorter values are refused rather than
+# trusted: a guessable secret would put decisions back within any tailnet
+# agent's reach. Popped from the environment so no pt or aws child inherits it.
+DECIDE_TOKEN_MIN = 16
+DECIDE_TOKEN = os.environ.pop("PTASK_DASH_DECIDE_TOKEN", "").strip()
 DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
 DASH_DOMAINS = parse_domains(os.environ.get("PTASK_DASH_DOMAINS"))
 DASH_DEFAULT_DOMAIN = resolve_default_domain(
@@ -223,6 +264,63 @@ def parse_limit(raw: str | None, default: int, maximum: int) -> int:
     return max(1, min(n, maximum))
 
 
+_PORT_RE = re.compile(r"[0-9]{1,5}")
+
+
+# Dotless names a request may use: a hostile LAN can resolve (and so rebind)
+# any other single label through its DHCP search domain, LLMNR or NBT-NS.
+_LOCAL_LABELS = frozenset(filter(None, {
+    "localhost", socket.gethostname().split(".", 1)[0].lower(),
+}))
+
+
+def host_allowed(value: str | None, extra=None) -> bool:
+    """True when a Host header names this sidecar rather than a stranger.
+
+    A DNS-rebinding page can only use a name whose DNS its author controls, so
+    the sidecar answers only to names nobody outside the operator can point at
+    it: IP literals, localhost, this machine's own short name, `*.ts.net`
+    (Tailscale serves that zone; a page cannot rebind one of its names to an
+    address of its choosing) and PTASK_DASH_ALLOWED_HOSTS (entries starting
+    with "." are suffixes). A request with no Host header is not a browser's
+    and passes.
+    """
+    if value is None:
+        return True
+    extra = ALLOWED_HOSTS if extra is None else extra
+    host = value.strip(" \t").lower()
+    if host.startswith("["):
+        end = host.find("]")
+        if end < 0:
+            return False
+        name, rest = host[1:end], host[end + 1:]
+        if rest and not (rest[0] == ":" and _PORT_RE.fullmatch(rest[1:])):
+            return False
+        if "%" in name:  # zone ids never come from a browser
+            return False
+        try:
+            ipaddress.IPv6Address(name)
+        except ValueError:
+            return False
+        return True
+    name, sep, port = host.partition(":")
+    if sep and not _PORT_RE.fullmatch(port):
+        return False
+    name = name.rstrip(".")
+    if not name:
+        return False
+    try:
+        ipaddress.IPv4Address(name)
+        return True
+    except ValueError:
+        pass
+    if name in extra or name in _LOCAL_LABELS:
+        return True
+    if any(e.startswith(".") and name.endswith(e) for e in extra):
+        return True
+    return "." in name and name.endswith(".ts.net")
+
+
 # --------------------------------------------------------------------------- db
 def connect():
     """Fresh read-only connection (cheap; safe for the threading server)."""
@@ -235,6 +333,10 @@ def connect():
 
 STREAM_POLL_SECS = 3.0
 STREAM_KEEPALIVE_SECS = 15.0
+# Each open /api/stream holds a server thread and a read connection for as
+# long as the client stays; past this many the next one gets a 503.
+STREAM_MAX = 32
+_STREAM_SLOTS = threading.BoundedSemaphore(STREAM_MAX)
 
 
 def journal_cursor(con) -> int | None:
@@ -500,7 +602,10 @@ def build_add_args(body: dict) -> tuple[list[str] | None, str | None]:
     title still runs through quick-add parsing (inline @label/#project/~2h keep
     working); explicit flags win over inline priority/description.
     """
-    title = (body.get("title") or "").strip()
+    title = body.get("title")
+    if not isinstance(title, str):
+        return None, "title must be a string"
+    title = title.strip()
     if not (3 <= len(title) <= 400):
         return None, "title 3-400 chars"
     args = ["add"]
@@ -519,8 +624,10 @@ def build_add_args(body: dict) -> tuple[list[str] | None, str | None]:
         if desc:
             args.append(f"--description={desc}")
     dl = body.get("deadline")
-    if dl is not None and str(dl).strip():
-        dl = str(dl).strip()
+    if dl is not None and not isinstance(dl, str):
+        return None, "deadline must be ISO date YYYY-MM-DD"
+    if dl is not None and dl.strip():
+        dl = dl.strip()
         if not _DATE_RE.match(dl):
             return None, "deadline must be ISO date YYYY-MM-DD"
         try:
@@ -640,7 +747,8 @@ def pt_json(args: list[str]) -> tuple[bool, object, str]:
 def pt_decide(verb: str, ap_id: str, note: str | None) -> tuple[bool, str]:
     args = [verb, ap_id, "--via", "dashboard"]
     if note is not None:
-        args += ["--note", note]
+        # `--note=` keeps a note that starts with "-" from being read as a flag.
+        args.append(f"--note={note}")
     actor = os.environ.get("PTASK_ACTOR") or "dashboard"
     try:
         out = subprocess.run(
@@ -989,6 +1097,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
+    def _host_ok(self) -> bool:
+        return host_allowed(self.headers.get("Host"))
+
+    def _decide_refusal(self):
+        """None when this request may decide an approval, else (code, message)."""
+        if len(DECIDE_TOKEN) < DECIDE_TOKEN_MIN:
+            return ("decide_disabled",
+                    "approval decisions are disabled on this dashboard: set "
+                    f"PTASK_DASH_DECIDE_TOKEN (at least {DECIDE_TOKEN_MIN} characters), "
+                    "or decide with `pt approve|reject AP-n` at a terminal")
+        presented = (self.headers.get("X-PTask-Decide-Token") or "").strip()
+        if presented and hmac.compare_digest(presented.encode(), DECIDE_TOKEN.encode()):
+            return None
+        return ("decide_token_required", "approval decisions need the decide token")
+
     def _origin_ok(self) -> bool:
         # CSRF for state-changing requests: a browser on the tailnet sending
         # Origin: https://ptask.tail07f9ef.ts.net with Host matching that
@@ -1088,6 +1211,15 @@ class Handler(BaseHTTPRequestHandler):
         self._text(target.read_bytes(), 200, ctype)
 
     def _stream(self):
+        slots = _STREAM_SLOTS
+        if not slots.acquire(blocking=False):
+            return self._json({"error": "too many open streams"}, 503)
+        try:
+            self._stream_body()
+        finally:
+            slots.release()
+
+    def _stream_body(self):
         self.send_response(200)
         self._security_headers()
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -1135,11 +1267,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         path, qs = u.path, parse_qs(u.query)
+        # The probe answers any name: "OK" tells a rebinding page nothing, and
+        # a monitor addressing the sidecar by some other name must not page.
+        if path == "/healthz":
+            return self._text("OK")
+        if not self._host_ok():
+            return self._json({"error": "unknown host"}, 421)
 
         if path in ("/login", "/logout"):
             return self._redirect("/")
-        if path == "/healthz":
-            return self._text("OK")
         if path == "/api/config":
             return self._json({
                 "title": DASH_TITLE,
@@ -1196,6 +1332,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": str(e)}, 500)
 
     def do_POST(self):
+        if not self._host_ok():
+            return self._json({"error": "unknown host"}, 421)
         u = urlparse(self.path)
         if u.path in ("/login", "/logout"):
             return self._redirect("/")
@@ -1214,8 +1352,10 @@ class Handler(BaseHTTPRequestHandler):
             ap_id, verb = m.group(1), m.group(2)
             if not _AP_ID_RE.fullmatch(ap_id):
                 return self._json({"error": "bad id"}, 400)
-            if not isinstance(body, dict):
-                return self._json({"error": "note must be a string"}, 400)
+            refusal = self._decide_refusal()
+            if refusal is not None:
+                code, message = refusal
+                return self._json({"ok": False, "code": code, "error": message}, 403)
             note = body.get("note", _UNSET)
             note_arg = None
             if note is not _UNSET:
