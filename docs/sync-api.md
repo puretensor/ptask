@@ -188,6 +188,18 @@ on task events such as `task.created`, `task.completed`, and
 `task.recurrence_advanced`.
 Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
 
+Body:
+
+```json
+{ "event_type": "task.created", "task_uuid": "<uuid>", "payload": { ... },
+  "ts": "2026-10-06T14:03:11.512000+01:00", "event_id": 4711 }
+```
+
+`ts` is the event's commit time (its `pt_event_log.ts`, operator timezone)
+and `event_id` its journal id, not the delivery time. One worker per server
+delivers every event, one at a time and in commit order, to each URL in
+turn; no retries, 10s timeout per POST.
+
 ## Metrics
 
 `/metrics` exposes (subset):

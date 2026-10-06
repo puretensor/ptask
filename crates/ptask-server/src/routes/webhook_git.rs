@@ -185,6 +185,7 @@ async fn handle(
                 continue;
             }
             let event_uuid = close_event_uuid(source, commit, &pt_id);
+            let outbound_uuid = event_uuid.clone();
             let close_state = state.clone();
             let close_pt_id = pt_id.clone();
             let close_source = source.to_string();
@@ -229,6 +230,7 @@ async fn handle(
                         event_type: event_type.into(),
                         task_uuid: Some(task_uuid),
                         payload,
+                        event_uuid: Some(outbound_uuid),
                     });
                     closed.push(result);
                 }

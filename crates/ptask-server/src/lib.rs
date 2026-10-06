@@ -36,6 +36,8 @@ pub struct AppState {
     pub tg_approval_buttons: bool,
     /// Failed-Basic-auth lockout for the dashboard routes.
     pub dash_throttle: Arc<routes::dashboard::BasicThrottle>,
+    /// The single ordered outbound-webhook queue.
+    pub outbound: Arc<webhooks::OutboundQueue>,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
             tg_forwarders: Arc::new(vec!["nexus".into()]),
             tg_approval_buttons: false,
             dash_throttle: Arc::default(),
+            outbound: Arc::default(),
         }
     }
 
@@ -1437,6 +1440,97 @@ mod tests {
             1,
             "the first event reached the live subscriber"
         );
+    }
+
+    /// Records every outbound delivery: (envelope, entered, left). The
+    /// first delivery is held for 400ms so overlapping deliveries show up.
+    type HookLog =
+        Arc<std::sync::Mutex<Vec<(serde_json::Value, std::time::Instant, std::time::Instant)>>>;
+
+    async fn recording_hook() -> (String, HookLog) {
+        let log: HookLog = Arc::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let sink = log.clone();
+        tokio::spawn(async move {
+            let app = Router::new().route(
+                "/hook",
+                axum::routing::post(move |body: axum::body::Bytes| {
+                    let sink = sink.clone();
+                    async move {
+                        let entered = std::time::Instant::now();
+                        let first = sink.lock().unwrap().is_empty();
+                        if first {
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        }
+                        let env: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        sink.lock()
+                            .unwrap()
+                            .push((env, entered, std::time::Instant::now()));
+                        "ok"
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, log)
+    }
+
+    async fn wait_for_hooks(log: &HookLog, n: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while log.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// SRV-5: each request delivered on its own task, so a later request's
+    /// event raced an earlier one still in flight, and `ts` was the delivery
+    /// time. Delivery is now one ordered queue and `ts` is the commit time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn webhooks_from_separate_requests_deliver_in_commit_order() {
+        let (url, log) = recording_hook().await;
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            WebhookConfig {
+                outbound_urls: vec![url],
+                ..Default::default()
+            },
+        ));
+        for i in 0..3 {
+            post_sync(
+                &app,
+                &serde_json::json!({"sync_token": "*", "commands": [{
+                    "type": "task_create", "uuid": format!("order-{i}"),
+                    "args": {"text": format!("ordered task {i}")},
+                }]}),
+            )
+            .await;
+        }
+        wait_for_hooks(&log, 3).await;
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 3);
+        for pair in log.windows(2) {
+            assert!(
+                pair[1].1 >= pair[0].2,
+                "a delivery started before the previous one finished"
+            );
+        }
+        for (i, (env, _, _)) in log.iter().enumerate() {
+            let (ts, id): (String, i64) = db
+                .with_conn(|c| {
+                    Ok(c.query_row(
+                        "SELECT ts, id FROM pt_event_log WHERE uuid = ?1",
+                        [format!("order-{i}")],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(env["payload"]["title"], format!("ordered task {i}"));
+            assert_eq!(env["ts"], ts, "ts is the journal commit time");
+            assert_eq!(env["event_id"], id);
+        }
     }
 
     // Back-compat path: no token configured → scrape allowed.
