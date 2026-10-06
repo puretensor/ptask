@@ -767,12 +767,21 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         // The caller completes the occurrence it saw. If the deadline moved
         // since (another completion advanced it, or an edit), advancing again
         // would silently skip an occurrence: refuse and change nothing.
-        if task.deadline != current_deadline {
+        // Compare normalised forms: rows written before deadlines were
+        // normalised must still match the value a client echoes back.
+        let same_occurrence = match (task.deadline.as_deref(), current_deadline.as_deref()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => match (normalize_when(a), normalize_when(b)) {
+                (Ok(x), Ok(y)) => x == y,
+                _ => a == b,
+            },
+            _ => false,
+        };
+        if !same_occurrence {
             let handle = task.pt_id.clone().unwrap_or_else(|| task.id.clone());
             return Err(crate::Error::Other(format!(
                 "{handle} changed since it was read: the occurrence is now due {} \
-                 (already completed or edited); nothing was advanced — run done again \
-                 to complete it",
+                 (already completed or edited); nothing was advanced",
                 current_deadline.as_deref().unwrap_or("(none)")
             )));
         }
@@ -1500,6 +1509,39 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
             |r| r.get(0),
         )?;
         if superseded {
+            // A newer event on the task means this change is no longer the
+            // last word on it. If someone else (another actor or surface)
+            // wrote it, or this is the create of a task that still exists,
+            // the newest change is protected: refuse rather than reach
+            // further back and undo, or delete, something older instead.
+            let foreign: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
+                   AND (actor IS NOT ?3
+                        OR COALESCE(json_extract(payload, '$.source'), '') NOT IN (?4, ?5)))",
+                params![task_uuid, id, ctx.actor, surface_a, surface_b],
+                |r| r.get(0),
+            )?;
+            let live_create = event_type == "task.created"
+                && tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
+                    [&task_uuid],
+                    |r| r.get::<_, bool>(0),
+                )?;
+            if foreign || live_create {
+                let (pt_id, title): (Option<String>, String) = tx
+                    .query_row(
+                        "SELECT pt_id, title FROM tasks WHERE id=?1",
+                        [&task_uuid],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?
+                    .unwrap_or((None, String::new()));
+                let handle = pt_id.unwrap_or_else(|| task_uuid.clone());
+                return Err(crate::Error::Other(format!(
+                    "your most recent undoable change, on {handle} \"{title}\", has been \
+                     changed since; nothing was undone"
+                )));
+            }
             continue;
         }
         let row: Option<(String, Option<String>, String)> = tx
@@ -3850,6 +3892,36 @@ mod tests {
     }
 
     #[test]
+    fn expected_deadline_matches_a_legacy_stored_form() {
+        // Regression (review round 2): the caller's value was normalised but
+        // compared as a string with the raw stored deadline, so a row stored
+        // before normalisation could never be completed with it.
+        let (_dir, db) = fresh_db();
+        let rec = crate::recurrence::parse("every day").unwrap();
+        let mut new = NewTask::minimal("legacy daily");
+        new.deadline = Some("2099-01-01T09:00:00+00:00".into());
+        let ext = Extensions {
+            recurrence: Some(rec),
+            ..Default::default()
+        };
+        let task = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET deadline='2099-01-01T09:00:00Z' WHERE id=?1",
+                [&task.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let read = resolve_for_lookup(&db, &task.id, true).unwrap();
+        let pinned = expect_deadline(read, Some("2099-01-01T09:00:00Z")).unwrap();
+        assert!(matches!(
+            mark_done(&db, &pinned, &EventCtx::test()).unwrap(),
+            DoneOutcome::Advanced { .. }
+        ));
+    }
+
+    #[test]
     fn mark_done_uses_deadline_read_inside_the_transaction() {
         let (_dir, db) = fresh_db();
         let rec = crate::recurrence::parse("every day").unwrap();
@@ -5002,6 +5074,35 @@ mod tests {
         assert!(undo_last(&db, &ctx).is_err());
         assert!(task_exists(&db, &parent.id), "the parent was deleted");
         assert!(task_exists(&db, &child.id), "undo reached past the parent");
+    }
+
+    #[test]
+    fn undo_refuses_when_its_newest_create_was_changed_since() {
+        // Regression (review round 2): another actor's edit on the newest
+        // create made undo skip it and delete an OLDER task instead.
+        let (_dir, db) = fresh_db();
+        let operator = EventCtx::local("shell");
+        let hal = EventCtx::local("hal");
+        let a = create(&db, NewTask::minimal("A"), &operator).unwrap();
+        let b = create(&db, NewTask::minimal("B"), &operator).unwrap();
+        update_priority(&db, &b.id, 5, &hal).unwrap();
+        assert!(undo_last(&db, &operator).is_err());
+        assert!(task_exists(&db, &a.id), "undo reached past B and deleted A");
+        assert!(task_exists(&db, &b.id));
+
+        // The same holds when the later events are the caller's own: done B,
+        // undo (reopens B), undo again must not delete A while B still exists.
+        let (_dir, db) = fresh_db();
+        let a = create(&db, NewTask::minimal("A"), &operator).unwrap();
+        let b = create(&db, NewTask::minimal("B"), &operator).unwrap();
+        mark_done(&db, &b, &operator).unwrap();
+        undo_last(&db, &operator).unwrap();
+        assert!(undo_last(&db, &operator).is_err());
+        assert!(
+            task_exists(&db, &a.id),
+            "chained undo deleted an older task"
+        );
+        assert!(task_exists(&db, &b.id));
     }
 
     #[test]
