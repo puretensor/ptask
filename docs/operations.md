@@ -102,19 +102,22 @@ work, whichever comes first, and marks what finished as processed. The unit's
 30-minute `TimeoutStartSec` therefore never kills a run mid-batch; rows left
 over wait for the next hourly run.
 
-Only one run distills at a time. A run holds an exclusive OS file lock on
-`<db>.distill.lock` (e.g. `~/puretensor-tasks/tasks.db.distill.lock`) for its
-whole duration; a concurrent `pt distill` prints `distill skipped`, consumes
-nothing, records no event and exits 0. The kernel drops the lock when the
-holder exits or is killed, so a crashed run never blocks the next one. A lock
-file this user cannot write (say, left behind by one `sudo pt distill`) is
-locked through a read-only descriptor instead. New lock files are made
-`0644` whatever the umask. If the lock file cannot even be read (mode `0600`,
-owned by another user), the run takes the same flock on the database file,
-opened read-only. That is safe on a local filesystem, because flock is
-independent of SQLite's fcntl locks. It only excludes other runs taking the
-same fallback, though, so delete such a lock file. In-memory databases take no
-lock, and a `file:` URI (percent-decoded) locks beside the file it names.
+Only one run distills at a time. For its whole duration a run holds an
+exclusive `flock` on the database's directory (e.g. `~/puretensor-tasks/`),
+opened read-only. A concurrent `pt distill` prints `distill skipped`, consumes
+nothing, records no event and exits 0. Every user who can open the database
+can open its directory, so a `sudo pt distill` and the timer user always
+contend on the same object. The kernel drops the lock when the holder exits or
+is killed, so a crashed run never blocks the next one.
+
+The database file itself is never opened for locking: closing any descriptor
+on it would drop SQLite's own fcntl locks. A directory descriptor is not the
+database file, so SQLite's locks are untouched. The old
+`<db>.distill.lock` side file is no longer used; a leftover one is harmless
+and can be deleted. Two databases in the same directory serialise each other's
+runs. On NFS, flock may be emulated with fcntl, so keep the database on a local
+filesystem (SQLite needs that anyway). In-memory databases take no lock, and a
+`file:` URI (percent-decoded) locks the directory of the file it names.
 
 ### Inspect
 

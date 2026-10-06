@@ -1101,26 +1101,70 @@ impl std::fmt::Display for DistillBusy {
 
 impl std::error::Error for DistillBusy {}
 
-/// Exclusive per-database run lock (`<db>.distill.lock`). Nothing claims
-/// `raw_items` rows, so two concurrent runs would fetch, classify and create
-/// tasks from the same captures. An OS file lock is released by the kernel
-/// when its holder exits or is killed, so a crashed run can never wedge the
-/// next one the way a lease row could.
+/// Exclusive per-database run lock. Nothing claims `raw_items` rows, so two
+/// concurrent runs would fetch, classify and create tasks from the same
+/// captures.
+///
+/// The lock is `flock(2)` on the database's DIRECTORY, opened read-only.
+/// It is the same object for every run, whatever user it runs as: anyone
+/// who can open the database can open its directory. The kernel releases
+/// it when the holder exits or is killed, so a crashed run never wedges the
+/// next one.
+///
+/// Never lock the database file itself. Closing *any* descriptor on that
+/// file drops every POSIX fcntl lock the process holds on it — SQLite's
+/// included, while the pool still has it open: SQLite's documented
+/// corruption case. A directory descriptor is not the database file, so
+/// SQLite's locks are untouched. (The old `<db>.distill.lock` side file is
+/// no longer used; a stale one is harmless. Its per-user permissions also
+/// let two users lock different objects and run at once.)
+///
+/// Caveats: two databases in one directory serialise each other's distill
+/// runs. On NFS, flock may be emulated with fcntl locks; keep the database
+/// on a local filesystem (SQLite needs that anyway).
 fn acquire_run_lock(db: &Db) -> Result<Option<std::fs::File>> {
     match db_file_path(db.path()) {
-        Some(file) => lock_at(&lock_path_for(&file), &file, open_lock_rw, open_ro).map(Some),
+        Some(file) => lock_directory(&lock_dir_for(&file)).map(Some),
         None => Ok(None),
     }
 }
 
-/// Where the run lock lives, or `None` when there is no database file to
-/// sit beside: `:memory:` and `file:` memory URIs are private to this
-/// process, so there is nothing to serialise against. A `file:` URI locks
-/// beside the file it names (query stripped), never as a literal
-/// `file:…` name in the working directory.
+/// The directory whose flock serialises runs on `db_file`.
+fn lock_dir_for(db_file: &std::path::Path) -> std::path::PathBuf {
+    match db_file.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    }
+}
+
+/// Where the run lock is taken, or `None` when there is no database file:
+/// `:memory:` and `file:` memory URIs are private to this process, so there
+/// is nothing to serialise against.
 #[cfg(test)]
-fn run_lock_path(db_path: &std::path::Path) -> Option<std::path::PathBuf> {
-    db_file_path(db_path).map(|f| lock_path_for(&f))
+fn run_lock_dir(db_path: &std::path::Path) -> Option<std::path::PathBuf> {
+    db_file_path(db_path).map(|f| lock_dir_for(&f))
+}
+
+/// flock a directory opened read-only. Refuses anything that is not a
+/// directory, so this code can never hold a descriptor on the database.
+fn lock_directory(dir: &std::path::Path) -> Result<std::fs::File> {
+    let shown = dir.display().to_string();
+    let handle =
+        std::fs::File::open(dir).with_context(|| format!("open distill lock directory {shown}"))?;
+    if !handle
+        .metadata()
+        .with_context(|| format!("stat distill lock directory {shown}"))?
+        .is_dir()
+    {
+        bail!("distill run lock target {shown} is not a directory");
+    }
+    match handle.try_lock() {
+        Ok(()) => Ok(handle),
+        Err(std::fs::TryLockError::WouldBlock) => Err(anyhow::Error::new(DistillBusy(shown))),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(anyhow::Error::new(e).context(format!("flock distill lock directory {shown}")))
+        }
+    }
 }
 
 /// `%XX` → byte, as SQLite does for `file:` URI paths. Malformed escapes are
@@ -1142,14 +1186,6 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-fn lock_path_for(db_file: &std::path::Path) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("{}.distill.lock", db_file.display()))
-}
-
-fn open_ro(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
 }
 
 /// The database file on disk, or `None` for an in-memory database.
@@ -1174,69 +1210,6 @@ fn db_file_path(db_path: &std::path::Path) -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::PathBuf::from(file))
-}
-
-fn open_lock_rw(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)
-}
-
-fn lock_at(
-    path: &std::path::Path,
-    db_file: &std::path::Path,
-    open_rw: impl Fn(&std::path::Path) -> std::io::Result<std::fs::File>,
-    open_ro: impl Fn(&std::path::Path) -> std::io::Result<std::fs::File>,
-) -> Result<std::fs::File> {
-    let path_s = path.display().to_string();
-    let denied = |e: &std::io::Error| e.kind() == std::io::ErrorKind::PermissionDenied;
-    let file = match open_rw(path) {
-        Ok(file) => {
-            // fchmod ignores the umask: a file first created under umask 077
-            // (root, say) must stay openable by the timer user. Best effort —
-            // we may not own an existing file.
-            use std::os::unix::fs::PermissionsExt;
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o644));
-            file
-        }
-        // Created by another user (e.g. one `sudo pt distill`): flock does
-        // not need write access, so lock a read-only descriptor instead of
-        // failing every run from now on.
-        Err(e) if denied(&e) => match open_ro(path) {
-            Ok(file) => file,
-            // Not even readable (mode 0600 from another user): lock the
-            // database file itself, opened read-only. Safe on a local
-            // filesystem: flock(2) locks are independent of the fcntl(2)
-            // byte-range locks SQLite uses, so this neither blocks nor is
-            // blocked by database access — it only excludes other runs
-            // taking the same fallback or the same flock.
-            Err(e2) if denied(&e2) => open_ro(db_file).with_context(|| {
-                format!(
-                    "distill run lock {path_s} is unreadable ({e2}) and the database \
-                     {} cannot be opened to lock instead",
-                    db_file.display()
-                )
-            })?,
-            Err(e2) => {
-                return Err(anyhow::Error::new(e2).context(format!(
-                    "open distill run lock {path_s} read-only (not writable: {e})"
-                )));
-            }
-        },
-        Err(e) => {
-            return Err(anyhow::Error::new(e).context(format!("open distill run lock {path_s}")));
-        }
-    };
-    let path = path_s;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(std::fs::TryLockError::WouldBlock) => Err(anyhow::Error::new(DistillBusy(path))),
-        Err(std::fs::TryLockError::Error(e)) => {
-            Err(anyhow::Error::new(e).context(format!("lock distill run lock {path}")))
-        }
-    }
 }
 
 fn run_native_within<P: LlmProvider + ?Sized>(
@@ -2216,113 +2189,97 @@ mod tests {
         assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 2);
     }
 
-    /// Regression (DIST-12): nothing claimed the rows, so two concurrent runs
-    /// (the hourly timer and a manual `pt distill`) both fetched, classified
-    /// and created tasks from the same captures.
-    /// Regression (round 2, DIST-12): after one `sudo pt distill` the lock
-    /// file belonged to root, and every later run as the timer user failed
-    /// with "Permission denied" opening it for write. Locking a read-only
-    /// descriptor works just as well (flock does not need write access).
+    /// Regression (round 4, DIST-12, data safety): the lock was a separate
+    /// file, with a fallback that opened and flocked the *database file*
+    /// and closed that fd at the end of the run, which drops every POSIX
+    /// fcntl lock the process holds on the file, SQLite's included. The
+    /// file scheme was also split-brain: one user on `x.db.distill.lock`,
+    /// another on `x.db`. Now every run, whoever it runs as, flocks the
+    /// same object: the database's directory, opened read-only.
     #[test]
-    fn a_lock_file_we_cannot_write_is_still_usable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tasks.db.distill.lock");
-        std::fs::write(&path, b"").unwrap();
-        // Tests run as root here, so chmod cannot produce EACCES: inject it.
-        let denied = |_: &std::path::Path| -> std::io::Result<std::fs::File> {
-            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-        };
-        let db_file = dir.path().join("tasks.db");
-        let held =
-            lock_at(&path, &db_file, denied, open_ro).expect("fell back to a read-only lock");
-        // It is a real lock: a second taker is refused as busy.
-        let err = lock_at(&path, &db_file, denied, open_ro).unwrap_err();
-        assert!(err.is::<DistillBusy>(), "{err:#}");
-        drop(held);
-        lock_at(&path, &db_file, denied, open_ro).unwrap();
-    }
-
-    /// Regression (round 3, DIST-12): a lock file created under umask 077
-    /// (mode 0600, e.g. by root) could not even be opened read-only by the
-    /// timer user, so every run failed with "Permission denied".
-    #[test]
-    fn a_lock_file_we_cannot_read_falls_back_and_new_ones_are_world_readable() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let db_file = dir.path().join("tasks.db");
-        std::fs::write(&db_file, b"").unwrap();
-        let path = dir.path().join("tasks.db.distill.lock");
-
-        // A lock file we can create gets 0644 whatever the umask.
-        std::fs::write(&path, b"").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        drop(lock_at(&path, &db_file, open_lock_rw, open_ro).unwrap());
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644, "lock file left at {mode:o}");
-
-        // Neither writable nor readable (as root, chmod cannot deny us, so
-        // inject EACCES): lock the database file itself, read-only.
-        let denied = |_: &std::path::Path| -> std::io::Result<std::fs::File> {
-            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-        };
-        let ro_denied_for_lock = |p: &std::path::Path| -> std::io::Result<std::fs::File> {
-            if p.extension().is_some_and(|e| e == "lock") {
-                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-            } else {
-                std::fs::File::open(p)
-            }
-        };
-        let held = lock_at(&path, &db_file, denied, ro_denied_for_lock)
-            .expect("fell back to locking the database file");
-        let err = lock_at(&path, &db_file, denied, ro_denied_for_lock).unwrap_err();
-        assert!(err.is::<DistillBusy>(), "{err:#}");
-        drop(held);
-
-        // file: URIs are percent-decoded.
+    fn the_run_lock_is_the_database_directory_for_every_user() {
+        use std::os::fd::AsRawFd;
+        let (dir, db) = fresh_db();
+        let held = acquire_run_lock(&db).unwrap().expect("a file DB is locked");
+        let target = std::fs::read_link(format!("/proc/self/fd/{}", held.as_raw_fd())).unwrap();
         assert_eq!(
-            run_lock_path(std::path::Path::new("file:/srv/my%20db/tasks.db?mode=rwc")),
-            Some(std::path::PathBuf::from("/srv/my db/tasks.db.distill.lock"))
+            target,
+            dir.path().canonicalize().unwrap(),
+            "the lock must be the DB directory, never the DB file or a side file"
+        );
+        // Any second taker — another user can always open the directory
+        // read-only — is refused while the first holds it.
+        let err = acquire_run_lock(&db).unwrap_err();
+        assert!(err.is::<DistillBusy>(), "{err:#}");
+        drop(held);
+
+        // A run while someone else holds the directory lock is refused and
+        // touches nothing.
+        seed_inbox(&db, &["call the bank about the mandate"]);
+        let outside = std::fs::File::open(dir.path()).unwrap();
+        outside.lock().unwrap();
+        let err = run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100).unwrap_err();
+        assert!(err.is::<DistillBusy>(), "{err:#}");
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+        drop(outside);
+        assert_eq!(
+            run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100)
+                .unwrap()
+                .consumed,
+            1
         );
     }
 
-    /// In-memory databases have no file to put a lock beside (and are
-    /// private to the process anyway); `file:` URIs lock beside the real
-    /// file, never as a junk `file:…` name in the working directory.
+    /// In-memory databases take no lock (private to the process); `file:`
+    /// URIs (percent-decoded) lock the real file's directory; the lock code
+    /// refuses to lock anything that is not a directory.
     #[test]
-    fn the_run_lock_path_follows_the_database_kind() {
+    fn the_run_lock_target_follows_the_database_kind() {
         use std::path::{Path, PathBuf};
-        assert_eq!(run_lock_path(Path::new(":memory:")), None);
-        assert_eq!(run_lock_path(Path::new("")), None);
-        assert_eq!(run_lock_path(Path::new("file::memory:?cache=shared")), None);
+        assert_eq!(run_lock_dir(Path::new(":memory:")), None);
+        assert_eq!(run_lock_dir(Path::new("")), None);
+        assert_eq!(run_lock_dir(Path::new("file::memory:?cache=shared")), None);
         assert_eq!(
-            run_lock_path(Path::new("file:x?mode=memory&cache=shared")),
+            run_lock_dir(Path::new("file:x?mode=memory&cache=shared")),
             None
         );
         assert_eq!(
-            run_lock_path(Path::new("file:/srv/pt/tasks.db?mode=rwc")),
-            Some(PathBuf::from("/srv/pt/tasks.db.distill.lock"))
+            run_lock_dir(Path::new("file:/srv/my%20pt/tasks.db?mode=rwc")),
+            Some(PathBuf::from("/srv/my pt"))
         );
         assert_eq!(
-            run_lock_path(Path::new("file:///srv/pt/tasks.db")),
-            Some(PathBuf::from("/srv/pt/tasks.db.distill.lock"))
+            run_lock_dir(Path::new("file:///srv/pt/tasks.db")),
+            Some(PathBuf::from("/srv/pt"))
         );
         assert_eq!(
-            run_lock_path(Path::new("/srv/pt/tasks.db")),
-            Some(PathBuf::from("/srv/pt/tasks.db.distill.lock"))
+            run_lock_dir(Path::new("/srv/pt/tasks.db")),
+            Some(PathBuf::from("/srv/pt"))
         );
+        assert_eq!(
+            run_lock_dir(Path::new("tasks.db")),
+            Some(PathBuf::from("."))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_file = dir.path().join("tasks.db");
+        std::fs::write(&db_file, b"").unwrap();
+        let err = lock_directory(&db_file).unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err:#}");
+        // Two "users" contend on the same directory.
+        let first = lock_directory(dir.path()).unwrap();
+        assert!(lock_directory(dir.path()).unwrap_err().is::<DistillBusy>());
+        drop(first);
+        lock_directory(dir.path()).unwrap();
     }
 
+    /// Regression (DIST-12): nothing claimed the rows, so two concurrent runs
+    /// (the hourly timer and a manual `pt distill`) both fetched, classified
+    /// and created tasks from the same captures.
     #[test]
     fn a_concurrent_run_is_refused_without_touching_the_queue() {
-        let (_dir, db) = fresh_db();
+        let (dir, db) = fresh_db();
         seed_inbox(&db, &["call the bank about the mandate"]);
-        let lock_path = format!("{}.distill.lock", db.path().display());
-        let held = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .unwrap();
+        let held = std::fs::File::open(dir.path()).unwrap();
         held.lock().unwrap();
 
         let err = run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100).unwrap_err();
