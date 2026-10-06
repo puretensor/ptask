@@ -1790,7 +1790,7 @@ fn confirm_delete(pt: &str, title: &str) -> Result<()> {
     print!(
         "{}",
         ui::prompt(
-            &format!(
+            format!(
                 "permanently delete {pt} \"{}\"? This cannot be undone.",
                 ui::one_line(title)
             ),
@@ -2063,7 +2063,7 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
                     "{}",
                     ui::bullet(
                         u.pt_id.as_deref().unwrap_or("------"),
-                        &format!("{:>3}m  {}", u.duration_min, u.title),
+                        format!("{:>3}m  {}", u.duration_min, u.title),
                         ui::Ink::Amber,
                         8
                     )
@@ -2473,7 +2473,7 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     "{}",
                     ui::bullet(
                         &d.task_uuid,
-                        &format!(
+                        format!(
                             "level {} · telegram {} · email {}",
                             d.level, d.telegram_sent, d.email_sent
                         ),
@@ -3168,7 +3168,7 @@ fn cmd_undo(db: &Db, a: UndoArgs) -> Result<()> {
         print!(
             "{}",
             ui::prompt(
-                &format!(
+                format!(
                     "undo the creation of {handle} \"{}\"? It will be deleted permanently.",
                     plan.title
                 ),
