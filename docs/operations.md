@@ -238,6 +238,14 @@ done/dismissed task resets its escalation level, level timestamp and reminder
 cooldown, so an on-schedule daily task never climbs the ladder and a task
 reopened after the level-5 final notice is reminded again from level 1.
 
+Each reminder is recorded before it is sent. Immediately before the send,
+one conditional update re-checks the task's current row (still pending, not
+snoozed or completed meanwhile, same level, not already reminded by a
+concurrent run) and stamps the 4-hour cooldown; the Telegram budget slot is
+reserved at the same point. A failed delivery releases both. A database
+write that fails after a delivered nudge is logged and reported on that task
+but no longer aborts the run, and the nudge is not repeated.
+
 A level whose channels are all unconfigured falls back to the configured
 channel: on a Telegram-only install the level-5 final notice goes to Telegram
 (budgeted like any Telegram nudge); on an email-only install levels 1-2 go to

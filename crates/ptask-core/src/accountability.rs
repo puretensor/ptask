@@ -30,6 +30,13 @@
 //! levels 1-2 go to email on an email-only one), so the ladder never stalls
 //! on a channel that does not exist.
 //!
+//! Each reminder is claimed before it is sent: one conditional UPDATE
+//! re-checks the task against its current row (still eligible, same level,
+//! same `last_reminded`) and stamps the cooldown, and the Telegram budget
+//! slot is reserved. A failed delivery releases both. A crash or a failed
+//! write after delivery therefore cannot leave a sent nudge unrecorded and
+//! due again, and a task completed or snoozed mid-run is not nudged.
+//!
 //! A new level is persisted only once its notice is delivered on some
 //! channel, so a dead or unconfigured channel cannot walk a task up the
 //! ladder unseen, and a failed level-5 email is retried rather than lost.
@@ -100,6 +107,7 @@ struct EligibleTask {
     /// task completed on schedule is never "33 days old".
     occurrence_start: String,
     last_reminded: Option<String>,
+    next_reminder: Option<String>,
     dismissal_count: i64,
     escalation_level: i64,
     level_changed_at: Option<String>,
@@ -143,29 +151,10 @@ pub fn increment_daily_budget(db: &Db, date_utc: &str) -> Result<i64> {
     Ok(n)
 }
 
-/// Tasks the reminder ladder may act on right now.
-///
-/// Both timestamp guards below fail *visible*: `julianday()` returns NULL on
-/// an unparseable value, so a malformed `snoozed_until` must not be allowed to
-/// suppress the row and a malformed `next_reminder` counts as due. Otherwise a
-/// single bad timestamp silences a task permanently.
-fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
-    let conn = db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT id, title,
-                COALESCE((SELECT i.ts FROM interactions i
-                           WHERE i.task_id = tasks.id
-                             AND (i.action = 'recurrence_advance'
-                                  OR (i.action = 'status_change'
-                                      AND i.details LIKE 'Reopened%'))
-                             AND julianday(i.ts) IS NOT NULL
-                           ORDER BY julianday(i.ts) DESC LIMIT 1),
-                         created_at),
-                last_reminded,
-                COALESCE(dismissal_count, 0), COALESCE(escalation_level, 0),
-                level_changed_at
-         FROM tasks
-         WHERE status IN ('pending', 'delayed')
+/// The reminder ladder's eligibility test, with `?1` = now (operator ISO).
+/// Shared by [`fetch_eligible`] and [`claim_reminder`], which re-applies it
+/// atomically immediately before a send.
+const ELIGIBLE_PREDICATE: &str = "status IN ('pending', 'delayed')
            AND NOT (COALESCE(status_v2,'') = 'snoozed'
                     AND snoozed_until IS NOT NULL
                     AND julianday(snoozed_until) IS NOT NULL
@@ -177,10 +166,34 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
            AND (next_reminder IS NULL
                 OR julianday(next_reminder) IS NULL
                 OR julianday(next_reminder) <= julianday(?1))
-           AND COALESCE(escalation_level, 0) < 5
+           AND COALESCE(escalation_level, 0) < 5";
+
+/// Tasks the reminder ladder may act on right now.
+///
+/// Both timestamp guards below fail *visible*: `julianday()` returns NULL on
+/// an unparseable value, so a malformed `snoozed_until` must not be allowed to
+/// suppress the row and a malformed `next_reminder` counts as due. Otherwise a
+/// single bad timestamp silences a task permanently.
+fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, title,
+                COALESCE((SELECT i.ts FROM interactions i
+                           WHERE i.task_id = tasks.id
+                             AND (i.action = 'recurrence_advance'
+                                  OR (i.action = 'status_change'
+                                      AND i.details LIKE 'Reopened%'))
+                             AND julianday(i.ts) IS NOT NULL
+                           ORDER BY julianday(i.ts) DESC LIMIT 1),
+                         created_at),
+                last_reminded,
+                COALESCE(dismissal_count, 0), COALESCE(escalation_level, 0),
+                level_changed_at, next_reminder
+         FROM tasks
+         WHERE {ELIGIBLE_PREDICATE}
          ORDER BY (last_reminded IS NOT NULL), last_reminded ASC,
-                  priority DESC, priority_score DESC",
-    )?;
+                  priority DESC, priority_score DESC"
+    ))?;
     let rows = stmt.query_map([now_iso], |r| {
         Ok(EligibleTask {
             id: r.get(0)?,
@@ -190,6 +203,7 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
             dismissal_count: r.get(4)?,
             escalation_level: r.get(5)?,
             level_changed_at: r.get(6)?,
+            next_reminder: r.get(7)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -373,20 +387,89 @@ fn log_notification(
     Ok(())
 }
 
-/// Stamp `last_reminded = now` and `next_reminder = now + 4h` so the next
-/// run-check skips this task during its cool-down window.
-fn stamp_reminder(db: &Db, task_uuid: &str, now: &Zoned) -> Result<()> {
+/// Claim this task's reminder slot BEFORE sending: stamp `last_reminded =
+/// now` and `next_reminder = now + 4h` in one conditional UPDATE that also
+/// re-checks, against the row as it is now, that the task is still eligible
+/// (not completed, dismissed or snoozed meanwhile — e.g. by a Done tap) and
+/// unchanged since [`fetch_eligible`] (same level, same `last_reminded`, so
+/// a concurrent run cannot claim it twice). `Ok(false)` = skip the task.
+///
+/// Recording before the send is what makes the nudge idempotent: a crash,
+/// kill or write failure after delivery can no longer leave it unstamped
+/// and due again. If every channel then fails, [`release_claim`] undoes it.
+fn claim_reminder(
+    db: &Db,
+    task: &EligibleTask,
+    now_iso_operator: &str,
+    now: &Zoned,
+) -> Result<bool> {
     let now_iso = crate::dates::format_iso(now);
     let next = now
         .checked_add(jiff::Span::new().hours(MIN_HOURS_BETWEEN_TASK_REMINDERS))
         .map_err(|e| Error::Other(format!("next_reminder math: {}", e)))?;
     let next_iso = crate::dates::format_iso(&next);
     let conn = db.get()?;
-    conn.execute(
-        "UPDATE tasks SET last_reminded=?1, next_reminder=?2 WHERE id=?3",
-        params![now_iso, next_iso, task_uuid],
+    let claimed = conn.execute(
+        &format!(
+            "UPDATE tasks SET last_reminded=?2, next_reminder=?3
+              WHERE id=?4 AND {ELIGIBLE_PREDICATE}
+                AND COALESCE(escalation_level, 0) = ?5
+                AND last_reminded IS ?6"
+        ),
+        params![
+            now_iso_operator,
+            now_iso,
+            next_iso,
+            task.id,
+            task.escalation_level,
+            task.last_reminded
+        ],
     )?;
-    Ok(())
+    Ok(claimed == 1)
+}
+
+/// Undo [`claim_reminder`] when nothing was delivered, so a dead channel
+/// does not silently consume the task's cooldown. Best effort: if this
+/// write fails the task simply waits out one cooldown (fails quiet, never
+/// loud-twice).
+fn release_claim(db: &Db, task: &EligibleTask, now: &Zoned) {
+    let claimed_iso = crate::dates::format_iso(now);
+    let result = db.get().and_then(|conn| {
+        conn.execute(
+            "UPDATE tasks SET last_reminded=?1, next_reminder=?2
+              WHERE id=?3 AND last_reminded=?4",
+            params![task.last_reminded, task.next_reminder, task.id, claimed_iso],
+        )
+        .map_err(Error::from)
+    });
+    if let Err(e) = result {
+        error!(target: "ptask::accountability", task_uuid = %task.id, error = %e, "could not release an undelivered reminder claim");
+    }
+}
+
+/// Give back a Telegram budget slot reserved for a send that failed.
+fn refund_daily_budget(db: &Db, date_utc: &str) {
+    let result = db.get().and_then(|conn| {
+        conn.execute(
+            "UPDATE daily_budget SET notifications_sent = MAX(notifications_sent - 1, 0)
+              WHERE date = ?1",
+            [date_utc],
+        )
+        .map_err(Error::from)
+    });
+    if let Err(e) = result {
+        error!(target: "ptask::accountability", error = %e, "could not refund a telegram budget slot");
+    }
+}
+
+/// A database write that follows a delivered send. Failing it must not abort
+/// the run (the send happened and the claim is already recorded), so it is
+/// logged and attached to the task's report instead.
+fn after_send(what: &str, result: Result<()>, dispatched: &mut DispatchedFor) {
+    if let Err(e) = result {
+        error!(target: "ptask::accountability", task_uuid = %dispatched.task_uuid, error = %e, "{what} failed after delivery");
+        dispatched.error = Some(format!("{what}: {e}"));
+    }
 }
 
 /// Dispatch configuration lives in the central config module; re-exported
@@ -563,6 +646,15 @@ pub async fn run_check_at<D: Dispatch>(
             dispatch.compose_via_hal(cfg, &req).await
         };
         let message = composed.unwrap_or_else(|| fallback_message(&task, level, age_days));
+        // Re-check and record atomically, right before anything is sent.
+        if !cfg.dry_run && !claim_reminder(db, &task, &now_iso_operator, &now_utc)? {
+            info!(
+                target: "ptask::accountability",
+                task_uuid = %task.id,
+                "task changed since it was selected — not reminded"
+            );
+            continue;
+        }
         let mut dispatched = DispatchedFor {
             task_uuid: task.id.clone(),
             level,
@@ -588,6 +680,15 @@ pub async fn run_check_at<D: Dispatch>(
                         let body = truncate_utf16(&message, TELEGRAM_TEXT_LIMIT - prefix_units);
                         let prefixed = format!("<b>Task #{}:</b> {}", level, html_escape(&body));
                         let buttons = nudge_buttons(&task.id);
+                        // Reserve the budget slot before sending (refunded on
+                        // failure), so a write failure after delivery cannot
+                        // let the run exceed the daily budget.
+                        if !cfg.dry_run
+                            && let Err(e) = increment_daily_budget(db, &date_utc)
+                        {
+                            release_claim(db, &task, &now_utc);
+                            return Err(e);
+                        }
                         let r = if cfg.dry_run {
                             true
                         } else {
@@ -601,10 +702,10 @@ pub async fn run_check_at<D: Dispatch>(
                             telegram_consecutive_failures = 0;
                             dispatched.telegram_sent = true;
                             sent_telegrams += 1;
-                            if !cfg.dry_run {
-                                increment_daily_budget(db, &date_utc)?;
-                            }
                         } else {
+                            if !cfg.dry_run {
+                                refund_daily_budget(db, &date_utc);
+                            }
                             report.send_failures += 1;
                             telegram_consecutive_failures += 1;
                             if telegram_consecutive_failures == TELEGRAM_CIRCUIT_BREAK {
@@ -648,15 +749,18 @@ pub async fn run_check_at<D: Dispatch>(
                 _ => false,
             };
             if ok && !cfg.dry_run {
-                log_notification(db, &task.id, channel, level, &message)?;
+                let logged = log_notification(db, &task.id, channel, level, &message);
+                after_send("notification log", logged, &mut dispatched);
             }
         }
-        if dispatched.telegram_sent || dispatched.email_sent {
+        if !(dispatched.telegram_sent || dispatched.email_sent) {
             if !cfg.dry_run {
-                if escalating {
-                    set_escalation_level(db, &task.id, level)?;
-                }
-                stamp_reminder(db, &task.id, &now_utc)?;
+                release_claim(db, &task, &now_utc);
+            }
+        } else {
+            if !cfg.dry_run && escalating {
+                let persisted = set_escalation_level(db, &task.id, level);
+                after_send("escalation level", persisted, &mut dispatched);
             }
             if escalating {
                 info!(
@@ -935,6 +1039,7 @@ mod tests {
                 occurrence_start: crate::dates::format_iso(
                     &now.checked_sub(jiff::Span::new().days(age_days)).unwrap(),
                 ),
+                next_reminder: None,
                 last_reminded: last_offset_secs.map(|s| {
                     crate::dates::format_iso(
                         &now.checked_sub(jiff::Span::new().seconds(s)).unwrap(),
@@ -975,6 +1080,7 @@ mod tests {
             title: "Renew SSL".into(),
             occurrence_start: "2026-05-01T00:00:00+00:00".into(),
             last_reminded: None,
+            next_reminder: None,
             dismissal_count: 2,
             escalation_level: 0,
             level_changed_at: None,
@@ -1554,6 +1660,106 @@ mod tests {
         assert_eq!(report.eligible, 1, "reopened task is eligible again");
         assert_eq!(report.dispatched.len(), 1);
         assert_eq!(report.dispatched[0].level, 1, "the ladder restarts");
+    }
+
+    /// Completes the task while the message is being composed — the operator
+    /// tapping Done (or another run) between `fetch_eligible` and the send.
+    struct CompletesDuringCompose {
+        db: Db,
+        sent: RecordTelegram,
+    }
+    impl Dispatch for CompletesDuringCompose {
+        async fn send_telegram(
+            &self,
+            cfg: &DispatchCfg,
+            text: &str,
+            buttons: &[(String, String)],
+        ) -> Result<bool> {
+            self.sent.send_telegram(cfg, text, buttons).await
+        }
+        async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {
+            Ok(true)
+        }
+        async fn compose_via_hal(&self, _cfg: &DispatchCfg, req: &NudgeRequest) -> Option<String> {
+            self.db
+                .with_conn(|c| {
+                    c.execute(
+                        "UPDATE tasks SET status='done', status_v2='done' WHERE id=?1",
+                        [&req.task_uuid],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            None
+        }
+    }
+
+    /// Regression (PARSE-12): the task row was read once, before composing
+    /// and sending, so a task completed in the meantime was still nudged.
+    #[tokio::test]
+    async fn task_state_is_rechecked_immediately_before_sending() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        let task_uuid = aged_task_before(&db, "done while composing", 3, &anchor);
+        let cfg = DispatchCfg {
+            hal_nudge_url: Some("http://hal.invalid/nudge".into()),
+            ..telegram_cfg()
+        };
+        let dispatch = CompletesDuringCompose {
+            db: db.clone(),
+            sent: RecordTelegram::default(),
+        };
+        let report = run_check_at(&db, &cfg, &dispatch, &anchor).await.unwrap();
+        assert!(
+            dispatch.sent.0.lock().unwrap().is_empty(),
+            "a completed task was nudged"
+        );
+        assert!(report.dispatched.is_empty());
+        assert_eq!(
+            get_daily_budget(&db, &anchor.date().to_string()).unwrap(),
+            0
+        );
+        let last: Option<String> = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT last_reminded FROM tasks WHERE id=?1",
+                    [&task_uuid],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(last.is_none());
+    }
+
+    /// Regression (PARSE-12): the reminder was recorded only after the send,
+    /// so a database write failing after a delivered nudge aborted the run
+    /// unstamped and every following run sent it again, outside the budget.
+    #[tokio::test]
+    async fn a_write_failure_after_sending_does_not_repeat_the_nudge() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        aged_task_before(&db, "nudged once only", 3, &anchor);
+        db.with_conn(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER reject_notification BEFORE INSERT ON notifications
+                 BEGIN SELECT RAISE(ABORT, 'simulated disk full'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let dispatch = RecordTelegram::default();
+        for _ in 0..3 {
+            let _ = run_check_at(&db, &telegram_cfg(), &dispatch, &anchor).await;
+        }
+        assert_eq!(
+            dispatch.0.lock().unwrap().len(),
+            1,
+            "the nudge was repeated after a post-send write failure"
+        );
+        assert_eq!(
+            get_daily_budget(&db, &anchor.date().to_string()).unwrap(),
+            1
+        );
     }
 
     /// Records every Telegram body it is asked to send.
