@@ -288,7 +288,7 @@ def host_allowed(value: str | None, extra=None) -> bool:
     if value is None:
         return True
     extra = ALLOWED_HOSTS if extra is None else extra
-    host = value.strip().lower()
+    host = value.strip(" \t").lower()
     if host.startswith("["):
         end = host.find("]")
         if end < 0:
@@ -303,8 +303,8 @@ def host_allowed(value: str | None, extra=None) -> bool:
         except ValueError:
             return False
         return True
-    name, _, port = host.partition(":")
-    if port and not _PORT_RE.fullmatch(port):
+    name, sep, port = host.partition(":")
+    if sep and not _PORT_RE.fullmatch(port):
         return False
     name = name.rstrip(".")
     if not name:

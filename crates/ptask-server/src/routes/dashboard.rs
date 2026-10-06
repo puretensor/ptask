@@ -234,8 +234,8 @@ pub async fn basic_throttle(
 /// `host_allowed`). A rebinding page can only address us under a name its
 /// author controls, so open (password-less) dashboard routes answer only to
 /// names nobody outside the operator can point here: IP literals,
-/// single-label names (localhost, MagicDNS short names), `*.ts.net`, and
-/// `DashConfig::allowed_hosts`. With `PTASK_DASH_PASS` set the browser never
+/// `localhost`, `*.ts.net`, and `DashConfig::allowed_hosts` (which carries
+/// the machine's own short name). With `PTASK_DASH_PASS` set the browser never
 /// sends the Basic credentials to the rebinding page's origin, so the guard
 /// stands down and any public name in front of the cockpit keeps working. A
 /// request with neither a Host header nor an authority is not a browser's.
@@ -275,7 +275,13 @@ pub fn authed(state: &AppState, headers: &HeaderMap) -> bool {
     else {
         return false;
     };
-    let Some(b64) = hdr.strip_prefix("Basic ") else {
+    // The scheme is case-insensitive (RFC 7235), read exactly as the throttle
+    // reads it so a header is counted iff it is checked.
+    let Some(b64) = hdr
+        .get(..6)
+        .filter(|s| s.eq_ignore_ascii_case("basic "))
+        .map(|_| &hdr[6..])
+    else {
         return false;
     };
     let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64) else {
@@ -1738,6 +1744,14 @@ mod tests {
         let req = Request::builder()
             .uri("/api/stats")
             .header(header::AUTHORIZATION, basic_header("correct horse"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(status_of(&app, req).await, 200);
+        // The scheme name is case-insensitive (RFC 7235).
+        let lower = basic_header("correct horse").replacen("Basic ", "basic ", 1);
+        let req = Request::builder()
+            .uri("/api/stats")
+            .header(header::AUTHORIZATION, lower)
             .body(axum::body::Body::empty())
             .unwrap();
         assert_eq!(status_of(&app, req).await, 200);

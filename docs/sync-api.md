@@ -22,10 +22,15 @@
 Loopback `pt serve` binds keep the original local-dev mode and accept requests
 without application credentials until a token is configured: `PTASK_API_TOKEN`,
 `PTASK_METRICS_TOKEN`, or any unrevoked named token (`pt token create`) closes
-anonymous access. Even then, an anonymous request is served only when its
-`Host` names the server itself (IP literal, `localhost`, the machine's short
+anonymous access. While anonymous access is open, a request is served only
+when its `Host` names the server itself (IP literal, `localhost`, the machine's short
 hostname, `*.ts.net`, `PTASK_DASH_ALLOWED_HOSTS`), because a DNS-rebinding
-page carries no credential either. Because the machine APIs and the always-
+page carries no credential either. A `.suffix` entry does not match the apex
+name itself (list it separately), a request with no `Host` header passes, and
+`pt serve` learns the machine's short hostname only on Linux. Tokenless clients
+that address `pt serve` by another DNS name (a reverse proxy forwarding its own
+`Host`, a LAN name in `PTASK_SYNC_URL`) need that name in
+`PTASK_DASH_ALLOWED_HOSTS`. Because the machine APIs and the always-
 mounted dashboard use separate auth schemes, non-loopback binds fail closed
 unless machine-API auth (`PTASK_API_TOKEN` or a named token) and
 `PTASK_DASH_PASS` are both set, and a non-loopback listener never serves

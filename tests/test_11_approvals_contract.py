@@ -596,11 +596,11 @@ def test_tg_approval_taps_refused_while_buttons_are_off(server_no_buttons):
     assert call_api(base, "GET", f"/api/approvals/{a['id']}", t["scraper"])[1]["status"] == "pending"
 
 
-def tap_actor(env: dict, callback_id: str) -> str:
+def tap_actor(env: dict, key: str) -> str:
     with sqlite3.connect(env["PTASK_DB"]) as db:
         row = db.execute("SELECT actor FROM pt_event_log WHERE uuid = ?",
-                         (f"tg-cb:{callback_id}",)).fetchone()
-    assert row, f"no journal entry for {callback_id}"
+                         (f"tg-cb:{key}",)).fetchone()
+    assert row, f"no journal entry for {key}"
     return row[0]
 
 
@@ -611,10 +611,19 @@ def test_tg_task_taps_are_the_operators_only_from_a_forwarder(server, env):
     # An agent's write token may still act, but as itself, never as the operator.
     body = {"data": "ptdismiss:PT-1", "callback_id": "cb-agent"}
     assert call_api(base, "POST", "/tg/callback", t["hal"], body)[0] == 200
-    assert tap_actor(env, "cb-agent") == "telegram via hal"
+    assert tap_actor(env, "hal:cb-agent") == "telegram via hal"
     body = {"data": "ptdismiss:PT-2", "callback_id": "cb-nexus"}
     assert call_api(base, "POST", "/tg/callback", t["nexus"], body)[0] == 200
     assert tap_actor(env, "cb-nexus") == "telegram"
+    # An agent can't pre-claim the operator's callback id and swallow the tap.
+    run(env, "add", "third target")
+    body = {"data": "ptdismiss:PT-3", "callback_id": "cb-claimed"}
+    assert call_api(base, "POST", "/tg/callback", t["hal"], body)[0] == 200
+    run(env, "reopen", "PT-3")
+    body = {"data": "ptdone:PT-3", "callback_id": "cb-claimed"}
+    code, resp = call_api(base, "POST", "/tg/callback", t["nexus"], body)
+    assert code == 200 and not resp.get("duplicate"), resp
+    assert pj(env, "show", "PT-3")["status"] == "done"
 
 
 # --------------------------------------------------------------------------- MCP

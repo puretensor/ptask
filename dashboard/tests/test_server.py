@@ -328,7 +328,7 @@ class HostAllowlistTests(unittest.TestCase):
             "127.0.0.1:x", "localhost:99999999", "a b",
             # A hostile LAN can resolve any other dotless name (DHCP search
             # domain, LLMNR, NBT-NS), so only localhost and our own name pass.
-            "evil", "wpad", "xn--e1afmkfd", "[fe80::1%evil.example]",
+            "evil", "wpad", "xn--e1afmkfd", "[fe80::1%evil.example]", "localhost:", "\xa0localhost",
         ):
             self.assertFalse(server.host_allowed(host, extra=frozenset()), host)
         self.assertFalse(server.host_allowed(

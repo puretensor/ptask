@@ -77,7 +77,13 @@ fn callback_blocking(
     }
     let uuid = rest;
 
-    let event_uuid = format!("tg-cb:{}", req.callback_id);
+    // A non-forwarder's key is namespaced by its client id, so it can never
+    // pre-claim (and so swallow) the callback id of the operator's real tap.
+    let event_uuid = if from_forwarder {
+        format!("tg-cb:{}", req.callback_id)
+    } else {
+        format!("tg-cb:{}:{}", identity.client_id, req.callback_id)
+    };
     let already = match ptask_core::event_log::get_by_uuid(&state.db, &event_uuid) {
         Ok(found) => found.is_some(),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, &format!("{}", e)),

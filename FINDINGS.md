@@ -37,6 +37,8 @@ before merge.
   remove it. The sidecar has no login. Unknown public Host names now get 421.
 - If you reach the cockpit by a MagicDNS short alias other than the box's own hostname,
   add it to `PTASK_DASH_ALLOWED_HOSTS`; consider `PTASK_DASH_ALLOWED_HOSTS=.<tailnet>.ts.net`.
+- Tokenless clients that reach `pt serve` by a DNS name other than `localhost`, the short
+  hostname or `*.ts.net` (reverse proxy, LAN name) need that name in `PTASK_DASH_ALLOWED_HOSTS`.
 - Check that nexus forwards taps with its `nexus` token (`pt token list` shows last use);
   on the legacy env token its taps are journaled as `telegram via legacy-env`.
 

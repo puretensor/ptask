@@ -2,8 +2,8 @@
 //!
 //! Loopback `pt serve` keeps unauthenticated local-development compatibility
 //! until a token is configured (the env token or any unrevoked named token),
-//! and even then answers anonymous requests only when they address one of the
-//! server's own names (DNS rebinding). Non-loopback listeners require API auth
+//! and in that mode answers anonymous requests only when they address one of
+//! the server's own names (DNS rebinding). Non-loopback listeners require API auth
 //! (`PTASK_API_TOKEN` or a named token) and dashboard Basic auth unless the
 //! explicit unauthenticated override is set, and never serve anonymous callers.
 //! Machine-API callers send either:
