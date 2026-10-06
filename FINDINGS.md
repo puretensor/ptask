@@ -27,6 +27,20 @@ before merge.
 | Auth | Named tokens never closed anonymous access. Finishing the rotation off `PTASK_API_TOKEN` and setting the override the bind error suggests would have given every unauthenticated caller Write. | An unrevoked named token closes anonymous access and counts as API auth for the bind check. A non-loopback listener never serves anonymous callers, so revoking the last named token can't open it. |
 | Telegram | `/tg/callback` approve/reject worked with decide buttons switched off. `ptdone`/`ptdismiss`/`ptsnooze` accepted any write token and journaled the action as the operator's tap. | Approval taps need `PTASK_TG_APPROVAL_BUTTONS=1` and a `PTASK_TG_FORWARDERS` client. Task taps from any other client are journaled as `telegram via <client_id>`. |
 
+### Fixed (3.36.0) — core task model
+
+| Area | Finding | Fix |
+|---|---|---|
+| Undo | `pt undo` reversed the latest event whoever wrote it, so it could delete another actor's task; undoing a create left dependency links and children dangling. | Undo reverses only your own events, and a later event from anyone protects the task. A create with links or children is never deleted. `pt undo` names the PT-N and title, and undoing a create needs a TTY confirmation or `--yes`. |
+| Resolve | An empty or blank query matched every task (`pt done ""` completed the only open task). | Refused. |
+| Completion | Completing a done task wrote a second `task.completed`. | Error "task is already done"; nothing written. |
+| Recurrence | A duplicate or stale completion advanced a recurring task twice. | The advance is conditional on the deadline the caller read. |
+| Deadlines | Deadlines and snoozes were stored in forms SQLite's date functions misread; snoozes woke on the wrong day. | One stored form (bare date, or the operator-timezone instant with a colon offset); the snooze check parses in Rust, so old rows still wake on time. |
+| Recurrence | A date-only recurring deadline gained a time on advance; quick-added monthly rules anchored on an already clamped day (Jan 31 → Feb 28 forever); fixed rules drifted an hour after spring-forward; an unrepresentable next occurrence made the task impossible to complete. | Date-only stays date-only; the anchor is the day the rule was set; fixed mode reapplies the rule's time; an unrepresentable next occurrence closes the task. |
+| Reaper | The reaper dismissed tasks touched after its scan. | Each candidate is re-checked (status, reason, unchanged `updated_at`) before dismissing. |
+| Search | `pt search` / MCP `task_search` passed raw FTS syntax, so ordinary text errored or matched wrongly. | Free text: each word quoted and ANDed; a trailing `*` is a prefix. |
+| Idempotency | An idempotency key replayed whatever command first used it, on any task; `/sync` command uuids shared one namespace across clients and raced to a raw UNIQUE error. | A key replays only the same command on the same task, otherwise errors. `/sync` keys are stored as `sync:<client>:<uuid>` (old raw keys still replay for their sender); concurrent duplicates both answer with the same `temp_id` map. |
+
 ### Operator actions (outside the repository)
 
 - GitHub → Settings → Actions → General: require approval for all external contributors.
