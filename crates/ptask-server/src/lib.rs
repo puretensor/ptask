@@ -692,6 +692,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let error = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // One prefix, not "filter: filter: ...".
+        assert!(
+            error.starts_with("filter: ") && !error.starts_with("filter: filter:"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
