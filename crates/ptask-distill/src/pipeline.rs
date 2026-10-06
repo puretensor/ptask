@@ -62,18 +62,34 @@ pub fn chunk_disposition(kept_len: usize, covered_len: usize) -> ChunkDispositio
     }
 }
 
-/// Similarity gate: normalized token overlap (Jaccard on lowercase words).
-/// Cheap, deterministic, no model download.
-fn title_similar(a: &str, b: &str) -> bool {
-    let toks = |s: &str| {
-        s.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| !w.is_empty())
-            .map(|w| w.to_string())
+fn title_tokens(s: &str) -> std::collections::HashSet<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Two titles name different things when their identifier tokens — any
+/// token containing a digit (`4411`, `n1` from `fox-n1`, `host7`, `v2`) —
+/// differ. Word overlap and embeddings both score "pay invoice 4411" and
+/// "pay invoice 4412" as near-identical, which deduped real new work away
+/// (even against done tasks). Fails toward creating a possible duplicate.
+fn identifiers_conflict(a: &str, b: &str) -> bool {
+    let ids = |s: &str| {
+        title_tokens(s)
+            .into_iter()
+            .filter(|w| w.chars().any(|c| c.is_numeric()))
             .collect::<std::collections::HashSet<_>>()
     };
-    let (ta, tb) = (toks(a), toks(b));
-    if ta.is_empty() || tb.is_empty() {
+    ids(a) != ids(b)
+}
+
+/// Similarity gate: normalized token overlap (Jaccard on lowercase words),
+/// never across distinct identifiers. Cheap, deterministic, no model download.
+fn title_similar(a: &str, b: &str) -> bool {
+    let (ta, tb) = (title_tokens(a), title_tokens(b));
+    if ta.is_empty() || tb.is_empty() || identifiers_conflict(a, b) {
         return false;
     }
     let inter = ta.intersection(&tb).count() as f64;
@@ -538,7 +554,9 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             Ok(SemanticCheck {
                 best: Some((idx, score)),
                 ..
-            }) if score >= crate::semantic_dedup::DEFAULT_THRESHOLD => {
+            }) if score >= crate::semantic_dedup::DEFAULT_THRESHOLD
+                && !identifiers_conflict(&dedup.existing[idx].1, &cand.title) =>
+            {
                 let (dup_id, dup_title) = dedup.existing[idx].clone();
                 st.skipped += 1;
                 cover(&cand.sources);
@@ -1627,6 +1645,67 @@ mod tests {
             .unwrap();
         assert!(stored.contains("preflight failed"), "{stored}");
         assert!(stored.contains("context length exceeded"), "{stored}");
+    }
+
+    /// Regression (DIST-2): the 0.6 Jaccard gate ignored identifiers, so a
+    /// different invoice number or host deduped against the old task —
+    /// including a *done* one, so the new commitment was never created.
+    #[test]
+    fn distinct_identifiers_never_dedup() {
+        assert!(!title_similar(
+            "Pay invoice 4411 to Acme",
+            "Pay invoice 4412 to Acme"
+        ));
+        assert!(!title_similar(
+            "Reboot the fox-n1 node",
+            "Reboot the fox-n3 node"
+        ));
+        assert!(!title_similar(
+            "Renew cert for host7 today",
+            "Renew cert for host9 today"
+        ));
+        assert!(!title_similar(
+            "Pay invoice 4411 to Acme",
+            "Pay invoice to Acme"
+        ));
+        // Same identifiers still dedup.
+        assert!(title_similar(
+            "Pay invoice 4411 to Acme",
+            "pay Acme invoice 4411"
+        ));
+        assert!(title_similar(
+            "Reboot the fox-n1 node",
+            "reboot fox-n1 node now"
+        ));
+
+        let (_dir, db) = fresh_db();
+        let done = ptask_core::tasks::create(
+            &db,
+            NewTask::minimal("Pay invoice 4411 to Acme"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET status='done', status_v2='done' WHERE id=?1",
+                [&done.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        seed_inbox(&db, &["pay Acme invoice 4412 by Friday"]);
+        let provider = MockProvider {
+            broken: false,
+            emit: vec![Candidate {
+                title: "Pay invoice 4412 to Acme".into(),
+                priority: 3,
+                description: String::new(),
+                sources: vec![],
+            }],
+        };
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert_eq!(report.created, 1, "invoice 4412 is new work, not 4411");
+        assert_eq!(report.skipped_dedup, 0);
     }
 
     #[test]
