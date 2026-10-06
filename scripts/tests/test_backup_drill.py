@@ -218,7 +218,8 @@ class BackupLegsTests(unittest.TestCase):
         r = self.sb.run("ptask-backup.sh", **self.env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         scps = [c for c in self.sb.calls() if c.startswith("scp ")]
-        self.assertTrue(scps and all(c.endswith(".db.partial") for c in scps), scps)
+        # Per-process name (.partial.<pid>), so overlapping runs can't swap uploads.
+        self.assertTrue(scps and all(".db.partial." in c for c in scps), scps)
         for d in (self.near, self.dr):
             self.assertEqual(list(d.glob("*.partial")), [])
 

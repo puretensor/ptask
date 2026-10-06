@@ -73,13 +73,16 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o Ser
 STEP_TIMEOUT=${PTASK_VERIFY_STEP_TIMEOUT:-30}
 XFER_TIMEOUT=${PTASK_VERIFY_XFER_TIMEOUT:-120}
 RESTORE_TIMEOUT=${PTASK_VERIFY_RESTORE_TIMEOUT:-300}
-rssh() { timeout -k 10 "$STEP_TIMEOUT" ssh "${SSH_OPTS[@]}" "$@"; }
+# ssh -n: never read stdin (see ptask-backup.sh). rssh_long hashes a
+# whole nightly, so it gets the transfer budget.
+rssh() { timeout -k 10 "$STEP_TIMEOUT" ssh -n "${SSH_OPTS[@]}" "$@"; }
+rssh_long() { timeout -k 10 "$XFER_TIMEOUT" ssh -n "${SSH_OPTS[@]}" "$@"; }
 rscp() { timeout -k 10 "$XFER_TIMEOUT" scp -q "${SSH_OPTS[@]}" "$@"; }
 # Worst case with the defaults: restore 300+10 s; nearby 2 rssh (40 s each)
-# + 1 rscp (130 s) = 210 s; off-site 4 rssh (list, stat, two sha256) =
-# 160 s; total 680 s. ptask-restore-verify.service allows
-# TimeoutStartSec=15min (900 s), which leaves 220 s for the local sqlite
-# checks. Raise it with the timeouts. --replica-only: 310 s, and
+# + 1 rscp (130 s) = 210 s; off-site 2 rssh (list, stat) + 2 rssh_long
+# (the two sha256, 130 s each) = 340 s; total 860 s.
+# ptask-restore-verify.service allows TimeoutStartSec=20min (1200 s), which
+# leaves 340 s for the local sqlite checks. Raise it with the timeouts. --replica-only: 310 s, and
 # ptask-replica-check.service allows 10min.
 
 SCRATCH=$(mktemp -d -t ptask-restore-verify-XXXXXX)
@@ -198,10 +201,10 @@ check_offsite() {
     # identical. Each side is hashed where it lives; nothing crosses the WAN.
     local name off_sum near_sum digest_note
     name=$(basename "$latest")
-    off_sum=$(rssh "$host" "sha256sum '$latest'") \
+    off_sum=$(rssh_long "$host" "sha256sum '$latest'") \
         || { fail "cannot hash $latest on $host"; return 1; }
     off_sum=${off_sum%% *}
-    if near_sum=$(rssh "${REMOTE%%:*}" \
+    if near_sum=$(rssh_long "${REMOTE%%:*}" \
             "f='${REMOTE#*:}/$name'; if [ -f \"\$f\" ]; then sha256sum \"\$f\"; fi"); then
         near_sum=${near_sum%% *}
         if [ -z "$near_sum" ]; then

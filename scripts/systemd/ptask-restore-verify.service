@@ -14,6 +14,6 @@ IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 StandardOutput=journal
 StandardError=journal
-# Above the script's own worst case (600 s of per-step timeouts with the
+# Above the script's own worst case (860 s of per-step timeouts with the
 # defaults; arithmetic in ptask-restore-verify.sh) plus the local checks.
-TimeoutStartSec=15min
+TimeoutStartSec=20min

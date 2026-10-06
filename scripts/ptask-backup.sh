@@ -61,7 +61,9 @@ SIZE=$(stat -c%s "$TMP")
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
 STEP_TIMEOUT=${PTASK_BACKUP_STEP_TIMEOUT:-60}
 XFER_TIMEOUT=${PTASK_BACKUP_XFER_TIMEOUT:-600}
-rssh() { timeout -k 10 "$STEP_TIMEOUT" ssh "${SSH_OPTS[@]}" "$@"; }
+# ssh -n: never read stdin. Under `timeout` ssh is outside the terminal's
+# foreground group, so a manual run would stop on SIGTTIN until timed out.
+rssh() { timeout -k 10 "$STEP_TIMEOUT" ssh -n "${SSH_OPTS[@]}" "$@"; }
 rscp() { timeout -k 10 "$XFER_TIMEOUT" scp -q "${SSH_OPTS[@]}" "$@"; }
 # Worst case with the defaults: a leg is 4 rssh steps (mkdir, mv, prune,
 # count) of at most 60+10 s plus one rscp of at most 600+10 s = 890 s, and
@@ -81,13 +83,16 @@ upload_leg() {
     local host="${target%%:*}" dir="${target#*:}" retained
     local final="$dir/ptask-tasks-$DATE.db"
     rssh "$host" "mkdir -p '$dir'" || return 1
-    rscp "$TMP" "$host:$final.partial" || return 1
-    rssh "$host" "mv -f '$final.partial' '$final'" || return 1
+    # Per-process name: an overlapping manual run can't rename this run's
+    # half-written upload into place.
+    local partial="$final.partial.$$"
+    rscp "$TMP" "$host:$partial" || return 1
+    rssh "$host" "mv -f '$partial' '$final'" || return 1
     # Retention prune. `-mtime +N` means strictly older than N days.
     rssh "$host" \
         "find '$dir' -maxdepth 1 -type f \
          \\( \\( -name 'ptask-tasks-*.db' -mtime +$((RETAIN_DAYS - 1)) \\) \
-         -o \\( -name 'ptask-tasks-*.db.partial' -mmin +720 \\) \\) -delete" || return 1
+         -o \\( -name 'ptask-tasks-*.db.partial*' -mmin +720 \\) \\) -delete" || return 1
     retained=$(rssh "$host" \
         "find '$dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' | wc -l") || return 1
     echo "ptask-backup: $label ok $host:$final (${SIZE} bytes, ${retained} backups retained)"
