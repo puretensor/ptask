@@ -487,7 +487,22 @@ pub fn cmd_decide(
     if matches!(decision, Decision::Approve) && !force {
         refuse_hazardous_preview(db, id)?;
     }
-    let ap = approvals::decide(db, id, decision, via, note, &ctx).map_err(map_core)?;
+    let ap = approvals::decide(db, id, decision, via, note, &ctx).map_err(|e| {
+        // Deciding a request that is no longer pending reports its terminal
+        // state with exit 4, as verify/consume do (core calls it a conflict).
+        let terminal = matches!(
+            &e,
+            ptask_core::Error::Approval(approvals::ApprovalError::Conflict(_))
+        ) && approvals::get(db, id).is_ok_and(|ap| ap.status != "pending");
+        if terminal {
+            return ExitCodeError {
+                code: 4,
+                message: e.to_string(),
+            }
+            .into();
+        }
+        map_core(e)
+    })?;
     emit_one(ap, None, json)
 }
 
@@ -517,7 +532,9 @@ pub const EXIT_PAYLOAD_FLAGGED: i32 = 7;
 /// explicit --force after inspecting the exact bytes. Rejecting never does.
 fn refuse_hazardous_preview(db: &Db, id: &str) -> Result<()> {
     let ap = approvals::get(db, id).map_err(map_core)?;
-    if ui::has_hazard(&ap.preview()) {
+    // Only a pending request can be approved: a decided one must report its
+    // terminal state (exit 4) from decide, not an impossible --force.
+    if ap.status == "pending" && ui::has_hazard(&ap.preview()) {
         return Err(ExitCodeError {
             code: EXIT_PAYLOAD_FLAGGED,
             message: format!(

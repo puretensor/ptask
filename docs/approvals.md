@@ -75,7 +75,9 @@ pt approval consume AP-12 --payload-file /tmp/letter.html
 | 1 | anything else (unknown id, bad args) |
 
 `pt approve` (and `pt approval decide … approve`) exits 7 when it refuses a
-flagged payload preview without `--force` (see Authority rules).
+flagged payload preview without `--force` (see Authority rules). Approving
+or rejecting a request that is no longer pending exits 4 (its terminal state
+is named); the `--force` check only applies to a pending request.
 
 Both accept exactly one of `--payload-file` / `--payload-json` / `--digest`,
 canonicalised identically to `request`.

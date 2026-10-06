@@ -307,6 +307,16 @@ fn approval_preview_flags_invisible_characters() {
     assert_eq!(pt.json(&["approval", "show", "AP-1"])["status"], "pending");
     // Rejecting needs no --force.
     pt.ok_as("operator", &["reject", "AP-1", "--via", "dashboard"]);
+    // Once decided, approve reports the terminal state (exit 4), not an
+    // impossible "approve with --force" (exit 7).
+    let out = pt.run_as("operator", &["approve", "AP-1", "--via", "dashboard"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("--force"));
 }
 
 /// A newline in untrusted text must never start a new output line: the
