@@ -919,7 +919,7 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':query -- The dependent task (cannot start until --on is done):_default' \
+':query -- The dependent task (cannot be closed until --on is done or dismissed):_default' \
 && ret=0
 ;;
 (review)

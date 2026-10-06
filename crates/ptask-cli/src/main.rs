@@ -230,7 +230,7 @@ struct ReapArgs {
 
 #[derive(clap::Args, Debug)]
 struct DependArgs {
-    /// The dependent task (cannot start until --on is done).
+    /// The dependent task (cannot be closed until --on is done or dismissed).
     query: String,
     /// The prerequisite task.
     #[arg(long = "on")]

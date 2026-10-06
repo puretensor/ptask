@@ -1563,7 +1563,8 @@ pub fn wake_expired_snoozes(db: &Db, now_iso: &str, ctx: &EventCtx) -> Result<us
     Ok(woken)
 }
 
-/// Add a `depends_on` edge: `from` cannot start until `to` is done.
+/// Add a `depends_on` edge: `from` cannot be closed until `to` is done or
+/// dismissed (starting or claiming it is not gated; `pt next` hides it).
 /// Rejects self-dependency and cycles.
 pub fn add_dependency(db: &Db, from_uuid: &str, to_uuid: &str, ctx: &EventCtx) -> Result<()> {
     if from_uuid == to_uuid {
