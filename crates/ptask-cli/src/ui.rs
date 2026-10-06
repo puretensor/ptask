@@ -129,7 +129,7 @@ const STAND_IN: char = ptask_core::text::STAND_IN;
 /// Make untrusted text safe to print (multi-line): see
 /// [`ptask_core::text::sanitize`] — the one predicate the CLI, TUI and core
 /// errors share.
-pub use ptask_core::text::{has_hazard, sanitize};
+pub use ptask_core::text::{has_hazard, one_line, sanitize};
 
 /// Length of the SGR sequence at the start of `s` if it is one this module
 /// emits outside gradients: reset, bold, dim, or a palette foreground.
@@ -146,20 +146,18 @@ fn own_sgr_len(s: &str) -> Option<usize> {
     })
 }
 
-/// `sanitize` for text that may already carry this module's paint (kv values,
-/// table cells, prompt and bullet text): with colour on, our own SGR
-/// sequences survive and every other escape is neutralised. Painters sanitise
-/// what they paint, so untrusted text should reach these slots painted;
-/// anything raw that slips through can at most pick a palette colour, never
-/// move the cursor, erase, conceal, retitle or touch the clipboard.
-fn sanitize_painted(text: &str) -> Cow<'_, str> {
+/// Single-line safe text for a slot that may already carry this module's
+/// paint (kv values, table cells, prompt and bullet text): with colour on,
+/// our own SGR sequences survive and every other escape is neutralised;
+/// line breaks fold to a visible mark so a value cannot forge a row.
+fn line_painted(text: &str) -> Cow<'_, str> {
     if !enabled() || !text.contains('\x1b') {
-        return sanitize(text);
+        return one_line(text);
     }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(i) = rest.find('\x1b') {
-        out.push_str(&sanitize(&rest[..i]));
+        out.push_str(&one_line(&rest[..i]));
         let tail = &rest[i..];
         match own_sgr_len(tail) {
             Some(n) => {
@@ -172,23 +170,14 @@ fn sanitize_painted(text: &str) -> Cow<'_, str> {
             }
         }
     }
-    out.push_str(&sanitize(rest));
+    out.push_str(&one_line(rest));
     Cow::Owned(out)
-}
-
-/// Single-line layout slots: a newline would break the row (or forge one).
-fn one_line(text: Cow<'_, str>) -> Cow<'_, str> {
-    if text.contains('\n') {
-        Cow::Owned(text.replace('\n', " "))
-    } else {
-        text
-    }
 }
 
 /// Paint plain text; keep text that is already painted (sanitised).
 fn paint_or_keep(text: &str, ink: Ink) -> String {
     if enabled() && text.contains('\x1b') {
-        sanitize_painted(text).into_owned()
+        line_painted(text).into_owned()
     } else {
         paint(text, ink)
     }
@@ -197,7 +186,7 @@ fn paint_or_keep(text: &str, ink: Ink) -> String {
 // ── Painters ──────────────────────────────────────────────────────────────────
 
 fn sgr(text: &str, (r, g, b): (u8, u8, u8), bold: bool, dim: bool) -> String {
-    let text = sanitize(text);
+    let text = one_line(text);
     if !enabled() || text.is_empty() {
         return text.into_owned();
     }
@@ -233,7 +222,7 @@ fn mix(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
 
 /// Per-character colour ramp across two or more palette stops.
 pub fn gradient(text: &str, stops: &[Ink]) -> String {
-    let text = sanitize(text);
+    let text = one_line(text);
     if !enabled() || text.is_empty() {
         return text.into_owned();
     }
@@ -302,7 +291,7 @@ pub fn pad(text: &str, width: usize, align: Align) -> String {
 /// Clip to a display width, ellipsised. Returns PLAIN, sanitised, single-line
 /// text — clip before you paint.
 pub fn clip(text: &str, width: usize) -> String {
-    let plain = one_line(Cow::Owned(strip_ansi(&sanitize_painted(text)))).into_owned();
+    let plain = strip_ansi(&line_painted(text));
     if plain.width() <= width {
         return plain;
     }
@@ -551,7 +540,7 @@ pub fn table(
             .enumerate()
             .map(|(j, c)| {
                 let cell = row.get(j).map(String::as_str).unwrap_or("");
-                let cell = one_line(sanitize_painted(cell));
+                let cell = line_painted(cell);
                 let cell = if vis_len(&cell) <= c.width {
                     cell.into_owned()
                 } else {
@@ -607,7 +596,7 @@ pub fn bullet(name: &str, detail: &str, ink: Ink, width: usize) -> String {
         "     {} {} {}",
         paint("•", ink),
         pad(&paint(&clip(name, width), Ink::Paper), width, Align::Left),
-        paint_or_keep(&one_line(Cow::Borrowed(detail)), Ink::Slate)
+        paint_or_keep(detail, Ink::Slate)
     )
 }
 
@@ -767,7 +756,7 @@ pub fn prompt(text: &str, keys: &str) -> String {
     format!(
         "  {}{}  {} {} ",
         paint("▸ ", Ink::Violet),
-        paint_or_keep(&one_line(Cow::Borrowed(text)), Ink::Paper),
+        paint_or_keep(text, Ink::Paper),
         dim(keys, Ink::Slate),
         bold(">", Ink::Cyan)
     )
@@ -1008,7 +997,7 @@ mod tests {
             assert_safe(name, &out);
         }
         // Single-line slots flatten a newline instead of forging a row.
-        assert_eq!(clip("a\nb", 10), "a b");
+        assert_eq!(clip("a\nb", 10), "a\u{2424}b");
         let rows = with_colour(false, || {
             table(
                 &[Column::new("T", 5)],
@@ -1017,7 +1006,7 @@ mod tests {
             )
         });
         assert_eq!(rows.len(), 5, "{rows:?}");
-        assert!(rows[3].contains("│ a b   │"), "{rows:?}");
+        assert!(rows[3].contains("│ a\u{2424}b   │"), "{rows:?}");
     }
 
     #[test]

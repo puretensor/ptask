@@ -1007,7 +1007,18 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     if let Err(e) = run() {
-        eprintln!("{}", ui::section("error", ui::Ink::Red, &format!("{e:#}")));
+        // Core errors use newlines as structure (the ambiguous-match list)
+        // and fold them inside the titles they embed, so each line prints
+        // on its own, painted (and therefore sanitised) one at a time.
+        let msg = format!("{e:#}");
+        let mut lines = msg.lines();
+        eprintln!(
+            "{}",
+            ui::section("error", ui::Ink::Red, lines.next().unwrap_or(""))
+        );
+        for line in lines {
+            eprintln!("  {}", ui::paint(line, ui::Ink::Slate));
+        }
         std::process::exit(approvals::exit_code(&e).unwrap_or(1));
     }
 }
@@ -1723,9 +1734,9 @@ fn render_show(
         out.push(String::new());
         out.push(ui::section("why", ui::Ink::Magenta, ""));
         for g in why_chain {
-            let title = ui::sanitize(&g.title);
+            let title = ui::one_line(&g.title);
             match g.why.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                Some(why) => out.push(format!("  {title}: {}", ui::sanitize(why))),
+                Some(why) => out.push(format!("  {title}: {}", ui::one_line(why))),
                 None => out.push(format!("  {title}")),
             }
         }
@@ -1779,7 +1790,7 @@ fn confirm_delete(pt: &str, title: &str) -> Result<()> {
         ui::prompt(
             &format!(
                 "permanently delete {pt} \"{}\"? This cannot be undone.",
-                ui::sanitize(title)
+                ui::one_line(title)
             ),
             "[y/N]"
         )
@@ -2309,7 +2320,7 @@ fn shell_single_quote(value: &str) -> String {
 /// sanitised title: a CR/erase or conceal sequence in the title could
 /// otherwise make the visible command differ from the copied one.
 fn delegation_command(handle: &str, title: &str) -> String {
-    let title = ui::sanitize(title);
+    let title = ui::one_line(title);
     let prompt = format!(
         "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt add the blocker as its own task, then pt depend {handle} --on <its PT-N>."
     );
@@ -3003,7 +3014,7 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
                     "{}  {}  {}  {}",
                     ui::pt_id(pt.as_deref().unwrap_or("-")),
                     ui::status_pill(status),
-                    ui::sanitize(title),
+                    ui::one_line(title),
                     ui::dim(
                         &format!("last {}", updated.get(..10).unwrap_or(updated)),
                         ui::Ink::Slate
@@ -4156,10 +4167,14 @@ mod tests {
         let title =
             "audit $(printf SUBSTITUTED) `printf BACKTICK` O'Brien \\\nnext; printf INJECTED";
         let handle = "PT-42";
+        // The newline folds to a visible mark (it could forge a command
+        // line on screen); every shell metacharacter survives the quoting.
         let expected = format!(
-            "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt add the blocker as its own task, then pt depend {handle} --on <its PT-N>."
+            "Work the pTask task {handle}: {}. When done: pt done {handle}; if blocked, pt add the blocker as its own task, then pt depend {handle} --on <its PT-N>.",
+            title.replace('\n', "\u{2424}")
         );
         let command = delegation_command(handle, title);
+        assert!(!command.contains('\n'), "{command}");
         let script = format!("claude() {{ printf '%s' \"$2\"; }}; {command}");
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -4198,7 +4213,7 @@ mod tests {
         assert!(!command.chars().any(char::is_control), "{command:?}");
         let expected = format!(
             "Work the pTask task PT-1: {}. When done: pt done PT-1; if blocked, pt add the blocker as its own task, then pt depend PT-1 --on <its PT-N>.",
-            super::ui::sanitize(title)
+            super::ui::one_line(title)
         );
         let script = format!("claude() {{ printf '%s' \"$2\"; }}; {command}");
         let output = std::process::Command::new("sh")

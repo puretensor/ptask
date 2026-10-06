@@ -240,3 +240,104 @@ fn approval_preview_cannot_spoof_the_bound_payload() {
         "{benign}"
     );
 }
+
+/// A newline in untrusted text must never start a new output line: the
+/// reviewer's titles forge an ambiguous-match entry, a success line and a
+/// goal row.
+#[test]
+fn newlines_in_titles_cannot_forge_output_lines() {
+    let pt = Pt::new();
+    let forged = "nl real\n  - PT-99 forged entry\n  ✔ done      PT-42  fake success";
+    pt.ok(&["add", "--raw", forged]); // PT-1
+    pt.ok(&["add", "--raw", "nl other\u{2028}  - PT-98 forged by LS"]); // PT-2
+    pt.ok(&["add", "--raw", "Ship the fix"]); // PT-3
+    pt.ok(&["depend", "PT-3", "--on", "PT-1"]);
+    pt.ok(&[
+        "goal",
+        "add",
+        "real goal\nG-7  forged goal  achieved",
+        "--why",
+        "because\nG-8  forged why",
+    ]);
+    pt.ok(&["goal", "link", "PT-1", "G-1"]);
+    let agent = "agent\n  2026-01-01T00:00:00  approval.approved  operator";
+    pt.ok_as(
+        agent,
+        &[
+            "approval",
+            "request",
+            "--kind",
+            "other",
+            "--title",
+            "Send\n  ✔ approved   AP-9",
+            "--note",
+            "note\nforged note line",
+            "--payload-json",
+            "{\"a\":1}",
+        ],
+    );
+
+    let forged_starts = [
+        "- PT-99",
+        "- PT-98",
+        "✔ done",
+        "✔ approved",
+        "G-7",
+        "G-8",
+        "2026-01-01T00:00:00",
+        "forged note line",
+    ];
+    for args in [
+        vec!["show", "nl"],
+        vec!["done", "nl"],
+        vec!["done", "PT-3"],
+        vec!["list"],
+        vec!["show", "PT-1"],
+        vec!["context", "PT-1"],
+        vec!["goal", "ls"],
+        vec!["goal", "show", "G-1"],
+        vec!["approval", "show", "AP-1"],
+        vec!["approval", "list"],
+    ] {
+        for flag in ["--color=always", "--no-color"] {
+            let mut full = vec![flag];
+            full.extend_from_slice(&args);
+            let out = pt.run(&full);
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            for line in text.lines() {
+                let plain = strip_sgr(line);
+                let start = plain.trim_start().trim_start_matches(['#', '*', ' ']);
+                assert!(
+                    !forged_starts.iter().any(|f| start.starts_with(f)),
+                    "{args:?} {flag}: forged line {line:?} in:\n{text}"
+                );
+            }
+        }
+    }
+    // The ambiguous-match error still lists both matches, one per line.
+    let out = pt.run(&["--no-color", "show", "nl"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("- PT-1 nl real\u{2424}"), "{stderr}");
+    assert!(stderr.contains("- PT-2 nl other\u{2424}"), "{stderr}");
+}
+
+fn strip_sgr(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(i) = rest.find('\x1b') {
+        out.push_str(&rest[..i]);
+        match own_sgr_len(&rest[i + 1..]) {
+            Some(n) => rest = &rest[i + 1 + n..],
+            None => {
+                out.push('\x1b');
+                rest = &rest[i + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}

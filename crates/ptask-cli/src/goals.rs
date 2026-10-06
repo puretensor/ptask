@@ -131,7 +131,7 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
                     .unwrap_or_default();
                 println!(
                     "{indent}{}",
-                    ui::sanitize(&format!(
+                    ui::one_line(&format!(
                         "{}  {}  {}{why}",
                         item.goal.g_id(),
                         item.goal.title,
@@ -259,14 +259,14 @@ fn print_human_show(shown: &GoalShow) {
         println!();
         println!("{}", ui::section("chain", ui::Ink::Steel, "nearest first"));
         for a in &shown.chain {
-            println!("  {}  {}", a.g_id(), ui::sanitize(&a.title));
+            println!("  {}  {}", a.g_id(), ui::one_line(&a.title));
         }
     }
     if !shown.children.is_empty() {
         println!();
         println!("{}", ui::section("children", ui::Ink::Cyan, ""));
         for c in &shown.children {
-            println!("  {}  {}", c.g_id(), ui::sanitize(&c.title));
+            println!("  {}  {}", c.g_id(), ui::one_line(&c.title));
         }
     }
     if !shown.tasks.is_empty() {
@@ -276,7 +276,7 @@ fn print_human_show(shown: &GoalShow) {
             println!(
                 "  {}  {}",
                 t.pt_id.as_deref().unwrap_or(&t.id),
-                ui::sanitize(&t.title)
+                ui::one_line(&t.title)
             );
         }
     }

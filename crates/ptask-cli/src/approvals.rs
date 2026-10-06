@@ -229,7 +229,7 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
     // Requester, note and preview are agent-supplied: sanitised so escape
     // sequences cannot rewrite what the operator reads before deciding.
     let mut pairs: Vec<(&str, String)> = vec![
-        ("requester", ui::sanitize(&ap.requester).into_owned()),
+        ("requester", ui::one_line(&ap.requester).into_owned()),
         ("digest", ap.digest.clone()),
         (
             "payload",
@@ -245,13 +245,13 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
         ),
     ];
     if let Some(t) = &ap.task_pt_id {
-        pairs.push(("task", ui::sanitize(t).into_owned()));
+        pairs.push(("task", ui::one_line(t).into_owned()));
     }
     if let Some(n) = &ap.request_note {
-        pairs.push(("requester note", ui::sanitize(n).into_owned()));
+        pairs.push(("requester note", ui::one_line(n).into_owned()));
     }
     if let Some(d) = &ap.decided_by {
-        pairs.push(("decided by", ui::sanitize(d).into_owned()));
+        pairs.push(("decided by", ui::one_line(d).into_owned()));
     }
     for l in ui::kv(&pairs, 16) {
         println!("    {}", l.trim_start());
@@ -295,7 +295,7 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
         for e in events {
             println!(
                 "{}",
-                ui::sanitize(&format!(
+                ui::one_line(&format!(
                     "  {}  {}  {}",
                     e.at,
                     e.event_type,

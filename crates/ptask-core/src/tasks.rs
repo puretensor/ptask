@@ -510,17 +510,19 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
             let titles: Vec<String> = rows
                 .into_iter()
                 .map(|t| {
+                    // One line per match: a newline in a title would
+                    // forge an entry (or a success line) in the error.
                     format!(
                         "  - {} {}",
                         t.pt_id.as_deref().unwrap_or("(no PT-id)"),
-                        t.title
+                        crate::text::one_line(&t.title)
                     )
                 })
                 .collect();
             Err(crate::Error::Other(format!(
                 "{} pending tasks match '{}':\n{}",
                 n,
-                query,
+                crate::text::one_line(query),
                 titles.join("\n")
             )))
         }
@@ -633,17 +635,19 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
             let titles: Vec<String> = rows
                 .into_iter()
                 .map(|t| {
+                    // One line per match: a newline in a title would
+                    // forge an entry (or a success line) in the error.
                     format!(
                         "  - {} {}",
                         t.pt_id.as_deref().unwrap_or("(no PT-id)"),
-                        t.title
+                        crate::text::one_line(&t.title)
                     )
                 })
                 .collect();
             Err(crate::Error::Other(format!(
                 "{} tasks match '{}':\n{}",
                 n,
-                query,
+                crate::text::one_line(query),
                 titles.join("\n")
             )))
         }
@@ -977,7 +981,11 @@ fn open_blockers_tx(tx: &rusqlite::Transaction<'_>, task_uuid: &str) -> Result<V
             let pt: Option<String> = r.get(0)?;
             let id: String = r.get(1)?;
             let title: String = r.get(2)?;
-            Ok(format!("{} ({})", pt.unwrap_or(id), title))
+            Ok(format!(
+                "{} ({})",
+                pt.unwrap_or(id),
+                crate::text::one_line(&title)
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
