@@ -86,6 +86,13 @@ Local CLI (`pt approve` / `pt reject` / `pt approval decide`):
 - `decided_via` is `cli` on a TTY, `dashboard` with `--via dashboard`
 - `decided_by` is `$PTASK_ACTOR`
 - the requester cannot decide their own request
+- approve (not reject) refuses without `--force` when the payload preview
+  holds control, bidi or invisible characters (a zero-width space in an
+  address, tag characters after an amount): the digest binds the stored
+  bytes, not what a screen shows. `pt approval show` marks them as U+FFFD
+  under a warning; inspect the exact bytes with
+  `pt approval payload AP-n | cat -v`, then `pt approve AP-n --force`. The
+  dashboard sidecar path (`--via dashboard`) is gated the same way.
 
 HTTP `POST /api/approvals/{id}/decide` requires **admin** scope;
 `decided_via=api`. Write-scope tokens may request and withdraw (own rows
@@ -142,6 +149,7 @@ pt approval request --kind email --title "Send the Q3 memo" \
 pt approval ls
 pt approval show AP-12
 pt approve AP-12                  # operator TTY
+pt approve AP-12 --force          # after inspecting a flagged payload
 pt reject AP-12 --via dashboard   # dashboard sidecar
 pt approval consume AP-12 --payload-file letter.html
 ```

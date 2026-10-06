@@ -136,6 +136,11 @@ pub struct DecideArgs {
     /// Record decided_via=dashboard (also allows a non-TTY stdin).
     #[arg(long = "via")]
     pub via: Option<ViaChoice>,
+    /// Approve even though the payload preview holds terminal control,
+    /// bidi or invisible characters (inspect it with `pt approval payload
+    /// AP-n | cat -v` first).
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -148,6 +153,10 @@ pub struct LongDecideArgs {
     pub note: Option<String>,
     #[arg(long = "via")]
     pub via: Option<ViaChoice>,
+    /// Approve even though the payload preview holds terminal control,
+    /// bidi or invisible characters.
+    #[arg(long)]
+    pub force: bool,
 }
 
 fn map_core(err: ptask_core::Error) -> anyhow::Error {
@@ -275,7 +284,7 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
             ui::pill(
                 ui::Status::Bad,
                 &format!(
-                    "WARNING: payload has terminal control/bidi characters (shown as \u{FFFD}) — run `pt approval payload {} | cat -v` before deciding",
+                    "WARNING: payload has control, bidi or invisible characters (shown as \u{FFFD}) — run `pt approval payload {} | cat -v` before deciding",
                     ap.ap_id()
                 )
             )
@@ -462,16 +471,21 @@ pub fn cmd_notify(db: &Db) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_decide(
     db: &Db,
     id: &str,
     decision: Decision,
     note: Option<&str>,
     via: Option<ViaChoice>,
+    force: bool,
     ctx: EventCtx,
     json: bool,
 ) -> Result<()> {
     let via = decide_guardrails(matches!(via, Some(ViaChoice::Dashboard)))?;
+    if matches!(decision, Decision::Approve) && !force {
+        refuse_hazardous_preview(db, id)?;
+    }
     let ap = approvals::decide(db, id, decision, via, note, &ctx).map_err(map_core)?;
     emit_one(ap, None, json)
 }
@@ -480,7 +494,37 @@ pub fn cmd_long_decide(db: &Db, a: LongDecideArgs, ctx: EventCtx, json: bool) ->
     let decision = Decision::parse(&a.decision)
         .map_err(ptask_core::Error::from)
         .map_err(map_core)?;
-    cmd_decide(db, &a.id, decision, a.note.as_deref(), a.via, ctx, json)
+    cmd_decide(
+        db,
+        &a.id,
+        decision,
+        a.note.as_deref(),
+        a.via,
+        a.force,
+        ctx,
+        json,
+    )
+}
+
+/// The digest binds the stored bytes, not what a screen shows: approving a
+/// payload whose preview holds control, bidi or invisible characters (a
+/// zero-width space in an address, tag characters after an amount) needs an
+/// explicit --force after inspecting the exact bytes. Rejecting never does.
+fn refuse_hazardous_preview(db: &Db, id: &str) -> Result<()> {
+    let ap = approvals::get(db, id).map_err(map_core)?;
+    if ui::has_hazard(&ap.preview()) {
+        return Err(ExitCodeError {
+            code: 1,
+            message: format!(
+                "{0}: the payload preview has control, bidi or invisible characters; \
+                 inspect the exact bytes with `pt approval payload {0} | cat -v`, \
+                 then approve with --force",
+                ap.ap_id()
+            ),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn emit_one(

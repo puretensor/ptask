@@ -208,10 +208,24 @@ fn approval_preview_cannot_spoof_the_bound_payload() {
         "a hazardous payload must carry the inspect warning:\n{shown}"
     );
 
-    // The decision path prints the same page.
-    let approved = pt.ok_as(
+    // Approving a hazardous payload needs --force; the decision path then
+    // prints the same page.
+    let refused = pt.run_as(
         "operator",
         &["--no-color", "approve", "AP-1", "--via", "dashboard"],
+    );
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--force"));
+    let approved = pt.ok_as(
+        "operator",
+        &[
+            "--no-color",
+            "approve",
+            "AP-1",
+            "--via",
+            "dashboard",
+            "--force",
+        ],
     );
     assert!(!approved.contains('\x1b') && !approved.contains('\r'));
     assert!(approved.contains("pt approval payload AP-1 | cat -v"));
@@ -239,6 +253,56 @@ fn approval_preview_cannot_spoof_the_bound_payload() {
         !benign.contains('\r') && !benign.contains('\u{fffd}'),
         "{benign}"
     );
+    // A benign payload approves without --force.
+    pt.ok_as("operator", &["approve", "AP-2", "--via", "dashboard"]);
+}
+
+/// The reviewer's invisible spoof: a zero-width space inside the address and
+/// tag characters after the amount render clean. They must show, raise the
+/// warning, and block `pt approve` until --force.
+#[test]
+fn approval_preview_flags_invisible_characters() {
+    let pt = Pt::new();
+    let payload = pt.dir.path().join("pay.txt");
+    std::fs::write(
+        &payload,
+        "alice@exa\u{200b}mple.com amount 10\u{e0041}\u{e0042}\n",
+    )
+    .unwrap();
+    pt.ok_as(
+        "agent",
+        &[
+            "approval",
+            "request",
+            "--kind",
+            "spend",
+            "--title",
+            "Pay Alice",
+            "--payload-file",
+            payload.to_str().unwrap(),
+        ],
+    );
+    let shown = pt.ok_as("operator", &["--no-color", "approval", "show", "AP-1"]);
+    assert!(
+        shown.contains("alice@exa\u{fffd}mple.com amount 10\u{fffd}\u{fffd}"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("pt approval payload AP-1 | cat -v"),
+        "{shown}"
+    );
+    // (Without --via the TTY guardrail answers first in a test; the --force
+    // gate runs on both paths.)
+    let out = pt.run_as("operator", &["approve", "AP-1", "--via", "dashboard"]);
+    assert!(!out.status.success(), "must refuse without --force");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--force") && stderr.contains("cat -v"),
+        "{stderr}"
+    );
+    assert_eq!(pt.json(&["approval", "show", "AP-1"])["status"], "pending");
+    // Rejecting needs no --force.
+    pt.ok_as("operator", &["reject", "AP-1", "--via", "dashboard"]);
 }
 
 /// A newline in untrusted text must never start a new output line: the

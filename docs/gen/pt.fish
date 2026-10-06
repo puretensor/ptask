@@ -816,6 +816,7 @@ complete -c pt -n "__fish_pt_using_subcommand approval; and __fish_seen_subcomma
 complete -c pt -n "__fish_pt_using_subcommand approval; and __fish_seen_subcommand_from decide" -l color -d 'Colour: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c pt -n "__fish_pt_using_subcommand approval; and __fish_seen_subcommand_from decide" -l force -d 'Approve even though the payload preview holds terminal control, bidi or invisible characters'
 complete -c pt -n "__fish_pt_using_subcommand approval; and __fish_seen_subcommand_from decide" -l json -d 'Emit machine-readable JSON instead of human text (task-facing verbs)'
 complete -c pt -n "__fish_pt_using_subcommand approval; and __fish_seen_subcommand_from decide" -l no-color -d 'Plain output — shorthand for `--color never`'
 complete -c pt -n "__fish_pt_using_subcommand approval; and __fish_seen_subcommand_from decide" -s h -l help -d 'Print help'
@@ -940,6 +941,7 @@ complete -c pt -n "__fish_pt_using_subcommand approve" -l idempotency-key -d 'Id
 complete -c pt -n "__fish_pt_using_subcommand approve" -l color -d 'Colour: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c pt -n "__fish_pt_using_subcommand approve" -l force -d 'Approve even though the payload preview holds terminal control, bidi or invisible characters (inspect it with `pt approval payload AP-n | cat -v` first)'
 complete -c pt -n "__fish_pt_using_subcommand approve" -l json -d 'Emit machine-readable JSON instead of human text (task-facing verbs)'
 complete -c pt -n "__fish_pt_using_subcommand approve" -l no-color -d 'Plain output — shorthand for `--color never`'
 complete -c pt -n "__fish_pt_using_subcommand approve" -s h -l help -d 'Print help'
@@ -950,6 +952,7 @@ complete -c pt -n "__fish_pt_using_subcommand reject" -l idempotency-key -d 'Ide
 complete -c pt -n "__fish_pt_using_subcommand reject" -l color -d 'Colour: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c pt -n "__fish_pt_using_subcommand reject" -l force -d 'Approve even though the payload preview holds terminal control, bidi or invisible characters (inspect it with `pt approval payload AP-n | cat -v` first)'
 complete -c pt -n "__fish_pt_using_subcommand reject" -l json -d 'Emit machine-readable JSON instead of human text (task-facing verbs)'
 complete -c pt -n "__fish_pt_using_subcommand reject" -l no-color -d 'Plain output — shorthand for `--color never`'
 complete -c pt -n "__fish_pt_using_subcommand reject" -s h -l help -d 'Print help'

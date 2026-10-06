@@ -961,7 +961,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__approval__subcmd__decide)
-            opts="-h --note --via --db --json --idempotency-key --color --no-color --help <ID> <DECISION>"
+            opts="-h --note --via --force --db --json --idempotency-key --color --no-color --help <ID> <DECISION>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1423,7 +1423,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__approve)
-            opts="-h --note --via --db --json --idempotency-key --color --no-color --help <ID>"
+            opts="-h --note --via --force --db --json --idempotency-key --color --no-color --help <ID>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3873,7 +3873,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__reject)
-            opts="-h --note --via --db --json --idempotency-key --color --no-color --help <ID>"
+            opts="-h --note --via --force --db --json --idempotency-key --color --no-color --help <ID>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
