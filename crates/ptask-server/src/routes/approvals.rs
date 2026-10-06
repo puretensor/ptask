@@ -184,16 +184,16 @@ async fn create(
     }
     let db = state.db.clone();
     let uuid = outcome.approval.uuid.clone();
-    let ap = match crate::blocking::db_value(move || approvals::get(&db, &uuid)).await {
-        Ok(Ok(ap)) => ap,
-        _ => outcome.approval,
-    };
+    let mut outcome = outcome;
+    if let Ok(Ok(ap)) = crate::blocking::db_value(move || approvals::get(&db, &uuid)).await {
+        outcome.approval = ap;
+    }
     let status = if created {
         StatusCode::CREATED
     } else {
         StatusCode::OK
     };
-    (status, Json(ap.to_json(None))).into_response()
+    (status, Json(outcome.to_json())).into_response()
 }
 
 async fn withdraw(

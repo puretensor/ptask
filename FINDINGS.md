@@ -75,6 +75,18 @@ Residue: tag-sequence subdivision flags (England, Scotland, Wales) render as U+F
 | Distill concurrency | Concurrent runs processed the same rows. | Every run flocks the database's (canonical) directory, never the DB file. A contended run records `distill.skipped`; the third consecutive skip exits non-zero. |
 | Notify/accountability | SMTP send had no timeout; the SMTP login was used as From; a bad address aborted the run after Telegram had sent; Telegram limits were counted in chars; email-only levels went silent without email; escalation never reset on advance or reopen; concurrent runs overran the daily budget; nudges were sent before state was re-checked. | Whole-send timeout and a per-run email circuit breaker. `PTASK_SMTP_FROM` and up-front validation; a failing channel counts only against itself. UTF-16 limits. Fallback to the configured channel. Escalation resets on advance and reopen. Conditional budget reservation. A re-check and claim before sending. |
 
+### Fixed (3.40.0) — approvals integrity
+
+| Area | Finding | Fix |
+|---|---|---|
+| Payload release | `pt approval payload` returned the bytes with exit 0 for pending, rejected, expired and consumed rows, so an executor that skipped the status check acted on an unapproved payload. | Bytes are released only while the approval is in force (approved, unexpired, unconsumed); otherwise the command exits 3/4/6 and prints nothing. Every approval JSON carries `in_force`. The docs say plainly that this is a correctness guard for executors, not a confidentiality boundary: `preview` exposes UTF-8 payloads on every read surface, and the `--any-status` TTY guard is a speed bump. |
+| Expiry | Approved rows stayed consumable after `expires_at`; an unswept pending row past expiry read as pending; an unparseable expiry never expired. | `expires_at` bounds execution too (exit 4); expiry fails closed. |
+| Dedupe | Digest dedupe returned another requester's AP-n. | Dedupe is scoped per requester (V020, case-folded); a re-request keeps the existing row and says which requested fields were not applied (`deduplicated`, `notice`). |
+| Canonical JSON | Duplicate keys were last-wins, big integers went through f64, floats were formatted unlike Python, and the "Python parity" claim was false. | Duplicate keys, out-of-range numbers, underflow and `-0` are refused. Literals of up to 17 digits are accepted. Floats are written exactly as Python's repr. 42,500 fuzzed numbers match Python's digest. |
+| Telegram decide | The preview was cut at 800 chars with buttons still shown; limits were counted in chars, not UTF-16 units; the callback never re-checked. | Buttons appear only when the whole payload is shown and readable, in UTF-16 budgets, with no bidi, default-ignorable or control characters (CRLF allowed). `/tg/callback` re-checks with `tap_decidable` and refuses an Approve tap with 403. |
+| Identity | The default actor `shell` was shared by an unconfigured `pt mcp` and the CLI; requester ≠ decider compared case-sensitively. | `pt mcp` uses `PTASK_MCP_ACTOR`, then `PTASK_ACTOR`, then `mcp`. Actor names compare trimmed and ASCII case-insensitive. |
+| Bounds | Expiry loaded every pending payload blob; titles and notes were unbounded. | Expiry reads only id, seq and expires_at. Title ≤ 300, notes ≤ 16384, payload_name ≤ 255, refused on every surface. |
+
 ### Operator actions (outside the repository)
 
 - GitHub → Settings → Actions → General: require approval for all external contributors.

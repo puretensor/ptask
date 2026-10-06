@@ -9,7 +9,7 @@
 //! (`run_check_at`); these implementations assume real config and that a
 //! live send is wanted.
 
-use ptask_core::accountability::{Dispatch, NudgeRequest, html_escape, truncate_utf16};
+use ptask_core::accountability::{Dispatch, NudgeRequest, html_escape};
 use ptask_core::approvals::Approval;
 use ptask_core::config::DispatchCfg;
 use ptask_core::{Db, Error, Result};
@@ -23,35 +23,165 @@ pub enum InlineButton {
     Url { text: String, url: String },
 }
 
-/// At most `max` UTF-16 code units — the unit Telegram's 4096 limit is
-/// counted in (an emoji counts as two, so a `char` budget overshoots).
+/// Telegram's message limit, in UTF-16 code units after entity parsing.
+const TELEGRAM_MAX_UNITS: usize = 4096;
+/// UTF-16 units of payload preview a ping carries. The payload gets the
+/// larger share: it is what the operator approves, the note is only the
+/// requester's prose. With the title (200) and requester (100) budgets and
+/// the fixed labels, header + preview always fits; only the note can push a
+/// message over, and it is dropped first.
+const PREVIEW_UNITS: usize = 2000;
+const NOTE_UNITS: usize = 800;
+const TITLE_UNITS: usize = 200;
+const REQUESTER_UNITS: usize = 100;
+
+fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// At most `max` UTF-16 units of `s` (plus "…" when cut). Cuts on char
+/// boundaries, so a surrogate pair is never split.
 fn excerpt(s: &str, max: usize) -> String {
-    truncate_utf16(s, max)
+    let mut out = String::new();
+    let mut units = 0;
+    for ch in s.chars() {
+        units += ch.len_utf16();
+        if units > max {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Characters that render invisibly or reorder the text around them:
+/// bidi embeddings/overrides/isolates and the Unicode
+/// Default_Ignorable_Code_Point set (zero-width spaces and joiners, word
+/// joiner, BOM, soft hyphen, variation selectors, tag characters, ...).
+/// A preview containing one can show the operator something other than
+/// the bytes being approved.
+/// True when the preview holds a character that renders invisibly or
+/// misleadingly: default-ignorable / bidi characters, or a control
+/// character other than a line break or tab. A lone CR or a backspace can
+/// make "pay 400\r9000" read as something else; CRLF line endings (every
+/// email) are ordinary.
+fn has_deceptive(preview: &str) -> bool {
+    let mut chars = preview.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let benign_control =
+            ch == '\n' || ch == '\t' || (ch == '\r' && chars.peek() == Some(&'\n'));
+        if is_deceptive(ch) || (ch.is_control() && !benign_control) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_deceptive(ch: char) -> bool {
+    matches!(ch,
+        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}'
+        | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}'
+        | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFF8}'
+        | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}')
+}
+
+/// Why a ping must not offer tap-to-decide, if it must not.
+fn tap_blocker(ap: &Approval, preview: &str) -> Option<&'static str> {
+    let readable = ap
+        .payload
+        .as_deref()
+        .is_some_and(|p| std::str::from_utf8(p).is_ok());
+    if !readable {
+        Some("unseen")
+    } else if utf16_len(preview) > PREVIEW_UNITS {
+        Some("truncated")
+    } else if has_deceptive(preview) {
+        Some("deceptive")
+    } else {
+        None
+    }
+}
+
+/// True when a Telegram ping for `ap` shows the operator the whole payload,
+/// faithfully: stored, UTF-8, within the preview budget, and free of
+/// invisible or direction-changing characters. The message builder offers
+/// Approve/Reject buttons only then, and `/tg/callback` re-checks it before
+/// honouring an Approve tap (pings sent by older builds carried buttons
+/// under looser rules).
+pub fn tap_decidable(ap: &Approval) -> bool {
+    tap_blocker(ap, &ap.preview()).is_none()
 }
 
 /// Body + keyboard for an approval Telegram ping.
+///
+/// Tap-to-decide buttons are offered only when [`tap_decidable`]: a preview
+/// cut at [`PREVIEW_UNITS`] could hide a harmful tail behind padding, a
+/// binary or digest-only payload shows nothing, and invisible or bidi
+/// characters can make the shown text lie. Those pings say so and link to
+/// the inbox instead.
 pub fn approval_telegram_message(
     ap: &Approval,
     dash_url: Option<&str>,
     tap_buttons: bool,
 ) -> (String, Vec<Vec<InlineButton>>) {
-    // Every free-text field is bounded: Telegram rejects bodies over 4096
-    // characters, and a rejected ping stays unnotified on every sweep.
-    let preview = excerpt(&ap.preview(), 800);
-    let note = excerpt(ap.request_note.as_deref().unwrap_or("").trim(), 1500);
+    // Every free-text field is bounded in UTF-16 units, which is what
+    // Telegram counts: a body over 4096 is rejected, and a rejected ping
+    // stays unnotified and is retried on every sweep.
+    let full_preview = ap.preview();
+    let preview_units = utf16_len(&full_preview);
+    let mut blocker = tap_blocker(ap, &full_preview);
+    let preview = excerpt(&full_preview, PREVIEW_UNITS);
     let digest_prefix: String = ap.digest.chars().take(12).collect();
-    let mut text = format!(
-        "<b>{}</b> · {} · {}\nRequester: {}\nDigest: {}…\n\nPreview:\n{}",
+    let header = format!(
+        "<b>{}</b> · {} · {}\nRequester: {}\nDigest: {}…\n\nPreview:\n",
         html_escape(&ap.ap_id()),
         html_escape(&excerpt(&ap.kind, 50)),
-        html_escape(&excerpt(&ap.title, 200)),
-        html_escape(&excerpt(&ap.requester, 100)),
+        html_escape(&excerpt(&ap.title, TITLE_UNITS)),
+        html_escape(&excerpt(&ap.requester, REQUESTER_UNITS)),
         html_escape(&digest_prefix),
-        html_escape(&preview),
     );
-    if !note.is_empty() {
-        text.push_str("\n\nRequester's note:\n");
-        text.push_str(&html_escape(&note));
+    let warning = |blocker: Option<&str>| match blocker {
+        Some("truncated") => format!(
+            "\n\n<b>⚠ PREVIEW TRUNCATED</b>: showing {PREVIEW_UNITS} of {preview_units} \
+             units. The rest is not shown here; review the full payload in the \
+             inbox. Tap-to-decide is disabled for this request."
+        ),
+        Some("deceptive") => "\n\n<b>⚠ Payload contains invisible or direction-changing \
+             characters</b>, so this preview may not show it faithfully. Review it in the \
+             inbox. Tap-to-decide is disabled for this request."
+            .into(),
+        Some(_) => "\n\n<b>⚠ Payload not shown</b>: review it in the inbox. \
+             Tap-to-decide is disabled for this request."
+            .into(),
+        None => String::new(),
+    };
+    let note = excerpt(ap.request_note.as_deref().unwrap_or("").trim(), NOTE_UNITS);
+    let note_block = if note.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nRequester's note:\n{}", html_escape(&note))
+    };
+    let mut body = format!("{}{}", html_escape(&preview), warning(blocker));
+    let mut text = format!("{header}{body}{note_block}");
+    if rendered_units(&text) > TELEGRAM_MAX_UNITS {
+        text = format!("{header}{body}");
+    }
+    if rendered_units(&text) > TELEGRAM_MAX_UNITS {
+        // Unreachable with the budgets above; kept so a future budget
+        // change cannot produce an undeliverable, decidable ping.
+        blocker = Some("truncated");
+        let room = TELEGRAM_MAX_UNITS
+            .saturating_sub(rendered_units(&header) + rendered_units(&warning(blocker)) + 1);
+        body = format!(
+            "{}{}",
+            html_escape(&excerpt(&full_preview, room)),
+            warning(blocker)
+        );
+        text = format!("{header}{body}");
     }
     let mut keyboard: Vec<Vec<InlineButton>> = Vec::new();
     if let Some(base) = dash_url.map(str::trim).filter(|s| !s.is_empty()) {
@@ -61,7 +191,7 @@ pub fn approval_telegram_message(
             url,
         }]);
     }
-    if tap_buttons {
+    if tap_buttons && blocker.is_none() {
         keyboard.push(vec![
             InlineButton::Callback {
                 text: "Approve".into(),
@@ -74,6 +204,19 @@ pub fn approval_telegram_message(
         ]);
     }
     (text, keyboard)
+}
+
+/// UTF-16 units Telegram counts for an HTML body: entities unescaped, tags
+/// (only `<b>` here) removed.
+fn rendered_units(html: &str) -> usize {
+    utf16_len(
+        &html
+            .replace("<b>", "")
+            .replace("</b>", "")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&"),
+    )
 }
 
 /// Send `text` with an arbitrary inline keyboard. `Ok(true)` on HTTP 2xx.
@@ -403,6 +546,71 @@ mod tests {
         }
     }
 
+    fn pending_with(payload: Option<Vec<u8>>) -> Approval {
+        Approval {
+            uuid: "u".into(),
+            seq: 9,
+            kind: "spend".into(),
+            title: "Pay".into(),
+            request_note: None,
+            payload_kind: payload.as_ref().map(|_| "file".into()),
+            payload_bytes: payload.as_ref().map(|p| p.len() as i64),
+            payload,
+            payload_name: None,
+            payload_ref: None,
+            digest: "cd".repeat(32),
+            requester: "hal".into(),
+            task_uuid: None,
+            task_pt_id: None,
+            status: "pending".into(),
+            decided_by: None,
+            decided_via: None,
+            decision_note: None,
+            created_at: "2026-09-25T00:00:00+00:00".into(),
+            decided_at: None,
+            expires_at: None,
+            notified_at: None,
+            consumed_at: None,
+            consumed_by: None,
+        }
+    }
+
+    fn has_decide_buttons(keyboard: &[Vec<InlineButton>]) -> bool {
+        keyboard
+            .iter()
+            .flatten()
+            .any(|b| matches!(b, InlineButton::Callback { .. }))
+    }
+
+    #[test]
+    fn tap_to_decide_only_when_the_whole_payload_is_shown() {
+        let short = pending_with(Some(b"pay 400 GBP to ACME".to_vec()));
+        let (_, kb) = approval_telegram_message(&short, Some("https://d"), true);
+        assert!(has_decide_buttons(&kb));
+
+        // Padding pushes the harmful tail past the excerpt.
+        let mut padded = "pay 400 GBP to ACME ".repeat(200).into_bytes();
+        padded.extend_from_slice(b"AND 90000 GBP TO MALLORY");
+        let (text, kb) =
+            approval_telegram_message(&pending_with(Some(padded)), Some("https://d"), true);
+        assert!(
+            !has_decide_buttons(&kb),
+            "a truncated preview must not be decidable"
+        );
+        assert!(text.contains("TRUNCATED"), "{text}");
+        assert!(
+            kb.iter()
+                .flatten()
+                .any(|b| matches!(b, InlineButton::Url { .. })),
+            "the inbox link stays"
+        );
+
+        for unseen in [Some(vec![0xff, 0x00, 0xfe]), None] {
+            let (text, kb) = approval_telegram_message(&pending_with(unseen), None, true);
+            assert!(!has_decide_buttons(&kb), "{text}");
+        }
+    }
+
     #[test]
     fn approval_ping_stays_under_the_telegram_limit_and_escapes() {
         let ap = Approval {
@@ -432,13 +640,76 @@ mod tests {
             consumed_by: None,
         };
         let (text, _) = approval_telegram_message(&ap, None, false);
-        // Telegram counts characters after entity parsing.
-        let rendered = text
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&amp;", "&");
-        assert!(rendered.chars().count() <= 4096, "{}", rendered.len());
+        assert!(telegram_units(&text) <= 4096, "{}", telegram_units(&text));
         assert!(!text.contains("<b><b>"), "title must be escaped");
+    }
+
+    /// What Telegram's 4096 limit counts: UTF-16 code units after entity
+    /// parsing (tags kept here, so this over-counts slightly).
+    fn telegram_units(html: &str) -> usize {
+        html.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .encode_utf16()
+            .count()
+    }
+
+    #[test]
+    fn astral_text_is_budgeted_in_utf16_units() {
+        let mut ap = pending_with(Some("😀".repeat(2_000).into_bytes()));
+        ap.title = "😀".repeat(400);
+        ap.requester = "😀".repeat(200);
+        ap.request_note = Some("😀".repeat(2_000));
+        let (text, kb) = approval_telegram_message(&ap, Some("https://d"), true);
+        assert!(telegram_units(&text) <= 4096, "{}", telegram_units(&text));
+        assert!(!has_decide_buttons(&kb), "4000 units of preview is cut");
+        assert!(text.contains("TRUNCATED"));
+        assert!(!tap_decidable(&ap));
+        // No excerpt splits a surrogate pair (the String would not exist),
+        // and the message as a whole stays valid UTF-16.
+        assert!(String::from_utf16(&text.encode_utf16().collect::<Vec<_>>()).is_ok());
+
+        // Exactly the budget fits; the note is dropped if it would overflow.
+        let mut fits = pending_with(Some("😀".repeat(1_000).into_bytes()));
+        fits.title = "😀".repeat(400);
+        fits.request_note = Some("😀".repeat(2_000));
+        let (text, kb) = approval_telegram_message(&fits, None, true);
+        assert!(telegram_units(&text) <= 4096, "{}", telegram_units(&text));
+        assert!(has_decide_buttons(&kb));
+        assert!(tap_decidable(&fits));
+    }
+
+    #[test]
+    fn invisible_or_bidi_characters_disable_tap_to_decide() {
+        for sneaky in [
+            "pay ACME \u{202E}0004\u{202C} GBP",
+            "pay \u{2067}ACME\u{2069}",
+            "pay\u{200B}ACME",
+            "pay ACME\u{2060}",
+            "\u{FEFF}pay ACME",
+            "pay \u{E0041}ACME",
+            // Control characters: a lone CR, backspaces, ESC and C1.
+            "pay 400\r9000 GBP to ACME",
+            "pay 9000 GBP\x08\x08\x08 to ACME",
+            "pay \x1b[2Kto ACME",
+            "pay \u{0085}ACME",
+        ] {
+            let ap = pending_with(Some(sneaky.as_bytes().to_vec()));
+            let (text, kb) = approval_telegram_message(&ap, None, true);
+            assert!(!has_decide_buttons(&kb), "{sneaky:?}");
+            assert!(!tap_decidable(&ap), "{sneaky:?}");
+            assert!(text.contains("invisible"), "{text}");
+        }
+    }
+
+    /// Ordinary multi-line text keeps its buttons: CRLF line endings,
+    /// newlines and tabs are not deceptive.
+    #[test]
+    fn line_breaks_and_tabs_keep_tap_to_decide() {
+        let ap = pending_with(Some(
+            b"Dear ACME,\r\n\tplease pay 400 GBP.\r\nThanks\n".to_vec(),
+        ));
+        assert!(tap_decidable(&ap));
     }
 
     /// Regression (PARSE-11): the approval excerpts counted `char`s, but
