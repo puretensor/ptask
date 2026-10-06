@@ -1829,6 +1829,113 @@ mod tests {
         .unwrap();
     }
 
+    /// POST a gitea push signed with `test-secret`.
+    async fn signed_gitea_push(app: &Router, body: &serde_json::Value) -> serde_json::Value {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let bytes = serde_json::to_vec(body).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-secret").unwrap();
+        mac.update(&bytes);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/webhook/gitea")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header(
+                        "X-Gitea-Signature",
+                        hex::encode(mac.finalize().into_bytes()),
+                    )
+                    .body(Body::from(bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn task_status(db: &Db, pt_id: &str) -> String {
+        ptask_core::tasks::resolve_for_lookup(db, pt_id, true)
+            .unwrap()
+            .status
+    }
+
+    #[tokio::test]
+    async fn git_push_closes_at_most_twenty_tasks() {
+        // SRV-11: every Closes/Fixes in a default-branch push was applied,
+        // inner PR commits included, with no cap: one merged public PR
+        // carrying `Closes PT-1 ... Closes PT-900` closed 900 tasks.
+        let db = open_test_db();
+        for i in 1..=25 {
+            ptask_core::tasks::create(
+                &db,
+                ptask_core::NewTask::minimal(format!("t{i}")),
+                &EventCtx::test(),
+            )
+            .unwrap();
+        }
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), Default::default(), hooks));
+        let message: String = (1..=25).map(|i| format!("Closes PT-{i}\n")).collect();
+        let resp = signed_gitea_push(
+            &app,
+            &serde_json::json!({
+                "ref": "refs/heads/main",
+                "commits": [{"id": "c1", "message": message}],
+            }),
+        )
+        .await;
+        assert_eq!(resp["closed"].as_array().unwrap().len(), 20, "{resp}");
+        assert_eq!(
+            resp["skipped"],
+            serde_json::json!(["PT-21", "PT-22", "PT-23", "PT-24", "PT-25"])
+        );
+        assert_eq!(task_status(&db, "PT-20"), "done");
+        assert_ne!(task_status(&db, "PT-21"), "done");
+    }
+
+    #[tokio::test]
+    async fn git_close_repos_allowlist_limits_which_repos_close_tasks() {
+        // SRV-11: any repository holding the shared secret could close any
+        // PT-N. PTASK_GIT_CLOSE_REPOS names the ones that may.
+        let db = open_test_db();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("ship it"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            git_close_repos: vec!["puretensor/ptask".into()],
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), Default::default(), hooks));
+        let push = |repo: &str, id: &str| {
+            serde_json::json!({
+                "ref": "refs/heads/main",
+                "repository": {"full_name": repo},
+                "commits": [{"id": id, "message": "Fixes PT-1"}],
+            })
+        };
+        let resp = signed_gitea_push(&app, &push("someone/fork", "c1")).await;
+        assert_eq!(resp["closed"], serde_json::json!([]), "{resp}");
+        assert_eq!(resp["skipped_repo"], "someone/fork");
+        assert_ne!(task_status(&db, "PT-1"), "done");
+
+        let resp = signed_gitea_push(&app, &push("PureTensor/ptask", "c2")).await;
+        assert_eq!(resp["closed"], serde_json::json!(["PT-1=done"]), "{resp}");
+        assert_eq!(task_status(&db, "PT-1"), "done");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn gitea_webhook_ignores_fixes_on_a_feature_branch() {
         use hmac::{Hmac, Mac};

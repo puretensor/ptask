@@ -172,6 +172,13 @@ HMAC verification: the secret comes from `PTASK_GITEA_WEBHOOK_SECRET` /
 `PTASK_GITHUB_WEBHOOK_SECRET`. Body signature is `X-Hub-Signature-256`
 (GitHub) or `X-Gitea-Signature` (Gitea).
 
+One delivery closes at most 20 distinct PT-N; the rest are listed under
+`skipped` in the response and logged. `PTASK_GIT_CLOSE_REPOS=owner/repo,...`
+limits which repositories (`repository.full_name`, case-insensitive) may
+close tasks at all; a push from any other repository gets 200 with
+`skipped_repo` and closes nothing. Unset, any repository holding the secret
+may close tasks.
+
 ## Outbound webhooks
 
 Configure `PTASK_WEBHOOK_URLS=<url1>,<url2>` and `PTASK_WEBHOOK_SECRET` for HMAC-signed POSTs
