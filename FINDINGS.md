@@ -5,15 +5,20 @@ Running register of review findings. One verb per item: **fixed** (version), **d
 why). Companion ledger: `review-ledger.jsonl`; the Opus reader report this section was
 triaged from is archived at `~/reports/cc/fable-pass-2026-09/reports/report-ptask.md`.
 
-## 2026-10-05 — adversarial pass (3.35.0)
+## 2026-10-05 — adversarial pass (3.35.0–3.42.0)
 
 Scope: the whole tree at `bd2c5cb` (3.34.0, after PT-2201 removed the cockpit login).
 Eight adversarial readers (server, dashboard, MCP and approvals, core storage, parsers,
 CLI/TUI/bot, distill and notify, CI and ops) reported about 115 candidate findings, with
 overlaps. Each was re-checked against the code, and most were reproduced against the built
-`pt` or a scratch sidecar before fixing. Fixes land as several PRs. Every fix carries a
-regression test that fails on the old code. Each PR gets an independent second review
-before merge.
+`pt` or a scratch sidecar before fixing. The fixes landed as eight PRs (3.35.0–3.42.0,
+#112–#119). Every fix carries a regression test that fails on the old code. Each PR then
+had an independent adversarial second review, repeated until it signed off; most took two
+to five rounds, and the later rounds caught regressions and bypasses in the first fixes
+(an `/email` decoder mismatch with quadratic memory, a DB-lock fallback that dropped
+SQLite's POSIX locks, variation-selector smuggling past the approval gate, a hung webhook
+subscriber stalling the rest). Two RUSTSEC "unmaintained" notices are accepted with stated
+reasons (operator sign-off, see `deny.toml`).
 
 ### Fixed (3.35.0) — access gates
 
@@ -97,6 +102,18 @@ Residue: tag-sequence subdivision flags (England, Scotland, Wales) render as U+F
 | Core residue | An old binary failed on a newer schema with a bare refinery error. Concurrent first-open migration failed once. `backfill_all` and subtask promotion weren't atomic. History sorted by local `ts` text. MCP's `discovered_from` link was written after the create committed. The digest's "recently done" was keyed on `updated_at`. | An explicit "schema newer than this binary" error, plus a documented rollback. One migration retry. IMMEDIATE transactions. Ordering by id. The link is written in the create transaction. Completion uses the status-change time. |
 | CLI and docs | Bearer tokens went over plain http to non-tailnet hosts silently. `pt plan` and `--stale-days` could panic. The bot's `/add` example used a past date. A blocked close in the sidecar returned 500. Dashboard `pt` processes didn't get `PTASK_WAL_AUTOCHECKPOINT=0`. The docs on `task_delete`, metrics and webhook fan-out were wrong, and docs claimed `start` was gated by blockers. | A warning is printed, and tailnet and MagicDNS names are recognised with a 1 s lookup bound. Range errors replace the panics. The example date is relative. The sidecar returns 409. The unit sets the variable. The docs match the code; a test checks the metrics table. |
 
+### Fixed (3.42.0) — ops, CI and runbooks
+
+| Area | Finding | Fix |
+|---|---|---|
+| Release runner | `release.yml` ran `sudo apt-get` on the production host's runner; a token went on the curl command line; the Litestream replica dir was 0755. The tag check (added here) can be deleted by whoever pushes the tag. | The cross toolchain is required pre-installed (`PTASK_ALLOW_SUDO_APT=1` to opt back in). The `/version` probe needs no token. The replica dir is 0700. Release tags must descend from main (stops accidents); `environment: release` is declared for a protected-tag rule. Gitea checkout is SHA-pinned and rustup-init is verified. Ansible verifies each binary's `.sha256`. |
+| Backups | Sequential legs under `set -e`: a near-leg failure skipped the off-site copy, and a hung mount stalled the unit until its timeout. A killed upload left a truncated "newest" nightly. | Independent legs with per-step `timeout` (ssh -n), worst case documented under the unit timeout. Uploads go to `.partial.<pid>` and are then renamed; stale partials are pruned. |
+| Restore drill | The replica passed at live−25 rows; a 0-byte nightly passed `integrity_check`; off-site checked existence only; Litestream crash-looped forever. | Row band plus settled `updated_at` (re-read after the restore). Size and age floors. Off-site sha256 compared against the same-date nearby copy. Litestream gets `StartLimit` + `OnFailure`. A new daily `ptask-replica-check` catches a stalled replica within a day. |
+| Runbooks | The promote/recovery runbook could corrupt the DB (light WAL) or silently revert it (heavy WAL); its verify SQL was invalid; the WAL-autocheckpoint rollback was per-connection only. | One literal, tested procedure: stop, fuser guard, move db + `-wal` + `-shm` aside together, install via rename, verify. The rollback edits `.env` and restarts. Ansible seeds `PTASK_WAL_AUTOCHECKPOINT=0` and has a `ptask_litestream=false` rollback mode. |
+| Units | Accountability/distill/litestream skipped silently without `.env`; the alert unit itself needed `.env`; export had no timeout; serve had no hardening; `.gitignore` missed `*.env`. | No silent skips. The alert unit takes optional `.env` and `~/.config/ptask/alert.env`, and logs at err priority without credentials. TimeoutStartSec on export. Serve is sandboxed. Secrets are ignored by git. |
+| Supply chain | cargo-deny checked default features only, so 64 native-ml crates were never checked. `scripts/verify-vendored-core.sh` compared files PT-2201 deleted. | `all-features = true`; two unmaintained notices accepted with reasons. The dead script is deleted. |
+| Docs | Distill was documented as defaulting to Gemini/exit 3, and the quiet window as UTC; the `next` ordering, readiness and exit codes were wrong; dsl.md documented tokens that don't exist; MCP status codes were wrong. | Docs match the code (checked against a built `pt`). |
+
 ### Operator actions (outside the repository)
 
 - GitHub → Settings → Actions → General: require approval for all external contributors.
@@ -111,6 +128,26 @@ Residue: tag-sequence subdivision flags (England, Scotland, Wales) render as U+F
   hostname or `*.ts.net` (reverse proxy, LAN name) need that name in `PTASK_DASH_ALLOWED_HOSTS`.
 - Check that nexus forwards taps with its `nexus` token (`pt token list` shows last use);
   on the legacy env token its taps are journaled as `telegram via legacy-env`.
+- Set `PTASK_SMTP_FROM` if the SMTP login isn't an email address; keep the local LLM at
+  127.0.0.1:8600 up (or set `PTASK_LLM_BACKEND`), or distill fails and alerts hourly.
+- Set `PTASK_MCP_ACTOR` per `pt mcp` registration (an exported `PTASK_ACTOR` is the fallback).
+- On tensor-core: `git pull` in `~/ptask` (units run `%h/ptask/scripts`), then re-run the
+  playbook (needs `~/puretensor-tasks/.env` and `/usr/local/bin/litestream`; use
+  `-e ptask_litestream=false` while Litestream is rolled back). It enables
+  `ptask-replica-check.timer` and seeds `PTASK_WAL_AUTOCHECKPOINT=0`. Check `/tmp` has room
+  for one full-DB restore a day.
+- Create `~/.config/ptask/alert.env` (0600) with the Telegram token and chat id, so alerts
+  still go out when `.env` is missing.
+- `sudo chmod -R go-rwx /var/backups/ptask-litestream`.
+- Pre-install `gcc-aarch64-linux-gnu` and `g++-aarch64-linux-gnu` on the runner, then remove
+  ghrunner's passwordless sudo (or set `PTASK_ALLOW_SUDO_APT=1` meanwhile).
+- Add a GitHub tag ruleset on `refs/tags/v*`, restrict the `release` environment to
+  protected `v*` tags, and protect `v*` tags on Gitea.
+- After the next release: confirm the Gitea release fired for the mirror-synced tag (else
+  push tags to Gitea) and that act_runner resolves the pinned checkout SHA.
+- After deploy: confirm `ptask-serve` starts with the sandbox flags (no `226/NAMESPACE`).
+- Open: release signing (key off the build runner) and a second alert channel beyond
+  Telegram and journald.
 
 ## 2026-09-25 — residue follow-up (3.34.0)
 
