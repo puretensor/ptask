@@ -16,8 +16,6 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
-use mail_parser::decoders::base64::base64_decode;
-use mail_parser::decoders::quoted_printable::quoted_printable_decode;
 use mail_parser::parsers::MessageStream;
 use mail_parser::{HeaderName, HeaderValue, MessageParser, MessagePart, MimeHeaders, PartType};
 use serde::Serialize;
@@ -62,23 +60,9 @@ async fn email(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    // Saturated: tell the sender to retry rather than queue parses behind
-    // each other. The permit moves into the blocking task, so a client that
-    // disconnects mid-parse does not free it early.
-    let Ok(permit) = state.email_parses.clone().try_acquire_owned() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(axum::http::header::RETRY_AFTER, "5")],
-            Json(serde_json::json!({"error": "too many emails being parsed; retry"})),
-        )
-            .into_response();
-    };
-    crate::blocking::db_response(move || {
-        let _permit = permit;
-        email_blocking(state, headers, body)
-    })
-    .await
-    .into_response()
+    crate::blocking::db_response(move || email_blocking(state, headers, body))
+        .await
+        .into_response()
 }
 
 /// The fields a capture keeps, owned so the parsed tree can be dropped on
@@ -199,8 +183,10 @@ fn transfer_encoding(part: &MessagePart<'_>, raw: &[u8]) -> TransferEncoding {
 /// down, walking without recursion. Nesting past MAX_MESSAGE_DEPTH is
 /// refused. An embedded message in base64 or quoted-printable (RFC 2046
 /// 5.2.1 forbids it, but Exchange-style gateways send it) is the one part
-/// the real parser decodes and re-parses: it is decoded here and probed in
-/// turn, so its nesting counts too. Recursion is bounded by
+/// the real parser decodes and re-parses: it is decoded here exactly as the
+/// real parser decodes it (mail-parser's own MIME decoders, from the part's
+/// body offset, stopping at the boundary the parser itself would use) and
+/// probed in turn, so its nesting counts too. Recursion is bounded by
 /// MAX_ENCODED_LAYERS.
 fn check_structure(
     bytes: &[u8],
@@ -212,8 +198,13 @@ fn check_structure(
     let Some(probe) = structure_parser().parse(bytes) else {
         return Ok(());
     };
-    let mut stack = vec![(&probe, base_depth)];
-    while let Some((msg, depth)) = stack.pop() {
+    // Each entry carries the boundary an unencoded embedded message inherits
+    // from its enclosing part: the real parser hands the current multipart's
+    // boundary down (`mime_boundary: state.mime_boundary.take()`), and a part
+    // with no multipart of its own inside that message decodes against it.
+    let mut stack: Vec<(&mail_parser::Message<'_>, usize, Option<&str>)> =
+        vec![(&probe, base_depth, None)];
+    while let Some((msg, depth, inherited)) = stack.pop() {
         if depth > MAX_MESSAGE_DEPTH {
             return Err("embedded messages nested too deeply");
         }
@@ -234,16 +225,21 @@ fn check_structure(
             }
         }
         for (i, part) in msg.parts.iter().enumerate() {
-            let (boundary, in_digest) = parent.get(&i).copied().unwrap_or((None, false));
+            let (boundary, in_digest) = match parent.get(&i) {
+                Some(&(boundary, digest)) => (boundary, digest),
+                None => (inherited, false),
+            };
             let encoding = if is_embedded_message(part, in_digest) {
                 transfer_encoding(part, bytes)
             } else {
                 TransferEncoding::Identity
             };
-            let decoded = match encoding {
+            let body = bytes.get(part.offset_body as usize..).unwrap_or_default();
+            let boundary_bytes = boundary.map(str::as_bytes).unwrap_or(b"");
+            let (end, decoded) = match encoding {
                 TransferEncoding::Identity | TransferEncoding::Other => {
                     if let PartType::Message(inner) = &part.body {
-                        stack.push((inner, depth + 1));
+                        stack.push((inner, depth + 1, boundary));
                     }
                     continue;
                 }
@@ -255,37 +251,117 @@ fn check_structure(
                 {
                     return Err("too many transfer-encoded embedded messages");
                 }
-                TransferEncoding::Base64 => base64_decode(encoded_body(part, bytes, boundary)),
+                TransferEncoding::Base64 => {
+                    MessageStream::new(body).decode_base64_mime(boundary_bytes)
+                }
                 TransferEncoding::QuotedPrintable => {
-                    quoted_printable_decode(encoded_body(part, bytes, boundary))
+                    MessageStream::new(body).decode_quoted_printable_mime(boundary_bytes)
                 }
             };
-            if let Some(decoded) = decoded {
-                check_structure(&decoded, depth + 1, encoded_layers + 1)?;
+            // Backstop that does not rely on matching the real decoder: a
+            // lenient decode of the same text may hold no more embedded
+            // messages than the depth limit allows.
+            if embedded_message_markers(&lenient_decode(&encoding, body, boundary))
+                > MAX_MESSAGE_DEPTH
+            {
+                return Err("embedded messages nested too deeply");
             }
+            // The real parser keeps an undecodable part as opaque text.
+            if end == usize::MAX {
+                continue;
+            }
+            check_structure(&decoded, depth + 1, encoded_layers + 1)?;
         }
     }
     Ok(())
 }
 
-/// A part's undecoded body bytes, up to its enclosing multipart's next
-/// boundary (the last part's range runs past the closing delimiter), as
-/// the real parser's MIME decoders stop there.
-fn encoded_body<'b>(part: &MessagePart<'_>, bytes: &'b [u8], boundary: Option<&str>) -> &'b [u8] {
-    let body = bytes
-        .get(part.offset_body as usize..part.offset_end as usize)
-        .unwrap_or_default();
-    let Some(boundary) = boundary else {
-        return body;
-    };
-    let delimiter = format!("\n--{boundary}");
-    let delimiter = delimiter.as_bytes();
-    if body.starts_with(&delimiter[1..]) {
-        return &[];
+/// Case-insensitive count of `message/rfc822` and `message/global` (with
+/// any whitespace after the slash) in `bytes`.
+fn embedded_message_markers(bytes: &[u8]) -> usize {
+    let lower = bytes.to_ascii_lowercase();
+    let mut count = 0;
+    let mut rest = &lower[..];
+    while let Some(at) = rest.windows(8).position(|w| w == b"message/") {
+        let after = &rest[at + 8..];
+        let trimmed = after
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .map_or(&after[after.len()..], |n| &after[n..]);
+        if trimmed.starts_with(b"rfc822") || trimmed.starts_with(b"global") {
+            count += 1;
+        }
+        rest = after;
     }
-    body.windows(delimiter.len())
-        .position(|w| w == delimiter)
-        .map_or(body, |end| &body[..end])
+    count
+}
+
+/// A forgiving decode of an encoded part: the text up to the first
+/// `--boundary` anywhere, base64 with every non-alphabet byte dropped, or
+/// quoted-printable with soft breaks and `=XX` escapes undone. It need not
+/// match the real decoder; it only bounds what could be hidden from it.
+fn lenient_decode(encoding: &TransferEncoding, body: &[u8], boundary: Option<&str>) -> Vec<u8> {
+    let body = match boundary {
+        Some(b) if !b.is_empty() => {
+            let delimiter = [b"--".as_slice(), b.as_bytes()].concat();
+            body.windows(delimiter.len())
+                .position(|w| w == delimiter.as_slice())
+                .map_or(body, |end| &body[..end])
+        }
+        _ => body,
+    };
+    match encoding {
+        TransferEncoding::Base64 => {
+            let sextet = |c: u8| match c {
+                b'A'..=b'Z' => Some(c - b'A'),
+                b'a'..=b'z' => Some(c - b'a' + 26),
+                b'0'..=b'9' => Some(c - b'0' + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            };
+            let values: Vec<u8> = body.iter().filter_map(|&c| sextet(c)).collect();
+            let mut out = Vec::with_capacity(values.len() / 4 * 3 + 3);
+            for chunk in values.chunks(4) {
+                let mut acc = 0u32;
+                for (k, v) in chunk.iter().enumerate() {
+                    acc |= u32::from(*v) << (18 - 6 * k);
+                }
+                let bytes = acc.to_be_bytes();
+                out.extend_from_slice(&bytes[1..chunk.len().saturating_sub(1).max(1) + 1]);
+            }
+            out
+        }
+        TransferEncoding::QuotedPrintable => {
+            let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+            let mut out = Vec::with_capacity(body.len());
+            let mut i = 0;
+            while i < body.len() {
+                if body[i] == b'=' {
+                    if let (Some(h), Some(l)) = (
+                        body.get(i + 1).copied().and_then(hex),
+                        body.get(i + 2).copied().and_then(hex),
+                    ) {
+                        out.push(h << 4 | l);
+                        i += 3;
+                        continue;
+                    }
+                    let soft = body[i + 1..]
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .filter(|&n| body[i + 1..i + 1 + n].iter().all(u8::is_ascii_whitespace));
+                    if let Some(n) = soft {
+                        i += n + 2;
+                        continue;
+                    }
+                }
+                out.push(body[i]);
+                i += 1;
+            }
+            out
+        }
+        TransferEncoding::Identity | TransferEncoding::Other => body.to_vec(),
+    }
 }
 
 /// Probe the structure, then parse and extract, on a dedicated big-stack
@@ -313,9 +389,22 @@ fn parse_email(body: Bytes) -> std::io::Result<ParseOutcome> {
 }
 
 fn email_blocking(state: AppState, headers: HeaderMap, body: Bytes) -> axum::response::Response {
+    // Authenticate before taking a parse permit: an unauthenticated flood
+    // must not hold the permits real senders need.
     if let Some(resp) = crate::auth::require_write_token(&state.db, &state.auth, &headers) {
         return resp;
     }
+    // Saturated: tell the sender to retry rather than queue parses behind
+    // each other. The permit lives until this blocking task finishes, so a
+    // client that disconnects mid-parse does not free it early.
+    let Ok(_permit) = state.email_parses.clone().try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, "5")],
+            Json(serde_json::json!({"error": "too many emails being parsed; retry"})),
+        )
+            .into_response();
+    };
     let ParsedEmail {
         subject,
         body_text,
@@ -380,5 +469,82 @@ fn email_blocking(state: AppState, headers: HeaderMap, body: Bytes) -> axum::res
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+
+    fn b64_lines(raw: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD
+            .encode(raw)
+            .as_bytes()
+            .chunks(20)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect::<Vec<_>>()
+            .join("\r\n")
+    }
+
+    /// The probe must read an encoded part exactly as the real parser does.
+    /// A stray `-` is skipped by mail-parser's MIME decoder (the strict
+    /// decoder the probe used before rejected it, so the probe skipped a
+    /// part the real parser then decoded and re-parsed).
+    #[test]
+    fn probe_decodes_like_the_real_parser_despite_a_stray_dash() {
+        let inner = b"Subject: inner\r\n\r\nhello\r\n";
+        let mut enc = b64_lines(inner);
+        enc.insert(7, '-');
+        let (end, decoded) = MessageStream::new(enc.as_bytes()).decode_base64_mime(b"");
+        assert_ne!(end, usize::MAX);
+        assert_eq!(&decoded[..], inner);
+    }
+
+    /// The MIME decoder stops at `--boundary` anywhere in a line, not only
+    /// at the start of one; the old probe cut only at `\n--boundary`.
+    #[test]
+    fn probe_stops_at_a_mid_line_boundary() {
+        let inner = b"Subject: inner\r\n\r\nhello\r\n";
+        let enc = format!("{}--B\r\ntrailing", b64_lines(inner));
+        let (end, decoded) = MessageStream::new(enc.as_bytes()).decode_base64_mime(b"B");
+        assert_ne!(end, usize::MAX);
+        assert_eq!(&decoded[..], inner);
+        assert_eq!(
+            lenient_decode(&TransferEncoding::Base64, enc.as_bytes(), Some("B")),
+            inner
+        );
+    }
+
+    #[test]
+    fn markers_are_counted_case_insensitively_with_whitespace() {
+        let text = b"Content-Type: message/rfc822\r\nContent-Type: Message/ RFC822\r\n\
+                     content-type: message/global\r\nContent-Type: message/delivery-status\r\n";
+        assert_eq!(embedded_message_markers(text), 3);
+    }
+
+    /// The backstop sees through either encoding, whatever junk the real
+    /// decoder might be made to disagree on.
+    #[test]
+    fn lenient_decode_sees_through_base64_junk_and_quoted_printable() {
+        let inner = b"Content-Type: message/rfc822\r\n\r\nContent-Type: message/rfc822\r\n";
+        let junked = b64_lines(inner).replace("\r\n", "-*\r\n");
+        let b64 = lenient_decode(&TransferEncoding::Base64, junked.as_bytes(), None);
+        assert_eq!(embedded_message_markers(&b64), 2);
+        let qp = b"Content-Type: m=65ssage/rfc8=\r\n22\r\n";
+        let qp = lenient_decode(&TransferEncoding::QuotedPrintable, qp, None);
+        assert_eq!(embedded_message_markers(&qp), 1);
+    }
+
+    /// An ordinary encoded forward still passes the probe.
+    #[test]
+    fn a_shallow_encoded_forward_is_accepted() {
+        let inner = b"Subject: forwarded\r\n\r\nplease renew the domain\r\n";
+        let raw = format!(
+            "Subject: Fwd\r\nContent-Type: message/rfc822\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{}\r\n",
+            b64_lines(inner)
+        );
+        assert_eq!(check_structure(raw.as_bytes(), 0, 0), Ok(()));
     }
 }
