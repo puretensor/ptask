@@ -357,6 +357,12 @@ fn plan_write_names_created_holds_when_a_spawn_fails() {
             ],
         )
         .env("PATH", &bin)
+        // The harness clears the environment; a toolcache python3 (CI's
+        // setup-python) finds libpython only through LD_LIBRARY_PATH.
+        .env(
+            "LD_LIBRARY_PATH",
+            std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+        )
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
