@@ -897,6 +897,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_command_uuids_in_the_capture_namespace_are_refused() {
+        // Round-2 SRV-15: a /sync task_create under uuid `capture:999999`
+        // (source_type incident) carried the capture lane's trust marker,
+        // and /capture/resolve closed it.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let resp = post_sync(
+            &app,
+            &serde_json::json!({"commands": [
+                {"uuid": "capture:999999", "type": "task_create",
+                 "args": {"text": "forged", "source_type": "incident"}},
+                {"uuid": "Capture:7", "type": "task_create", "args": {"text": "forged too"}},
+                {"uuid": "ok-1", "type": "task_create", "args": {"text": "fine"}},
+            ]}),
+        )
+        .await;
+        for uuid in ["capture:999999", "Capture:7"] {
+            let err = resp["sync_status"][uuid]["error"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(err.contains("reserved"), "{uuid}: {resp}");
+        }
+        assert_eq!(resp["sync_status"]["ok-1"], "ok", "{resp}");
+        let titles: Vec<String> = db
+            .with_conn(|c| {
+                let mut s = c.prepare("SELECT title FROM tasks ORDER BY title")?;
+                let rows = s
+                    .query_map([], |r| r.get(0))?
+                    .collect::<std::result::Result<_, _>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(titles, ["fine"]);
+    }
+
+    #[tokio::test]
     async fn sync_round_trip_priority_edit_reopen() {
         let db = open_test_db();
         let app = router(AppState::new(

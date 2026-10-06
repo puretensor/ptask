@@ -266,10 +266,12 @@ fn open_incident_for_key(db: &ptask_core::Db, key: &str) -> Result<bool, ptask_c
 /// SQL predicate (over `tasks`): the capture fast lane created this task.
 /// Its `task.created` journal row is keyed `capture:<raw_items id>` and
 /// commits with the insert; incidents HAL files over MCP and /sync tasks
-/// typed `incident` carry other keys.
+/// typed `incident` carry other keys, and clients may not supply a key in
+/// that namespace (`event_log::is_reserved_client_key`). GLOB, not LIKE:
+/// LIKE is case-insensitive, and the id must be all digits.
 const CAPTURE_LANE_TASK: &str = "EXISTS (SELECT 1 FROM pt_event_log e
      WHERE e.task_uuid = tasks.id AND e.event_type = 'task.created'
-       AND e.uuid LIKE 'capture:%')";
+       AND e.uuid GLOB 'capture:[0-9]*' AND NOT e.uuid GLOB 'capture:*[^0-9]*')";
 
 /// Bump a matched open incident's occurrence counters. The capture's key is
 /// stamped only onto an unkeyed task the capture lane created: resolve
@@ -800,6 +802,38 @@ mod tests {
         serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["closed"]
             .as_i64()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_an_exact_capture_key_marks_a_capture_lane_task() {
+        // Round-2 SRV-15: the marker was `uuid LIKE 'capture:%'`, which is
+        // case-insensitive and matched any suffix, so keys journaled before
+        // the namespace was reserved still forged it.
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("glob.db")).unwrap();
+        let state = AppState::new(db.clone(), Default::default(), Default::default());
+        for (i, key) in ["CAPTURE:12", "capture:12x", "capture:"].iter().enumerate() {
+            let ctx = EventCtx::test().with_uuid(*key);
+            let t = ptask_core::tasks::create_with_extensions(
+                &db,
+                ptask_core::NewTask {
+                    source_type: "incident".into(),
+                    ..ptask_core::NewTask::minimal(format!("forged {i}"))
+                },
+                ptask_core::Extensions::default(),
+                &ctx,
+            )
+            .unwrap();
+            db.with_conn(|c| {
+                c.execute(
+                    "UPDATE tasks SET capture_key = 'k:forged' WHERE id = ?1",
+                    [&t.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(closed_by_resolve(&state, "k:forged").await, 0);
     }
 
     #[tokio::test]
