@@ -108,7 +108,7 @@ fn seed_reap_failure(pt: &Pt, stuck: &[usize]) {
         c.execute_batch(&format!(
             "CREATE TRIGGER test_stuck BEFORE UPDATE ON tasks
              WHEN OLD.id IN ({}) AND NEW.status = 'dismissed'
-             BEGIN SELECT RAISE(ABORT, 'dismiss refused by test'); END;",
+             BEGIN SELECT RAISE(ABORT, 'dismiss refused by test ' || char(27) || ']52;c;eA==' || char(7)); END;",
             stuck_ids.join(",")
         ))?;
         Ok(())
@@ -173,6 +173,17 @@ fn reap_fails_when_every_dismiss_fails() {
         "{stdout}"
     );
     assert!(stderr.contains("2 of 2"), "{stderr}");
+    // The SQLite error carries an OSC 52; neither the report nor the
+    // tracing WARN line may pass it to the terminal.
+    assert!(stderr.contains("dismiss refused by test"), "{stderr}");
+    assert!(
+        !stderr.contains('\x1b') && !stderr.contains('\x07'),
+        "{stderr:?}"
+    );
+    assert!(
+        !stdout.contains('\x1b') && !stdout.contains('\x07'),
+        "{stdout:?}"
+    );
 }
 
 #[test]

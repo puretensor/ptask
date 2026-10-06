@@ -1067,7 +1067,22 @@ fn run() -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_env("PTASK_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     // Colour only for a terminal: scripts and agents read stderr as text.
+    // Field values can carry DB or task text (a SQLite error quoting a
+    // title, say), so each is folded to one sanitised line before it
+    // reaches the terminal.
+    use tracing_subscriber::field::MakeExt;
+    let fields = tracing_subscriber::fmt::format::debug_fn(|w, field, value| {
+        let text = format!("{value:?}");
+        let text = ui::one_line(&text);
+        if field.name() == "message" {
+            write!(w, "{text}")
+        } else {
+            write!(w, "{}={text}", field.name())
+        }
+    })
+    .delimited(" ");
     tracing_subscriber::fmt()
+        .fmt_fields(fields)
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
