@@ -51,12 +51,48 @@ fn default_priority() -> i64 {
 /// charging any capture or bisecting: halving a chunk cannot fix an outage,
 /// it only multiplies calls against it.
 #[derive(Debug)]
-pub struct ProviderUnavailable(pub String);
+pub struct ProviderUnavailable {
+    pub class: FailureClass,
+    pub message: String,
+}
+
+impl ProviderUnavailable {
+    pub fn new(class: FailureClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+        }
+    }
+}
 
 impl fmt::Display for ProviderUnavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "provider unavailable: {}", self.0)
+        write!(
+            f,
+            "provider unavailable ({:?}): {}",
+            self.class, self.message
+        )
     }
+}
+
+/// Why the provider is unavailable. Only [`FailureClass::Server`] (a 500,
+/// 502, 504… that may be deterministic for one input, e.g. a local server
+/// erroring on context overflow) is ever re-checked and blamed on the
+/// input; the rest describe the provider's state and always abort the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// HTTP 429.
+    RateLimited,
+    /// HTTP 503.
+    Overloaded,
+    /// HTTP 408 or a client-side timeout.
+    Timeout,
+    /// Connection refused/reset, DNS, TLS…
+    Transport,
+    /// HTTP 401/403/404: credentials rejected or model gone.
+    Auth,
+    /// Any other 5xx.
+    Server,
 }
 
 impl std::error::Error for ProviderUnavailable {}
@@ -488,10 +524,10 @@ struct CallError {
     message: String,
     /// Worth another attempt within this call (transient).
     retryable: bool,
-    /// The provider, not the input, is at fault: transport failures, rate
-    /// limits, 5xx, and rejected credentials or a missing model. Once
-    /// retries are exhausted this surfaces as [`ProviderUnavailable`].
-    provider_fault: bool,
+    /// The provider, not the input, is at fault (and why): transport
+    /// failures, rate limits, 5xx, rejected credentials or a missing model.
+    /// Once retries are exhausted this surfaces as [`ProviderUnavailable`].
+    provider_fault: Option<FailureClass>,
     /// Server-requested delay (`Retry-After`, seconds form).
     retry_after: Option<Duration>,
 }
@@ -499,10 +535,15 @@ struct CallError {
 impl CallError {
     fn transport(what: &str, e: reqwest::Error) -> Self {
         let retryable = e.is_timeout() || e.is_connect() || e.is_request();
+        let class = if e.is_timeout() {
+            FailureClass::Timeout
+        } else {
+            FailureClass::Transport
+        };
         Self {
             message: format!("{what}: {}", e.without_url()),
             retryable,
-            provider_fault: true,
+            provider_fault: Some(class),
             retry_after: None,
         }
     }
@@ -512,11 +553,16 @@ impl CallError {
         Self {
             message: format!("http {status}: {}", snippet(body)),
             retryable,
-            provider_fault: retryable
-                || matches!(
-                    status,
-                    StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
-                ),
+            provider_fault: match status {
+                StatusCode::TOO_MANY_REQUESTS => Some(FailureClass::RateLimited),
+                StatusCode::SERVICE_UNAVAILABLE => Some(FailureClass::Overloaded),
+                StatusCode::REQUEST_TIMEOUT => Some(FailureClass::Timeout),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
+                    Some(FailureClass::Auth)
+                }
+                s if s.is_server_error() => Some(FailureClass::Server),
+                _ => None,
+            },
             retry_after,
         }
     }
@@ -526,7 +572,7 @@ impl CallError {
         Self {
             message,
             retryable: false,
-            provider_fault: false,
+            provider_fault: None,
             retry_after: None,
         }
     }
@@ -595,8 +641,8 @@ fn generate_with_retry(
             "{label} request failed after {attempt} attempt(s): {}",
             attempt_errors.join(" | ")
         );
-        if e.provider_fault {
-            return Err(anyhow::Error::new(ProviderUnavailable(summary)));
+        if let Some(class) = e.provider_fault {
+            return Err(anyhow::Error::new(ProviderUnavailable::new(class, summary)));
         }
         bail!("{summary}");
     }
@@ -1392,9 +1438,10 @@ mod tests {
         let err = provider
             .classify_batch(&["I will ship it".into()])
             .unwrap_err();
-        assert!(
-            err.downcast_ref::<ProviderUnavailable>().is_some(),
-            "not typed as an outage: {err:#}"
+        assert_eq!(
+            err.downcast_ref::<ProviderUnavailable>().map(|p| p.class),
+            Some(FailureClass::Overloaded),
+            "not typed as an overload: {err:#}"
         );
         assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
@@ -1417,9 +1464,10 @@ mod tests {
         let err = provider
             .classify_batch(&["I will ship it".into()])
             .unwrap_err();
-        assert!(
-            err.downcast_ref::<ProviderUnavailable>().is_some(),
-            "timeout not typed as an outage: {err:#}"
+        assert_eq!(
+            err.downcast_ref::<ProviderUnavailable>().map(|p| p.class),
+            Some(FailureClass::Timeout),
+            "timeout not typed as a timeout: {err:#}"
         );
     }
 

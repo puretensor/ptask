@@ -526,6 +526,12 @@ struct RunState {
     /// The provider became unavailable mid-run (see `ProviderUnavailable`):
     /// no further call starts and nothing more is charged.
     aborted: bool,
+    /// The one failing path a server-class error may be blamed on this run:
+    /// the ids of the most recent chunk on it. Set after a healthy
+    /// re-preflight and narrowed as bisection follows the failure down.
+    suspect: Option<std::collections::HashSet<i64>>,
+    /// Charges from that path, applied only if the run does not abort.
+    provisional_failures: Vec<(i64, String)>,
 }
 
 /// Why a chunk failed, and whether the capture may be blamed for it.
@@ -540,17 +546,24 @@ struct ChunkError {
     /// The provider itself is down/rate-limited/timing out. Bisecting would
     /// only multiply calls against the outage, so the run stops instead.
     abort: bool,
+    /// The outage class, when the provider reported one.
+    outage: Option<crate::providers::FailureClass>,
+    /// Blamed on the input only provisionally (a server-class error after a
+    /// healthy re-preflight): the charge is dropped if the run later aborts.
+    provisional: bool,
 }
 
 impl ChunkError {
     fn provider(e: anyhow::Error) -> Self {
         let outage = e
             .downcast_ref::<crate::providers::ProviderUnavailable>()
-            .is_some();
+            .map(|p| p.class);
         Self {
             reason: format!("{e:#}"),
-            chargeable: !outage,
-            abort: outage,
+            chargeable: outage.is_none(),
+            abort: outage.is_some(),
+            outage,
+            provisional: false,
         }
     }
 
@@ -561,6 +574,8 @@ impl ChunkError {
             reason: format!("{e:#}"),
             chargeable: false,
             abort: false,
+            outage: None,
+            provisional: false,
         }
     }
 }
@@ -696,28 +711,53 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
         Err(e) => e,
     };
     let mut e = e;
-    if e.abort {
-        // An outage-class error (5xx/408/timeout…) can also be deterministic
-        // for one input — Gemini 500s on some content, a local server 500s on
-        // context overflow. Treating that as an outage aborts every run
-        // before bisection and, with oldest-first fetching, stalls the whole
-        // queue forever. Re-check liveness: a healthy provider means the
-        // failure is this chunk's, so isolate/charge/quarantine as usual.
-        st.calls += 1;
-        match provider.preflight() {
-            Ok(()) => {
-                warn!(
-                    target: "ptask::distill",
-                    chunk = items.len(),
-                    error = %e.reason,
-                    "provider-side error but preflight is healthy — treating it as input-specific"
-                );
-                e.abort = false;
-                e.chargeable = true;
-            }
-            Err(p) => {
-                e.reason = format!("{} (preflight also failed: {p:#})", e.reason);
-            }
+    if let Some(class) = e.outage {
+        // A server-class error (500/502/504…) can be deterministic for one
+        // input — Gemini 500s on some content, a local server 500s on context
+        // overflow — and aborting on it would stall the oldest-first queue
+        // forever. So it may be blamed on input, but only along ONE failing
+        // path per run: the first time, a healthy re-preflight opens the
+        // path; after that only a sub-chunk of the path's latest chunk (the
+        // bisection following one poison row down) may fail. Any other
+        // failure — a second, disjoint failing chunk, or both halves failing
+        // — means the provider is flapping, not the data: abort uncharged
+        // and drop the path's provisional charges. Every other class
+        // (rate limit, overload, timeout, transport, auth) describes the
+        // provider and always aborts.
+        let ids: std::collections::HashSet<i64> = items.iter().map(|i| i.id).collect();
+        let input_specific = class == crate::providers::FailureClass::Server
+            && match &st.suspect {
+                None => {
+                    st.calls += 1;
+                    match provider.preflight() {
+                        Ok(()) => true,
+                        Err(p) => {
+                            e.reason = format!("{} (preflight also failed: {p:#})", e.reason);
+                            false
+                        }
+                    }
+                }
+                Some(path) => ids.is_subset(path),
+            };
+        if input_specific {
+            warn!(
+                target: "ptask::distill",
+                chunk = items.len(),
+                error = %e.reason,
+                "server error with a healthy provider — treating it as input-specific"
+            );
+            st.suspect = Some(ids);
+            e.abort = false;
+            e.chargeable = true;
+            e.provisional = true;
+        } else if !st.provisional_failures.is_empty() {
+            warn!(
+                target: "ptask::distill",
+                dropped = st.provisional_failures.len(),
+                "a second provider failure this run — the earlier one was the provider too; \
+                 dropping its provisional charges"
+            );
+            st.provisional_failures.clear();
         }
     }
     if st.first_error.is_none() || e.abort {
@@ -741,7 +781,9 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
             error = %e.reason,
             "isolated an unprocessable capture"
         );
-        if e.chargeable {
+        if e.chargeable && e.provisional {
+            st.provisional_failures.push((items[0].id, e.reason));
+        } else if e.chargeable {
             st.failures.push((items[0].id, e.reason));
         } else {
             st.deferred += 1;
@@ -915,11 +957,11 @@ fn create_candidates<P: LlmProvider + ?Sized>(
 /// failure during task creation is not.
 ///
 /// A provider *outage* (rate limit, 5xx, timeout, unreachable, rejected
-/// credentials — `ProviderUnavailable`) confirmed by a failing re-preflight
-/// is different: it aborts the run at once, without bisecting and without
-/// charging anything, and the run fails closed after marking the chunks that
-/// finished. If the re-preflight succeeds the error is input-specific and
-/// takes the normal isolate/charge path.
+/// credentials — `ProviderUnavailable`) is different: it aborts the run at
+/// once, without bisecting and without charging anything, and the run fails
+/// closed after marking the chunks that finished. The one exception is a
+/// server-class 5xx with a healthy re-preflight, which may be blamed on input
+/// along a single bisection path per run (provisionally — see `walk_chunk`).
 ///
 /// A run in which nothing got through still fails closed. Note what that does
 /// NOT mean: an attempt is charged whether or not anything else succeeded this
@@ -1092,6 +1134,12 @@ fn run_native_within<P: LlmProvider + ?Sized>(
 
     for id in &st.consumed_ids {
         ptask_core::raw_items::mark_processed(db, *id)?;
+    }
+    // Charges blamed on input after a server error stand only if the run
+    // never concluded the provider itself was failing.
+    if !st.aborted {
+        let provisional = std::mem::take(&mut st.provisional_failures);
+        st.failures.extend(provisional);
     }
     for (id, reason) in &st.failures {
         match ptask_core::raw_items::record_distill_failure(db, *id, reason) {
@@ -1993,6 +2041,79 @@ mod tests {
         assert_eq!(report.consumed, 1, "the lock is released with its holder");
     }
 
+    /// Healthy preflight, but every batch fails with `class` — a flapping or
+    /// overloaded provider.
+    struct Flapping {
+        class: crate::providers::FailureClass,
+        classify_calls: std::cell::Cell<usize>,
+        preflights: std::cell::Cell<usize>,
+    }
+    impl Flapping {
+        fn new(class: crate::providers::FailureClass) -> Self {
+            Self {
+                class,
+                classify_calls: std::cell::Cell::new(0),
+                preflights: std::cell::Cell::new(0),
+            }
+        }
+    }
+    impl LlmProvider for Flapping {
+        fn classify_batch(&self, _texts: &[String]) -> Result<Vec<Classification>> {
+            self.classify_calls.set(self.classify_calls.get() + 1);
+            Err(anyhow::Error::new(
+                crate::providers::ProviderUnavailable::new(
+                    self.class,
+                    "request failed after 3 attempt(s)",
+                ),
+            ))
+        }
+        fn consolidate(&self, _items: &[String]) -> Result<Vec<Candidate>> {
+            unreachable!("classification never succeeds")
+        }
+        fn preflight(&self) -> Result<()> {
+            self.preflights.set(self.preflights.get() + 1);
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "flapping-test"
+        }
+    }
+
+    /// Regression (round 3, DIST-5): with a healthy preflight but every
+    /// batch failing (503s from an overloaded provider), the re-preflight
+    /// "proved" each failure input-specific: ~32 classify calls and 33
+    /// preflights per run, and 15 healthy captures quarantined every 3 runs.
+    /// Non-server classes now always abort, and a server-class failure may
+    /// be blamed on input along one bisection path at most.
+    #[test]
+    fn a_flapping_provider_charges_nothing_and_stays_bounded() {
+        use crate::providers::FailureClass;
+        for class in [
+            FailureClass::Overloaded,
+            FailureClass::RateLimited,
+            FailureClass::Timeout,
+            FailureClass::Server,
+        ] {
+            let (_dir, db) = fresh_db();
+            let texts = distinct_captures(&db, 60);
+            for _ in 0..ptask_core::raw_items::MAX_DISTILL_ATTEMPTS {
+                let provider = Flapping::new(class);
+                assert!(run_native(&db, &provider, 300).is_err());
+                let calls = provider.classify_calls.get() + provider.preflights.get();
+                let bound = if class == FailureClass::Server { 12 } else { 2 };
+                assert!(
+                    calls <= bound,
+                    "{class:?}: {calls} provider calls in one run"
+                );
+            }
+            assert!(
+                texts.iter().all(|t| attempts(&db, t) == 0),
+                "{class:?}: healthy captures were charged for a flapping provider"
+            );
+            assert_eq!(ptask_core::raw_items::quarantined_count(&db).unwrap(), 0);
+        }
+    }
+
     /// Regression (round 2, DIST-5): a capture that deterministically gets a
     /// 5xx/408 (Gemini 500 on certain inputs, a local server 500 on context
     /// overflow) was treated as an outage, aborting every run before
@@ -2007,9 +2128,12 @@ mod tests {
         impl LlmProvider for Poison5xx {
             fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
                 if texts.iter().any(|t| t.contains("POISON")) {
-                    return Err(anyhow::Error::new(crate::providers::ProviderUnavailable(
-                        "local llm request failed after 3 attempt(s): http 500".into(),
-                    )));
+                    return Err(anyhow::Error::new(
+                        crate::providers::ProviderUnavailable::new(
+                            crate::providers::FailureClass::Server,
+                            "local llm request failed after 3 attempt(s): http 500",
+                        ),
+                    ));
                 }
                 PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
             }
@@ -2066,9 +2190,12 @@ mod tests {
             fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
                 self.calls.set(self.calls.get() + 1);
                 if self.calls.get() > self.healthy_calls {
-                    return Err(anyhow::Error::new(crate::providers::ProviderUnavailable(
-                        "http 503: overloaded".into(),
-                    )));
+                    return Err(anyhow::Error::new(
+                        crate::providers::ProviderUnavailable::new(
+                            crate::providers::FailureClass::Server,
+                            "http 502: bad gateway",
+                        ),
+                    ));
                 }
                 PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
             }
@@ -2078,9 +2205,12 @@ mod tests {
             /// A real outage fails the liveness check too (once it has begun).
             fn preflight(&self) -> Result<()> {
                 if self.calls.get() > self.healthy_calls {
-                    return Err(anyhow::Error::new(crate::providers::ProviderUnavailable(
-                        "http 503: overloaded".into(),
-                    )));
+                    return Err(anyhow::Error::new(
+                        crate::providers::ProviderUnavailable::new(
+                            crate::providers::FailureClass::Server,
+                            "http 502: bad gateway",
+                        ),
+                    ));
                 }
                 Ok(())
             }

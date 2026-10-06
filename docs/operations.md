@@ -177,15 +177,21 @@ to a provider/classification failure) is never charged — a local outage must
 not push a good capture toward quarantine.
 
 A provider **outage** is not charged either. Once retries are exhausted, a
-timeout, connection failure, HTTP 408/429/5xx, or a 401/403/404 (credentials
-or model gone) triggers a fresh preflight. If the preflight also fails, it is
-an outage: the run aborts immediately, with no bisection and no attempt
-charged, the chunks that already finished are still marked processed, and the
-run fails closed with `distill.failed` ("provider unavailable: …"). If the
-preflight succeeds, the error is specific to that input (for example a server
-that returns 500 on context overflow), and the chunk takes the normal
-bisect/charge/quarantine path, so one such capture cannot stall the
-oldest-first queue. Retries honour
+rate limit (429), overload (503), timeout (408 or client-side), connection
+failure, or a 401/403/404 (credentials or model gone) aborts the run
+immediately. There is no bisection and no attempt charged, the chunks that
+already finished are still marked processed, and the run fails closed with
+`distill.failed` ("provider unavailable (…): …").
+
+Other 5xx errors (500/502/504…) can be specific to one input, for example a
+server that returns 500 on context overflow, so they get one re-check per run.
+If a fresh preflight succeeds, the chunk is bisected along that single failing
+path and the offending capture is charged provisionally. If a second,
+unrelated chunk then fails with a provider error, or both halves of a split
+fail, the provider is flapping: the run aborts and the provisional charge is
+dropped. One poison capture is still isolated and quarantined, while a
+flapping provider charges nothing and costs a handful of calls per run.
+Retries honour
 a `Retry-After` header of up to 30 s; a longer one aborts at once instead of
 waiting.
 
