@@ -28,7 +28,17 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> impl Into
             return resp;
         }
         let (status, body) = match render(&state.db) {
-            Ok(body) => (StatusCode::OK, body),
+            Ok(mut body) => {
+                // In-process: the outbound queue's per-subscriber overflow.
+                let _ = writeln!(
+                    body,
+                    "# HELP pt_webhook_dropped_total Outbound webhook events dropped because a subscriber's backlog was full.\n\
+                     # TYPE pt_webhook_dropped_total counter\n\
+                     pt_webhook_dropped_total {}",
+                    state.outbound.dropped()
+                );
+                (StatusCode::OK, body)
+            }
             Err(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!(

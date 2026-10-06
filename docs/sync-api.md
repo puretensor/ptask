@@ -98,12 +98,16 @@ the environment variable is set on the client node.
     "<command-uuid>": "ok"
     | { "error": "<message>" }
   },
-  "temp_id_mapping": { "<temp_id>": "<real-task-uuid>" }
+  "temp_id_mapping": { "<temp_id>": "<real-task-uuid>" },
+  "deleted_task_uuids": ["<task-uuid>", ...]
 }
 ```
 
 - `resources.tasks` carries the delta: full task set on full sync,
   changed-since-sync_token on incremental.
+- `deleted_task_uuids` are tombstones: tasks hard-deleted (`task_delete`,
+  `pt delete`) since `sync_token`. Drop them from the local copy. Always
+  empty on a full sync, whose task set replaces client state wholesale.
 - `sync_token` is the new monotonic cursor (current `pt_event_log.id`).
 
 ### Commands
@@ -116,7 +120,11 @@ the environment variable is set on the client node.
 | `task_edit` (v1.8.0) | `{ task_uuid \| pt_id, deadline }` | sets the deadline (ISO string) or clears it (JSON `null`); other JSON types or an omitted deadline are rejected without mutation; rescores. |
 | `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). |
 | `task_retext` (v1.9.0) | `{ task_uuid \| pt_id, title?, description? }` | replaces the title and/or description (at least one required). |
-| `task_dismiss`, `task_start`, `task_snooze` (args.until ISO), `task_depend` (args.on query, args.clear bool), `task_delete` (v1.10.0) | `{ task_uuid \| pt_id }` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. |
+| `task_dismiss` (v1.10.0) | `{ task_uuid \| pt_id }` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. |
+| `task_start` (v1.10.0) | `{ task_uuid \| pt_id }` | `status → in_progress`. |
+| `task_snooze` (v1.10.0) | `{ task_uuid \| pt_id, until }` | snoozes until the ISO `until`. |
+| `task_depend` (v1.10.0) | `{ task_uuid \| pt_id, on, clear? }` | adds (or with `clear: true` removes) a `depends_on` edge to the `on` query (PT-N or title); cycles are rejected. |
+| `task_delete` (v1.10.0) | `{ task_uuid \| pt_id }` | **hard-deletes** the task row and its side-table rows (labels, links, recurrence, `interactions` history) — not reversible. A `task.deleted` tombstone stays in `pt_event_log` and reaches other clients as `deleted_task_uuids`. Use `task_dismiss` for a reversible close. |
 
 Each command records exactly one event keyed on its `uuid`, so `/sync` replays
 are idempotent. More commands (`task_delete`, `view_save`, …) are backward-
@@ -198,21 +206,55 @@ may close tasks.
 ## Outbound webhooks
 
 Configure `PTASK_WEBHOOK_URLS=<url1>,<url2>` and `PTASK_WEBHOOK_SECRET` for HMAC-signed POSTs
-on task events such as `task.created`, `task.completed`, and
-`task.recurrence_advanced`.
+of the events produced by applied `/sync` commands (`task.created`,
+`task.completed`, `task.recurrence_advanced`, `task.updated`,
+`task.deleted`, ...; replays are not re-sent) and by `/webhook/{gitea,github}`
+auto-closes. Nothing else is pushed: writes from the CLI, TUI, bot,
+dashboard, MCP mount, timers and other routes reach `pt_event_log` (and so
+`/sync` deltas) but not the webhook. Treat a push as a hint and `/sync` as
+the complete feed.
 Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
+
+Body:
+
+```json
+{ "event_type": "task.created", "task_uuid": "<uuid>", "payload": { ... },
+  "ts": "2026-10-06T14:03:11.512000+01:00", "event_id": 4711 }
+```
+
+`ts` is the event's commit time (its `pt_event_log.ts`, operator timezone)
+and `event_id` its journal id, not the delivery time. `/sync` commands and
+git-webhook closes commit and enqueue under one process-wide lock, so events
+are enqueued in commit order. Each URL has its own worker that delivers its
+events one at a time in that order, so a slow or dead subscriber delays only
+itself; no retries, 10s timeout per POST. Each URL's backlog is capped at
+10,000 events: past that, new events for that URL are dropped, logged and
+counted in `pt_webhook_dropped_total`. On graceful shutdown (SIGTERM /
+SIGINT) the server finishes in-flight requests (up to 10s) and then gives the
+queued events up to 15s to go out; whatever is left after that is dropped
+(and logged).
 
 ## Metrics
 
-`/metrics` exposes (subset):
+`/metrics` exposes these series. All but `pt_webhook_dropped_total` (an
+in-process counter, reset on restart) are computed from the database at
+scrape time:
 
 | Metric | Type | Labels |
 |---|---|---|
 | `pt_tasks_total` | gauge | `status` |
-| `pt_capture_total` | counter | `source` |
-| `pt_dsl_parse_duration_seconds` | histogram | `kind` (`quickadd` / `filter`) |
-| `pt_webhook_send_total` | counter | `result` (`ok` / `error`) |
-| `pt_sync_commands_total` | counter | `kind` (`task_create` / `task_done` / ...) |
+| `pt_tasks_priority_total` | gauge | `priority` |
+| `pt_raw_items_unprocessed` | gauge | — |
+| `pt_views_total` | gauge | — |
+| `pt_event_log_cursor` | gauge | — (highest `pt_event_log.id`, the sync cursor) |
+| `pt_webhook_log_total` | gauge | `direction` (`in` / `out`) |
+| `pt_recurrence_total` | gauge | — |
+| `pt_distill_last_success_age_seconds` | gauge | — (`-1` = never ran) |
+| `pt_distill_failed_total` | gauge | — |
+| `pt_distill_last_run_ok` | gauge | — (`1` ok / `0` failed) |
+| `pt_distill_quarantined_captures` | gauge | — |
+| `pt_notifications_last_sent_age_seconds` | gauge | `channel` |
+| `pt_webhook_dropped_total` | counter | — (outbound events dropped on a full per-URL backlog) |
 
 ## Dashboard surface (v2.3.0)
 

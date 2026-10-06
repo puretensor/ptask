@@ -25,6 +25,87 @@ pub fn default_url() -> String {
     std::env::var("PTASK_SYNC_URL").unwrap_or_else(|_| "http://127.0.0.1:9501".to_string())
 }
 
+/// A warning when the bearer token would cross the network in cleartext:
+/// plain `http` to a host that is neither loopback nor on the tailnet.
+/// Tailscale addresses (100.64.0.0/10, fd7a:115c:a1e0::/48, `*.ts.net`) ride
+/// WireGuard, so http there is already encrypted; that is the production
+/// setup, which is why this warns rather than refuses. A single-label host
+/// (a MagicDNS short name such as `tensor-core`) is resolved and trusted
+/// when every address it resolves to is on the tailnet.
+fn cleartext_token_warning(base: &str, sends_token: bool) -> Option<String> {
+    cleartext_token_warning_with(base, sends_token, resolve_within_a_second)
+}
+
+/// The host's addresses, or none if the lookup fails or takes longer than a
+/// second: a dead resolver must not stall every remote command for its full
+/// retry budget. No addresses means "not shown to be on the tailnet", so
+/// the warning prints.
+fn resolve_within_a_second(host: &str, port: u16) -> Vec<std::net::IpAddr> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let host = host.to_string();
+    std::thread::spawn(move || {
+        use std::net::ToSocketAddrs;
+        let addrs: Vec<std::net::IpAddr> = (host.as_str(), port)
+            .to_socket_addrs()
+            .map(|addrs| addrs.map(|a| a.ip()).collect())
+            .unwrap_or_default();
+        let _ = tx.send(addrs);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap_or_default()
+}
+
+/// Loopback or Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48).
+fn is_trusted_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            ip.is_loopback() || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
+        }
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback() || ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]
+        }
+    }
+}
+
+/// [`cleartext_token_warning`] with an injectable resolver (tests).
+fn cleartext_token_warning_with(
+    base: &str,
+    sends_token: bool,
+    resolve: impl Fn(&str, u16) -> Vec<std::net::IpAddr>,
+) -> Option<String> {
+    if !sends_token {
+        return None;
+    }
+    let url = reqwest::Url::parse(base).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let host = url.host_str()?;
+    let trusted = match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+    {
+        Ok(ip) => is_trusted_ip(ip),
+        Err(_) => {
+            let name = host.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost"
+                || name.ends_with(".localhost")
+                || name.ends_with(".ts.net")
+                || (!name.contains('.') && {
+                    let ips = resolve(&name, url.port_or_known_default().unwrap_or(80));
+                    !ips.is_empty() && ips.into_iter().all(is_trusted_ip)
+                })
+        }
+    };
+    (!trusted).then(|| {
+        format!(
+            "PTASK_API_TOKEN is sent in cleartext to {base} (plain http, not loopback or \
+             tailnet); use https or a Tailscale address"
+        )
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteClient {
     base: String,
@@ -49,12 +130,17 @@ impl RemoteClient {
             .timeout(Duration::from_secs(30))
             .build()
             .context("build remote client")?;
+        let api_token = std::env::var("PTASK_API_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(warning) = cleartext_token_warning(base, api_token.is_some()) {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| eprintln!("warning: {warning}"));
+        }
         Ok(Self {
             base: base.trim_end_matches('/').to_string(),
-            api_token: std::env::var("PTASK_API_TOKEN")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
+            api_token,
             client,
             idempotency_key: None,
         })
@@ -560,6 +646,65 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn cleartext_token_warning_only_for_untrusted_http_hosts() {
+        // CLI-18: the bearer token went over plain http to any host with
+        // no warning. Loopback, the tailnet (WireGuard-encrypted) and https
+        // are fine; anything else is warned about when a token is sent.
+        for url in [
+            "http://192.168.1.20:9501",
+            "http://10.0.0.5:9501",
+            "http://tasks.example.com",
+            "HTTP://8.8.8.8",
+            "http://[2001:db8::1]:9501",
+        ] {
+            assert!(cleartext_token_warning(url, true).is_some(), "{url}");
+            assert!(cleartext_token_warning(url, false).is_none(), "{url}");
+        }
+        for url in [
+            "https://tasks.example.com",
+            "http://127.0.0.1:9501",
+            "http://127.8.0.1",
+            "http://localhost:9501",
+            "http://[::1]:9501",
+            "http://100.64.0.1:9501",
+            "http://100.127.255.254",
+            "http://[fd7a:115c:a1e0::1]:9501",
+            "http://tensor-core.tail1234.ts.net:9501",
+        ] {
+            assert!(cleartext_token_warning(url, true).is_none(), "{url}");
+        }
+        // 100.128.0.0 is outside 100.64.0.0/10.
+        assert!(cleartext_token_warning("http://100.128.0.1", true).is_some());
+    }
+
+    #[test]
+    fn short_magicdns_name_on_the_tailnet_is_not_warned_about() {
+        // `http://tensor-core:9501` is how MagicDNS short names look; they
+        // resolve to the tailnet, so the token is WireGuard-encrypted.
+        let tailnet = |_: &str, _: u16| vec!["100.100.7.9".parse().unwrap()];
+        let tailnet6 = |_: &str, _: u16| vec!["fd7a:115c:a1e0::9".parse().unwrap()];
+        let lan = |_: &str, _: u16| vec!["192.168.1.9".parse().unwrap()];
+        let mixed = |_: &str, _: u16| {
+            vec![
+                "100.100.7.9".parse().unwrap(),
+                "192.168.1.9".parse().unwrap(),
+            ]
+        };
+        let unresolved = |_: &str, _: u16| Vec::new();
+        let url = "http://tensor-core:9501";
+        assert!(cleartext_token_warning_with(url, true, tailnet).is_none());
+        assert!(cleartext_token_warning_with(url, true, tailnet6).is_none());
+        assert!(cleartext_token_warning_with(url, true, lan).is_some());
+        assert!(cleartext_token_warning_with(url, true, mixed).is_some());
+        assert!(cleartext_token_warning_with(url, true, unresolved).is_some());
+        // Only single-label names are resolved: a dotted public name is
+        // judged by its spelling, never looked up.
+        let never = |h: &str, _: u16| -> Vec<std::net::IpAddr> { panic!("resolved {h}") };
+        assert!(cleartext_token_warning_with("http://tasks.example.com", true, never).is_some());
+        assert!(cleartext_token_warning_with("http://tensor-core", false, never).is_none());
+    }
 
     fn existing_tasks_json() -> Vec<Value> {
         vec![

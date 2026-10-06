@@ -560,7 +560,11 @@ def q_heatmap():
 
 
 def q_task_events(task_uuid: str, limit: int = 60):
-    """Return attributed event history for the detail drawer."""
+    """Return attributed event history for the detail drawer, newest first.
+
+    Ordered by id (commit order), not ts: ts carries the operator-timezone
+    offset, so across the autumn fall-back hour the text sorts in reverse.
+    """
     con = connect()
     try:
         rows = con.execute(
@@ -568,7 +572,7 @@ def q_task_events(task_uuid: str, limit: int = 60):
             SELECT uuid, task_uuid, event_type, actor, ts, payload
             FROM pt_event_log
             WHERE task_uuid=?
-            ORDER BY ts DESC
+            ORDER BY id DESC
             LIMIT ?
             """,
             (task_uuid, limit),
@@ -698,6 +702,12 @@ def build_edit_args(tid: str, body: dict) -> tuple[list[str] | None, str | None]
                 return None, err
             args += [f"{flag}={l}" for l in labels]
     return (args, None) if len(args) > 2 else (None, None)
+
+
+# Fragment of pt's refusal (ptask_core::Error::Blocked) when `pt done` hits
+# open depends_on prerequisites; pt exits 1 for every error, so the text is
+# the only signal.
+PT_BLOCKED_MARKER = " is blocked by open task(s): "
 
 
 def pt_exec(args: list[str]) -> tuple[bool, str]:
@@ -1397,6 +1407,10 @@ class Handler(BaseHTTPRequestHandler):
             if not _ID_RE.match(tid):
                 return self._json({"error": "bad id"}, 400)
             ok, msg = pt_exec(["done", "--", tid])
+            if not ok and PT_BLOCKED_MARKER in msg:
+                # pt refused the close: open prerequisites. A conflict the
+                # operator resolves, not a server fault.
+                return self._json({"ok": False, "message": msg}, 409)
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         m = re.match(r"^/api/tasks/([^/]+)/priority$", u.path)

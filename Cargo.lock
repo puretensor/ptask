@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-bot"
-version = "3.40.0"
+version = "3.41.0"
 dependencies = [
  "anyhow",
  "jiff",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-cli"
-version = "3.40.0"
+version = "3.41.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2693,7 +2693,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-core"
-version = "3.40.0"
+version = "3.41.0"
 dependencies = [
  "hex",
  "interim",
@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-distill"
-version = "3.40.0"
+version = "3.41.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -2738,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-notify"
-version = "3.40.0"
+version = "3.41.0"
 dependencies = [
  "lettre",
  "ptask-core",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-server"
-version = "3.40.0"
+version = "3.41.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2759,6 +2759,8 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "hyper",
+ "hyper-util",
  "jiff",
  "mail-parser",
  "ptask-core",
@@ -2772,14 +2774,16 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http",
+ "tower-service",
  "tracing",
 ]
 
 [[package]]
 name = "ptask-tui"
-version = "3.40.0"
+version = "3.41.0"
 dependencies = [
  "anyhow",
  "crossterm",

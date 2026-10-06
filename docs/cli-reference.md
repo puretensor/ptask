@@ -184,7 +184,7 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 | `pt kind <query> <scout\|ship> [--deliverable report\|pr\|none]` | set a task's shape; `pt add --kind scout` declares it at creation |
 | `pt promote <query>` | investigation → implementation: flips `kind` scout→ship (and `report`→`pr`) on the **same row**, so the open count is unchanged. Refuses a terminal task — reopen it first. |
 | `pt snooze <query> <until…>` | park until a date (natural language ok); auto-wakes to todo via the hourly scoring run |
-| `pt depend <query> --on <target> [--clear]` | dependency edges in `task_links`; `pt next` hides tasks with unmet deps; **`pt done` refuses (exit non-zero, names the open blockers) while any prerequisite is still open** — dismissed prerequisites count as satisfied; no `--on` shows current edges |
+| `pt depend <query> --on <target> [--clear]` | dependency edges in `task_links`; `pt next` hides tasks with unmet deps; **`pt done` refuses (exit non-zero, names the open blockers) while any prerequisite is still open** — dismissed prerequisites count as satisfied; `pt start` / claim are not gated (only closing is); no `--on` shows current edges |
 | `pt review [--stale-days N]` | interactive sweep of stale tasks (TTY: k/d/x/s/q; non-TTY prints the list) |
 | `pt search <query…> [-n N]` | FTS5 full-text over titles + descriptions; free text: every word must match, punctuation and AND/OR/NOT are literal (`follow-up`, `c++`, `PT-2201` just work), a trailing `*` matches a prefix |
 | `pt bulk '<filter>' --set-priority P \| --done \| --dismiss [--dry-run]` | one action across every DSL match |
@@ -251,6 +251,12 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote version` | compare client vs server `GET /version`; exits non-zero on skew |
 
 `--url` defaults to `$PTASK_SYNC_URL` then `http://127.0.0.1:9501`.
+`$PTASK_API_TOKEN` is sent as a bearer token; when the URL is plain `http`
+to a host that is neither loopback nor a Tailscale address (100.64.0.0/10,
+`fd7a:115c:a1e0::/48`, `*.ts.net`, all WireGuard-encrypted) the client
+prints a one-line cleartext-token warning on stderr (once per process). A
+single-label MagicDNS name (`http://tensor-core:9501`) is resolved and counts
+as Tailscale when every address it resolves to does. Use `https` elsewhere.
 
 Every remote error also runs the version handshake: a 401/404 from a
 mismatched deploy appends `version skew: client vX vs server vY` to the

@@ -8,8 +8,53 @@ refinery::embed_migrations!("migrations");
 pub use migrations::runner;
 
 /// Apply all pending migrations on the given connection.
+///
+/// refinery reads the applied set and applies the pending migrations in
+/// separate transactions, so two processes opening a freshly deployed DB at
+/// once can both try to apply the same migration; the loser's grouped
+/// transaction fails ("duplicate column name", UNIQUE on the history table)
+/// and rolls back. It only gets to write after the winner committed, so one
+/// retry re-reads the applied set and finds nothing left to do. A real
+/// failure fails the retry the same way and is returned.
 pub fn run(conn: &mut rusqlite::Connection) -> Result<refinery::Report, refinery::Error> {
-    runner().set_grouped(true).run(conn)
+    match runner().set_grouped(true).run(conn) {
+        Ok(report) => Ok(report),
+        Err(e) if is_deterministic(&e) => Err(e),
+        Err(_) => runner().set_grouped(true).run(conn),
+    }
+}
+
+/// Verification failures (history vs embedded set) can't be cured by a retry.
+fn is_deterministic(e: &refinery::Error) -> bool {
+    use refinery::error::Kind;
+    matches!(
+        e.kind(),
+        Kind::MissingVersion(_) | Kind::DivergentVersion(..) | Kind::RepeatedVersion(_)
+    )
+}
+
+/// Turn a migration failure into the crate error. A DB migrated by a newer
+/// binary is refused (an older binary can't honour schema it doesn't know:
+/// new constraints, triggers, columns its writes would leave unset), but the
+/// refusal names the cause and the way out instead of refinery's bare
+/// "migration V20__x is missing from the filesystem".
+pub fn describe_error(e: refinery::Error) -> crate::Error {
+    let newest_known = runner()
+        .get_migrations()
+        .iter()
+        .map(|m| m.version())
+        .max()
+        .unwrap_or(0);
+    if let refinery::error::Kind::MissingVersion(m) = e.kind()
+        && m.version() > newest_known
+    {
+        return crate::Error::Other(format!(
+            "database schema is at {m}, newer than this pt binary knows (latest V{newest_known}): \
+             a newer pt migrated it. Run that newer pt, or roll back by restoring the \
+             pre-upgrade backup (see \"Rolling back a release\" in docs/operations.md)"
+        ));
+    }
+    crate::Error::Migration(e)
 }
 
 #[cfg(test)]
