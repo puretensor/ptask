@@ -18,7 +18,8 @@ use axum::response::{IntoResponse, Json};
 use axum::routing::post;
 use mail_parser::decoders::base64::base64_decode;
 use mail_parser::decoders::quoted_printable::quoted_printable_decode;
-use mail_parser::{HeaderName, MessageParser, MessagePart, MimeHeaders, PartType};
+use mail_parser::parsers::MessageStream;
+use mail_parser::{HeaderName, HeaderValue, MessageParser, MessagePart, MimeHeaders, PartType};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -147,18 +148,23 @@ enum TransferEncoding {
 }
 
 fn transfer_encoding(part: &MessagePart<'_>, raw: &[u8]) -> TransferEncoding {
+    // Read the value exactly as the real parser does: the last header,
+    // unstructured (so RFC 2047 encoded words like `=?utf-8?q?base64?=`
+    // decode), compared case-insensitively.
     let Some(value) = part
         .headers
         .iter()
         .rev()
         .find(|h| h.name == HeaderName::ContentTransferEncoding)
         .and_then(|h| raw.get(h.offset_start as usize..h.offset_end as usize))
-        .map(<[u8]>::trim_ascii)
     else {
         return TransferEncoding::Identity;
     };
-    let is = |name: &str| value.eq_ignore_ascii_case(name.as_bytes());
-    if value.is_empty() || is("7bit") || is("8bit") || is("binary") {
+    let HeaderValue::Text(value) = MessageStream::new(value).parse_unstructured() else {
+        return TransferEncoding::Identity;
+    };
+    let is = |name: &str| value.eq_ignore_ascii_case(name);
+    if is("7bit") || is("8bit") || is("binary") {
         TransferEncoding::Identity
     } else if is("base64") {
         TransferEncoding::Base64

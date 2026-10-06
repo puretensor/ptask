@@ -2378,15 +2378,22 @@ Don't forget the sourdough.\r\n";
         // header name may even carry whitespace mail-parser ignores.
         use base64::Engine as _;
         let hidden = base64::engine::general_purpose::STANDARD.encode(nested_rfc822(10_000));
-        for cte in ["Content-Transfer-Encoding", "Content-Transfer- Encoding"] {
+        // Also with the encoding name folded or in an RFC 2047 encoded word,
+        // which the real parser decodes before matching it.
+        for (cte, value) in [
+            ("Content-Transfer-Encoding", "base64"),
+            ("Content-Transfer- Encoding", "base64"),
+            ("Content-Transfer-Encoding", "=?utf-8?q?base64?="),
+            ("Content-Transfer-Encoding", "\r\n BASE64"),
+        ] {
             let raw = format!(
                 "Subject: probe\r\nMessage-ID: <b64@x>\r\nContent-Type: message/rfc822\r\n\
-                 {cte}: base64\r\n\r\n{hidden}\r\n"
+                 {cte}: {value}\r\n\r\n{hidden}\r\n"
             );
             assert_eq!(
                 post_email(&app, raw.into_bytes()).await,
                 StatusCode::BAD_REQUEST,
-                "{cte}"
+                "{cte}: {value}"
             );
         }
         assert_eq!(
