@@ -98,12 +98,16 @@ the environment variable is set on the client node.
     "<command-uuid>": "ok"
     | { "error": "<message>" }
   },
-  "temp_id_mapping": { "<temp_id>": "<real-task-uuid>" }
+  "temp_id_mapping": { "<temp_id>": "<real-task-uuid>" },
+  "deleted_task_uuids": ["<task-uuid>", ...]
 }
 ```
 
 - `resources.tasks` carries the delta: full task set on full sync,
   changed-since-sync_token on incremental.
+- `deleted_task_uuids` are tombstones: tasks hard-deleted (`task_delete`,
+  `pt delete`) since `sync_token`. Drop them from the local copy. Always
+  empty on a full sync, whose task set replaces client state wholesale.
 - `sync_token` is the new monotonic cursor (current `pt_event_log.id`).
 
 ### Commands
@@ -116,7 +120,11 @@ the environment variable is set on the client node.
 | `task_edit` (v1.8.0) | `{ task_uuid \| pt_id, deadline }` | sets the deadline (ISO string) or clears it (JSON `null`); other JSON types or an omitted deadline are rejected without mutation; rescores. |
 | `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). |
 | `task_retext` (v1.9.0) | `{ task_uuid \| pt_id, title?, description? }` | replaces the title and/or description (at least one required). |
-| `task_dismiss`, `task_start`, `task_snooze` (args.until ISO), `task_depend` (args.on query, args.clear bool), `task_delete` (v1.10.0) | `{ task_uuid \| pt_id }` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. |
+| `task_dismiss` (v1.10.0) | `{ task_uuid \| pt_id }` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. |
+| `task_start` (v1.10.0) | `{ task_uuid \| pt_id }` | `status → in_progress`. |
+| `task_snooze` (v1.10.0) | `{ task_uuid \| pt_id, until }` | snoozes until the ISO `until`. |
+| `task_depend` (v1.10.0) | `{ task_uuid \| pt_id, on, clear? }` | adds (or with `clear: true` removes) a `depends_on` edge to the `on` query (PT-N or title); cycles are rejected. |
+| `task_delete` (v1.10.0) | `{ task_uuid \| pt_id }` | **hard-deletes** the task row and its side-table rows (labels, links, recurrence, `interactions` history) — not reversible. A `task.deleted` tombstone stays in `pt_event_log` and reaches other clients as `deleted_task_uuids`. Use `task_dismiss` for a reversible close. |
 
 Each command records exactly one event keyed on its `uuid`, so `/sync` replays
 are idempotent. More commands (`task_delete`, `view_save`, …) are backward-
@@ -205,15 +213,23 @@ logged).
 
 ## Metrics
 
-`/metrics` exposes (subset):
+`/metrics` exposes these gauges, all computed from the database at scrape
+time (there are no in-process counters):
 
 | Metric | Type | Labels |
 |---|---|---|
 | `pt_tasks_total` | gauge | `status` |
-| `pt_capture_total` | counter | `source` |
-| `pt_dsl_parse_duration_seconds` | histogram | `kind` (`quickadd` / `filter`) |
-| `pt_webhook_send_total` | counter | `result` (`ok` / `error`) |
-| `pt_sync_commands_total` | counter | `kind` (`task_create` / `task_done` / ...) |
+| `pt_tasks_priority_total` | gauge | `priority` |
+| `pt_raw_items_unprocessed` | gauge | — |
+| `pt_views_total` | gauge | — |
+| `pt_event_log_cursor` | gauge | — (highest `pt_event_log.id`, the sync cursor) |
+| `pt_webhook_log_total` | gauge | `direction` (`in` / `out`) |
+| `pt_recurrence_total` | gauge | — |
+| `pt_distill_last_success_age_seconds` | gauge | — (`-1` = never ran) |
+| `pt_distill_failed_total` | gauge | — |
+| `pt_distill_last_run_ok` | gauge | — (`1` ok / `0` failed) |
+| `pt_distill_quarantined_captures` | gauge | — |
+| `pt_notifications_last_sent_age_seconds` | gauge | `channel` |
 
 ## Dashboard surface (v2.3.0)
 

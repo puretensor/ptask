@@ -1750,6 +1750,50 @@ mod tests {
         assert!(s.contains("pt_views_total "));
     }
 
+    /// SRV-12: docs/sync-api.md listed four metrics `/metrics` never
+    /// exported. Every metric the doc's table names must exist, and every
+    /// exported metric must be documented.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_api_doc_metrics_table_matches_the_exporter() {
+        let doc = include_str!("../../../docs/sync-api.md");
+        let table = doc
+            .split("## Metrics")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("docs/sync-api.md has a Metrics section");
+        let documented: std::collections::BTreeSet<String> = table
+            .lines()
+            .filter_map(|l| l.strip_prefix("| `"))
+            .filter_map(|l| l.split('`').next())
+            .map(str::to_string)
+            .collect();
+        let app = router(AppState::new(
+            open_test_db(),
+            Default::default(),
+            Default::default(),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let exported: std::collections::BTreeSet<String> = std::str::from_utf8(&body)
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.strip_prefix("# TYPE "))
+            .filter_map(|l| l.split_whitespace().next())
+            .map(str::to_string)
+            .collect();
+        assert_eq!(documented, exported);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn metrics_distill_age_uses_the_latest_instant_not_the_largest_string() {
         // "10:30:00+01:00" is 09:30Z but the greater string; 09:45Z is later.
