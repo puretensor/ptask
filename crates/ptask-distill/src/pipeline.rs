@@ -66,10 +66,11 @@ pub fn chunk_disposition(kept_len: usize, covered_len: usize) -> ChunkDispositio
     }
 }
 
-/// Lowercase word set for the similarity gates. Date/time tokens are left
-/// out (see [`identifiers_conflict`]): "… by 5pm" is the same task.
+/// Lowercase word set for the similarity gates. Date/time tokens and month
+/// names are left out — they are compared by value through [`DateFacts`]
+/// instead (see [`identifiers_conflict`]): "… by 5pm" is the same task.
 fn title_tokens(s: &str) -> std::collections::HashSet<String> {
-    tokens_without_dates(s).into_iter().collect()
+    analyse_title(s).0.into_iter().collect()
 }
 
 /// Two titles name different things when their identifier tokens — any
@@ -78,24 +79,23 @@ fn title_tokens(s: &str) -> std::collections::HashSet<String> {
 /// "pay invoice 4412" as near-identical, which deduped real new work away
 /// (even against done tasks). Fails toward creating a possible duplicate.
 ///
-/// Date and time tokens are not identifiers: "… by 5pm", "… for 2026",
-/// "on the 5th", "12 March", "9:30am", "2026-10-06" restate when, not which
-/// thing, and counting them blocked genuine duplicates.
-///
-/// But "not an identifier" is not "ignored": a date/time value present in
-/// only ONE title is ignored ("… by 5pm" is the same task), while differing
-/// values of the same kind in BOTH titles are a conflict — 2025 vs 2026,
-/// 3pm vs 4pm, 5 Oct vs 6 Oct, March vs April. The dedup universe includes
-/// done tasks, so without this, this year's annual commitment was swallowed
-/// by last year's completed one.
+/// Date and time tokens are not identifiers, but they are not ignored
+/// either: a date/time value present in only ONE title is ignored ("… by
+/// 5pm" is the same task), while differing values of the same kind in BOTH
+/// titles are a conflict — 2025 vs 2026, 3pm vs 4pm, 5 Oct vs 6 Oct, March
+/// vs April, 2026-10-06 vs 2026-11-06, "12 for March" vs "13 for March". The
+/// dedup universe includes done tasks, so a missed conflict silently loses
+/// this year's commitment to last year's; when in doubt, keep both tasks.
 fn identifiers_conflict(a: &str, b: &str) -> bool {
-    let ids = |s: &str| {
-        title_tokens(s)
-            .into_iter()
+    let (ta, fa) = analyse_title(a);
+    let (tb, fb) = analyse_title(b);
+    let ids = |t: &[String]| {
+        t.iter()
             .filter(|w| w.chars().any(|c| c.is_numeric()))
+            .cloned()
             .collect::<std::collections::HashSet<_>>()
     };
-    ids(a) != ids(b) || DateFacts::of(a).conflicts(&DateFacts::of(b))
+    ids(&ta) != ids(&tb) || fa.conflicts(&fb)
 }
 
 /// Normalised date/time values in a title, by kind.
@@ -105,58 +105,16 @@ struct DateFacts {
     /// (hour 0-23, minute)
     times: std::collections::BTreeSet<(u8, u8)>,
     months: std::collections::BTreeSet<u8>,
-    /// (month, day) — a day number or ordinal next to a month name.
+    /// (month, day) — a day next to a month name, or from a numeric date.
     days: std::collections::BTreeSet<(u8, u8)>,
     /// Ordinal days with no month ("on the 5th").
     bare_days: std::collections::BTreeSet<u8>,
+    /// Every day-like number dropped from the tokens because a month name
+    /// is nearby ("12 for March"), so dropping it never hides a difference.
+    date_numbers: std::collections::BTreeSet<u8>,
 }
 
 impl DateFacts {
-    fn of(s: &str) -> Self {
-        let raw = raw_tokens(s);
-        let mut f = DateFacts::default();
-        let day_of = |t: &str| -> Option<u8> {
-            let digits = ["st", "nd", "rd", "th"]
-                .iter()
-                .find_map(|x| t.strip_suffix(x))
-                .unwrap_or(t);
-            is_small_number(digits)
-                .then(|| digits.parse().ok())
-                .flatten()
-                .filter(|d| (1..=31).contains(d))
-        };
-        for (i, t) in raw.iter().enumerate() {
-            if is_year(t) {
-                f.years.extend(t.parse::<u16>().ok());
-            } else if let Some(time) = normalise_time(t) {
-                f.times.insert(time);
-            } else if let Some(m) = month_number(t) {
-                f.months.insert(m);
-                // "5 Oct", "Oct 5", "October 5th", "5th of October".
-                let neighbours = [
-                    i.checked_sub(1),
-                    Some(i + 1),
-                    i.checked_sub(2)
-                        .filter(|&j| raw.get(j + 1).is_some_and(|w| w == "of")),
-                ];
-                for j in neighbours.into_iter().flatten() {
-                    if let Some(d) = raw.get(j).and_then(|w| day_of(w)) {
-                        f.days.insert((m, d));
-                    }
-                }
-            } else if is_ordinal(t) {
-                let near_month = [i.checked_sub(1), Some(i + 1), Some(i + 2)]
-                    .into_iter()
-                    .flatten()
-                    .any(|j| raw.get(j).is_some_and(|w| month_number(w).is_some()));
-                if !near_month {
-                    f.bare_days.extend(day_of(t));
-                }
-            }
-        }
-        f
-    }
-
     /// Both sides carry a value of the same kind and the values differ.
     fn conflicts(&self, other: &Self) -> bool {
         fn differ<T: Ord>(
@@ -170,7 +128,107 @@ impl DateFacts {
             || differ(&self.months, &other.months)
             || differ(&self.days, &other.days)
             || differ(&self.bare_days, &other.bare_days)
+            || differ(&self.date_numbers, &other.date_numbers)
     }
+}
+
+/// `yyyy-mm-dd`, `dd/mm/yyyy`, `dd/mm/yy` or `d/m` (day first: the operator
+/// is in the UK) → (year, month, day).
+fn numeric_date(w: &str) -> Option<(Option<u16>, u8, u8)> {
+    let valid = |m: u8, d: u8| (1..=12).contains(&m) && (1..=31).contains(&d);
+    let num = |p: &str| -> Option<u16> {
+        (!p.is_empty() && p.len() <= 4 && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse().ok())
+            .flatten()
+    };
+    let parts: Vec<&str> = w.split('-').collect();
+    if parts.len() == 3 && is_year(parts[0]) {
+        let (y, m, d) = (num(parts[0])?, num(parts[1])? as u8, num(parts[2])? as u8);
+        return valid(m, d).then_some((Some(y), m, d));
+    }
+    let parts: Vec<&str> = w.split('/').collect();
+    if (2..=3).contains(&parts.len()) && parts[..2].iter().all(|p| is_small_number(p)) {
+        let (d, m) = (num(parts[0])? as u8, num(parts[1])? as u8);
+        let y = match parts.get(2) {
+            None => None,
+            Some(y) if is_year(y) => Some(num(y)?),
+            Some(y) if y.len() == 2 => Some(2000 + num(y)?),
+            Some(_) => return None,
+        };
+        return valid(m, d).then_some((y, m, d));
+    }
+    None
+}
+
+/// Similarity tokens plus the date/time values taken out of them.
+fn analyse_title(s: &str) -> (Vec<String>, DateFacts) {
+    let mut facts = DateFacts::default();
+    let mut rest = String::new();
+    for word in s.split_whitespace() {
+        let core = word.trim_matches(|c: char| !c.is_alphanumeric());
+        if let Some((year, month, day)) = numeric_date(core) {
+            facts.years.extend(year);
+            facts.months.insert(month);
+            facts.days.insert((month, day));
+            continue;
+        }
+        rest.push_str(word);
+        rest.push(' ');
+    }
+    let raw = raw_tokens(&rest);
+    let month_at = |j: usize| raw.get(j).and_then(|w| month_number(w));
+    let day_of = |t: &str| -> Option<u8> {
+        let digits = ["st", "nd", "rd", "th"]
+            .iter()
+            .find_map(|x| t.strip_suffix(x))
+            .unwrap_or(t);
+        is_small_number(digits)
+            .then(|| digits.parse().ok())
+            .flatten()
+            .filter(|d| (1..=31).contains(d))
+    };
+    let mut tokens = Vec::new();
+    for (i, t) in raw.iter().enumerate() {
+        if is_year(t) {
+            facts.years.extend(t.parse::<u16>().ok());
+            continue;
+        }
+        if let Some(time) = normalise_time(t) {
+            facts.times.insert(time);
+            continue;
+        }
+        if let Some(m) = month_number(t) {
+            facts.months.insert(m);
+            continue;
+        }
+        // "5 Oct", "Oct 5", "October 5th", "5th of October".
+        let adjacent_month = month_at(i + 1)
+            .or_else(|| i.checked_sub(1).and_then(month_at))
+            .or_else(|| {
+                (raw.get(i + 1).is_some_and(|w| w == "of"))
+                    .then(|| month_at(i + 2))
+                    .flatten()
+            });
+        let near_month = adjacent_month.is_some()
+            || (i.saturating_sub(2)..=i + 2).any(|j| j != i && month_at(j).is_some());
+        if let Some(day) = day_of(t).filter(|_| is_ordinal(t) || near_month) {
+            if near_month {
+                facts.date_numbers.insert(day);
+            }
+            match adjacent_month {
+                Some(m) => {
+                    facts.days.insert((m, day));
+                }
+                None if is_ordinal(t) && !near_month => {
+                    facts.bare_days.insert(day);
+                }
+                None => {}
+            }
+            continue;
+        }
+        tokens.extend(t.split(':').filter(|w| !w.is_empty()).map(str::to_string));
+    }
+    (tokens, facts)
 }
 
 fn month_number(t: &str) -> Option<u8> {
@@ -269,35 +327,6 @@ fn is_ordinal(t: &str) -> bool {
     ["st", "nd", "rd", "th"]
         .iter()
         .any(|suffix| t.strip_suffix(suffix).is_some_and(is_small_number))
-}
-
-/// Lowercase tokens with date/time tokens removed. `:` is kept inside a
-/// token so a clock time stays whole; remaining tokens are split on it.
-fn tokens_without_dates(s: &str) -> Vec<String> {
-    let raw = raw_tokens(s);
-    // A 1-2 digit number within two tokens of a month name or a year is a
-    // day/month ("12 March", "March 12", "2026-10-06", "06/10/2026").
-    let near_date_word = |i: usize| {
-        (i.saturating_sub(2)..=i + 2)
-            .filter(|&j| j != i)
-            .filter_map(|j| raw.get(j))
-            .any(|w| MONTHS.contains(&w.as_str()) || is_year(w))
-    };
-    raw.iter()
-        .enumerate()
-        .filter(|(i, t)| {
-            !(is_year(t)
-                || is_time(t)
-                || is_ordinal(t)
-                || (is_small_number(t) && near_date_word(*i)))
-        })
-        .flat_map(|(_, t)| {
-            t.split(':')
-                .filter(|w| !w.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .collect()
 }
 
 /// Similarity gate: normalized token overlap (Jaccard on lowercase words),
@@ -2416,6 +2445,37 @@ mod tests {
             .unwrap();
         assert!(stored.contains("preflight failed"), "{stored}");
         assert!(stored.contains("context length exceeded"), "{stored}");
+    }
+
+    /// Regression (round 3b, DIST-2): numbers dropped as "dates" were never
+    /// compared, numeric dates were not parsed, and a number merely near a
+    /// year counted as a date — so these lost real work by deduping. And
+    /// month names stayed in the similarity tokens, so some true duplicates
+    /// were missed.
+    #[test]
+    fn date_numbers_and_numeric_dates_are_compared_not_discarded() {
+        for (a, b) in [
+            ("Pay invoice 12 for March", "Pay invoice 13 for March"),
+            ("Deadline 2026-10-06 filing", "Deadline 2026-11-06 filing"),
+            ("Submit form by 06/10/2026", "Submit form by 07/10/2026"),
+            ("Order 10 GPUs 2026", "Order 20 GPUs 2026"),
+            ("Ship 40 units in March", "Ship 45 units in March"),
+        ] {
+            assert!(!title_similar(a, b), "{a:?} vs {b:?} must not dedup");
+        }
+        for (a, b) in [
+            ("renew domain by 15 Oct", "renew domain"),
+            ("Book the venue for Oct 5", "Book the venue for October 5th"),
+            ("Deadline 2026-10-06 filing", "Deadline filing"),
+            ("Submit form by 6/10", "Submit form"),
+        ] {
+            assert!(title_similar(a, b), "{a:?} vs {b:?} should dedup");
+        }
+        // A number near a month that cannot be a day stays an identifier.
+        assert!(identifiers_conflict(
+            "Ship 40 units in March",
+            "Ship units in March"
+        ));
     }
 
     /// Regression (round 3, DIST-2): dropping date/time tokens on both sides
