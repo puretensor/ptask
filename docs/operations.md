@@ -119,6 +119,13 @@ runs. On NFS, flock may be emulated with fcntl, so keep the database on a local
 filesystem (SQLite needs that anyway). In-memory databases take no lock, and a
 `file:` URI (percent-decoded) locks the directory of the file it names.
 
+Symlinks are resolved first, so a run through `other/link.db -> real/x.db`
+locks `real/`. The directory is opened with `O_DIRECTORY`, which means every
+user who runs distill needs read permission on it. A `0711` or `0733`
+database directory makes every run fail with "cannot open the database
+directory … make the directory readable by this user". Fix it with, for
+example, `chmod g+r` or `o+r` on that directory.
+
 ### Inspect
 
 ```bash

@@ -1187,7 +1187,13 @@ impl std::error::Error for DistillBusy {}
 /// on a local filesystem (SQLite needs that anyway).
 fn acquire_run_lock(db: &Db) -> Result<Option<std::fs::File>> {
     match db_file_path(db.path()) {
-        Some(file) => lock_directory(&lock_dir_for(&file)).map(Some),
+        // Resolve symlinks first: `other/link.db -> real/x.db` must contend
+        // on `real/`, not `other/`. Fall back to the given path if it cannot
+        // be resolved (the lock is then at least as strict as before).
+        Some(file) => {
+            let file = std::fs::canonicalize(&file).unwrap_or(file);
+            lock_directory(&lock_dir_for(&file)).map(Some)
+        }
         None => Ok(None),
     }
 }
@@ -1211,9 +1217,40 @@ fn run_lock_dir(db_path: &std::path::Path) -> Option<std::path::PathBuf> {
 /// flock a directory opened read-only. Refuses anything that is not a
 /// directory, so this code can never hold a descriptor on the database.
 fn lock_directory(dir: &std::path::Path) -> Result<std::fs::File> {
+    lock_directory_with(dir, open_directory)
+}
+
+/// `open(dir, O_RDONLY | O_DIRECTORY)`: the kernel itself refuses anything
+/// that is not a directory, so this can never yield a descriptor on the
+/// database file.
+fn open_directory(dir: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(dir)
+}
+
+fn lock_directory_with(
+    dir: &std::path::Path,
+    open: impl Fn(&std::path::Path) -> std::io::Result<std::fs::File>,
+) -> Result<std::fs::File> {
     let shown = dir.display().to_string();
-    let handle =
-        std::fs::File::open(dir).with_context(|| format!("open distill lock directory {shown}"))?;
+    let handle = match open(dir) {
+        Ok(handle) => handle,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "cannot open the database directory {shown} to take the distill run lock; \
+                 make the directory readable by this user (e.g. chmod o+r or g+r; a 0711 or \
+                 0733 directory is not enough)"
+            )));
+        }
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("open distill lock directory {shown}"))
+            );
+        }
+    };
     if !handle
         .metadata()
         .with_context(|| format!("stat distill lock directory {shown}"))?
@@ -2451,6 +2488,43 @@ mod tests {
         );
     }
 
+    /// Regression (round 5, DIST-12): the lock directory came from the path
+    /// as given, so a run through a symlink (`other/link.db -> real/x.db`)
+    /// locked `other/` and proceeded while `real/` was held. An unreadable
+    /// directory (0711) failed with a bare "Permission denied".
+    #[test]
+    fn the_run_lock_follows_symlinks_and_explains_an_unreadable_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let (real, other) = (root.path().join("real"), root.path().join("other"));
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let real_db = Db::open(real.join("x.db")).unwrap();
+        seed_inbox(&real_db, &["call the bank about the mandate"]);
+        std::os::unix::fs::symlink(real.join("x.db"), other.join("link.db")).unwrap();
+        let via_link = Db::open(other.join("link.db")).unwrap();
+
+        let holder = std::fs::File::open(&real).unwrap();
+        holder.lock().unwrap();
+        let err = run_native(&via_link, &PoisonProvider { poison: "\u{0}" }, 100).unwrap_err();
+        assert!(
+            err.is::<DistillBusy>(),
+            "a run via the symlink ignored the lock: {err:#}"
+        );
+        assert_eq!(
+            ptask_core::raw_items::unprocessed_count(&real_db).unwrap(),
+            1
+        );
+        drop(holder);
+
+        // As root, chmod cannot deny us: inject EACCES.
+        let denied = |_: &std::path::Path| -> std::io::Result<std::fs::File> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        };
+        let err = lock_directory_with(&real, denied).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("readable"), "no remedy named: {msg}");
+    }
+
     /// In-memory databases take no lock (private to the process); `file:`
     /// URIs (percent-decoded) lock the real file's directory; the lock code
     /// refuses to lock anything that is not a directory.
@@ -2485,7 +2559,12 @@ mod tests {
         let db_file = dir.path().join("tasks.db");
         std::fs::write(&db_file, b"").unwrap();
         let err = lock_directory(&db_file).unwrap_err();
-        assert!(err.to_string().contains("not a directory"), "{err:#}");
+        assert!(
+            format!("{err:#}")
+                .to_lowercase()
+                .contains("not a directory"),
+            "{err:#}"
+        );
         // Two "users" contend on the same directory.
         let first = lock_directory(dir.path()).unwrap();
         assert!(lock_directory(dir.path()).unwrap_err().is::<DistillBusy>());
