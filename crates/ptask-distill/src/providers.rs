@@ -79,20 +79,24 @@ impl fmt::Display for ProviderUnavailable {
 /// 502, 504… that may be deterministic for one input, e.g. a local server
 /// erroring on context overflow) is ever re-checked and blamed on the
 /// input; the rest describe the provider's state and always abort the run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Variants are ordered from least to most clearly the provider's fault;
+/// across retry attempts the worst (greatest) one is reported, so a
+/// 500/503/500 sequence is an overload, not a blameable server error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FailureClass {
-    /// HTTP 429.
-    RateLimited,
+    /// Any other 5xx (500, 502…).
+    Server,
+    /// HTTP 408, 504 (gateway timeout) or a client-side timeout.
+    Timeout,
     /// HTTP 503.
     Overloaded,
-    /// HTTP 408 or a client-side timeout.
-    Timeout,
+    /// HTTP 429.
+    RateLimited,
     /// Connection refused/reset, DNS, TLS…
     Transport,
     /// HTTP 401/403/404: credentials rejected or model gone.
     Auth,
-    /// Any other 5xx.
-    Server,
 }
 
 impl std::error::Error for ProviderUnavailable {}
@@ -556,7 +560,9 @@ impl CallError {
             provider_fault: match status {
                 StatusCode::TOO_MANY_REQUESTS => Some(FailureClass::RateLimited),
                 StatusCode::SERVICE_UNAVAILABLE => Some(FailureClass::Overloaded),
-                StatusCode::REQUEST_TIMEOUT => Some(FailureClass::Timeout),
+                StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => {
+                    Some(FailureClass::Timeout)
+                }
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
                     Some(FailureClass::Auth)
                 }
@@ -617,11 +623,13 @@ fn generate_with_retry(
     mut once: impl FnMut() -> std::result::Result<serde_json::Value, CallError>,
 ) -> Result<serde_json::Value> {
     let mut attempt_errors = Vec::new();
+    let mut worst: Option<FailureClass> = None;
     for attempt in 1..=GEMINI_MAX_ATTEMPTS {
         let e = match once() {
             Ok(v) => return Ok(v),
             Err(e) => e,
         };
+        worst = worst.max(e.provider_fault);
         attempt_errors.push(format!("attempt {attempt}: {e}"));
         let wait_too_long = e.retry_after.is_some_and(|d| d > MAX_RETRY_AFTER);
         if e.retryable && attempt < GEMINI_MAX_ATTEMPTS && !wait_too_long {
@@ -641,7 +649,9 @@ fn generate_with_retry(
             "{label} request failed after {attempt} attempt(s): {}",
             attempt_errors.join(" | ")
         );
-        if let Some(class) = e.provider_fault {
+        if e.provider_fault.is_some()
+            && let Some(class) = worst
+        {
             return Err(anyhow::Error::new(ProviderUnavailable::new(class, summary)));
         }
         bail!("{summary}");
@@ -1468,6 +1478,38 @@ mod tests {
             err.downcast_ref::<ProviderUnavailable>().map(|p| p.class),
             Some(FailureClass::Timeout),
             "timeout not typed as a timeout: {err:#}"
+        );
+    }
+
+    /// Regression (round 4, DIST-5): the failure class came from the LAST
+    /// attempt only, so 503/500 interleaving read as a blameable Server
+    /// error, and a 504 gateway timeout counted as Server too.
+    #[test]
+    fn failure_class_is_the_worst_across_attempts_and_504_is_a_timeout() {
+        let classify = |responses: Vec<String>| {
+            let (url, _) = scripted_server(responses);
+            let provider = OpenAiCompatProvider::with_base_url(url, "m".into()).unwrap();
+            let err = provider
+                .classify_batch(&["I will ship it".into()])
+                .unwrap_err();
+            err.downcast_ref::<ProviderUnavailable>().map(|p| p.class)
+        };
+        let resp = |status: &str| http_response(status, "", "{}");
+        assert_eq!(
+            classify(vec![
+                resp("500 Internal Server Error"),
+                resp("503 Service Unavailable"),
+                resp("500 Internal Server Error"),
+            ]),
+            Some(FailureClass::Overloaded)
+        );
+        assert_eq!(
+            classify(vec![resp("504 Gateway Timeout"); 3]),
+            Some(FailureClass::Timeout)
+        );
+        assert_eq!(
+            classify(vec![resp("500 Internal Server Error"); 3]),
+            Some(FailureClass::Server)
         );
     }
 

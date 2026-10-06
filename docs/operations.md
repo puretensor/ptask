@@ -193,9 +193,10 @@ to a provider/classification failure) is never charged — a local outage must
 not push a good capture toward quarantine.
 
 A provider **outage** is not charged either. Once retries are exhausted, a
-rate limit (429), overload (503), timeout (408 or client-side), connection
+rate limit (429), overload (503), timeout (408, 504 or client-side), connection
 failure, or a 401/403/404 (credentials or model gone) aborts the run
-immediately. There is no bisection and no attempt charged, the chunks that
+immediately. The class is the worst one seen across the retry attempts, so a
+500/503/500 sequence counts as an overload. There is no bisection and no attempt charged, the chunks that
 already finished are still marked processed, and the run fails closed with
 `distill.failed` ("provider unavailable (…): …").
 
