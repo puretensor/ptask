@@ -459,6 +459,13 @@ const CHUNK: usize = 25;
 /// calls, never permanent non-consumption.
 const MAX_SOURCES_PER_CANDIDATE: usize = 8;
 
+/// Runs in which a lone failing capture was deferred (no real success that
+/// run to prove the provider healthy on real data) before it may be charged
+/// anyway. Each such run fails closed (`distill.failed`), so an operator is
+/// alerted long before a provider broken on real data can quarantine work;
+/// a queue holding only poisons still progresses after this many runs.
+const DEFERRALS_BEFORE_CHARGE: usize = 6;
+
 /// A capture any healthy provider classifies without trouble. Used as the
 /// canary that separates a poison input from a failing provider.
 const CANARY_CAPTURE: &str = "I will renew the office lease next week.";
@@ -612,9 +619,21 @@ struct RunState {
     /// The provider became unavailable mid-run (see `ProviderUnavailable`):
     /// no further call starts and nothing more is charged.
     aborted: bool,
-    /// Charges blamed on input after a server error (canary healthy), applied
-    /// only if the run does not later conclude the provider is failing.
-    provisional_failures: Vec<(i64, String)>,
+    /// Charges blamed on input after a server error (canary healthy), with
+    /// the `real_successes` count when the failing chunk began. Applied only
+    /// if the run does not abort AND real work succeeded after that point.
+    provisional_failures: Vec<(i64, String, usize)>,
+    /// Chunks of real captures that completed and consumed something — the
+    /// evidence that the provider works on real data, not just the canary.
+    real_successes: usize,
+}
+
+/// Which provider call a chunk failed in, so the canary exercises the same
+/// stage (a provider can classify fine while every consolidate 500s).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Classify,
+    Consolidate,
 }
 
 /// Why a chunk failed, and whether the capture may be blamed for it.
@@ -632,8 +651,9 @@ struct ChunkError {
     /// The outage class, when the provider reported one.
     outage: Option<crate::providers::FailureClass>,
     /// Blamed on the input only provisionally (a server-class error after a
-    /// healthy re-preflight): the charge is dropped if the run later aborts.
+    /// healthy canary): see `RunState::provisional_failures`.
     provisional: bool,
+    stage: Stage,
 }
 
 impl ChunkError {
@@ -647,6 +667,14 @@ impl ChunkError {
             abort: outage.is_some(),
             outage,
             provisional: false,
+            stage: Stage::Classify,
+        }
+    }
+
+    fn consolidate(e: anyhow::Error) -> Self {
+        Self {
+            stage: Stage::Consolidate,
+            ..Self::provider(e)
         }
     }
 
@@ -659,6 +687,7 @@ impl ChunkError {
             abort: false,
             outage: None,
             provisional: false,
+            stage: Stage::Classify,
         }
     }
 }
@@ -690,7 +719,7 @@ fn process_chunk<P: LlmProvider + ?Sized>(
         let kept_texts: Vec<String> = kept.iter().map(|&i| texts[i].clone()).collect();
         let mut candidates = provider
             .consolidate(&kept_texts)
-            .map_err(ChunkError::provider)?;
+            .map_err(ChunkError::consolidate)?;
         for cand in &mut candidates {
             if cand.sources.is_empty() {
                 st.sourceless += 1;
@@ -779,6 +808,7 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
     dedup: &mut Dedup,
     st: &mut RunState,
     ctx: &EventCtx,
+    baseline: Option<usize>,
 ) {
     if items.is_empty() || st.aborted {
         return;
@@ -788,7 +818,15 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
         st.budget_exhausted = true;
         return;
     }
-    let e = match process_chunk(db, provider, items, dedup, st, ctx) {
+    // Real successes before this chunk: a provisional charge in this subtree
+    // stands only if real work succeeds after it.
+    let baseline = baseline.unwrap_or(st.real_successes);
+    let consumed_before = st.consumed_ids.len();
+    let outcome = process_chunk(db, provider, items, dedup, st, ctx);
+    if st.consumed_ids.len() > consumed_before {
+        st.real_successes += 1;
+    }
+    let e = match outcome {
         Ok(uncovered) if uncovered.is_empty() => return,
         Ok(uncovered) => {
             // Strictly smaller than `items` (something was covered), so this
@@ -799,7 +837,7 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
                 uncovered = uncovered.len(),
                 "consolidation left kept captures uncovered — walking them again"
             );
-            walk_chunk(db, provider, &uncovered, dedup, st, ctx);
+            walk_chunk(db, provider, &uncovered, dedup, st, ctx, Some(baseline));
             return;
         }
         Err(e) => e,
@@ -815,24 +853,31 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
         // the canary succeeds, the provider is serving classify requests and
         // this chunk's content is the cause: bisect it, however many poison
         // rows it holds. If the canary fails, it is the provider: abort.
+        // The canary exercises the stage that failed.
         st.calls += 1;
-        let canary_ok = matches!(
-            provider.classify_batch(&[CANARY_CAPTURE.to_string()]),
-            Ok(v) if v.len() == 1
-        );
+        let canary = [CANARY_CAPTURE.to_string()];
+        let canary_ok = match e.stage {
+            Stage::Classify => matches!(provider.classify_batch(&canary), Ok(v) if v.len() == 1),
+            Stage::Consolidate => matches!(provider.consolidate(&canary), Ok(v) if !v.is_empty()),
+        };
         if !canary_ok {
             e.reason = format!(
-                "{} (a benign canary classify failed too — the provider, not the input)",
+                "{} (a benign canary failed too — the provider, not the input)",
                 e.reason
             );
         } else {
             if items.len() == 1 {
                 // Confirm before charging: the lone row must fail AGAIN after
                 // the healthy canary, so a transient 500 is never charged.
-                match process_chunk(db, provider, items, dedup, st, ctx) {
+                let consumed_before = st.consumed_ids.len();
+                let again = process_chunk(db, provider, items, dedup, st, ctx);
+                if st.consumed_ids.len() > consumed_before {
+                    st.real_successes += 1;
+                }
+                match again {
                     Ok(uncovered) => {
                         if !uncovered.is_empty() {
-                            walk_chunk(db, provider, &uncovered, dedup, st, ctx);
+                            walk_chunk(db, provider, &uncovered, dedup, st, ctx, Some(baseline));
                         }
                         return;
                     }
@@ -882,7 +927,8 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
             "isolated an unprocessable capture"
         );
         if e.chargeable && e.provisional {
-            st.provisional_failures.push((items[0].id, e.reason));
+            st.provisional_failures
+                .push((items[0].id, e.reason, baseline));
         } else if e.chargeable {
             st.failures.push((items[0].id, e.reason));
         } else {
@@ -897,8 +943,8 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
         "chunk failed — bisecting to isolate the offending capture"
     );
     let mid = items.len() / 2;
-    walk_chunk(db, provider, &items[..mid], dedup, st, ctx);
-    walk_chunk(db, provider, &items[mid..], dedup, st, ctx);
+    walk_chunk(db, provider, &items[..mid], dedup, st, ctx, Some(baseline));
+    walk_chunk(db, provider, &items[mid..], dedup, st, ctx, Some(baseline));
 }
 
 /// Create the survivors of one chunk's consolidation, running every dedup
@@ -1267,7 +1313,7 @@ fn run_native_within<P: LlmProvider + ?Sized>(
         ..RunState::default()
     };
     for chunk in items.chunks(CHUNK) {
-        walk_chunk(db, provider, chunk, &mut dedup, &mut st, &ctx);
+        walk_chunk(db, provider, chunk, &mut dedup, &mut st, &ctx, None);
     }
     if st.sourceless > 0 {
         warn!(
@@ -1291,10 +1337,21 @@ fn run_native_within<P: LlmProvider + ?Sized>(
         ptask_core::raw_items::mark_processed(db, *id)?;
     }
     // Charges blamed on input after a server error stand only if the run
-    // never concluded the provider itself was failing.
+    // never concluded the provider itself was failing AND real work
+    // succeeded after the failing chunk began: a canary alone does not prove
+    // the provider handles real data. Otherwise the charge is deferred
+    // (recorded, not charged); after DEFERRALS_BEFORE_CHARGE deferred runs
+    // it is charged anyway, so a queue of nothing but poisons still moves.
     if !st.aborted {
-        let provisional = std::mem::take(&mut st.provisional_failures);
-        st.failures.extend(provisional);
+        for (id, reason, baseline) in std::mem::take(&mut st.provisional_failures) {
+            if st.real_successes > baseline
+                || prior_deferrals(db, id).unwrap_or(0) >= DEFERRALS_BEFORE_CHARGE
+            {
+                st.failures.push((id, reason));
+            } else {
+                record_deferral(db, id, &reason, &ctx);
+            }
+        }
     }
     for (id, reason) in &st.failures {
         match ptask_core::raw_items::record_distill_failure(db, *id, reason) {
@@ -1381,6 +1438,32 @@ fn run_native_within<P: LlmProvider + ?Sized>(
         "native distill run complete"
     );
     Ok(report)
+}
+
+/// Runs in which a capture's server-error charge was deferred.
+fn prior_deferrals(db: &Db, raw_item_id: i64) -> Result<usize> {
+    Ok(db.with_conn(|c| {
+        Ok(c.query_row(
+            "SELECT COUNT(*) FROM pt_event_log
+              WHERE event_type = 'distill.deferred'
+                AND json_extract(payload, '$.raw_item_id') = ?1",
+            [raw_item_id],
+            |r| r.get::<_, i64>(0),
+        )?)
+    })? as usize)
+}
+
+fn record_deferral(db: &Db, raw_item_id: i64, reason: &str, ctx: &EventCtx) {
+    warn!(
+        target: "ptask::distill",
+        raw_item = raw_item_id,
+        "server error with no real success after it this run — charge deferred"
+    );
+    let payload = serde_json::json!({ "raw_item_id": raw_item_id, "error": reason });
+    let uuid = format!("distill-deferred:{}", uuid::Uuid::new_v4());
+    if let Err(e) = event_log::record(db, &uuid, None, "distill.deferred", &payload, ctx) {
+        warn!(target: "ptask::distill", error = %e, "could not record a deferred charge");
+    }
 }
 
 /// Record the manifest event. Success uses `distill.run` so the existing
@@ -2567,11 +2650,28 @@ mod tests {
         for (n, poison_at) in [
             (22, vec![3, 15]),
             (13, vec![4, 5, 6]),
+            (24, (2..12).collect::<Vec<_>>()),
             (5, vec![0, 1, 2, 3, 4]),
         ] {
             let (_dir, db) = fresh_db();
-            let (healthy, poison) = seed_with_poisons(&db, n, &poison_at);
-            for _ in 0..ptask_core::raw_items::MAX_DISTILL_ATTEMPTS {
+            let (mut healthy, poison) = seed_with_poisons(&db, n, &poison_at);
+            let only_poisons = healthy.is_empty();
+            // With healthy captures arriving each run (as in production),
+            // poisons are charged once real work succeeds around them. A
+            // queue of nothing but poisons has no such evidence and is
+            // charged only after DEFERRALS_BEFORE_CHARGE deferred runs.
+            let runs = ptask_core::raw_items::MAX_DISTILL_ATTEMPTS as usize
+                + if only_poisons {
+                    DEFERRALS_BEFORE_CHARGE
+                } else {
+                    0
+                };
+            for run in 0..runs {
+                if run > 0 && !only_poisons {
+                    let fresh = format!("fresh capture {run} about errand {}", run * 7919);
+                    ptask_core::raw_items::insert(&db, &fresh, "test", "test://x").unwrap();
+                    healthy.push(fresh);
+                }
                 let _ = run_native(&db, &ServerPoison::new(), 300);
             }
             assert_eq!(
@@ -2588,6 +2688,80 @@ mod tests {
                 poison.len(),
                 "{poison_at:?}: every healthy row consumed"
             );
+        }
+    }
+
+    /// Fails every real classify with a server 500 but answers the canary —
+    /// a provider broken on real data.
+    struct RealData500;
+    impl LlmProvider for RealData500 {
+        fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+            if texts.len() == 1 && texts[0] == CANARY_CAPTURE {
+                return PoisonProvider { poison: "\u{0}" }.classify_batch(texts);
+            }
+            Err(anyhow::Error::new(
+                crate::providers::ProviderUnavailable::new(
+                    crate::providers::FailureClass::Server,
+                    "request failed after 3 attempt(s): http 500",
+                ),
+            ))
+        }
+        fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+            PoisonProvider { poison: "\u{0}" }.consolidate(items)
+        }
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "real-data-500-test"
+        }
+    }
+
+    /// Classify works; consolidate always 500s.
+    struct Consolidate500;
+    impl LlmProvider for Consolidate500 {
+        fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+            PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+        }
+        fn consolidate(&self, _items: &[String]) -> Result<Vec<Candidate>> {
+            Err(anyhow::Error::new(
+                crate::providers::ProviderUnavailable::new(
+                    crate::providers::FailureClass::Server,
+                    "request failed after 3 attempt(s): http 500",
+                ),
+            ))
+        }
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "consolidate-500-test"
+        }
+    }
+
+    /// Regression (round 5, DIST-5): the canary does not protect against a
+    /// provider that fails all real data but answers the canary (12 healthy
+    /// captures charged per run, the queue quarantined within a day), nor
+    /// against one whose consolidate always 500s while classify — the only
+    /// stage the canary tested — works (7 charged per run).
+    #[test]
+    fn a_provider_failing_real_data_charges_nothing() {
+        for (n, consolidate_broken) in [(12, false), (7, true)] {
+            let (_dir, db) = fresh_db();
+            let texts = distinct_captures(&db, n);
+            for _ in 0..ptask_core::raw_items::MAX_DISTILL_ATTEMPTS {
+                let result = if consolidate_broken {
+                    run_native(&db, &Consolidate500, 300)
+                } else {
+                    run_native(&db, &RealData500, 300)
+                };
+                assert!(result.is_err(), "nothing can succeed");
+            }
+            assert!(
+                texts.iter().all(|t| attempts(&db, t) == 0),
+                "consolidate_broken={consolidate_broken}: healthy captures charged"
+            );
+            assert_eq!(ptask_core::raw_items::quarantined_count(&db).unwrap(), 0);
         }
     }
 
@@ -2658,8 +2832,10 @@ mod tests {
         // Blame is decided by a canary classify, not a re-preflight.
         assert_eq!(provider.preflights.get(), 1);
 
-        // Alone in the queue it is still charged each run, then quarantined.
-        for _ in 1..ptask_core::raw_items::MAX_DISTILL_ATTEMPTS {
+        // Alone in the queue there is no real success to vouch for the
+        // provider: its charge is deferred for DEFERRALS_BEFORE_CHARGE runs,
+        // then charged anyway, so it is still quarantined eventually.
+        for _ in 1..ptask_core::raw_items::MAX_DISTILL_ATTEMPTS as usize + DEFERRALS_BEFORE_CHARGE {
             assert!(run_native(&db, &provider, 100).is_err());
         }
         assert_eq!(ptask_core::raw_items::quarantined_count(&db).unwrap(), 1);

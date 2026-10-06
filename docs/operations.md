@@ -201,16 +201,24 @@ already finished are still marked processed, and the run fails closed with
 `distill.failed` ("provider unavailable (…): …").
 
 Other 5xx errors (500/502…) can be specific to one input, for example a server
-that returns 500 on context overflow. After each one, distill sends a canary:
-it classifies one known-benign capture with the real schema. If the canary
-fails, it is the provider: the run aborts, and any provisional charges from
-earlier in the run are dropped. If the canary succeeds, the chunk is bisected,
-however many poison rows it holds. A lone row is charged, provisionally, only
-if it fails again on a second attempt after the healthy canary, so a transient
-500 is never charged. Any number of poison captures, including a queue holding
-nothing else, is therefore isolated and quarantined, while a flapping provider
-(one that fails every real batch) charges nothing and costs a few calls per
-run.
+that returns 500 on context overflow. After each one, distill sends a canary
+on the stage that failed: one known-benign capture through classify, or
+through consolidate. If the canary fails, it is the provider: the run aborts,
+and any provisional charges from earlier in the run are dropped. If the
+canary succeeds, the chunk is bisected, however many poison rows it holds. A
+lone row is charged provisionally only if it fails again on a second attempt
+after the healthy canary, so a transient 500 is never charged.
+
+A provisional charge is applied only if a chunk of real captures succeeded
+later in the same run, because a canary alone does not prove the provider
+handles real data. Otherwise the charge is deferred: a `distill.deferred`
+event is recorded and nothing is charged. Each such run fails closed (nothing
+was consumed), so `distill.failed` alerts the operator. A capture deferred in
+6 runs (`DEFERRALS_BEFORE_CHARGE`) is charged anyway. A provider that answers
+the canary but fails all real data charges nothing for about 6 hours. A queue
+holding nothing but poisons still drains: those rows are quarantined after
+about 6 + 3 runs. Mixed with healthy captures, poisons are charged straight
+away and quarantined after 3 runs.
 Retries honour
 a `Retry-After` header of up to 30 s; a longer one aborts at once instead of
 waiting.
