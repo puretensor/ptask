@@ -480,7 +480,9 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
         );
         return match row {
             Ok(t) => Ok(t),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::PtIdNotFound(pt_id_str)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::PtIdNotFound(
+                crate::text::one_line(&pt_id_str).into_owned(),
+            )),
             Err(e) => Err(e.into()),
         };
     }
@@ -503,24 +505,26 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     match rows.len() {
         0 => Err(crate::Error::Other(format!(
             "no pending task matching '{}'",
-            query
+            crate::text::one_line(query)
         ))),
         1 => Ok(rows.into_iter().next().unwrap()),
         n => {
             let titles: Vec<String> = rows
                 .into_iter()
                 .map(|t| {
+                    // One line per match: a newline in a title would
+                    // forge an entry (or a success line) in the error.
                     format!(
                         "  - {} {}",
                         t.pt_id.as_deref().unwrap_or("(no PT-id)"),
-                        t.title
+                        crate::text::one_line(&t.title)
                     )
                 })
                 .collect();
             Err(crate::Error::Other(format!(
                 "{} pending tasks match '{}':\n{}",
                 n,
-                query,
+                crate::text::one_line(query),
                 titles.join("\n")
             )))
         }
@@ -593,7 +597,9 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
         );
         return match row {
             Ok(t) => Ok(t),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::PtIdNotFound(pt_id_str)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::PtIdNotFound(
+                crate::text::one_line(&pt_id_str).into_owned(),
+            )),
             Err(e) => Err(e.into()),
         };
     }
@@ -625,7 +631,8 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
             };
             Err(crate::Error::Other(format!(
                 "no {} matching '{}'",
-                scope, query
+                scope,
+                crate::text::one_line(query)
             )))
         }
         1 => Ok(rows.into_iter().next().unwrap()),
@@ -633,17 +640,19 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
             let titles: Vec<String> = rows
                 .into_iter()
                 .map(|t| {
+                    // One line per match: a newline in a title would
+                    // forge an entry (or a success line) in the error.
                     format!(
                         "  - {} {}",
                         t.pt_id.as_deref().unwrap_or("(no PT-id)"),
-                        t.title
+                        crate::text::one_line(&t.title)
                     )
                 })
                 .collect();
             Err(crate::Error::Other(format!(
                 "{} tasks match '{}':\n{}",
                 n,
-                query,
+                crate::text::one_line(query),
                 titles.join("\n")
             )))
         }
@@ -873,8 +882,13 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             };
 
             tx.execute(
+                // A new occurrence restarts the reminder ladder: the escalation
+                // belonged to the occurrence just completed.
                 "UPDATE tasks SET deadline=?1, updated_at=?2, status='pending',
-                              status_v2='todo', snoozed_until=NULL WHERE id=?3",
+                              status_v2='todo', snoozed_until=NULL,
+                              escalation_level=0, level_changed_at=NULL,
+                              last_reminded=NULL, next_reminder=NULL
+                  WHERE id=?3",
                 params![next_iso, now, task.id],
             )?;
             tx.execute(
@@ -977,7 +991,11 @@ fn open_blockers_tx(tx: &rusqlite::Transaction<'_>, task_uuid: &str) -> Result<V
             let pt: Option<String> = r.get(0)?;
             let id: String = r.get(1)?;
             let title: String = r.get(2)?;
-            Ok(format!("{} ({})", pt.unwrap_or(id), title))
+            Ok(format!(
+                "{} ({})",
+                pt.unwrap_or(id),
+                crate::text::one_line(&title)
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
@@ -1340,7 +1358,12 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
         ));
     }
     tx.execute(
-        "UPDATE tasks SET status='pending', status_v2='todo', snoozed_until=NULL, updated_at=?1 WHERE id=?2",
+        // Reopening restarts the reminder ladder; a stale level 5 would
+        // otherwise exclude the task from accountability forever.
+        "UPDATE tasks SET status='pending', status_v2='todo', snoozed_until=NULL, updated_at=?1,
+                          escalation_level=0, level_changed_at=NULL,
+                          last_reminded=NULL, next_reminder=NULL
+          WHERE id=?2",
         params![now, task_uuid],
     )?;
     tx.execute(
@@ -1482,9 +1505,11 @@ const NOTHING_UNDOABLE: &str =
 /// (or is depended on by), or that parents another task, is never deleted:
 /// those relations are not journaled under its own uuid.
 fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<UndoPlan>> {
-    // "Own" is actor AND surface: CLI, TUI and an unconfigured `pt mcp` all
-    // default to actor "shell", so the actor alone let the operator's undo
-    // delete what an agent added over MCP. CLI and TUI are one surface.
+    // "Own" is actor AND surface: an MCP server can still run under the
+    // operator's actor (PTASK_ACTOR=shell exported into `pt mcp`; the
+    // unconfigured default is "mcp"), so the actor alone could let the
+    // operator's undo delete what an agent added over MCP. CLI and TUI are
+    // one surface.
     let (surface_a, surface_b) = match ctx.source.as_str() {
         "cli" | "tui" => ("cli", "tui"),
         other => (other, other),

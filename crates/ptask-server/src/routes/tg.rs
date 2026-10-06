@@ -214,6 +214,19 @@ fn approval_callback(
         "ptreject" => ptask_core::approvals::Decision::Reject,
         _ => return err(StatusCode::BAD_REQUEST, "unknown callback verb"),
     };
+    // Re-check what the ping could show. Pings from older builds carried
+    // buttons under looser rules (an 800-char cut, no bidi check), so the
+    // button's existence proves nothing. Rejecting stays one tap.
+    if decision == ptask_core::approvals::Decision::Approve
+        && let Ok(ap) = ptask_core::approvals::get(&state.db, ap_id)
+        && !ptask_notify::tap_decidable(&ap)
+    {
+        return err(
+            StatusCode::FORBIDDEN,
+            "this request cannot be approved from Telegram: the ping could not show the \
+             whole payload faithfully; review in the inbox",
+        );
+    }
     let ctx = EventCtx {
         actor: "operator@telegram".into(),
         source: "tg-callback".into(),

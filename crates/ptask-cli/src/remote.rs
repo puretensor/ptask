@@ -259,6 +259,12 @@ impl RemoteClient {
         description: Option<&str>,
         deadline: Option<Option<&str>>,
     ) -> Result<Task> {
+        // Validate before anything is sent: the server applies the two
+        // commands independently, so a deadline it rejects used to leave the
+        // rename applied (exit 1, naming only a command uuid).
+        if let Some(Some(d)) = deadline {
+            validate_deadline(d)?;
+        }
         let mut task = self.resolve(query, false)?;
         let retext_uuid = self.command_uuid("retext");
         let edit_uuid = self.command_uuid("deadline");
@@ -282,11 +288,33 @@ impl RemoteClient {
         }
         let req = json!({ "sync_token": NO_DELTA_TOKEN, "resource_types": ["tasks"], "commands": commands });
         let resp = self.sync(&req)?;
-        if title.is_some() || description.is_some() {
-            ensure_ok(&resp.sync_status, &retext_uuid)?;
+        // Report per command, so a part the server refused (e.g. clearing a
+        // recurring task's deadline) never hides the part that did land.
+        let mut applied = Vec::new();
+        let mut refused = Vec::new();
+        for (part, wanted, uuid) in [
+            (
+                "title/description",
+                title.is_some() || description.is_some(),
+                &retext_uuid,
+            ),
+            ("deadline", deadline.is_some(), &edit_uuid),
+        ] {
+            if !wanted {
+                continue;
+            }
+            match command_error(&resp.sync_status, uuid) {
+                None => applied.push(part),
+                Some(e) => refused.push(format!("{part} NOT applied ({e})")),
+            }
         }
-        if deadline.is_some() {
-            ensure_ok(&resp.sync_status, &edit_uuid)?;
+        if !refused.is_empty() {
+            let handle = task.pt_id.as_deref().unwrap_or(&task.id);
+            let mut msg = format!("remote edit {handle}: {}", refused.join("; "));
+            if !applied.is_empty() {
+                msg.push_str(&format!("; {} WAS applied", applied.join(" + ")));
+            }
+            return Err(anyhow!(msg));
         }
         if let Some(t) = title {
             task.title = t.to_string();
@@ -372,9 +400,14 @@ impl RemoteClient {
     }
 
     /// `pt remote rm <query>` — permanent delete (tombstoned for delta
-    /// sync). Resolves terminal tasks too.
-    pub fn rm(&self, query: &str) -> Result<Task> {
-        self.simple_task_command("task_delete", query, serde_json::Map::new(), true)
+    /// sync). A title substring reaches active tasks only; an exact PT-N or
+    /// uuid may still name a done/dismissed one. `confirm` sees the resolved
+    /// task before anything is sent and aborts the delete by failing.
+    pub fn rm(&self, query: &str, confirm: impl FnOnce(&Task) -> Result<()>) -> Result<Task> {
+        let task = self.resolve(query, false)?;
+        confirm(&task)?;
+        self.dispatch("task_delete", &task.id, serde_json::Map::new())?;
+        Ok(task)
     }
 
     /// `GET /list?filter=` — server-side filtered list (replaces the old
@@ -407,9 +440,20 @@ impl RemoteClient {
         include_terminal: bool,
     ) -> Result<Task> {
         let task = self.resolve(query, include_terminal)?;
+        self.dispatch(command, &task.id, extra)?;
+        Ok(task)
+    }
+
+    /// Send one command against an already-resolved task.
+    fn dispatch(
+        &self,
+        command: &str,
+        task_uuid: &str,
+        extra: serde_json::Map<String, Value>,
+    ) -> Result<()> {
         let cmd_uuid = self.command_uuid("");
         let mut args = serde_json::Map::new();
-        args.insert("task_uuid".into(), json!(task.id));
+        args.insert("task_uuid".into(), json!(task_uuid));
         args.extend(extra);
         let req = json!({
             "sync_token": NO_DELTA_TOKEN,
@@ -421,8 +465,7 @@ impl RemoteClient {
             }]
         });
         let resp = self.sync(&req)?;
-        ensure_ok(&resp.sync_status, &cmd_uuid)?;
-        Ok(task)
+        ensure_ok(&resp.sync_status, &cmd_uuid)
     }
 
     /// `pt remote next` — DAG-ready tasks computed on the canonical host. The
@@ -472,6 +515,36 @@ struct SyncResp {
 #[derive(Debug, Deserialize)]
 struct SyncResources {
     tasks: Vec<Task>,
+}
+
+/// The server's reason a command failed; `None` when it reports "ok".
+fn command_error(status: &BTreeMap<String, Value>, cmd_uuid: &str) -> Option<String> {
+    match status.get(cmd_uuid) {
+        Some(Value::String(s)) if s == "ok" => None,
+        Some(other) => Some(
+            other
+                .get("error")
+                .and_then(Value::as_str)
+                .map_or_else(|| other.to_string(), str::to_string),
+        ),
+        None => Some("missing from the server's response".into()),
+    }
+}
+
+/// The deadline forms the server accepts (core `parse_iso_zoned`): an ISO
+/// timestamp with an offset or a bare date. Blank means "clear".
+fn validate_deadline(deadline: &str) -> Result<()> {
+    let d = deadline.trim();
+    if d.is_empty()
+        || d.parse::<ptask_core::jiff::Timestamp>().is_ok()
+        || d.parse::<ptask_core::jiff::civil::Date>().is_ok()
+    {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "invalid --deadline {d:?}: use YYYY-MM-DD or an ISO timestamp with an offset \
+         (e.g. 2026-07-01T09:00:00Z); nothing was sent"
+    ))
 }
 
 fn ensure_ok(status: &BTreeMap<String, Value>, cmd_uuid: &str) -> Result<()> {
@@ -604,6 +677,16 @@ mod tests {
                         let uuid = cmd["uuid"].as_str().unwrap_or("?").to_string();
                         status.insert(uuid.clone(), Value::String("ok".into()));
                         let kind = cmd["type"].as_str().unwrap_or("");
+                        // As the server does for a recurring task.
+                        if kind == "task_edit"
+                            && cmd["args"]["task_uuid"] == "uuid-cccccccc"
+                            && cmd["args"]["deadline"].is_null()
+                        {
+                            status.insert(
+                                uuid.clone(),
+                                json!({"error": "cannot clear deadline on a recurring task; update it instead"}),
+                            );
+                        }
                         if kind == "task_create" {
                             let text = cmd["args"]["text"].as_str().unwrap_or("");
                             let task_uuid = format!("uuid-{}", &uuid[..8]);
@@ -858,6 +941,45 @@ mod tests {
     }
 
     #[test]
+    fn remote_edit_rejects_a_bad_deadline_before_sending_anything() {
+        let (c, calls, _rt) = mock_client();
+        let err = c
+            .edit("PT-100", Some("renamed"), None, Some(Some("tuesday-ish")))
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--deadline") && msg.contains("tuesday-ish"),
+            "{msg}"
+        );
+        assert!(calls.lock().unwrap().is_empty(), "nothing may be sent");
+        // The forms the server accepts still go through; blank means clear.
+        for ok in [
+            "2026-07-01",
+            "2026-07-01T09:00:00Z",
+            "2026-07-01T09:00:00+01:00",
+            " ",
+        ] {
+            c.edit("PT-100", Some("renamed"), None, Some(Some(ok)))
+                .unwrap_or_else(|e| panic!("{ok:?}: {e:#}"));
+        }
+    }
+
+    #[test]
+    fn remote_edit_names_what_was_and_was_not_applied() {
+        let (c, _calls, _rt) = mock_client();
+        let err = c
+            .edit("PT-102", Some("renamed"), None, Some(None))
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("PT-102"), "{msg}");
+        assert!(
+            msg.contains("deadline NOT applied") && msg.contains("recurring task"),
+            "{msg}"
+        );
+        assert!(msg.contains("title/description WAS applied"), "{msg}");
+    }
+
+    #[test]
     fn remote_reopen_dispatches_task_reopen() {
         let (c, calls, _rt) = mock_client();
         let task = c.reopen("PT-100").unwrap();
@@ -919,6 +1041,27 @@ mod tests {
         assert_eq!(d.labels, vec!["ops".to_string()]);
         assert_eq!(d.project.as_deref(), Some("fleet"));
         assert_eq!(d.duration_min, Some(30));
+    }
+
+    #[test]
+    fn remote_rm_reaches_active_substrings_and_confirms_before_sending() {
+        let (c, calls, _rt) = mock_client();
+        // "archive completed receipt" (PT-102) is done: out of a substring's reach.
+        assert!(c.rm("archive", |_| Ok(())).is_err());
+        // A declined confirmation sends nothing.
+        assert!(c.rm("PT-100", |_| Err(anyhow!("declined"))).is_err());
+        assert!(calls.lock().unwrap().is_empty(), "nothing may be sent");
+        // An exact PT-N still names the done task, after confirmation.
+        let task = c
+            .rm("PT-102", |t| {
+                assert_eq!(t.status, "done");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(task.pt_id.as_deref(), Some("PT-102"));
+        let calls_v = calls.lock().unwrap();
+        let cmd = dispatched(&calls_v, "task_delete").expect("task_delete dispatched");
+        assert_eq!(cmd["args"]["task_uuid"], "uuid-cccccccc");
     }
 
     #[test]

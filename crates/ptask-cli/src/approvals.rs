@@ -40,8 +40,9 @@ pub enum ApprovalCommand {
     List(ListArgs),
     /// Show one approval, including journal events.
     Show(IdArgs),
-    /// Write the stored payload bytes to stdout.
-    Payload(IdArgs),
+    /// Write the approved payload bytes to stdout (exit 3/4/6 unless the
+    /// approval is in force; see verify).
+    Payload(PayloadArgs),
     /// Withdraw a pending request (requester only).
     Withdraw(IdArgs),
     /// Check that an approval is approved and the payload still matches.
@@ -106,6 +107,17 @@ pub struct IdArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct PayloadArgs {
+    /// AP-n (or the row uuid).
+    pub id: String,
+    /// Operator inspection: print the bytes whatever the status (pending,
+    /// rejected, expired, consumed). Needs an operator TTY; refused under
+    /// CLAUDECODE. Not for executors.
+    #[arg(long = "any-status")]
+    pub any_status: bool,
+}
+
+#[derive(Args, Debug)]
 #[command(group(
     clap::ArgGroup::new("payload_src")
         .required(true)
@@ -136,6 +148,11 @@ pub struct DecideArgs {
     /// Record decided_via=dashboard (also allows a non-TTY stdin).
     #[arg(long = "via")]
     pub via: Option<ViaChoice>,
+    /// Approve even though the payload preview holds terminal control,
+    /// bidi or invisible characters (inspect it with `pt approval payload
+    /// AP-n | cat -v` first).
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -148,6 +165,10 @@ pub struct LongDecideArgs {
     pub note: Option<String>,
     #[arg(long = "via")]
     pub via: Option<ViaChoice>,
+    /// Approve even though the payload preview holds terminal control,
+    /// bidi or invisible characters.
+    #[arg(long)]
+    pub force: bool,
 }
 
 fn map_core(err: ptask_core::Error) -> anyhow::Error {
@@ -226,9 +247,11 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
             &ap.kind
         )
     );
-    let mut pairs: Vec<(&str, String)> = vec![
-        ("requester", ap.requester.clone()),
-        ("digest", ap.digest.clone()),
+    // Requester, note and preview are agent-supplied: raw cells, sanitised
+    // by kv so escape sequences cannot rewrite what the operator reads.
+    let mut pairs: Vec<(&str, ui::Cell)> = vec![
+        ("requester", ap.requester.as_str().into()),
+        ("digest", ap.digest.as_str().into()),
         (
             "payload",
             if ap.payload_stored() {
@@ -238,18 +261,19 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
                     ap.payload_bytes.unwrap_or(0)
                 )
             } else {
-                "not stored".into()
-            },
+                "not stored".to_string()
+            }
+            .into(),
         ),
     ];
     if let Some(t) = &ap.task_pt_id {
-        pairs.push(("task", t.clone()));
+        pairs.push(("task", t.into()));
     }
     if let Some(n) = &ap.request_note {
-        pairs.push(("requester note", n.clone()));
+        pairs.push(("requester note", n.into()));
     }
     if let Some(d) = &ap.decided_by {
-        pairs.push(("decided by", d.clone()));
+        pairs.push(("decided by", d.into()));
     }
     for l in ui::kv(&pairs, 16) {
         println!("    {}", l.trim_start());
@@ -263,7 +287,29 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
             "rendered from the stored payload"
         )
     );
-    println!("{}", ap.preview());
+    let preview = ap.preview();
+    // The digest binds the stored bytes, not the screen: when they hold
+    // anything a terminal would act on, say so above and below the preview.
+    let warning = ui::has_hazard(&preview).then(|| {
+        format!(
+            "  {}",
+            ui::pill(
+                ui::Status::Bad,
+                &format!(
+                    "WARNING: payload has control, bidi or invisible characters (shown as \u{FFFD}) — run `pt approval payload {} | cat -v` before deciding",
+                    ap.ap_id()
+                )
+            )
+        )
+    });
+    if let Some(w) = &warning {
+        println!("{w}");
+    }
+    // Strict: the preview is the bound bytes, so even a joining ZWJ shows.
+    println!("{}", ui::sanitize_strict(&preview));
+    if let Some(w) = &warning {
+        println!("{w}");
+    }
     if let Some(events) = events
         && !events.is_empty()
     {
@@ -271,13 +317,32 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
         println!("{}", ui::section("events", ui::Ink::Steel, "journal"));
         for e in events {
             println!(
-                "  {}  {}  {}",
-                e.at,
-                e.event_type,
-                e.actor.as_deref().unwrap_or("-")
+                "{}",
+                ui::one_line(&format!(
+                    "  {}  {}  {}",
+                    e.at,
+                    e.event_type,
+                    e.actor.as_deref().unwrap_or("-")
+                ))
             );
         }
     }
+}
+
+fn inspect_guardrails() -> Result<()> {
+    let claudecode = std::env::var("CLAUDECODE")
+        .ok()
+        .is_some_and(|s| !s.is_empty());
+    if claudecode || !std::io::stdin().is_terminal() {
+        return Err(ExitCodeError {
+            code: 1,
+            message: "--any-status is operator inspection and needs an operator TTY; \
+                      executors get the payload only once it is approved"
+                .into(),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn decide_guardrails(via_dashboard: bool) -> Result<DecidedVia> {
@@ -322,19 +387,29 @@ pub fn cmd_request(db: &Db, a: RequestArgs, ctx: EventCtx, json: bool) -> Result
         task_pt_id: a.task,
         expires_in: a.expires_in,
     };
-    let outcome = approvals::request(db, input, &ctx).map_err(map_core)?;
+    let mut outcome = approvals::request(db, input, &ctx).map_err(map_core)?;
     if outcome.created {
         notify_one(db, &outcome.approval);
     }
-    let ap = approvals::get(db, &outcome.approval.uuid).unwrap_or(outcome.approval);
-    emit_one(ap, None, json)
+    if let Some(n) = &outcome.notice {
+        // Full text, not ui::outcome: that column truncates.
+        eprintln!("notice: {n}");
+    }
+    if let Ok(fresh) = approvals::get(db, &outcome.approval.uuid) {
+        outcome.approval = fresh;
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome.to_json())?);
+        return Ok(());
+    }
+    emit_one(outcome.approval, None, json)
 }
 
 pub fn cmd_list(db: &Db, a: ListArgs, json: bool) -> Result<()> {
     let items = approvals::list(db, Some(&a.status)).map_err(map_core)?;
     if json {
         let v: Vec<serde_json::Value> = items.iter().map(|ap| ap.to_json(None)).collect();
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        crate::print_json(&v)?;
         return Ok(());
     }
     print_lines_headline(&format!("approvals · {}", a.status), items.len());
@@ -363,8 +438,16 @@ pub fn cmd_show(db: &Db, a: IdArgs, json: bool) -> Result<()> {
     emit_one(ap, Some(&events), json)
 }
 
-pub fn cmd_payload(db: &Db, a: IdArgs) -> Result<()> {
-    let bytes = approvals::payload_bytes(db, &a.id).map_err(map_core)?;
+/// `--any-status` is the operator's inspection path, behind the same guards
+/// as a decision minus `--via dashboard` (the dashboard renders `preview`).
+/// Without it the bytes are released only while the approval is in force.
+pub fn cmd_payload(db: &Db, a: PayloadArgs) -> Result<()> {
+    let bytes = if a.any_status {
+        inspect_guardrails()?;
+        approvals::inspect_payload_bytes(db, &a.id).map_err(map_core)?
+    } else {
+        approvals::payload_bytes(db, &a.id).map_err(map_core)?
+    };
     let mut out = std::io::stdout().lock();
     out.write_all(&bytes)?;
     Ok(())
@@ -435,17 +518,37 @@ pub fn cmd_notify(db: &Db) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_decide(
     db: &Db,
     id: &str,
     decision: Decision,
     note: Option<&str>,
     via: Option<ViaChoice>,
+    force: bool,
     ctx: EventCtx,
     json: bool,
 ) -> Result<()> {
     let via = decide_guardrails(matches!(via, Some(ViaChoice::Dashboard)))?;
-    let ap = approvals::decide(db, id, decision, via, note, &ctx).map_err(map_core)?;
+    if matches!(decision, Decision::Approve) && !force {
+        refuse_hazardous_preview(db, id)?;
+    }
+    let ap = approvals::decide(db, id, decision, via, note, &ctx).map_err(|e| {
+        // Deciding a request that is no longer pending reports its terminal
+        // state with exit 4, as verify/consume do (core calls it a conflict).
+        let terminal = matches!(
+            &e,
+            ptask_core::Error::Approval(approvals::ApprovalError::Conflict(_))
+        ) && approvals::get(db, id).is_ok_and(|ap| ap.status != "pending");
+        if terminal {
+            return ExitCodeError {
+                code: 4,
+                message: e.to_string(),
+            }
+            .into();
+        }
+        map_core(e)
+    })?;
     emit_one(ap, None, json)
 }
 
@@ -453,7 +556,43 @@ pub fn cmd_long_decide(db: &Db, a: LongDecideArgs, ctx: EventCtx, json: bool) ->
     let decision = Decision::parse(&a.decision)
         .map_err(ptask_core::Error::from)
         .map_err(map_core)?;
-    cmd_decide(db, &a.id, decision, a.note.as_deref(), a.via, ctx, json)
+    cmd_decide(
+        db,
+        &a.id,
+        decision,
+        a.note.as_deref(),
+        a.via,
+        a.force,
+        ctx,
+        json,
+    )
+}
+
+/// Exit code of `pt approve` refusing a flagged preview without --force; the
+/// dashboard sidecar maps it to a 409 `payload_flagged`.
+pub const EXIT_PAYLOAD_FLAGGED: i32 = 7;
+
+/// The digest binds the stored bytes, not what a screen shows: approving a
+/// payload whose preview holds control, bidi or invisible characters (a
+/// zero-width space in an address, tag characters after an amount) needs an
+/// explicit --force after inspecting the exact bytes. Rejecting never does.
+fn refuse_hazardous_preview(db: &Db, id: &str) -> Result<()> {
+    let ap = approvals::get(db, id).map_err(map_core)?;
+    // Only a pending request can be approved: a decided one must report its
+    // terminal state (exit 4) from decide, not an impossible --force.
+    if ap.status == "pending" && ui::has_hazard(&ap.preview()) {
+        return Err(ExitCodeError {
+            code: EXIT_PAYLOAD_FLAGGED,
+            message: format!(
+                "{0}: the payload preview has control, bidi or invisible characters; \
+                 inspect the exact bytes with `pt approval payload {0} | cat -v`, \
+                 then approve with --force",
+                ap.ap_id()
+            ),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn emit_one(
@@ -462,7 +601,7 @@ fn emit_one(
     json: bool,
 ) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&ap.to_json(events))?);
+        crate::print_json(&ap.to_json(events))?;
     } else {
         print_human(&ap, events);
     }

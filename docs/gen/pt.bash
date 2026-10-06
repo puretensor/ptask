@@ -961,7 +961,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__approval__subcmd__decide)
-            opts="-h --note --via --db --json --idempotency-key --color --no-color --help <ID> <DECISION>"
+            opts="-h --note --via --force --db --json --idempotency-key --color --no-color --help <ID> <DECISION>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1245,7 +1245,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__approval__subcmd__payload)
-            opts="-h --db --json --idempotency-key --color --no-color --help <ID>"
+            opts="-h --any-status --db --json --idempotency-key --color --no-color --help <ID>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1423,7 +1423,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__approve)
-            opts="-h --note --via --db --json --idempotency-key --color --no-color --help <ID>"
+            opts="-h --note --via --force --db --json --idempotency-key --color --no-color --help <ID>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3873,7 +3873,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__reject)
-            opts="-h --note --via --db --json --idempotency-key --color --no-color --help <ID>"
+            opts="-h --note --via --force --db --json --idempotency-key --color --no-color --help <ID>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4483,7 +4483,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__remote__subcmd__rm)
-            opts="-h --url --db --json --idempotency-key --color --no-color --help <QUERY>"
+            opts="-y -h --yes --url --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5369,7 +5369,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__view__subcmd__show)
-            opts="-n -h --limit --db --json --idempotency-key --color --no-color --help <NAME>"
+            opts="-n -s -h --limit --status --db --json --idempotency-key --color --no-color --help <NAME>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5380,6 +5380,14 @@ _pt() {
                     return 0
                     ;;
                 -n)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --status)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
