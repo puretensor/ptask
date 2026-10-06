@@ -134,6 +134,24 @@ pub fn get_daily_budget(db: &Db, date_utc: &str) -> Result<i64> {
     Ok(row.unwrap_or(0))
 }
 
+/// Atomically take one Telegram budget slot for `date_utc` if fewer than
+/// `max` are used. `Ok(false)` = the budget is spent (possibly by a
+/// concurrent run). A single conditional upsert, so two runs can never both
+/// take the last slot.
+pub fn reserve_daily_budget(db: &Db, date_utc: &str, max: i64) -> Result<bool> {
+    if max <= 0 {
+        return Ok(false);
+    }
+    let conn = db.get()?;
+    let changed = conn.execute(
+        "INSERT INTO daily_budget (date, notifications_sent) VALUES (?1, 1)
+         ON CONFLICT(date) DO UPDATE SET notifications_sent = notifications_sent + 1
+          WHERE notifications_sent < ?2",
+        params![date_utc, max],
+    )?;
+    Ok(changed == 1)
+}
+
 /// Increment the Telegram budget counter for `date_utc` by one. Returns the
 /// new value.
 pub fn increment_daily_budget(db: &Db, date_utc: &str) -> Result<i64> {
@@ -594,7 +612,7 @@ pub async fn run_check_at<D: Dispatch>(
     let budget_used = get_daily_budget(db, &date_utc)?;
     report.budget_used_before = budget_used;
     report.budget_used_after = budget_used;
-    let telegram_remaining = (DAILY_BUDGET_MAX - budget_used).max(0);
+    let mut telegram_remaining = (DAILY_BUDGET_MAX - budget_used).max(0);
     if telegram_remaining == 0 {
         info!(
             target: "ptask::accountability",
@@ -682,12 +700,28 @@ pub async fn run_check_at<D: Dispatch>(
                         let buttons = nudge_buttons(&task.id);
                         // Reserve the budget slot before sending (refunded on
                         // failure), so a write failure after delivery cannot
-                        // let the run exceed the daily budget.
-                        if !cfg.dry_run
-                            && let Err(e) = increment_daily_budget(db, &date_utc)
-                        {
-                            release_claim(db, &task, &now_utc);
-                            return Err(e);
+                        // let the run exceed the daily budget. The reservation
+                        // is conditional on the shared counter, not on this
+                        // run's snapshot, so concurrent runs cannot overrun it.
+                        let reserved = cfg.dry_run
+                            || match reserve_daily_budget(db, &date_utc, DAILY_BUDGET_MAX) {
+                                Ok(reserved) => reserved,
+                                Err(e) => {
+                                    release_claim(db, &task, &now_utc);
+                                    return Err(e);
+                                }
+                            };
+                        if !reserved {
+                            // Not a delivery failure: the budget is spent.
+                            // Stop Telegram for the rest of this run; the
+                            // claim is released below if nothing else went.
+                            info!(
+                                target: "ptask::accountability",
+                                task_uuid = %task.id,
+                                "telegram budget spent by a concurrent run — skipping"
+                            );
+                            telegram_remaining = sent_telegrams;
+                            continue;
                         }
                         let r = if cfg.dry_run {
                             true
@@ -1760,6 +1794,54 @@ mod tests {
             get_daily_budget(&db, &anchor.date().to_string()).unwrap(),
             1
         );
+    }
+
+    /// Counts Telegram sends and yields inside each one, so two runs driven
+    /// by one `join!` interleave at every send.
+    #[derive(Default)]
+    struct YieldingTelegram(std::sync::atomic::AtomicUsize);
+    impl Dispatch for YieldingTelegram {
+        async fn send_telegram(
+            &self,
+            _cfg: &DispatchCfg,
+            _text: &str,
+            _buttons: &[(String, String)],
+        ) -> Result<bool> {
+            tokio::task::yield_now().await;
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+        async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {
+            Ok(true)
+        }
+        async fn compose_via_hal(&self, _cfg: &DispatchCfg, _req: &NudgeRequest) -> Option<String> {
+            None
+        }
+    }
+
+    /// Regression (round 2, PARSE-12): `telegram_remaining` was computed once
+    /// per run and the budget increment was unconditional, so two concurrent
+    /// runs each spent the full daily budget (6 sends, counter 6, max 3).
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_runs_cannot_overrun_the_daily_budget() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        for i in 0..8 {
+            aged_task_before(&db, &format!("stale concurrent task {i}"), 3, &anchor);
+        }
+        let dispatch = YieldingTelegram::default();
+        let cfg = telegram_cfg();
+        let (a, b) = tokio::join!(
+            run_check_at(&db, &cfg, &dispatch, &anchor),
+            run_check_at(&db, &cfg, &dispatch, &anchor)
+        );
+        a.unwrap();
+        b.unwrap();
+        let sent = dispatch.0.load(std::sync::atomic::Ordering::SeqCst) as i64;
+        let budget = get_daily_budget(&db, &anchor.date().to_string()).unwrap();
+        assert!(sent <= DAILY_BUDGET_MAX, "{sent} telegrams sent");
+        assert!(budget <= DAILY_BUDGET_MAX, "budget counter {budget}");
+        assert_eq!(sent, budget, "every send is reserved exactly once");
     }
 
     /// Records every Telegram body it is asked to send.
