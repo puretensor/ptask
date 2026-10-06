@@ -197,14 +197,17 @@ immediately. There is no bisection and no attempt charged, the chunks that
 already finished are still marked processed, and the run fails closed with
 `distill.failed` ("provider unavailable (…): …").
 
-Other 5xx errors (500/502/504…) can be specific to one input, for example a
-server that returns 500 on context overflow, so they get one re-check per run.
-If a fresh preflight succeeds, the chunk is bisected along that single failing
-path and the offending capture is charged provisionally. If a second,
-unrelated chunk then fails with a provider error, or both halves of a split
-fail, the provider is flapping: the run aborts and the provisional charge is
-dropped. One poison capture is still isolated and quarantined, while a
-flapping provider charges nothing and costs a handful of calls per run.
+Other 5xx errors (500/502…) can be specific to one input, for example a server
+that returns 500 on context overflow. After each one, distill sends a canary:
+it classifies one known-benign capture with the real schema. If the canary
+fails, it is the provider: the run aborts, and any provisional charges from
+earlier in the run are dropped. If the canary succeeds, the chunk is bisected,
+however many poison rows it holds. A lone row is charged, provisionally, only
+if it fails again on a second attempt after the healthy canary, so a transient
+500 is never charged. Any number of poison captures, including a queue holding
+nothing else, is therefore isolated and quarantined, while a flapping provider
+(one that fails every real batch) charges nothing and costs a few calls per
+run.
 Retries honour
 a `Retry-After` header of up to 30 s; a longer one aborts at once instead of
 waiting.

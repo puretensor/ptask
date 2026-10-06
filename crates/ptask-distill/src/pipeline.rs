@@ -452,6 +452,10 @@ const CHUNK: usize = 25;
 /// calls, never permanent non-consumption.
 const MAX_SOURCES_PER_CANDIDATE: usize = 8;
 
+/// A capture any healthy provider classifies without trouble. Used as the
+/// canary that separates a poison input from a failing provider.
+const CANARY_CAPTURE: &str = "I will renew the office lease next week.";
+
 /// Ceiling on provider calls per run. Failure isolation halves a failing
 /// chunk, so a pathologically bad batch could otherwise fan out to ~2N calls.
 /// Hitting the ceiling ends the run early; whatever succeeded is still
@@ -601,11 +605,8 @@ struct RunState {
     /// The provider became unavailable mid-run (see `ProviderUnavailable`):
     /// no further call starts and nothing more is charged.
     aborted: bool,
-    /// The one failing path a server-class error may be blamed on this run:
-    /// the ids of the most recent chunk on it. Set after a healthy
-    /// re-preflight and narrowed as bisection follows the failure down.
-    suspect: Option<std::collections::HashSet<i64>>,
-    /// Charges from that path, applied only if the run does not abort.
+    /// Charges blamed on input after a server error (canary healthy), applied
+    /// only if the run does not later conclude the provider is failing.
     provisional_failures: Vec<(i64, String)>,
 }
 
@@ -797,54 +798,60 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
         Err(e) => e,
     };
     let mut e = e;
-    if let Some(class) = e.outage {
-        // A server-class error (500/502/504…) can be deterministic for one
-        // input — Gemini 500s on some content, a local server 500s on context
+    if e.outage == Some(crate::providers::FailureClass::Server) {
+        // A server-class error (500/502…) can be deterministic for one input
+        // — Gemini 500s on some content, a local server 500s on context
         // overflow — and aborting on it would stall the oldest-first queue
-        // forever. So it may be blamed on input, but only along ONE failing
-        // path per run: the first time, a healthy re-preflight opens the
-        // path; after that only a sub-chunk of the path's latest chunk (the
-        // bisection following one poison row down) may fail. Any other
-        // failure — a second, disjoint failing chunk, or both halves failing
-        // — means the provider is flapping, not the data: abort uncharged
-        // and drop the path's provisional charges. Every other class
-        // (rate limit, overload, timeout, transport, auth) describes the
-        // provider and always aborts.
-        let ids: std::collections::HashSet<i64> = items.iter().map(|i| i.id).collect();
-        let input_specific = class == crate::providers::FailureClass::Server
-            && match &st.suspect {
-                None => {
-                    st.calls += 1;
-                    match provider.preflight() {
-                        Ok(()) => true,
-                        Err(p) => {
-                            e.reason = format!("{} (preflight also failed: {p:#})", e.reason);
-                            false
+        // forever. A preflight cannot tell that apart from a provider that
+        // answers tiny requests but fails real batches (flapping), so ask a
+        // canary: classify one known-benign capture with the real schema. If
+        // the canary succeeds, the provider is serving classify requests and
+        // this chunk's content is the cause: bisect it, however many poison
+        // rows it holds. If the canary fails, it is the provider: abort.
+        st.calls += 1;
+        let canary_ok = matches!(
+            provider.classify_batch(&[CANARY_CAPTURE.to_string()]),
+            Ok(v) if v.len() == 1
+        );
+        if !canary_ok {
+            e.reason = format!(
+                "{} (a benign canary classify failed too — the provider, not the input)",
+                e.reason
+            );
+        } else {
+            if items.len() == 1 {
+                // Confirm before charging: the lone row must fail AGAIN after
+                // the healthy canary, so a transient 500 is never charged.
+                match process_chunk(db, provider, items, dedup, st, ctx) {
+                    Ok(uncovered) => {
+                        if !uncovered.is_empty() {
+                            walk_chunk(db, provider, &uncovered, dedup, st, ctx);
                         }
+                        return;
                     }
+                    Err(again) => e = again,
                 }
-                Some(path) => ids.is_subset(path),
-            };
-        if input_specific {
-            warn!(
-                target: "ptask::distill",
-                chunk = items.len(),
-                error = %e.reason,
-                "server error with a healthy provider — treating it as input-specific"
-            );
-            st.suspect = Some(ids);
-            e.abort = false;
-            e.chargeable = true;
-            e.provisional = true;
-        } else if !st.provisional_failures.is_empty() {
-            warn!(
-                target: "ptask::distill",
-                dropped = st.provisional_failures.len(),
-                "a second provider failure this run — the earlier one was the provider too; \
-                 dropping its provisional charges"
-            );
-            st.provisional_failures.clear();
+            }
+            if e.outage == Some(crate::providers::FailureClass::Server) {
+                warn!(
+                    target: "ptask::distill",
+                    chunk = items.len(),
+                    error = %e.reason,
+                    "server error while a canary classify succeeds — treating it as input-specific"
+                );
+                e.abort = false;
+                e.chargeable = true;
+                e.provisional = true;
+            }
         }
+    }
+    if e.abort && !st.provisional_failures.is_empty() {
+        warn!(
+            target: "ptask::distill",
+            dropped = st.provisional_failures.len(),
+            "the provider itself failed later in this run — dropping the provisional charges"
+        );
+        st.provisional_failures.clear();
     }
     if st.first_error.is_none() || e.abort {
         st.first_error = Some(e.reason.clone());
@@ -1066,8 +1073,8 @@ fn create_candidates<P: LlmProvider + ?Sized>(
 /// credentials — `ProviderUnavailable`) is different: it aborts the run at
 /// once, without bisecting and without charging anything, and the run fails
 /// closed after marking the chunks that finished. The one exception is a
-/// server-class 5xx with a healthy re-preflight, which may be blamed on input
-/// along a single bisection path per run (provisionally — see `walk_chunk`).
+/// server-class 5xx while a benign canary classify succeeds, which is blamed
+/// on the input and bisected (charged provisionally — see `walk_chunk`).
 ///
 /// A run in which nothing got through still fails closed. Note what that does
 /// NOT mean: an attempt is charged whether or not anything else succeeded this
@@ -2364,6 +2371,108 @@ mod tests {
         }
     }
 
+    /// Server-500s any batch containing "POISON"; fails the first batch
+    /// containing "FLAKY" once (a transient 500), then answers normally.
+    struct ServerPoison {
+        flaked: std::cell::Cell<bool>,
+    }
+    impl ServerPoison {
+        fn new() -> Self {
+            Self {
+                flaked: std::cell::Cell::new(false),
+            }
+        }
+    }
+    impl LlmProvider for ServerPoison {
+        fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+            let flaky = texts.iter().any(|t| t.contains("FLAKY")) && !self.flaked.replace(true);
+            if flaky || texts.iter().any(|t| t.contains("POISON")) {
+                return Err(anyhow::Error::new(
+                    crate::providers::ProviderUnavailable::new(
+                        crate::providers::FailureClass::Server,
+                        "request failed after 3 attempt(s): http 500",
+                    ),
+                ));
+            }
+            PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+        }
+        fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+            PoisonProvider { poison: "\u{0}" }.consolidate(items)
+        }
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "server-poison-test"
+        }
+    }
+
+    /// Seed `n` distinct rows, with the rows at `poison_at` made poison.
+    fn seed_with_poisons(db: &Db, n: usize, poison_at: &[usize]) -> (Vec<String>, Vec<String>) {
+        let (mut healthy, mut poison) = (Vec::new(), Vec::new());
+        for i in 0..n {
+            let t = if poison_at.contains(&i) {
+                format!("POISON capture {i}")
+            } else {
+                format!("distinct capture number {i} about topic {}", i * 7919)
+            };
+            ptask_core::raw_items::insert(db, &t, "test", "test://x").unwrap();
+            if poison_at.contains(&i) {
+                poison.push(t);
+            } else {
+                healthy.push(t);
+            }
+        }
+        (healthy, poison)
+    }
+
+    /// Regression (round 4, DIST-5): with two or more poison-500 rows in the
+    /// oldest chunk, both halves of a split failed (or a second path
+    /// failed), the run aborted and dropped every charge — neither poison
+    /// was ever charged and the queue stalled permanently. A per-failure
+    /// canary classify now tells a poison input from a failing provider.
+    #[test]
+    fn several_poison_500s_are_all_isolated_and_the_queue_moves() {
+        for (n, poison_at) in [
+            (22, vec![3, 15]),
+            (13, vec![4, 5, 6]),
+            (5, vec![0, 1, 2, 3, 4]),
+        ] {
+            let (_dir, db) = fresh_db();
+            let (healthy, poison) = seed_with_poisons(&db, n, &poison_at);
+            for _ in 0..ptask_core::raw_items::MAX_DISTILL_ATTEMPTS {
+                let _ = run_native(&db, &ServerPoison::new(), 300);
+            }
+            assert_eq!(
+                ptask_core::raw_items::quarantined_count(&db).unwrap() as usize,
+                poison.len(),
+                "{poison_at:?}: every poison quarantined after the attempt limit"
+            );
+            assert!(
+                healthy.iter().all(|t| attempts(&db, t) == 0),
+                "{poison_at:?}: a healthy row was charged"
+            );
+            assert_eq!(
+                ptask_core::raw_items::unprocessed_count(&db).unwrap() as usize,
+                poison.len(),
+                "{poison_at:?}: every healthy row consumed"
+            );
+        }
+    }
+
+    /// Regression (round 4, DIST-5): a transient 500 on a near-empty queue
+    /// was charged immediately (healthy re-preflight), so three unlucky runs
+    /// could quarantine a good capture. A row is charged only if it fails
+    /// again after a successful canary.
+    #[test]
+    fn a_transient_500_on_a_lone_row_is_not_charged() {
+        let (_dir, db) = fresh_db();
+        seed_inbox(&db, &["FLAKY: call the bank about the mandate"]);
+        let report = run_native(&db, &ServerPoison::new(), 100).unwrap();
+        assert_eq!(report.consumed, 1);
+        assert_eq!(attempts(&db, "FLAKY: call the bank about the mandate"), 0);
+    }
+
     /// Regression (round 2, DIST-5): a capture that deterministically gets a
     /// 5xx/408 (Gemini 500 on certain inputs, a local server 500 on context
     /// overflow) was treated as an outage, aborting every run before
@@ -2415,10 +2524,8 @@ mod tests {
         assert_eq!(report.consumed, 3, "the queue moves past the poison row");
         assert_eq!(report.failed, 1);
         assert_eq!(attempts(&db, "POISON memo that overflows the context"), 1);
-        assert!(
-            provider.preflights.get() >= 2,
-            "re-checked liveness before blaming input"
-        );
+        // Blame is decided by a canary classify, not a re-preflight.
+        assert_eq!(provider.preflights.get(), 1);
 
         // Alone in the queue it is still charged each run, then quarantined.
         for _ in 1..ptask_core::raw_items::MAX_DISTILL_ATTEMPTS {
@@ -2484,7 +2591,8 @@ mod tests {
         };
         let err = run_native(&db, &provider, 100).unwrap_err();
         assert!(err.to_string().contains("provider unavailable"), "{err:#}");
-        assert_eq!(provider.calls.get(), 1, "an outage must not be bisected");
+        // The failing classify plus one canary classify; never bisected.
+        assert_eq!(provider.calls.get(), 2, "an outage must not be bisected");
         for t in texts {
             assert_eq!(attempts(&db, t), 0, "{t} was charged for an outage");
         }
@@ -2503,7 +2611,8 @@ mod tests {
             healthy_calls: 1,
         };
         assert!(run_native(&db, &provider, 200).is_err());
-        assert_eq!(provider.calls.get(), 2, "the run stops at the first outage");
+        // One healthy chunk, the failing classify, one canary: then it stops.
+        assert_eq!(provider.calls.get(), 3, "the run stops at the first outage");
         assert_eq!(
             ptask_core::raw_items::unprocessed_count(&db).unwrap(),
             (CHUNK * 2) as i64,
