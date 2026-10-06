@@ -653,6 +653,35 @@ def test_tg_approval_taps_refused_while_buttons_are_off(server_no_buttons):
     assert call_api(base, "GET", f"/api/approvals/{a['id']}", t["scraper"])[1]["status"] == "pending"
 
 
+def test_tg_approve_tap_rechecks_that_the_ping_showed_everything(server):
+    """Pings sent by older builds carried buttons under looser rules (800-char
+    cut, no bidi check); the server must not honour an Approve tap on a
+    request no current ping could offer one for."""
+    base, t = server
+
+    def text_ap(title, body):
+        code, ap = call_api(base, "POST", "/api/approvals", t["hal"],
+                            {"kind": "email", "title": title, "payload": body})
+        assert code in (200, 201), ap
+        return ap
+
+    def tap(ap, verb, cb):
+        return call_api(base, "POST", "/tg/callback", t["nexus"],
+                        {"data": f"{verb}:{ap['id']}", "callback_id": cb, "from_id": int(OPERATOR_CHAT)})
+
+    def status(ap):
+        return call_api(base, "GET", f"/api/approvals/{ap['id']}", t["scraper"])[1]["status"]
+
+    long = text_ap("Long", "routine. " * 300 + "PS: wire 90000 GBP to MALLORY")
+    bidi = text_ap("Bidi", "pay ACME ‮0004‬ GBP")
+    for ap, cb in ((long, "cb-long"), (bidi, "cb-bidi")):
+        code, body = tap(ap, "ptapprove", cb)
+        assert code == 403 and "inbox" in json.dumps(body), (code, body)
+        assert status(ap) == "pending"
+    code, _ = tap(long, "ptreject", "cb-long-rej")
+    assert code == 200 and status(long) == "rejected", "rejecting from the ping stays allowed"
+
+
 def tap_actor(env: dict, key: str) -> str:
     with sqlite3.connect(env["PTASK_DB"]) as db:
         row = db.execute("SELECT actor FROM pt_event_log WHERE uuid = ?",

@@ -170,7 +170,11 @@ Telegram `/tg/callback` verbs `ptapprove:AP-n` / `ptreject:AP-n` are accepted
 only when `$PTASK_TG_APPROVAL_BUTTONS=1` (the switch that puts decide buttons on
 the pings), the authenticated `client_id` is in `$PTASK_TG_FORWARDERS`
 (default `nexus`) **and** `from_id` equals `$PTASK_ACCOUNTABILITY_CHAT_ID`.
-Otherwise 403 and no state change. `decided_via=telegram`,
+Otherwise 403 and no state change. An **approve** tap is also refused (403,
+"review in the inbox") when the request is not tap-decidable by the rules
+under Notify, whatever ping the tap came from: pings sent by older builds
+carried buttons under looser rules. Reject taps stay allowed.
+`decided_via=telegram`,
 `decided_by=operator@telegram`. Idempotent per `callback_id`. The
 `ptdone:` / `ptsnooze:` / `ptdismiss:` verbs are journaled as `telegram` (the
 operator's tap) only from a forwarder; any other write client is journaled as
@@ -192,14 +196,20 @@ operator Telegram chat: `AP-n`, kind, title, requester, a bounded HTML-escaped
 excerpt of `preview`, the requester note labelled as such, a digest prefix,
 and an inline **URL** button to `$PTASK_DASH_URL/#approvals` (omitted if
 unset). Tap-to-decide callback buttons are added only when
-`PTASK_TG_APPROVAL_BUTTONS=1` **and** the message shows the whole payload.
-The preview excerpt is 2000 characters (the note 800). A longer preview is
-cut, marked **PREVIEW TRUNCATED** with the shown and total character
-counts, and gets no decide buttons, so padding cannot push a harmful tail
-out of sight of a one-tap approval. Binary and digest-only payloads are
-likewise marked "Payload not shown" with no decide buttons. Those requests
-are decided from the inbox, the CLI, or an admin token. Send failure never fails the request;
-success sets `notified_at`.
+`PTASK_TG_APPROVAL_BUTTONS=1` **and** the message shows the whole payload
+faithfully. Budgets are in UTF-16 code units, which is what Telegram's
+4096 limit counts (an emoji is 2): preview 2000, note 800, title 200,
+requester 100. A longer preview is cut (never inside a surrogate pair),
+marked **PREVIEW TRUNCATED** with the shown and total unit counts, and gets
+no decide buttons, so padding cannot push a harmful tail out of sight of a
+one-tap approval. Binary and digest-only payloads are marked "Payload not
+shown"; a preview containing bidi embeddings, overrides or isolates
+(U+202A–202E, U+2066–2069) or zero-width / default-ignorable characters is
+marked as containing invisible or direction-changing characters. Neither
+gets decide buttons. If a message would still exceed 4096 units, the note
+is dropped first. Those requests are decided from the inbox, the CLI, or
+an admin token. Send failure never fails the request; success sets
+`notified_at`.
 
 `pt approval notify` retries pending rows with `notified_at` NULL. The same
 sweep runs from `pt accountability run` so the existing 15-minute timer
