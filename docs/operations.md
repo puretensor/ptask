@@ -182,7 +182,18 @@ batches. Claims of 1-2 captures are trusted, and so is a lone capture's own
 answer, whether that answer creates a task or dedups against an existing one,
 even when the model numbers its sources from 1. A lexical check would reject
 honest paraphrases such as "tell hal to fix the raid" → "Replace failed disk
-in storage array". Tasks returned without `sources` cover nothing.
+in storage array".
+
+A lone capture whose answer dedups against an existing task is audited:
+- a match against a task created earlier in the same run always stands;
+- a match where the capture's text supports either title stands silently;
+- otherwise the match still stands, but a `distill.lone_unsupported_dedup`
+  event records the capture and the matched task for review;
+- the exception is an unsupported match against a done or dismissed task: the
+  capture is left unconsumed and uncharged rather than silently filed under
+  closed work. It is retried each run.
+
+Tasks returned without `sources` cover nothing.
 They are counted as `sourceless_candidates` in the `distill.run` payload and
 printed by `pt distill`; a non-zero count means the model is ignoring the
 schema and burning calls on re-walks. A consolidation

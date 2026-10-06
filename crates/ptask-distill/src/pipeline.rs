@@ -333,7 +333,95 @@ fn is_ordinal(t: &str) -> bool {
 /// deduped candidate has been allowed to cover.
 struct Coverage<'a> {
     texts: &'a [String],
+    /// raw_items ids, index-aligned with `texts`.
+    ids: &'a [i64],
     covered: &'a mut [bool],
+    /// Set when a lone capture was left uncovered on purpose (see
+    /// [`Coverage::cover`]); the chunk is then deferred, never charged.
+    blocked: &'a mut bool,
+}
+
+/// The existing task a dedup gate matched.
+struct Matched<'m> {
+    id: Option<&'m str>,
+    title: &'m str,
+    created_this_run: bool,
+    closed: bool,
+}
+
+impl Coverage<'_> {
+    /// Mark the captures `sources` claims as covered by a candidate titled
+    /// `title`, created (`matched` = None) or deduped against `matched`.
+    ///
+    /// Over-merge claims (3+ sources) must be supported by each capture's own
+    /// text; 1-2 source claims are trusted. A lone capture's answer is
+    /// trusted too, with an audit for dedup matches: a match against a task
+    /// created this run always stands; otherwise it stands if the capture
+    /// supports the matched or the candidate title, and if neither does it
+    /// still stands but is recorded as `distill.lone_unsupported_dedup` —
+    /// unless the matched task is done or dismissed, in which case the
+    /// capture is left unconsumed and uncharged rather than silently
+    /// filed under closed work.
+    fn cover(
+        &mut self,
+        sources: &[usize],
+        title: &str,
+        matched: Option<Matched<'_>>,
+        db: &Db,
+        ctx: &EventCtx,
+    ) {
+        let lone = self.texts.len() == 1;
+        let trusted = lone || sources.len() < OVER_MERGE_SOURCES;
+        for &i in sources {
+            let capture = &self.texts[i];
+            if lone && let Some(m) = &matched {
+                let supported = m.created_this_run
+                    || source_supports(capture, m.title)
+                    || source_supports(capture, title);
+                if !supported && m.closed {
+                    warn!(
+                        target: "ptask::distill",
+                        raw_item = self.ids[i],
+                        matched = m.title,
+                        "lone capture matches a closed task its text does not support — left for review"
+                    );
+                    *self.blocked = true;
+                    continue;
+                }
+                if !supported {
+                    let payload = serde_json::json!({
+                        "raw_item_id": self.ids[i],
+                        "matched_task": m.id,
+                        "matched_title": m.title,
+                        "candidate_title": title,
+                    });
+                    let uuid = format!("distill-lone-dedup:{}", uuid::Uuid::new_v4());
+                    if let Err(e) = event_log::record(
+                        db,
+                        &uuid,
+                        m.id,
+                        "distill.lone_unsupported_dedup",
+                        &payload,
+                        ctx,
+                    ) {
+                        warn!(target: "ptask::distill", error = %e, "lone-dedup audit event failed");
+                    }
+                }
+                self.covered[i] = true;
+                continue;
+            }
+            if trusted || source_supports(capture, title) {
+                self.covered[i] = true;
+            } else {
+                warn!(
+                    target: "ptask::distill",
+                    title,
+                    capture = %capture.chars().take(80).collect::<String>(),
+                    "candidate claims a capture its text does not support — not consumed"
+                );
+            }
+        }
+    }
 }
 
 /// Words too common to show that a capture is about a task.
@@ -430,6 +518,13 @@ fn select_kept(texts: &[String], verdicts: &[Classification]) -> Result<Vec<usiz
     Ok(kept)
 }
 
+fn closed_task_ids(db: &Db) -> Result<std::collections::HashSet<String>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare("SELECT id FROM tasks WHERE status_v2 IN ('done','dismissed')")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 fn existing_tasks_since(db: &Db, cutoff: &str) -> Result<Vec<(String, String)>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
@@ -489,6 +584,10 @@ const RUN_WALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20 *
 /// the same run can't create the same task twice.
 struct Dedup {
     existing: Vec<(String, String)>,
+    /// Ids in `existing` that are done or dismissed.
+    closed: std::collections::HashSet<String>,
+    /// Ids of tasks this run created.
+    created_this_run: std::collections::HashSet<String>,
     #[cfg(feature = "native-ml")]
     embedder: LazyEmbedder,
     /// Embeddings of `existing`, index-aligned, computed once per run on the
@@ -508,6 +607,8 @@ impl Dedup {
         );
         Ok(Self {
             existing: existing_tasks_since(db, &cutoff)?,
+            closed: closed_task_ids(db)?,
+            created_this_run: Default::default(),
             #[cfg(feature = "native-ml")]
             embedder: LazyEmbedder::default(),
             #[cfg(feature = "native-ml")]
@@ -714,6 +815,7 @@ fn process_chunk<P: LlmProvider + ?Sized>(
         .map_err(ChunkError::provider)?;
     let kept = select_kept(&texts, &verdicts).map_err(ChunkError::provider)?;
     let mut covered = vec![false; kept.len()];
+    let mut blocked = false;
     if !kept.is_empty() {
         st.calls += 1;
         let kept_texts: Vec<String> = kept.iter().map(|&i| texts[i].clone()).collect();
@@ -758,7 +860,9 @@ fn process_chunk<P: LlmProvider + ?Sized>(
             candidates,
             Coverage {
                 texts: &kept_texts,
+                ids: &kept.iter().map(|&i| items[i].id).collect::<Vec<_>>(),
                 covered: &mut covered,
+                blocked: &mut blocked,
             },
             dedup,
             st,
@@ -767,6 +871,14 @@ fn process_chunk<P: LlmProvider + ?Sized>(
         .map_err(ChunkError::local)?;
     }
     let covered_len = covered.iter().filter(|&&c| c).count();
+    if blocked && covered_len == 0 {
+        // Deliberately left for review (a lone capture that would otherwise
+        // be filed under closed work it does not mention): not the capture's
+        // fault, so never charged — retried next run.
+        return Err(ChunkError::local(anyhow::anyhow!(
+            "lone capture matches only a done/dismissed task its text does not support — left unconsumed"
+        )));
+    }
     if chunk_disposition(kept.len(), covered_len) == ChunkDisposition::Retain {
         // Preserve the input, but use the same isolation and bounded retry
         // path as other provider failures. Returning success leaves the
@@ -959,34 +1071,8 @@ fn create_candidates<P: LlmProvider + ?Sized>(
     st: &mut RunState,
     ctx: &EventCtx,
 ) -> Result<()> {
-    // Coverage is the model's claim. It is checked against the captures'
-    // own text only for an over-merge — a candidate claiming 3+ sources,
-    // the shape of a catch-all "Do everything" that consumed unrelated work.
-    // A lone capture (its candidate, created or deduped, can only be about
-    // it) and a 1–2 source claim are trusted: a lexical check rejects too
-    // many honest paraphrases ("tell hal to fix the raid" → "Replace failed
-    // disk in storage array") and would quarantine captures whose tasks
-    // exist.
-    let Coverage {
-        texts: source_texts,
-        covered,
-    } = coverage;
-    let lone = source_texts.len() == 1;
-    let mut cover = |sources: &[usize], title: &str| {
-        let trusted = lone || sources.len() < OVER_MERGE_SOURCES;
-        for &i in sources {
-            if trusted || source_supports(&source_texts[i], title) {
-                covered[i] = true;
-            } else {
-                warn!(
-                    target: "ptask::distill",
-                    title,
-                    capture = %source_texts[i].chars().take(80).collect::<String>(),
-                    "candidate claims a capture its text does not support — not consumed"
-                );
-            }
-        }
-    };
+    // Coverage rules: see `Coverage::cover`.
+    let mut coverage = coverage;
     for mut cand in candidates {
         // A blank title is not a task. It is skipped without covering its
         // sources, so those captures go round again instead of being
@@ -1003,13 +1089,19 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         if cand.sources.is_empty() {
             warn!(target: "ptask::distill", title = %cand.title, "candidate names no source captures — it covers none");
         }
-        if dedup
+        if let Some((id, matched_title)) = dedup
             .existing
             .iter()
-            .any(|(_, t)| title_similar(t, &cand.title))
+            .find(|(_, t)| title_similar(t, &cand.title))
         {
             st.skipped += 1;
-            cover(&cand.sources, &cand.title);
+            let matched = Matched {
+                id: Some(id),
+                title: matched_title,
+                created_this_run: dedup.created_this_run.contains(id),
+                closed: dedup.closed.contains(id),
+            };
+            coverage.cover(&cand.sources, &cand.title, Some(matched), db, ctx);
             info!(target: "ptask::distill", title = %cand.title, "dedup skip (jaccard)");
             continue;
         }
@@ -1021,7 +1113,15 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         {
             Ok(true) => {
                 st.skipped += 1;
-                cover(&cand.sources, &cand.title);
+                // Same candidate text distilled within 7 days: the task it
+                // made is not identified here, so it is matched by title.
+                let matched = Matched {
+                    id: None,
+                    title: &cand.title,
+                    created_this_run: false,
+                    closed: false,
+                };
+                coverage.cover(&cand.sources, &cand.title, Some(matched), db, ctx);
                 info!(target: "ptask::distill", title = %cand.title, "dedup skip (temporal)");
                 continue;
             }
@@ -1042,7 +1142,13 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             {
                 let (dup_id, dup_title) = dedup.existing[idx].clone();
                 st.skipped += 1;
-                cover(&cand.sources, &cand.title);
+                let matched = Matched {
+                    id: Some(&dup_id),
+                    title: &dup_title,
+                    created_this_run: dedup.created_this_run.contains(&dup_id),
+                    closed: dedup.closed.contains(&dup_id),
+                };
+                coverage.cover(&cand.sources, &cand.title, Some(matched), db, ctx);
                 info!(
                     target: "ptask::distill",
                     title = %cand.title,
@@ -1109,9 +1215,10 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             (Some(_), None) => dedup.existing_vecs = None,
             (None, _) => {}
         }
+        dedup.created_this_run.insert(created.id.clone());
         dedup.existing.push((created.id, title));
         st.created += 1;
-        cover(&cand.sources, &cand.title);
+        coverage.cover(&cand.sources, &cand.title, None, db, ctx);
     }
     Ok(())
 }
@@ -2373,6 +2480,112 @@ mod tests {
         }
         let report = run_native(&db, &Paraphraser, 100).unwrap();
         assert_eq!((report.created, report.consumed, report.failed), (0, 4, 0));
+    }
+
+    /// Answers every item with the same fixed title, one candidate each.
+    struct FixedTitle(&'static str);
+    impl LlmProvider for FixedTitle {
+        fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+            PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+        }
+        fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+            Ok((0..items.len())
+                .map(|i| Candidate {
+                    title: self.0.into(),
+                    priority: 2,
+                    description: String::new(),
+                    sources: vec![i],
+                })
+                .collect())
+        }
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "fixed-title-test"
+        }
+    }
+
+    fn lone_unsupported_events(db: &Db) -> Vec<String> {
+        db.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT json_extract(payload, '$.matched_task') FROM pt_event_log
+                  WHERE event_type = 'distill.lone_unsupported_dedup'",
+            )?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+    }
+
+    fn existing_task(db: &Db, title: &str, closed: bool) -> String {
+        let t = ptask_core::tasks::create(db, NewTask::minimal(title), &EventCtx::test()).unwrap();
+        if closed {
+            db.with_conn(|c| {
+                c.execute(
+                    "UPDATE tasks SET status='done', status_v2='done' WHERE id=?1",
+                    [&t.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        t.id
+    }
+
+    /// Regression (round 5, DIST-1a audit): a lone capture's dedup match was
+    /// trusted blindly. Each branch of the guard:
+    /// (i) a task created earlier in this run always matches;
+    /// (ii) otherwise a supported match is silent, an unsupported one is
+    ///      still consumed but recorded as `distill.lone_unsupported_dedup`;
+    /// (iii) an unsupported match against a done/dismissed task is blocked:
+    ///      left unconsumed and uncharged.
+    #[test]
+    fn a_lone_dedup_match_is_audited_and_blocked_only_against_closed_work() {
+        // (i) chunk 2's lone capture matches the task chunk 1 created.
+        let (_dir, db) = fresh_db();
+        for i in 0..=CHUNK {
+            let t = format!("unrelated errand number {i} about topic {}", i * 7919);
+            ptask_core::raw_items::insert(&db, &t, "test", "test://x").unwrap();
+        }
+        let report = run_native(&db, &FixedTitle("Renew the office lease"), 100).unwrap();
+        assert_eq!(report.consumed, CHUNK + 1);
+        assert!(lone_unsupported_events(&db).is_empty());
+
+        // (ii-a) supported match against an open task: consumed, silent.
+        let (_dir, db) = fresh_db();
+        existing_task(&db, "Book dentist appointment", false);
+        seed_inbox(&db, &["dentist booking needed soon"]);
+        let report = run_native(&db, &FixedTitle("Book dentist appointment"), 100).unwrap();
+        assert_eq!((report.consumed, report.created), (1, 0));
+        assert!(lone_unsupported_events(&db).is_empty());
+
+        // (ii-b) unsupported match against an open task: consumed, recorded.
+        let (_dir, db) = fresh_db();
+        let open = existing_task(&db, "Replace failed disk in storage array", false);
+        seed_inbox(&db, &["tell hal to fix the raid"]);
+        let report = run_native(
+            &db,
+            &FixedTitle("Replace failed disk in storage array"),
+            100,
+        )
+        .unwrap();
+        assert_eq!(report.consumed, 1);
+        assert_eq!(lone_unsupported_events(&db), vec![open]);
+
+        // (iii) unsupported match against a DONE task: blocked, uncharged.
+        let (_dir, db) = fresh_db();
+        existing_task(&db, "Replace failed disk in storage array", true);
+        seed_inbox(&db, &["tell hal to fix the raid"]);
+        let _ = run_native(
+            &db,
+            &FixedTitle("Replace failed disk in storage array"),
+            100,
+        );
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+        assert_eq!(attempts(&db, "tell hal to fix the raid"), 0);
     }
 
     /// Normal consolidation still covers: several captures about one thing,
