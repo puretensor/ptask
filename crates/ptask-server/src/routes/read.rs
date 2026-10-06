@@ -74,7 +74,8 @@ async fn list(
             Some(Err(e)) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("filter: {e}")})),
+                    // parse errors already read "filter: ...".
+                    Json(serde_json::json!({"error": e.to_string()})),
                 )
                     .into_response();
             }

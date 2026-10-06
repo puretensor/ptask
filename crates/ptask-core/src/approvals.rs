@@ -492,7 +492,11 @@ fn get_in_conn(conn: &rusqlite::Connection, id: &str) -> Result<Approval> {
     } else {
         load_by_uuid_conn(conn, id.trim())?
     };
-    found.ok_or_else(|| Error::Approval(ApprovalError::NotFound(id.trim().to_string())))
+    found.ok_or_else(|| {
+        Error::Approval(ApprovalError::NotFound(
+            crate::text::one_line(id.trim()).into_owned(),
+        ))
+    })
 }
 
 pub fn list(db: &Db, status: Option<&str>) -> Result<Vec<Approval>> {

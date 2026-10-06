@@ -54,6 +54,27 @@ struct PushEvent {
 struct PushRepository {
     #[serde(default)]
     pub default_branch: Option<String>,
+    /// `owner/name`, matched against `PTASK_GIT_CLOSE_REPOS`.
+    #[serde(default)]
+    pub full_name: Option<String>,
+}
+
+/// Most distinct PT-N a single delivery may close. Every commit in a
+/// default-branch push is scanned, inner commits of a merged PR included,
+/// so one PR carrying `Closes PT-1 ... Closes PT-900` closed 900 tasks.
+const MAX_CLOSES_PER_DELIVERY: usize = 20;
+/// Most over-cap ids echoed back in `skipped`; `skipped_count` has them all.
+const MAX_REPORTED_SKIPS: usize = 100;
+
+/// Whether `full_name` may close tasks under the configured allowlist
+/// (empty = any repository holding the secret).
+fn repo_may_close(allowlist: &[String], full_name: Option<&str>) -> bool {
+    allowlist.is_empty()
+        || full_name.is_some_and(|name| {
+            allowlist
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(name.trim()))
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,8 +186,33 @@ async fn handle(
             .into_response();
     }
 
+    let full_name = event
+        .repository
+        .as_ref()
+        .and_then(|r| r.full_name.as_deref());
+    if !repo_may_close(&state.webhooks.git_close_repos, full_name) {
+        info!(
+            target: "ptask::webhook",
+            source,
+            repository = full_name.unwrap_or(""),
+            "ignoring close directives from a repository not in PTASK_GIT_CLOSE_REPOS"
+        );
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "closed": [],
+                "errors": [],
+                "skipped_repo": full_name,
+            })),
+        )
+            .into_response();
+    }
+
     let mut closed: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    // Over-cap ids: all counted, the first MAX_REPORTED_SKIPS reported.
+    let mut skipped: HashSet<String> = HashSet::new();
+    let mut skipped_report: Vec<String> = Vec::new();
     let mut handled_pt_ids: HashSet<String> = HashSet::new();
     let outbox = crate::webhooks::Outbox::start(state);
     for commit in &event.commits {
@@ -175,7 +221,7 @@ async fn handle(
             continue;
         }
         for pt_id in magic_words::pt_ids_to_close(&directives) {
-            if !handled_pt_ids.insert(pt_id.clone()) {
+            if handled_pt_ids.contains(&pt_id) {
                 info!(
                     target: "ptask::webhook",
                     source,
@@ -184,6 +230,14 @@ async fn handle(
                 );
                 continue;
             }
+            if handled_pt_ids.len() >= MAX_CLOSES_PER_DELIVERY {
+                if skipped_report.len() < MAX_REPORTED_SKIPS && !skipped.contains(&pt_id) {
+                    skipped_report.push(pt_id.clone());
+                }
+                skipped.insert(pt_id);
+                continue;
+            }
+            handled_pt_ids.insert(pt_id.clone());
             let event_uuid = close_event_uuid(source, commit, &pt_id);
             let close_state = state.clone();
             let close_pt_id = pt_id.clone();
@@ -243,14 +297,23 @@ async fn handle(
         );
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "closed": closed,
-            "errors": errors,
-        })),
-    )
-        .into_response()
+    let mut resp = serde_json::json!({
+        "closed": closed,
+        "errors": errors,
+    });
+    if !skipped.is_empty() {
+        warn!(
+            target: "ptask::webhook",
+            source,
+            cap = MAX_CLOSES_PER_DELIVERY,
+            skipped_count = skipped.len(),
+            first_skipped = ?skipped_report.iter().take(5).collect::<Vec<_>>(),
+            "close directives over the per-delivery cap were not applied"
+        );
+        resp["skipped"] = serde_json::json!(skipped_report);
+        resp["skipped_count"] = serde_json::json!(skipped.len());
+    }
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 enum CloseOutcome {

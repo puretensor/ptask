@@ -28,12 +28,23 @@ pub struct Reaped {
     pub updated_at: String,
 }
 
+/// A candidate whose dismiss failed, with the reason.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReapFailure {
+    #[serde(flatten)]
+    pub task: Reaped,
+    pub error: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReapReport {
     pub dry_run: bool,
     pub incident_ttl_days: i64,
     pub distilled_ttl_days: i64,
+    /// Dismissed (or, in dry-run, would be dismissed).
     pub reaped: Vec<Reaped>,
+    /// Candidates whose dismiss failed; `errors == failed.len()`.
+    pub failed: Vec<ReapFailure>,
     pub errors: usize,
 }
 
@@ -84,7 +95,7 @@ pub fn run(db: &Db, dry_run: bool, ctx: &EventCtx) -> Result<ReapReport> {
         rows.collect::<std::result::Result<_, _>>()?
     };
 
-    let mut errors = 0usize;
+    let mut failed = Vec::new();
     let reaped = if dry_run {
         candidates
     } else {
@@ -98,7 +109,10 @@ pub fn run(db: &Db, dry_run: bool, ctx: &EventCtx) -> Result<ReapReport> {
                 ),
                 Err(e) => {
                     tracing::warn!(target: "ptask::reap", uuid = %c.uuid, error = %e, "dismiss failed");
-                    errors += 1;
+                    failed.push(ReapFailure {
+                        task: c,
+                        error: e.to_string(),
+                    });
                 }
             }
         }
@@ -110,7 +124,8 @@ pub fn run(db: &Db, dry_run: bool, ctx: &EventCtx) -> Result<ReapReport> {
         incident_ttl_days: INCIDENT_TTL_DAYS,
         distilled_ttl_days: DISTILLED_TTL_DAYS,
         reaped,
-        errors,
+        errors: failed.len(),
+        failed,
     })
 }
 

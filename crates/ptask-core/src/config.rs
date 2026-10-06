@@ -100,6 +100,10 @@ pub struct WebhookConfig {
     pub gitea_secret: String,
     /// Shared secret verifying inbound GitHub `X-Hub-Signature-256`.
     pub github_secret: String,
+    /// Repositories (`repository.full_name`, case-insensitive) whose pushes
+    /// may close tasks (`$PTASK_GIT_CLOSE_REPOS`, comma-separated). Empty =
+    /// any repository holding the shared secret.
+    pub git_close_repos: Vec<String>,
 }
 
 /// Native distillation configuration.
@@ -217,6 +221,15 @@ impl Config {
                 outbound_secret: std::env::var("PTASK_WEBHOOK_SECRET").unwrap_or_default(),
                 gitea_secret: std::env::var("PTASK_GITEA_WEBHOOK_SECRET").unwrap_or_default(),
                 github_secret: std::env::var("PTASK_GITHUB_WEBHOOK_SECRET").unwrap_or_default(),
+                git_close_repos: std::env::var("PTASK_GIT_CLOSE_REPOS")
+                    .ok()
+                    .map(|s| {
+                        s.split(',')
+                            .map(|p| p.trim().to_string())
+                            .filter(|p| !p.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             },
             distill: DistillConfig {
                 llm_backend: env_nonempty("PTASK_LLM_BACKEND").unwrap_or_else(|| "local".into()),
@@ -410,6 +423,25 @@ mod tests {
             std::env::remove_var("LOCAL_LLM_URL");
             std::env::remove_var("LOCAL_LLM_MODEL");
         }
+    }
+
+    #[test]
+    fn git_close_repos_reads_a_trimmed_comma_list() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        unsafe {
+            std::env::set_var("PTASK_GIT_CLOSE_REPOS", " puretensor/ptask , ,org/infra ");
+        }
+        assert_eq!(
+            Config::from_env().webhooks.git_close_repos,
+            ["puretensor/ptask", "org/infra"]
+        );
+        unsafe {
+            std::env::remove_var("PTASK_GIT_CLOSE_REPOS");
+        }
+        assert!(Config::from_env().webhooks.git_close_repos.is_empty());
     }
 
     #[test]
