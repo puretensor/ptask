@@ -157,9 +157,15 @@ deduplicated task covers it. Kept captures the model left uncovered are
 walked again as a smaller chunk in the same run, so a model that stops early
 or merges too eagerly cannot make a commitment disappear. One task covers at
 most 8 captures (`MAX_SOURCES_PER_CANDIDATE`); captures beyond that go round
-again instead of being consumed on a single over-merged answer. A lone
-capture is always credited to the tasks it produced, even when the model
-numbers its sources from 1. Tasks returned without `sources` cover nothing.
+again instead of being consumed on a single over-merged answer. A task also
+covers a capture only if that capture's own text supports the title: at least
+half of the title's content words appear in it, where a shared prefix of 4+
+letters counts as a match. A catch-all title such as "Do everything" therefore
+consumes nothing, and the captures go round again as singles. A lone capture
+is always credited to a task newly created from it, even when the model
+numbers its sources from 1. A dedup match must still be supported by the
+capture's text, so a lone capture cannot vanish into an unrelated existing
+task; it is charged and eventually quarantined instead. Tasks returned without `sources` cover nothing.
 They are counted as `sourceless_candidates` in the `distill.run` payload and
 printed by `pt distill`; a non-zero count means the model is ignoring the
 schema and burning calls on re-walks. A consolidation

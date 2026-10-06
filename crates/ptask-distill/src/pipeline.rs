@@ -329,6 +329,52 @@ fn is_ordinal(t: &str) -> bool {
         .any(|suffix| t.strip_suffix(suffix).is_some_and(is_small_number))
 }
 
+/// The kept captures handed to consolidate, and which of them a created or
+/// deduped candidate has been allowed to cover.
+struct Coverage<'a> {
+    texts: &'a [String],
+    covered: &'a mut [bool],
+}
+
+/// Words too common to show that a capture is about a task.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from", "get", "i", "in", "is",
+    "it", "me", "my", "of", "on", "or", "our", "re", "so", "that", "the", "this", "to", "up", "we",
+    "will", "with",
+];
+
+/// Does a capture's own text plausibly support a candidate title? At least
+/// half of the title's content words must appear in the capture, with a
+/// shared prefix of 4+ letters counting as a match ("renewal" ~ "renew").
+/// Calibrated for short titles against longer capture text: a genuine merge
+/// of differently worded captures about one thing passes, a catch-all title
+/// ("Do everything", "Follow up on items") does not.
+fn source_supports(capture: &str, title: &str) -> bool {
+    let content = |s: &str| -> Vec<String> {
+        analyse_title(s)
+            .0
+            .into_iter()
+            .filter(|w| !STOPWORDS.contains(&w.as_str()))
+            .collect()
+    };
+    let title_words = content(title);
+    if title_words.is_empty() {
+        return false;
+    }
+    let capture_words = content(capture);
+    let matches = |a: &str, b: &str| {
+        a == b || {
+            let common = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+            common >= 4
+        }
+    };
+    let hits = title_words
+        .iter()
+        .filter(|t| capture_words.iter().any(|c| matches(t, c)))
+        .count();
+    hits * 2 >= title_words.len()
+}
+
 /// Similarity gate: normalized token overlap (Jaccard on lowercase words),
 /// never across distinct identifiers. Cheap, deterministic, no model download.
 fn title_similar(a: &str, b: &str) -> bool {
@@ -669,8 +715,19 @@ fn process_chunk<P: LlmProvider + ?Sized>(
                 cand.sources.truncate(MAX_SOURCES_PER_CANDIDATE);
             }
         }
-        create_candidates(db, provider, candidates, &mut covered, dedup, st, ctx)
-            .map_err(ChunkError::local)?;
+        create_candidates(
+            db,
+            provider,
+            candidates,
+            Coverage {
+                texts: &kept_texts,
+                covered: &mut covered,
+            },
+            dedup,
+            st,
+            ctx,
+        )
+        .map_err(ChunkError::local)?;
     }
     let covered_len = covered.iter().filter(|&&c| c).count();
     if chunk_disposition(kept.len(), covered_len) == ChunkDisposition::Retain {
@@ -837,14 +894,34 @@ fn create_candidates<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
     candidates: Vec<crate::providers::Candidate>,
-    covered: &mut [bool],
+    coverage: Coverage<'_>,
     dedup: &mut Dedup,
     st: &mut RunState,
     ctx: &EventCtx,
 ) -> Result<()> {
-    let mut cover = |sources: &[usize]| {
+    // Coverage is the model's claim; accept it per source only when that
+    // capture's own text supports the title. The one exception is a lone
+    // capture whose candidate was just *created*: it can only have come from
+    // that capture, and the new task makes it visible. A dedup match is
+    // never taken on the model's word alone — that is how a repeated
+    // "Do everything" silently consumed unrelated work.
+    let Coverage {
+        texts: source_texts,
+        covered,
+    } = coverage;
+    let lone = source_texts.len() == 1;
+    let mut cover = |sources: &[usize], title: &str, created: bool| {
         for &i in sources {
-            covered[i] = true;
+            if (lone && created) || source_supports(&source_texts[i], title) {
+                covered[i] = true;
+            } else {
+                warn!(
+                    target: "ptask::distill",
+                    title,
+                    capture = %source_texts[i].chars().take(80).collect::<String>(),
+                    "candidate claims a capture its text does not support — not consumed"
+                );
+            }
         }
     };
     for mut cand in candidates {
@@ -869,7 +946,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             .any(|(_, t)| title_similar(t, &cand.title))
         {
             st.skipped += 1;
-            cover(&cand.sources);
+            cover(&cand.sources, &cand.title, false);
             info!(target: "ptask::distill", title = %cand.title, "dedup skip (jaccard)");
             continue;
         }
@@ -881,7 +958,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         {
             Ok(true) => {
                 st.skipped += 1;
-                cover(&cand.sources);
+                cover(&cand.sources, &cand.title, false);
                 info!(target: "ptask::distill", title = %cand.title, "dedup skip (temporal)");
                 continue;
             }
@@ -902,7 +979,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             {
                 let (dup_id, dup_title) = dedup.existing[idx].clone();
                 st.skipped += 1;
-                cover(&cand.sources);
+                cover(&cand.sources, &cand.title, false);
                 info!(
                     target: "ptask::distill",
                     title = %cand.title,
@@ -971,7 +1048,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         }
         dedup.existing.push((created.id, title));
         st.created += 1;
-        cover(&cand.sources);
+        cover(&cand.sources, &cand.title, true);
     }
     Ok(())
 }
@@ -1942,7 +2019,16 @@ mod tests {
     #[test]
     fn one_candidate_cannot_claim_a_whole_chunk() {
         let (_dir, db) = fresh_db();
-        distinct_captures(&db, 20);
+        // Twenty genuine repeats of one commitment (so relatedness holds).
+        for i in 0..20 {
+            ptask_core::raw_items::insert(
+                &db,
+                &format!("reminder {i}: reboot the fox-n1 node"),
+                "test",
+                "test://x",
+            )
+            .unwrap();
+        }
         let provider = SourcesProvider {
             map: |_| vec![],
             consolidations: std::cell::Cell::new(0),
@@ -1957,6 +2043,80 @@ mod tests {
             20,
             provider.consolidations.get()
         );
+    }
+
+    /// Answers every consolidation with one catch-all task covering
+    /// everything it was given.
+    struct CatchAll {
+        title: &'static str,
+        consolidations: std::cell::Cell<usize>,
+    }
+    impl LlmProvider for CatchAll {
+        fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+            PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+        }
+        fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+            self.consolidations.set(self.consolidations.get() + 1);
+            Ok(vec![Candidate {
+                title: self.title.into(),
+                priority: 2,
+                description: String::new(),
+                sources: (0..items.len()).collect(),
+            }])
+        }
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "catch-all-test"
+        }
+    }
+
+    /// Regression (round 3, DIST-1c): coverage was the model's word alone, so
+    /// a repeated "Do everything" consumed every capture, eight at a time,
+    /// mostly via dedup against the first "Do everything" task. A source is
+    /// now covered only if its own text supports the candidate title; the
+    /// rest go round as singles, where a dedup match must also be related.
+    #[test]
+    fn a_catch_all_title_cannot_consume_unrelated_captures() {
+        let (_dir, db) = fresh_db();
+        let texts = distinct_captures(&db, 10);
+        let provider = CatchAll {
+            title: "Do everything",
+            consolidations: std::cell::Cell::new(0),
+        };
+        let _ = run_native(&db, &provider, 100);
+        let unprocessed = ptask_core::raw_items::unprocessed_count(&db).unwrap();
+        assert!(
+            unprocessed >= 9,
+            "{} unrelated captures consumed by \"Do everything\"",
+            10 - unprocessed
+        );
+        assert!(texts.iter().filter(|t| attempts(&db, t) > 0).count() >= 9);
+    }
+
+    /// Normal consolidation still covers: several captures about one thing,
+    /// worded differently, become one task in one pass.
+    #[test]
+    fn a_genuine_merge_still_covers_every_capture() {
+        let (_dir, db) = fresh_db();
+        seed_inbox(
+            &db,
+            &[
+                "renew the office lease",
+                "office lease renewal is due next month",
+                "call the landlord to renew our lease",
+            ],
+        );
+        let provider = CatchAll {
+            title: "Renew the office lease",
+            consolidations: std::cell::Cell::new(0),
+        };
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert_eq!(report.consumed, 3);
+        assert_eq!(report.created, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(provider.consolidations.get(), 1, "covered in one pass");
     }
 
     /// A kept capture no candidate covers is retained, not consumed, even when
