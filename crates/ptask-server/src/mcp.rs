@@ -365,25 +365,17 @@ impl PtaskMcp {
             (ext.kind, ext.deliverable) =
                 ptask_core::tasks::kind_and_deliverable(kind.as_deref(), deliverable.as_deref())
                     .map_err(domain_err)?;
-            let discovered_parent = discovered_from
+            ext.discovered_from = discovered_from
                 .as_deref()
                 .map(|parent| ptask_core::tasks::resolve_for_lookup(&db, parent, true))
                 .transpose()
-                .map_err(domain_err)?;
+                .map_err(domain_err)?
+                .map(|parent| parent.id);
+            // The link commits with the task (or neither does): a link
+            // written afterwards could fail for an already-created task, and
+            // the agent's retry would duplicate it.
             let t = ptask_core::tasks::create_with_extensions(&db, new, ext, &ctx)
                 .map_err(domain_err)?;
-            if let Some(parent) = discovered_parent {
-                db.with_conn(|c| {
-                    c.execute(
-                        "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
-                         VALUES (?1, ?2, 'discovered_from',
-                                 strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00')",
-                        rusqlite::params![t.id, parent.id],
-                    )?;
-                    Ok(())
-                })
-                .map_err(domain_err)?;
-            }
             rescore_db(&db);
             json_ok(&task_json(&t))
         })
@@ -1204,6 +1196,70 @@ mod tests {
                 |r| r.get(0),
             )?;
             assert_eq!(links, 1);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_add_provenance_link_is_atomic_with_the_create() {
+        // MCP-14: the discovered_from link was inserted after the create
+        // committed and without an event. If it failed, the tool errored for
+        // a task that already existed and an agent retry created it again.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let parent = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("parent task"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute_batch(
+                "CREATE TRIGGER no_links BEFORE INSERT ON task_links
+                 BEGIN SELECT RAISE(ABORT, 'link write failed'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let cursor = ptask_core::event_log::current_cursor(&db).unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+        let add = || {
+            mcp.task_add(Parameters(AddArg {
+                text: "discovered child".into(),
+                reason: None,
+                discovered_from: parent.pt_id.clone(),
+                kind: None,
+                deliverable: None,
+            }))
+        };
+
+        assert!(add().await.is_err());
+        db.with_conn(|c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM tasks WHERE title = 'discovered child'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(n, 0, "a failed link must not leave the task behind");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), cursor);
+
+        // Once the link can be written, the created event carries it.
+        db.with_conn(|c| Ok(c.execute_batch("DROP TRIGGER no_links")?))
+            .unwrap();
+        assert!(add().await.is_ok());
+        db.with_conn(|c| {
+            let payload: String = c.query_row(
+                "SELECT payload FROM pt_event_log
+                 WHERE event_type = 'task.created' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )?;
+            let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(v["discovered_from"], serde_json::json!(parent.id));
             Ok(())
         })
         .unwrap();

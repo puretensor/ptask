@@ -61,6 +61,11 @@ dashboard/accountability compatibility),
 (`tasks_fts`). Subtask JSON of non-terminal parents was promoted to real
 child rows by the one-shot Rust converter in `pt backfill`.
 
+`pt_event_log.ts` is the exception to UTC: it is written in the operator
+timezone with its offset (`2026-10-25T01:30:00+01:00`). Order the journal by
+`id` (commit order, also the sync cursor), never by `ts` text, which sorts
+the autumn fall-back hour in reverse; compare instants by parsing the offset.
+
 ## Environment
 
 Since v1.16.0 the environment is read exactly once per process, at the

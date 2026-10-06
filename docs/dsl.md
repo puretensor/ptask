@@ -13,13 +13,13 @@ trailing `//description` becomes the description.
 | Token | Effect |
 |---|---|
 | `p1`..`p5` | priority, native scale: p1=low, p2=normal, p3=high, p4=urgent, p5=critical. Identical to `--priority` and `pt priority` — no Todoist inversion. |
-| `@label` | append to `pt_extensions.labels` JSON. Multiple allowed. |
-| `#project` | `pt_extensions.project` (last wins). |
-| `~30m`, `~2h`, `~1d` | `pt_extensions.duration_min`. |
+| `@label` | append to `pt_extensions.labels` JSON. Multiple allowed; surrounding prose punctuation is dropped (`@bob,` and `@(bob)` → `bob`). |
+| `#project` | `pt_extensions.project` (last wins). An all-digit `#42` is an issue reference and stays title text. |
+| `~30m`, `~2h`, `~1d` | `pt_extensions.duration_min` (a positive whole number of units). |
 | `!HH:MM` | reminder time of day (a valid `HH:MM` only). Echoed by `pt add`; not persisted. |
 | `//description` | everything from `//` to end-of-text → description. |
 | `every monday`, `every weekday`, `every! 5 days`, etc. | recurrence — see [recurrence.md](recurrence.md). |
-| `YYYY-MM-DD` | deadline, when it is a standalone date in the future. |
+| `YYYY-MM-DD` | deadline, when it is a standalone date after today (today's date is usually provenance, e.g. "discovered 2026-08-01"; use `--deadline`). Stored date-only: due all day, not overdue until the day has passed. |
 | `due:`*date* | scheduled date (`due_at`): when you plan to do it, distinct from the deadline. One word: `due:2026-10-02`, `due:tomorrow`. |
 
 ### Dates
@@ -28,7 +28,11 @@ Body-text deadline inference is deliberately narrow: only a standalone
 future ISO date (`2030-03-01`) sets the deadline. Other date prose
 (`tomorrow`, `next friday`, `4/5`, a past date) stays title text instead of
 silently setting a wrong deadline; pass `--deadline` for anything else.
-Recurrence phrases (`every monday at 9am`) set the first occurrence.
+Recurrence phrases (`every monday at 9am`) set the first occurrence, unless
+the text also carries an explicit ISO date: that date is the first deadline
+wherever it appears (at the rule's `at <time>` if it has one, and anchoring the
+cadence: `2027-01-31 every month at 9:00` runs Jan 31, Feb 28, Mar 31 at
+09:00), and is never folded into the rule.
 
 Operator timezone: `Europe/London` (DST-correct via jiff).
 

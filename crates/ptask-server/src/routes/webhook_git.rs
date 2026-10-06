@@ -239,18 +239,38 @@ async fn handle(
             }
             handled_pt_ids.insert(pt_id.clone());
             let event_uuid = close_event_uuid(source, commit, &pt_id);
+            let close_outbox = outbox.clone();
             let close_state = state.clone();
             let close_pt_id = pt_id.clone();
             let close_source = source.to_string();
             let commit_id = commit.id.clone();
+            // Commit and enqueue under the commit-order lock, like /sync, so
+            // subscribers see this close in commit order.
             match crate::blocking::db_value(move || {
-                apply_close(
-                    &close_state,
-                    &close_source,
-                    &commit_id,
-                    &close_pt_id,
-                    &event_uuid,
-                )
+                crate::webhooks::commit_ordered(&close_outbox, || {
+                    let outcome = apply_close(
+                        &close_state,
+                        &close_source,
+                        &commit_id,
+                        &close_pt_id,
+                        &event_uuid,
+                    );
+                    if let CloseOutcome::Applied {
+                        event_type,
+                        task_uuid,
+                        payload,
+                        ..
+                    } = &outcome
+                    {
+                        close_outbox.send(crate::webhooks::OutboundEvent {
+                            event_type: (*event_type).into(),
+                            task_uuid: Some(task_uuid.clone()),
+                            payload: payload.clone(),
+                            event_uuid: Some(event_uuid.clone()),
+                        });
+                    }
+                    outcome
+                })
             })
             .await
             {
@@ -273,17 +293,7 @@ async fn handle(
                     errors.push(format!("{}: internal error", pt_id));
                     continue;
                 }
-                Ok(CloseOutcome::Applied {
-                    event_type,
-                    task_uuid,
-                    payload,
-                    result,
-                }) => {
-                    outbox.send(crate::webhooks::OutboundEvent {
-                        event_type: event_type.into(),
-                        task_uuid: Some(task_uuid),
-                        payload,
-                    });
+                Ok(CloseOutcome::Applied { result, .. }) => {
                     closed.push(result);
                 }
             }

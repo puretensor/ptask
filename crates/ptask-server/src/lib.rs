@@ -38,6 +38,11 @@ pub struct AppState {
     pub dash_throttle: Arc<routes::dashboard::BasicThrottle>,
     /// Permits for concurrent POST /email parses.
     pub email_parses: Arc<tokio::sync::Semaphore>,
+    /// The outbound-webhook queue (one ordered worker per subscriber).
+    pub outbound: Arc<webhooks::OutboundQueue>,
+    /// Cancelled when the server starts shutting down; ends the MCP mount's
+    /// long-lived SSE streams so graceful shutdown can finish.
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 impl AppState {
@@ -54,6 +59,8 @@ impl AppState {
             email_parses: Arc::new(tokio::sync::Semaphore::new(
                 routes::email::MAX_CONCURRENT_PARSES,
             )),
+            outbound: Arc::default(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -145,7 +152,11 @@ pub fn router(state: AppState) -> Router {
         // but this mount binds the tailnet IP and sits behind the hal
         // bearer gate — a rebinding page can't present that token, so
         // allow-all (empty) is sound here.
-        StreamableHttpServerConfig::default().with_allowed_hosts(Vec::<String>::new()),
+        StreamableHttpServerConfig::default()
+            .with_allowed_hosts(Vec::<String>::new())
+            // An open GET /mcp stream never ends on its own; cancelling this
+            // on shutdown closes it instead of holding SIGTERM forever.
+            .with_cancellation_token(state.shutdown.clone()),
     );
     let mcp_router: Router =
         Router::new()
@@ -204,18 +215,136 @@ pub async fn serve(db: Db, addr: SocketAddr, mut config: Config) -> Result<()> {
             config.tg_forwarders,
             config.tg_approval_buttons,
         );
-    let app = router(state);
     info!(target: "ptask::server", %addr, "starting pt serve");
     let listener = TcpListener::bind(addr).await?;
-    // Peer addresses key the dashboard's failed-auth throttle.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    run(listener, state, shutdown_signal(), WEBHOOK_DRAIN_TIMEOUT).await?;
     info!(target: "ptask::server", "pt serve stopped");
     Ok(())
+}
+
+/// How long graceful shutdown waits for queued outbound webhooks.
+const WEBHOOK_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Serve `state` on `listener` until `shutdown` resolves, then finish the
+/// in-flight requests and give queued outbound webhooks `webhook_drain` to
+/// go out (delivery is a background task the runtime would otherwise drop).
+async fn run(
+    listener: TcpListener,
+    state: AppState,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    webhook_drain: std::time::Duration,
+) -> Result<()> {
+    let outbound = state.outbound.clone();
+    let streams = state.shutdown.clone();
+    let shutdown = async move {
+        shutdown.await;
+        streams.cancel();
+    };
+    serve_router(
+        listener,
+        router(state),
+        HEADER_READ_TIMEOUT,
+        CONNECTION_GRACE,
+        shutdown,
+    )
+    .await?;
+    // No request can enqueue any more; deliver what is queued, bounded.
+    outbound.drain(webhook_drain).await;
+    Ok(())
+}
+
+/// How long a client may take to send a request's headers. axum::serve
+/// gives hyper no timer, so hyper's own 30s default never armed and a client
+/// trickling its headers (slowloris) held a connection forever; the accept
+/// loop below sets one. Only the header read is bounded: request bodies and
+/// streamed responses (the MCP mount's SSE) are not.
+const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long graceful shutdown lets open connections finish before closing
+/// them: an MCP SSE stream or a trickled request body never ends by itself.
+const CONNECTION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn serve_router(
+    listener: TcpListener,
+    app: Router,
+    header_read_timeout: std::time::Duration,
+    connection_grace: std::time::Duration,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    use hyper_util::rt::{TokioIo, TokioTimer};
+    use hyper_util::server::graceful::GracefulShutdown;
+    use hyper_util::service::TowerToHyperService;
+    use tower_service::Service;
+
+    // Peer addresses key the dashboard's failed-auth throttle.
+    let mut make_service = app.into_make_service_with_connect_info::<SocketAddr>();
+    // HTTP/1 only, as axum::serve is built here (no http2 feature).
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(header_read_timeout);
+    let graceful = GracefulShutdown::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let (stream, peer) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::warn!(target: "ptask::server", error = %e, "accept failed");
+                    if accept_error_needs_backoff(&e) {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    continue;
+                }
+            },
+            () = &mut shutdown => break,
+        };
+        let service = match make_service.call(peer).await {
+            Ok(service) => service,
+            Err(never) => match never {},
+        };
+        // No upgrades: no route speaks WebSocket.
+        let conn =
+            builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
+        let conn = graceful.watch(conn);
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                tracing::debug!(target: "ptask::server", error = %e, "connection ended");
+            }
+        });
+    }
+    drop(listener);
+    // Like axum::serve's graceful shutdown: idle connections close now,
+    // in-flight requests finish -- bounded, since a long-lived stream or a
+    // client trickling a request body never finishes on its own and would
+    // hold shutdown (and the webhook drain after it) until SIGKILL.
+    if tokio::time::timeout(connection_grace, graceful.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            target: "ptask::server",
+            grace_s = connection_grace.as_secs(),
+            "open connections outlived the shutdown grace; closing them"
+        );
+    }
+    Ok(())
+}
+
+/// Whether a failed `accept()` should pause the loop. Out of descriptors
+/// or memory (EMFILE, ENFILE, ENOMEM, ENOBUFS), retrying at once just spins,
+/// so back off 1s as axum::serve does. A per-connection error (the peer
+/// reset or aborted before we accepted) affects only that peer: carry on.
+fn accept_error_needs_backoff(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    !matches!(
+        e.kind(),
+        ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+    )
 }
 
 async fn shutdown_signal() {
@@ -1467,8 +1596,10 @@ mod tests {
         assert!(id > 0);
     }
 
-    /// A hung subscriber no longer holds up `/sync`: delivery runs on its own
-    /// task, in order, and still reaches the live subscriber.
+    /// A hung subscriber holds up neither `/sync` nor the other subscribers:
+    /// each URL has its own ordered worker, so the live one gets every event
+    /// while the hung one is still timing out on the first (round-2 SRV-5:
+    /// one serial worker cost every subscriber 10s per event).
     #[tokio::test]
     async fn sync_returns_without_waiting_on_a_hung_webhook_subscriber() {
         // Accepts connections (kernel backlog) and never answers: each send
@@ -1485,9 +1616,11 @@ mod tests {
             db.clone(),
             Default::default(),
             WebhookConfig {
+                // Hung first: a serial fan-out reaches the live URL only
+                // after each 10s timeout.
                 outbound_urls: vec![
-                    live_url.clone(),
                     format!("http://{}/hook", hung.local_addr().unwrap()),
+                    live_url.clone(),
                 ],
                 ..Default::default()
             },
@@ -1524,14 +1657,524 @@ mod tests {
             .unwrap()
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while delivered() == 0 && std::time::Instant::now() < deadline {
+        while delivered() < 3 && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert_eq!(
             delivered(),
-            1,
-            "the first event reached the live subscriber"
+            3,
+            "every event reached the live subscriber despite the hung one"
         );
+    }
+
+    /// The per-URL backlog is bounded: a subscriber that stops answering
+    /// costs at most `backlog` queued events, the rest are dropped, counted
+    /// and exported, and the other subscribers still get everything.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_subscriber_backlog_drops_and_counts_instead_of_growing() {
+        let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let live = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_url = format!("http://{}/hook", live.local_addr().unwrap());
+        let count = received.clone();
+        tokio::spawn(async move {
+            let app = Router::new().route(
+                "/hook",
+                axum::routing::post(move || {
+                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { "ok" }
+                }),
+            );
+            axum::serve(live, app).await.unwrap();
+        });
+        let db = open_test_db();
+        let mut state = AppState::new(
+            db.clone(),
+            Default::default(),
+            WebhookConfig {
+                outbound_urls: vec![
+                    format!("http://{}/hook", hung.local_addr().unwrap()),
+                    live_url,
+                ],
+                ..Default::default()
+            },
+        );
+        state.outbound = Arc::new(webhooks::OutboundQueue::with_backlog(2));
+        let outbox = webhooks::Outbox::start(&state);
+        for i in 0..6 {
+            outbox.send(webhooks::OutboundEvent {
+                event_type: "task.created".into(),
+                task_uuid: None,
+                payload: serde_json::json!({"title": format!("e{i}")}),
+                event_uuid: None,
+            });
+            // Let each lane's worker pick up its first event.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // Hung lane: one in flight + 2 queued, 3 dropped. Live lane: none.
+        assert_eq!(state.outbound.dropped(), 3);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while received.load(std::sync::atomic::Ordering::SeqCst) < 6
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(received.load(std::sync::atomic::Ordering::SeqCst), 6);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("pt_webhook_dropped_total 3")
+        );
+    }
+
+    /// Holds the commit-order lock on another thread for `hold`.
+    fn hold_commit_order(hold: std::time::Duration) {
+        let (locked, is_locked) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _guard = webhooks::COMMIT_ORDER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            locked.send(()).unwrap();
+            std::thread::sleep(hold);
+        });
+        is_locked.recv().unwrap();
+    }
+
+    /// The git-webhook close commits and enqueues under the same
+    /// commit-order lock as `/sync`, so its event can't be enqueued out of
+    /// commit order against a concurrent /sync command.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn git_close_commits_under_the_commit_order_lock() {
+        let db = open_test_db();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("ship it"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let hung = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            outbound_urls: vec![format!("http://{}/hook", hung.local_addr().unwrap())],
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), Default::default(), hooks));
+        hold_commit_order(std::time::Duration::from_millis(600));
+        let started = std::time::Instant::now();
+        let resp = signed_gitea_push(
+            &app,
+            &serde_json::json!({
+                "ref": "refs/heads/main",
+                "commits": [{"id": "c1", "message": "Fixes PT-1"}],
+            }),
+        )
+        .await;
+        assert_eq!(resp["closed"].as_array().unwrap().len(), 1, "{resp}");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(400),
+            "the close did not wait for the commit-order lock"
+        );
+    }
+
+    /// Without outbound URLs there is nothing to order, so /sync must not
+    /// queue behind the process-wide lock.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_without_webhooks_skips_the_commit_order_lock() {
+        let app = router(AppState::new(
+            open_test_db(),
+            Default::default(),
+            Default::default(),
+        ));
+        hold_commit_order(std::time::Duration::from_millis(1500));
+        let started = std::time::Instant::now();
+        post_sync(
+            &app,
+            &serde_json::json!({"sync_token": "*", "commands": [{
+                "type": "task_create", "uuid": "no-hooks", "args": {"text": "plain"},
+            }]}),
+        )
+        .await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1000),
+            "/sync waited {:?} on the commit-order lock",
+            started.elapsed()
+        );
+    }
+
+    /// Records every outbound delivery: (envelope, entered, left). The
+    /// first delivery is held for 400ms so overlapping deliveries show up.
+    type HookLog =
+        Arc<std::sync::Mutex<Vec<(serde_json::Value, std::time::Instant, std::time::Instant)>>>;
+
+    async fn recording_hook() -> (String, HookLog) {
+        let log: HookLog = Arc::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let sink = log.clone();
+        tokio::spawn(async move {
+            let app = Router::new().route(
+                "/hook",
+                axum::routing::post(move |body: axum::body::Bytes| {
+                    let sink = sink.clone();
+                    async move {
+                        let entered = std::time::Instant::now();
+                        let first = sink.lock().unwrap().is_empty();
+                        if first {
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        }
+                        let env: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        sink.lock()
+                            .unwrap()
+                            .push((env, entered, std::time::Instant::now()));
+                        "ok"
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, log)
+    }
+
+    async fn wait_for_hooks(log: &HookLog, n: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while log.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[test]
+    fn only_resource_exhaustion_accept_errors_back_off() {
+        use std::io::{Error, ErrorKind};
+        // One peer resetting or aborting before accept() is that peer's
+        // problem; sleeping 1s on it stalled every other client.
+        for kind in [
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionRefused,
+            ErrorKind::Interrupted,
+        ] {
+            assert!(!accept_error_needs_backoff(&Error::from(kind)), "{kind:?}");
+        }
+        // EMFILE / ENFILE / ENOMEM / ENOBUFS: retrying at once just spins.
+        for errno in [24, 23, 12, 105] {
+            assert!(
+                accept_error_needs_backoff(&Error::from_raw_os_error(errno)),
+                "errno {errno}"
+            );
+        }
+    }
+
+    /// SRV-14: axum::serve sets no hyper timer, so hyper's header read
+    /// timeout never armed and a client trickling (or never finishing) its
+    /// request headers held a connection open forever (slowloris).
+    #[tokio::test]
+    async fn stalled_request_headers_are_cut_off_but_streams_survive() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let app = Router::new()
+            .route("/", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/stream",
+                axum::routing::get(|| async {
+                    // A response that streams for longer than the header
+                    // timeout, like the MCP mount's SSE.
+                    let chunks = futures_util::stream::unfold(0u8, |i| async move {
+                        if i == 5 {
+                            return None;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        Some((
+                            Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(
+                                i.to_string(),
+                            )),
+                            i + 1,
+                        ))
+                    });
+                    axum::body::Body::from_stream(chunks)
+                }),
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_router(
+            listener,
+            app,
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_secs(10),
+            std::future::pending(),
+        ));
+
+        let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        conn.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            conn.read_to_end(&mut buf),
+        )
+        .await;
+        assert!(closed.is_ok(), "a stalled header kept the connection open");
+
+        let body = reqwest::get(format!("http://{addr}/stream"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "01234");
+    }
+
+    /// operations.md promises it: an idle keep-alive connection is closed by
+    /// the header-read timer once it sends no next request.
+    #[tokio::test]
+    async fn idle_keep_alive_connection_is_reaped_by_the_header_timer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let app = Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_router(
+            listener,
+            app,
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_secs(10),
+            std::future::pending(),
+        ));
+        let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        conn.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            conn.read_to_end(&mut buf),
+        )
+        .await;
+        assert!(closed.is_ok(), "an idle keep-alive connection stayed open");
+        assert!(String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200"));
+    }
+
+    /// SRV-6: delivery was a detached task, so events still queued when
+    /// `pt serve` got SIGTERM were dropped with the runtime.
+    /// SRV-6 round 2: graceful shutdown waited for every connection, and an
+    /// MCP client's GET /mcp SSE stream never ends on its own, so SIGTERM
+    /// never finished and the webhook drain never ran. The stream is now
+    /// cancelled on shutdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_closes_an_open_mcp_sse_stream() {
+        let db = open_test_db();
+        let token =
+            ptask_core::tokens::create(&db, "hal", ptask_core::tokens::Scope::Write).unwrap();
+        let state = AppState::new(db, AuthConfig::default(), Default::default());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(run(
+            listener,
+            state,
+            async {
+                let _ = stopped.await;
+            },
+            std::time::Duration::from_secs(10),
+        ));
+        let client = reqwest::Client::new();
+        let post = |body: serde_json::Value, session: Option<String>| {
+            let mut req = client
+                .post(&base)
+                .bearer_auth(&token)
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .body(serde_json::to_vec(&body).unwrap());
+            if let Some(id) = session {
+                req = req.header("mcp-session-id", id);
+            }
+            req.send()
+        };
+        let init = post(
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-03-26", "capabilities": {},
+                "clientInfo": {"name": "t", "version": "1"}}}),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(init.status().is_success(), "{}", init.status());
+        let session = init.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        drop(init);
+        post(
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            Some(session.clone()),
+        )
+        .await
+        .unwrap();
+        let sse = client
+            .get(&base)
+            .bearer_auth(&token)
+            .header("accept", "text/event-stream")
+            .header("mcp-session-id", &session)
+            .send()
+            .await
+            .unwrap();
+        assert!(sse.status().is_success(), "{}", sse.status());
+
+        stop.send(()).unwrap();
+        let started = std::time::Instant::now();
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(15), server).await;
+        assert!(exited.is_ok(), "pt serve never finished shutting down");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "shutdown waited {:?} for the SSE stream",
+            started.elapsed()
+        );
+        drop(sse);
+    }
+
+    /// A request whose body never finishes holds its connection open; the
+    /// grace bound ends graceful shutdown anyway.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_grace_is_bounded_for_a_stalled_request_body() {
+        use tokio::io::AsyncWriteExt;
+        let app = Router::new().route(
+            "/upload",
+            axum::routing::post(|body: axum::body::Bytes| async move { body.len().to_string() }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_router(
+            listener,
+            app,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(500),
+            async {
+                let _ = stopped.await;
+            },
+        ));
+        let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        conn.write_all(b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nabc")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        stop.send(()).unwrap();
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        assert!(exited.is_ok(), "a stalled body held shutdown open");
+        drop(conn);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn graceful_shutdown_drains_queued_webhooks() {
+        let (url, log) = recording_hook().await;
+        let state = AppState::new(
+            open_test_db(),
+            Default::default(),
+            WebhookConfig {
+                outbound_urls: vec![url],
+                ..Default::default()
+            },
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(run(
+            listener,
+            state,
+            async {
+                let _ = stopped.await;
+            },
+            std::time::Duration::from_secs(10),
+        ));
+        let commands: Vec<serde_json::Value> = (0..3)
+            .map(|i| {
+                serde_json::json!({
+                    "type": "task_create", "uuid": format!("drain-{i}"),
+                    "args": {"text": format!("drained task {i}")},
+                })
+            })
+            .collect();
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/sync"))
+            .header("content-type", "application/json")
+            .body(
+                serde_json::to_vec(&serde_json::json!({"sync_token": "*", "commands": commands}))
+                    .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "{}", resp.status());
+        drop(resp);
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        assert_eq!(
+            log.lock().unwrap().len(),
+            3,
+            "shutdown returned before the queued webhooks went out"
+        );
+    }
+
+    /// SRV-5: each request delivered on its own task, so a later request's
+    /// event raced an earlier one still in flight, and `ts` was the delivery
+    /// time. Delivery is now one ordered queue and `ts` is the commit time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn webhooks_from_separate_requests_deliver_in_commit_order() {
+        let (url, log) = recording_hook().await;
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            WebhookConfig {
+                outbound_urls: vec![url],
+                ..Default::default()
+            },
+        ));
+        for i in 0..3 {
+            post_sync(
+                &app,
+                &serde_json::json!({"sync_token": "*", "commands": [{
+                    "type": "task_create", "uuid": format!("order-{i}"),
+                    "args": {"text": format!("ordered task {i}")},
+                }]}),
+            )
+            .await;
+        }
+        wait_for_hooks(&log, 3).await;
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 3);
+        for pair in log.windows(2) {
+            assert!(
+                pair[1].1 >= pair[0].2,
+                "a delivery started before the previous one finished"
+            );
+        }
+        for (i, (env, _, _)) in log.iter().enumerate() {
+            let (ts, id): (String, i64) = db
+                .with_conn(|c| {
+                    Ok(c.query_row(
+                        // /sync journals scoped keys: sync:<len>:<actor>:<uuid>.
+                        "SELECT ts, id FROM pt_event_log WHERE uuid = ?1",
+                        [format!("sync:9:anonymous:order-{i}")],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(env["payload"]["title"], format!("ordered task {i}"));
+            assert_eq!(env["ts"], ts, "ts is the journal commit time");
+            assert_eq!(env["event_id"], id);
+        }
     }
 
     // Back-compat path: no token configured → scrape allowed.
@@ -1564,6 +2207,50 @@ mod tests {
         assert!(s.contains("pt_raw_items_unprocessed "));
         assert!(s.contains("pt_event_log_cursor "));
         assert!(s.contains("pt_views_total "));
+    }
+
+    /// SRV-12: docs/sync-api.md listed four metrics `/metrics` never
+    /// exported. Every metric the doc's table names must exist, and every
+    /// exported metric must be documented.
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_api_doc_metrics_table_matches_the_exporter() {
+        let doc = include_str!("../../../docs/sync-api.md");
+        let table = doc
+            .split("## Metrics")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("docs/sync-api.md has a Metrics section");
+        let documented: std::collections::BTreeSet<String> = table
+            .lines()
+            .filter_map(|l| l.strip_prefix("| `"))
+            .filter_map(|l| l.split('`').next())
+            .map(str::to_string)
+            .collect();
+        let app = router(AppState::new(
+            open_test_db(),
+            Default::default(),
+            Default::default(),
+        ));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let exported: std::collections::BTreeSet<String> = std::str::from_utf8(&body)
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.strip_prefix("# TYPE "))
+            .filter_map(|l| l.split_whitespace().next())
+            .map(str::to_string)
+            .collect();
+        assert_eq!(documented, exported);
     }
 
     #[tokio::test(flavor = "current_thread")]

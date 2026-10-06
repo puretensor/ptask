@@ -132,6 +132,10 @@ a greppable, diffable projection (the SQLite spine stays canonical).
 
 ## Outbound webhooks (specola)
 
-`pt serve` fans out journal events to `PTASK_WEBHOOK_URLS` (comma-separated,
-HMAC-signed with `PTASK_WEBHOOK_SECRET` — see `webhooks::sign`). Point one at
-specola's ingest to push task changes instead of having specola poll.
+`pt serve` POSTs events to `PTASK_WEBHOOK_URLS` (comma-separated,
+HMAC-signed with `PTASK_WEBHOOK_SECRET` — see `webhooks::sign`). Only changes
+made *through `pt serve`'s* `/sync` commands and git-webhook auto-closes are
+pushed; writes from the local CLI, TUI, Telegram bot, dashboard sidecar, MCP
+tools, timers and the server's other routes land in `pt_event_log` but are not
+pushed. A consumer that needs every change should poll `/sync` with its
+cursor (or use the push as a hint to sync) rather than rely on the webhook.

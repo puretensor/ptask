@@ -58,7 +58,10 @@ pub fn lookup_pt_id(conn: &rusqlite::Connection, task_uuid: &str) -> Result<Opti
 /// no-op once all rows are minted. Returns the number of new IDs minted.
 pub fn backfill_all(db: &Db) -> Result<usize> {
     let mut conn = db.get()?;
-    let tx = conn.transaction()?;
+    // IMMEDIATE: take the writer reservation before reading the counter. A
+    // DEFERRED read let a concurrent create mint a PT-N underneath, leaving
+    // this transaction on a stale snapshot that fails its first write.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
     // Tasks lacking a PT-N, in creation order.
     let mut stmt = tx.prepare(
@@ -166,5 +169,39 @@ mod tests {
         let conn = db.get().unwrap();
         let err = lookup_uuid(&conn, "PT-999").unwrap_err();
         assert!(matches!(err, Error::PtIdNotFound(_)));
+    }
+
+    #[test]
+    fn backfill_waits_for_a_concurrent_writer_instead_of_failing() {
+        // CORE-10: backfill read the counter in a DEFERRED transaction. A
+        // writer minting a PT-N meanwhile left it on a stale snapshot, so
+        // its first write failed (SQLITE_BUSY_SNAPSHOT) instead of
+        // serialising behind the writer and reading the new counter.
+        let (dir, db) = setup_db_with_tasks(&[("uuid-a", "legacy", "2026-01-01T00:00:00Z")]);
+        let path = dir.path().join("test.db");
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer
+            .busy_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute_batch(
+                "UPDATE pt_counters SET value = value + 1 WHERE name='pt_id';
+                 INSERT INTO tasks (id, title, created_at, updated_at, pt_id)
+                 VALUES ('uuid-new', 'created meanwhile', '2026-02-01T00:00:00Z',
+                         '2026-02-01T00:00:00Z', 'PT-1');",
+            )
+            .unwrap();
+        let db2 = db.clone();
+        let backfill = std::thread::spawn(move || backfill_all(&db2).map_err(|e| e.to_string()));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        writer.execute_batch("COMMIT").unwrap();
+        assert_eq!(backfill.join().unwrap(), Ok(1));
+        db.with_conn(|c| {
+            assert_eq!(lookup_pt_id(c, "uuid-a")?.as_deref(), Some("PT-2"));
+            assert_eq!(current_counter(c)?, 2);
+            Ok(())
+        })
+        .unwrap();
     }
 }
