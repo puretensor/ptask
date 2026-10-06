@@ -147,6 +147,7 @@ pub fn create_with_extensions(
     ext: Extensions,
     ctx: &EventCtx,
 ) -> Result<Task> {
+    reject_blank_title(&new.title)?;
     // Every edit path validates a deadline; create stored any text, so
     // `--deadline "next friday"` read as overdue forever (julianday NULL)
     // and made a recurring task uncompletable. Stored in the one canonical
@@ -2008,12 +2009,24 @@ pub struct TaskEdit<'a> {
 
 /// Apply selected fields, side tables, interactions and one attributed event
 /// in one transaction. A rejected field or late database error changes nothing.
+/// A task title must have visible text: an empty or whitespace-only title
+/// left an unreadable row on every surface.
+fn reject_blank_title(title: &str) -> Result<()> {
+    if title.trim().is_empty() {
+        return Err(crate::Error::Other("title must not be empty".into()));
+    }
+    Ok(())
+}
+
 pub fn edit_atomic(db: &Db, task_uuid: &str, edit: TaskEdit<'_>, ctx: &EventCtx) -> Result<()> {
     // Blank or padded deadlines normalise like update_deadline: "" clears.
     let mut edit = edit;
     edit.deadline = edit
         .deadline
         .map(|d| d.map(str::trim).filter(|d| !d.is_empty()));
+    if let Some(t) = edit.title {
+        reject_blank_title(t)?;
+    }
     let has_text = edit.title.is_some() || edit.description.is_some();
     let has_labels = !edit.labels_add.is_empty() || !edit.labels_remove.is_empty();
     if !has_text && edit.priority.is_none() && edit.deadline.is_none() && !has_labels {
@@ -2160,6 +2173,9 @@ pub fn update_text(
 ) -> Result<()> {
     if title.is_none() && description.is_none() {
         return Err(crate::Error::Other("update_text: nothing to change".into()));
+    }
+    if let Some(t) = title {
+        reject_blank_title(t)?;
     }
     let now = iso_now();
     let mut conn = db.get()?;
@@ -4775,6 +4791,38 @@ mod tests {
         );
         assert!(task_exists(&db, &b.id), "the prerequisite was deleted");
         assert_eq!(load_detail(&db, &a.id).unwrap().depends_on, vec![b.id]);
+    }
+
+    #[test]
+    fn a_blank_title_is_refused_on_create_and_every_edit_path() {
+        // Regression (round 2, item 2): `pt edit --title ""` and MCP
+        // task_edit {"title": ""} stored an empty title.
+        let (_dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        for blank in ["", "   ", "\t\n"] {
+            assert!(
+                create(&db, NewTask::minimal(blank), &ctx).is_err(),
+                "{blank:?}"
+            );
+        }
+        let t = create(&db, NewTask::minimal("keep me"), &ctx).unwrap();
+        let cursor = crate::event_log::current_cursor(&db).unwrap();
+        for blank in ["", "   "] {
+            let edit = TaskEdit {
+                title: Some(blank),
+                ..Default::default()
+            };
+            assert!(edit_atomic(&db, &t.id, edit, &ctx).is_err(), "{blank:?}");
+            assert!(
+                update_text(&db, &t.id, Some(blank), None, &ctx).is_err(),
+                "{blank:?}"
+            );
+        }
+        assert_eq!(
+            resolve_for_lookup(&db, &t.id, true).unwrap().title,
+            "keep me"
+        );
+        assert_eq!(crate::event_log::current_cursor(&db).unwrap(), cursor);
     }
 
     fn ctx_as(actor: &str, source: &str) -> EventCtx {
