@@ -226,11 +226,11 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
             &ap.kind
         )
     );
-    // Requester, note and preview are agent-supplied: sanitised so escape
-    // sequences cannot rewrite what the operator reads before deciding.
-    let mut pairs: Vec<(&str, String)> = vec![
-        ("requester", ui::one_line(&ap.requester).into_owned()),
-        ("digest", ap.digest.clone()),
+    // Requester, note and preview are agent-supplied: raw cells, sanitised
+    // by kv so escape sequences cannot rewrite what the operator reads.
+    let mut pairs: Vec<(&str, ui::Cell)> = vec![
+        ("requester", ap.requester.as_str().into()),
+        ("digest", ap.digest.as_str().into()),
         (
             "payload",
             if ap.payload_stored() {
@@ -240,18 +240,19 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
                     ap.payload_bytes.unwrap_or(0)
                 )
             } else {
-                "not stored".into()
-            },
+                "not stored".to_string()
+            }
+            .into(),
         ),
     ];
     if let Some(t) = &ap.task_pt_id {
-        pairs.push(("task", ui::one_line(t).into_owned()));
+        pairs.push(("task", t.into()));
     }
     if let Some(n) = &ap.request_note {
-        pairs.push(("requester note", ui::one_line(n).into_owned()));
+        pairs.push(("requester note", n.into()));
     }
     if let Some(d) = &ap.decided_by {
-        pairs.push(("decided by", ui::one_line(d).into_owned()));
+        pairs.push(("decided by", d.into()));
     }
     for l in ui::kv(&pairs, 16) {
         println!("    {}", l.trim_start());

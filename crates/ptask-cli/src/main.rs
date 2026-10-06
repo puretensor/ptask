@@ -1239,29 +1239,30 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         );
         // Echo the parsed interpretation so a silent quick-add mis-parse
         // (the PT-653 class) is visible at the moment of creation.
-        let mut pairs: Vec<(&str, String)> = vec![("priority", ui::priority_pill(t.priority))];
+        let mut pairs: Vec<(&str, ui::Cell)> =
+            vec![("priority", ui::painted(ui::priority_pill(t.priority)))];
         if let Some(d) = &t.deadline {
-            pairs.push(("deadline", ui::due_cell(Some(d))));
+            pairs.push(("deadline", ui::painted(ui::due_cell(Some(d)))));
         }
         if !t.description.is_empty() {
-            pairs.push(("desc", t.description.clone()));
+            pairs.push(("desc", (&t.description).into()));
         }
         if !out.labels.is_empty() {
-            pairs.push(("labels", out.labels.join(", ")));
+            pairs.push(("labels", out.labels.join(", ").into()));
         }
         if let Some(p) = &out.project {
-            pairs.push(("project", p.clone()));
+            pairs.push(("project", p.into()));
         }
         if let Some(m) = out.duration_min {
-            pairs.push(("estimate", format!("{m}m")));
+            pairs.push(("estimate", format!("{m}m").into()));
         }
         if let Some(r) = &out.reminder {
-            pairs.push(("reminder", r.clone()));
+            pairs.push(("reminder", r.into()));
         }
         if let Some(rec) = &out.recurrence {
-            pairs.push(("recurs", rec.clone()));
+            pairs.push(("recurs", rec.into()));
         }
-        pairs.push(("uuid", ui::dim(&t.id, ui::Ink::Slate)));
+        pairs.push(("uuid", ui::painted(ui::dim(&t.id, ui::Ink::Slate))));
         for l in ui::kv(&pairs, 14) {
             println!("    {}", l.trim_start());
         }
@@ -1680,47 +1681,48 @@ fn render_show(
         out.push(format!("  {}", ui::bold(&l, ui::Ink::Paper)));
     }
     out.push(String::new());
-    let mut pairs: Vec<(&str, String)> = vec![
-        ("status", ui::status_pill(&t.status)),
+    let mut pairs: Vec<(&str, ui::Cell)> = vec![
+        ("status", ui::painted(ui::status_pill(&t.status))),
         (
             "priority",
-            format!(
+            ui::painted(format!(
                 "{}{}",
                 ui::priority_pill(t.priority),
                 ui::dim(&format!("  ({})", t.priority), ui::Ink::Slate)
-            ),
+            )),
         ),
-        ("deadline", ui::due_cell(t.deadline.as_deref())),
+        ("deadline", ui::painted(ui::due_cell(t.deadline.as_deref()))),
         (
             "kind",
             match t.deliverable.as_deref() {
                 Some(dl) => format!("{} → {dl}", t.kind),
                 None => t.kind.clone(),
-            },
+            }
+            .into(),
         ),
     ];
     if let Some(d) = d {
         if !d.labels.is_empty() {
-            pairs.push(("labels", d.labels.join(", ")));
+            pairs.push(("labels", d.labels.join(", ").into()));
         }
         if let Some(p) = &d.project {
-            pairs.push(("project", p.clone()));
+            pairs.push(("project", p.into()));
         }
         if let Some(m) = d.duration_min {
-            pairs.push(("estimate", format!("{m}m")));
+            pairs.push(("estimate", format!("{m}m").into()));
         }
         if !d.depends_on.is_empty() {
-            pairs.push(("depends on", d.depends_on.join(", ")));
+            pairs.push(("depends on", d.depends_on.join(", ").into()));
         }
         if !d.blocks_tasks.is_empty() {
-            pairs.push(("blocks", d.blocks_tasks.join(", ")));
+            pairs.push(("blocks", d.blocks_tasks.join(", ").into()));
         }
         if let Some(r) = &d.recurrence_input {
-            pairs.push(("recurs", r.clone()));
+            pairs.push(("recurs", r.into()));
         }
     }
-    pairs.push(("source", t.source_type.clone()));
-    pairs.push(("uuid", ui::dim(&t.id, ui::Ink::Slate)));
+    pairs.push(("source", (&t.source_type).into()));
+    pairs.push(("uuid", ui::painted(ui::dim(&t.id, ui::Ink::Slate))));
     out.extend(ui::kv(&pairs, 14));
     if !blocked.is_empty() {
         out.push(String::new());
@@ -2038,8 +2040,13 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
                     ]
                 })
                 .collect();
-            print_lines(ui::table(&cols, &rows, &Default::default()));
-            println!("{}", ui::footer(rows.len(), "hold", ""));
+            let n = rows.len();
+            print_lines(ui::table(
+                &cols,
+                &ui::painted_rows(rows),
+                &Default::default(),
+            ));
+            println!("{}", ui::footer(n, "hold", ""));
         }
         if !output.unscheduled.is_empty() {
             println!();
@@ -2614,8 +2621,8 @@ fn cmd_depend(db: &Db, a: DependArgs) -> Result<()> {
             };
             print_lines(ui::kv(
                 &[
-                    ("depends on", fmt(&detail.depends_on)),
-                    ("blocks", fmt(&detail.blocks_tasks)),
+                    ("depends on", fmt(&detail.depends_on).into()),
+                    ("blocks", fmt(&detail.blocks_tasks).into()),
                 ],
                 14,
             ))
@@ -2680,23 +2687,23 @@ fn cmd_why(db: &Db, a: WhyArgs) -> Result<()> {
         };
         print_lines(ui::kv(
             &[
-                ("urgency", term(b.urgency, wu, "")),
+                ("urgency", ui::painted(term(b.urgency, wu, ""))),
                 (
                     "dependency",
-                    term(b.dependency, wd, "active tasks blocked by this"),
+                    ui::painted(term(b.dependency, wd, "active tasks blocked by this")),
                 ),
                 (
                     "neglect",
-                    term(b.neglect, wn, "time since last touch / 30d"),
+                    ui::painted(term(b.neglect, wn, "time since last touch / 30d")),
                 ),
-                ("manual", term(b.manual, wm, "priority")),
+                ("manual", ui::painted(term(b.manual, wm, "priority"))),
                 (
                     "effort",
-                    format!(
+                    ui::painted(format!(
                         "{}  {}",
                         ui::paint(&format!("×{:.3}", b.effort_factor), ui::Ink::Paper),
                         ui::dim(&format!("llm nudge {:+.3}", b.score_llm), ui::Ink::Slate)
-                    ),
+                    )),
                 ),
             ],
             14,
@@ -2980,7 +2987,7 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
                 "{}",
                 ui::bullet(
                     pt.as_deref().unwrap_or("-"),
-                    &format!(
+                    ui::painted(format!(
                         "{}  {}  {}",
                         ui::status_pill(status),
                         ui::paint(title, ui::Ink::Paper),
@@ -2988,7 +2995,7 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
                             &format!("last touch {}", updated.get(..10).unwrap_or(updated)),
                             ui::Ink::Slate
                         )
-                    ),
+                    )),
                     ui::Ink::Amber,
                     8
                 )
@@ -3010,16 +3017,16 @@ fn cmd_review(db: &Db, a: ReviewArgs) -> Result<()> {
         print!(
             "{}",
             ui::prompt(
-                &format!(
+                ui::painted(format!(
                     "{}  {}  {}  {}",
                     ui::pt_id(pt.as_deref().unwrap_or("-")),
                     ui::status_pill(status),
-                    ui::one_line(title),
+                    ui::paint(title, ui::Ink::Paper),
                     ui::dim(
                         &format!("last {}", updated.get(..10).unwrap_or(updated)),
                         ui::Ink::Slate
                     )
-                ),
+                )),
                 "[k/d/x/s/q]"
             )
         );
@@ -3112,8 +3119,13 @@ fn cmd_log(db: &Db, a: LogArgs) -> Result<()> {
             ]
         })
         .collect();
-    print_lines(ui::table(&cols, &rows, &Default::default()));
-    println!("{}", ui::footer(rows.len(), "event", ""));
+    let n = rows.len();
+    print_lines(ui::table(
+        &cols,
+        &ui::painted_rows(rows),
+        &Default::default(),
+    ));
+    println!("{}", ui::footer(n, "event", ""));
     Ok(())
 }
 
@@ -3295,8 +3307,13 @@ fn cmd_token(db: &Db, c: TokenCommand) -> Result<()> {
                     ]
                 })
                 .collect();
-            print_lines(ui::table(&cols, &rows, &Default::default()));
-            println!("{}", ui::footer(rows.len(), "token", ""));
+            let n = rows.len();
+            print_lines(ui::table(
+                &cols,
+                &ui::painted_rows(rows),
+                &Default::default(),
+            ));
+            println!("{}", ui::footer(n, "token", ""));
             Ok(())
         }
         TokenCommand::Revoke(a) => {
@@ -3358,10 +3375,10 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                         "remote"
                     )
                 );
-                let mut pairs: Vec<(&str, String)> =
-                    vec![("priority", ui::priority_pill(task.priority))];
+                let mut pairs: Vec<(&str, ui::Cell)> =
+                    vec![("priority", ui::painted(ui::priority_pill(task.priority)))];
                 if let Some(d) = &task.deadline {
-                    pairs.push(("deadline", ui::due_cell(Some(d))));
+                    pairs.push(("deadline", ui::painted(ui::due_cell(Some(d)))));
                 }
                 for l in ui::kv(&pairs, 14) {
                     println!("    {}", l.trim_start());
@@ -3687,8 +3704,8 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                 if let Some(server) = &server {
                     print_lines(ui::kv(
                         &[
-                            ("client", format!("v{local}")),
-                            ("server", format!("v{server}")),
+                            ("client", format!("v{local}").into()),
+                            ("server", format!("v{server}").into()),
                         ],
                         14,
                     ));
@@ -3892,7 +3909,11 @@ fn print_rank_diff(db: &Db) -> Result<()> {
             ]
         })
         .collect();
-    print_lines(ui::table(&cols, &rows, &Default::default()));
+    print_lines(ui::table(
+        &cols,
+        &ui::painted_rows(rows),
+        &Default::default(),
+    ));
     Ok(())
 }
 

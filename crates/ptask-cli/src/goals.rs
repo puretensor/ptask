@@ -244,14 +244,14 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
 fn print_human_show(shown: &GoalShow) {
     let g = &shown.goal;
     print_goal_line(g, "");
-    let mut pairs: Vec<(&str, String)> = vec![("status", g.status.clone())];
+    let mut pairs: Vec<(&str, ui::Cell)> = vec![("status", g.status.as_str().into())];
     if let Some(p) = &g.parent {
-        pairs.push(("parent", p.clone()));
+        pairs.push(("parent", p.into()));
     }
     if let Some(w) = &g.why {
-        pairs.push(("why", w.clone()));
+        pairs.push(("why", w.into()));
     }
-    pairs.push(("uuid", ui::dim(&g.uuid, ui::Ink::Slate)));
+    pairs.push(("uuid", ui::painted(ui::dim(&g.uuid, ui::Ink::Slate))));
     for l in ui::kv(&pairs, 12) {
         println!("    {}", l.trim_start());
     }

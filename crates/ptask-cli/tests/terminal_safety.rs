@@ -341,3 +341,28 @@ fn strip_sgr(line: &str) -> String {
     out.push_str(rest);
     out
 }
+
+/// Raw task text carrying ui.rs's own palette SGR must not reach the
+/// terminal as an escape either: the plan's unscheduled bullets and the
+/// add echo's kv block passed it through untouched.
+#[test]
+fn raw_text_cannot_smuggle_the_palette_sgr() {
+    let pt = Pt::new();
+    // Slate, exactly as ui.rs paints it.
+    let smuggled = "pay\x1b[38;2;107;115;148mHIDDEN\x1b[0m";
+    let added = pt.ok(&["--color=always", "add", "--raw", smuggled, "-d", smuggled]);
+    assert!(!added.contains("pay\x1b"), "{added:?}");
+    assert!(added.contains("pay\u{fffd}[38;2;"), "{added:?}");
+
+    // No free slot: every ready task lands in the unscheduled bullets.
+    let gcal = pt.dir.path().join("gcal.py");
+    std::fs::write(
+        &gcal,
+        "import json\nprint(json.dumps({'tz': 'Europe/London', 'free_slots': []}))\n",
+    )
+    .unwrap();
+    let plan = pt.ok(&["--color=always", "plan", "--gcal", gcal.to_str().unwrap()]);
+    assert!(plan.contains("UNSCHEDULED"), "{plan:?}");
+    assert!(!plan.contains("pay\x1b"), "{plan:?}");
+    assert!(plan.contains("pay\u{fffd}[38;2;"), "{plan:?}");
+}
