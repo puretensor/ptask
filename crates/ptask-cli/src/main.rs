@@ -3766,6 +3766,13 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
                     )
                 )
             );
+            if r.sourceless_candidates > 0 {
+                println!(
+                    "  {} candidate(s) came back without sources — the model is ignoring \
+                     the consolidation schema; their captures were re-walked",
+                    r.sourceless_candidates
+                );
+            }
             if r.quarantined > 0 {
                 println!(
                     "  {} capture(s) quarantined after {} failed attempts — \

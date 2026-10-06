@@ -37,6 +37,10 @@ pub struct NativeReport {
     /// Rows currently parked out of the queue (attempts exhausted). A
     /// standing count, not a per-run delta — it is the poison-pill gauge.
     pub quarantined: usize,
+    /// Candidates the provider returned without `sources` this run. They
+    /// cover nothing, so their captures bisect and burn calls: a non-zero
+    /// value means the model is ignoring the schema.
+    pub sourceless_candidates: usize,
     pub provider: String,
     pub duration_ms: u128,
 }
@@ -151,6 +155,16 @@ fn existing_tasks_since(db: &Db, cutoff: &str) -> Result<Vec<(String, String)>> 
 /// one unclassifiable memo failed the run and nothing was ever marked
 /// processed — the same oldest-first rows came back forever.
 const CHUNK: usize = 25;
+
+/// Most captures one candidate may cover. Coverage is the model's word
+/// alone, so without a cap a single over-merged answer (or one deduped title)
+/// could consume a whole 25-row chunk. Eight comfortably fits a genuine merge
+/// of repeated memos about one commitment; anything beyond is covered up to
+/// the cap and the remainder walked again. That walk always covers at least
+/// one more capture (so it terminates), and a repeated answer is deduped
+/// against the task just created and covers the next eight, so the cap costs
+/// calls, never permanent non-consumption.
+const MAX_SOURCES_PER_CANDIDATE: usize = 8;
 
 /// Ceiling on provider calls per run. Failure isolation halves a failing
 /// chunk, so a pathologically bad batch could otherwise fan out to ~2N calls.
@@ -293,6 +307,8 @@ struct RunState {
     /// The first failure seen, un-bisected — the one worth reporting.
     first_error: Option<String>,
     calls: usize,
+    /// Candidates returned without `sources` (see `NativeReport`).
+    sourceless: usize,
     /// No new provider call starts after this instant.
     stop_at: Option<std::time::Instant>,
     budget_exhausted: bool,
@@ -367,15 +383,35 @@ fn process_chunk<P: LlmProvider + ?Sized>(
             .consolidate(&kept_texts)
             .map_err(ChunkError::provider)?;
         for cand in &mut candidates {
+            if cand.sources.is_empty() {
+                st.sourceless += 1;
+            }
+            // With one kept capture there is nothing else a task can be from.
+            // Applied before the range check, so a model that numbers from 1
+            // still resolves lone captures (bisection gets there) instead of
+            // quarantining everything.
+            if kept.len() == 1 {
+                cand.sources = vec![0];
+                continue;
+            }
             if let Some(&bad) = cand.sources.iter().find(|&&i| i >= kept.len()) {
                 return Err(ChunkError::provider(anyhow::anyhow!(
                     "provider returned out-of-range source index {bad} for {} kept items — failing closed",
                     kept.len()
                 )));
             }
-            // With one kept capture there is nothing else a task can be from.
-            if kept.len() == 1 {
-                cand.sources = vec![0];
+            cand.sources.sort_unstable();
+            cand.sources.dedup();
+            if cand.sources.len() > MAX_SOURCES_PER_CANDIDATE {
+                warn!(
+                    target: "ptask::distill",
+                    title = %cand.title,
+                    claimed = cand.sources.len(),
+                    cap = MAX_SOURCES_PER_CANDIDATE,
+                    "candidate claims more captures than one task plausibly merges — \
+                     covering only the cap; the rest go round again"
+                );
+                cand.sources.truncate(MAX_SOURCES_PER_CANDIDATE);
             }
         }
         create_candidates(db, provider, candidates, &mut covered, dedup, st, ctx)
@@ -809,6 +845,7 @@ fn run_native_within<P: LlmProvider + ?Sized>(
             skipped_dedup: 0,
             failed: 0,
             quarantined: ptask_core::raw_items::quarantined_count(db)? as usize,
+            sourceless_candidates: 0,
             provider: provider.name().into(),
             duration_ms: start.elapsed().as_millis(),
         };
@@ -823,6 +860,14 @@ fn run_native_within<P: LlmProvider + ?Sized>(
     };
     for chunk in items.chunks(CHUNK) {
         walk_chunk(db, provider, chunk, &mut dedup, &mut st, &ctx);
+    }
+    if st.sourceless > 0 {
+        warn!(
+            target: "ptask::distill",
+            sourceless = st.sourceless,
+            "provider returned candidates without sources — their captures cannot be \
+             credited and are re-walked (burning calls); the model is ignoring the schema"
+        );
     }
     if st.budget_exhausted {
         warn!(
@@ -901,6 +946,7 @@ fn run_native_within<P: LlmProvider + ?Sized>(
         skipped_dedup: st.skipped,
         failed: st.failures.len() + st.deferred,
         quarantined: ptask_core::raw_items::quarantined_count(db)? as usize,
+        sourceless_candidates: st.sourceless,
         provider: provider.name().into(),
         duration_ms: start.elapsed().as_millis(),
     };
@@ -939,6 +985,7 @@ pub fn record_run(db: &Db, ctx: &EventCtx, report: &NativeReport, success: bool)
         "skipped_dedup": report.skipped_dedup,
         "failed": report.failed,
         "quarantined": report.quarantined,
+        "sourceless_candidates": report.sourceless_candidates,
         "provider": report.provider,
         "duration_ms": report.duration_ms,
     });
@@ -1443,6 +1490,126 @@ mod tests {
         assert_eq!(report.kept, 10);
         assert_eq!(report.failed, 0);
         assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 0);
+    }
+
+    /// Consolidates each item into its own candidate, with sources mangled by
+    /// `map` — the shapes real models produce.
+    struct SourcesProvider {
+        map: fn(usize) -> Vec<usize>,
+        consolidations: std::cell::Cell<usize>,
+        one_candidate: bool,
+    }
+    impl LlmProvider for SourcesProvider {
+        fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+            PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+        }
+        fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+            self.consolidations.set(self.consolidations.get() + 1);
+            if self.one_candidate {
+                return Ok(vec![Candidate {
+                    title: "Reboot the fox-n1 node".into(),
+                    priority: 2,
+                    description: String::new(),
+                    sources: (0..items.len()).collect(),
+                }]);
+            }
+            Ok(PoisonProvider { poison: "\u{0}" }
+                .consolidate(items)?
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut c)| {
+                    c.sources = (self.map)(i);
+                    c
+                })
+                .collect())
+        }
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "sources-test"
+        }
+    }
+
+    fn distinct_captures(db: &Db, n: usize) -> Vec<String> {
+        let texts: Vec<String> = (0..n)
+            .map(|i| format!("distinct capture number {i} about topic {}", i * 7919))
+            .collect();
+        for t in &texts {
+            ptask_core::raw_items::insert(db, t, "test", "test://x").unwrap();
+        }
+        texts
+    }
+
+    /// Regression (round 2, DIST-1a): a model answering with 1-based
+    /// sources failed the range check before the lone-capture override ran,
+    /// so even a single capture could never succeed: everything quarantined.
+    #[test]
+    fn one_based_sources_do_not_quarantine_lone_captures() {
+        let (_dir, db) = fresh_db();
+        let texts = distinct_captures(&db, 3);
+        let provider = SourcesProvider {
+            map: |i| vec![i + 1],
+            consolidations: std::cell::Cell::new(0),
+            one_candidate: false,
+        };
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert_eq!(report.consumed, 3);
+        assert_eq!(report.failed, 0);
+        assert!(texts.iter().all(|t| attempts(&db, t) == 0));
+    }
+
+    /// Regression (round 2, DIST-1b): a model that omits `sources` left its
+    /// chunks uncovered and bisecting, silently burning the call budget. It
+    /// is now counted, reported and recorded in the run manifest.
+    #[test]
+    fn candidates_without_sources_are_counted_and_reported() {
+        let (_dir, db) = fresh_db();
+        distinct_captures(&db, 4);
+        let provider = SourcesProvider {
+            map: |_| vec![],
+            consolidations: std::cell::Cell::new(0),
+            one_candidate: false,
+        };
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert!(report.sourceless_candidates > 0, "{report:?}");
+        assert_eq!(report.consumed, 4, "lone captures still resolve");
+        let recorded: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT json_extract(payload, '$.sourceless_candidates') FROM pt_event_log
+                      WHERE event_type='distill.run'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(recorded as usize, report.sourceless_candidates);
+    }
+
+    /// Regression (round 2, DIST-1c): one candidate (or one deduped title)
+    /// could claim every capture in a chunk, so a single over-merged answer
+    /// consumed 25 commitments at once. A candidate now covers at most
+    /// `MAX_SOURCES_PER_CANDIDATE`; the rest go round again (and still all
+    /// resolve, so nothing is left permanently unconsumed).
+    #[test]
+    fn one_candidate_cannot_claim_a_whole_chunk() {
+        let (_dir, db) = fresh_db();
+        distinct_captures(&db, 20);
+        let provider = SourcesProvider {
+            map: |_| vec![],
+            consolidations: std::cell::Cell::new(0),
+            one_candidate: true,
+        };
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert_eq!(report.consumed, 20, "everything still resolves in the run");
+        assert_eq!(report.created, 1);
+        assert!(
+            provider.consolidations.get() >= 20usize.div_ceil(8),
+            "one answer covered {} captures in {} call(s)",
+            20,
+            provider.consolidations.get()
+        );
     }
 
     /// A kept capture no candidate covers is retained, not consumed, even when
