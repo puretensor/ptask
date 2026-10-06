@@ -64,6 +64,10 @@ requester's prose:
 Agent prose belongs in `request_note` (`--note` / `--note-file`) and is always
 shown labelled as the requester's note.
 
+Text fields are bounded on every surface: `title` 300 characters, the
+requester's note and the operator's decision note 16384 characters each,
+`payload_name` 255 characters. Longer values are refused, not truncated.
+
 Kinds: `email`, `ebay`, `spend`, `destroy`, `external`, `budget`, `other`.
 
 ## Consume

@@ -18,6 +18,13 @@ use uuid::Uuid;
 /// artefacts are referenced by digest only.
 pub const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
+/// Requester-supplied text is bounded on every surface (MCP and HTTP
+/// accept arbitrary strings): a title is a one-line summary, a note is
+/// prose the operator reads, a payload name is a file name.
+pub const MAX_TITLE_CHARS: usize = 300;
+pub const MAX_NOTE_CHARS: usize = 16 * 1024;
+pub const MAX_NAME_CHARS: usize = 255;
+
 const KINDS: &[&str] = &[
     "email", "ebay", "spend", "destroy", "external", "budget", "other",
 ];
@@ -646,6 +653,15 @@ fn validate_kind(kind: &str) -> Result<()> {
     }
 }
 
+fn check_len(field: &str, value: &str, max: usize) -> Result<()> {
+    if value.chars().count() > max {
+        return Err(Error::Approval(ApprovalError::Invalid(format!(
+            "{field} exceeds {max} characters"
+        ))));
+    }
+    Ok(())
+}
+
 fn validate_status_filter(status: &str) -> Result<()> {
     if status == "all" || STATUSES.contains(&status) {
         Ok(())
@@ -912,6 +928,16 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
             "title must not be empty".into(),
         )));
     }
+    check_len("title", title, MAX_TITLE_CHARS)?;
+    if let Some(note) = input.request_note.as_deref() {
+        check_len("note", note.trim(), MAX_NOTE_CHARS)?;
+    }
+    if let PayloadSource::File {
+        name: Some(name), ..
+    } = &input.payload
+    {
+        check_len("payload_name", name, MAX_NAME_CHARS)?;
+    }
     let requester = ctx.actor.trim();
     if requester.is_empty() {
         return Err(Error::Approval(ApprovalError::Invalid(
@@ -1048,6 +1074,9 @@ pub fn decide(
     let now_z = dates::now_in_operator_tz()?;
     let now = dates::format_iso(&now_z);
     let note = note.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(note) = note {
+        check_len("note", note, MAX_NOTE_CHARS)?;
+    }
     let mut conn = db.get()?;
     // IMMEDIATE: a deferred transaction that reads first gets SQLITE_BUSY
     // on the write upgrade without waiting out busy_timeout.
@@ -1061,7 +1090,13 @@ pub fn decide(
         ))));
     }
     if is_past(current.expires_at.as_deref(), &now_z) {
-        mark_expired(&tx, &current, &now, &EventCtx::system("approvals"))?;
+        mark_expired(
+            &tx,
+            &current.uuid,
+            current.seq,
+            &now,
+            &EventCtx::system("approvals"),
+        )?;
         tx.commit()?;
         return Err(Error::Approval(ApprovalError::Conflict(format!(
             "{} expired at {}, not pending",
@@ -1222,19 +1257,28 @@ pub fn consume(db: &Db, id: &str, offered: &PayloadSource, ctx: &EventCtx) -> Re
 
 /// Mark pending rows whose `expires_at` is in the past as expired.
 /// Idempotent: already-expired rows are left alone. Returns how many
-/// newly expired.
+/// newly expired. Runs on every request, so it reads only the three
+/// columns it needs, never the payload blobs.
 pub fn expire(db: &Db, ctx: &EventCtx) -> Result<usize> {
     let now = dates::now_in_operator_tz()?;
     let now_iso = dates::format_iso(&now);
-    let pending = list(db, Some("pending"))?;
+    let candidates: Vec<(String, i64, String)> = {
+        let conn = db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, seq, expires_at FROM approvals
+             WHERE status = 'pending' AND expires_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
     let mut n = 0usize;
-    for ap in pending {
-        if !is_past(ap.expires_at.as_deref(), &now) {
+    for (uuid, seq, expires_at) in candidates {
+        if !is_past(Some(&expires_at), &now) {
             continue;
         }
         let mut conn = db.get()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if mark_expired(&tx, &ap, &now_iso, ctx)? {
+        if mark_expired(&tx, &uuid, seq, &now_iso, ctx)? {
             n += 1;
         }
         tx.commit()?;
@@ -1254,22 +1298,23 @@ fn is_past(expires_at: Option<&str>, now: &jiff::Zoned) -> bool {
 /// pending.
 fn mark_expired(
     tx: &rusqlite::Transaction<'_>,
-    ap: &Approval,
+    uuid: &str,
+    seq: i64,
     now_iso: &str,
     ctx: &EventCtx,
 ) -> Result<bool> {
     let changed = tx.execute(
         "UPDATE approvals SET status = 'expired', decided_at = ?1
          WHERE id = ?2 AND status = 'pending'",
-        params![now_iso, ap.uuid],
+        params![now_iso, uuid],
     )?;
     if changed == 1 {
         record_event(
             tx,
             ctx,
-            &ap.uuid,
+            uuid,
             "approval.expired",
-            serde_json::json!({"approval_id": ap.ap_id()}),
+            serde_json::json!({"approval_id": format_ap_id(seq)}),
         )?;
     }
     Ok(changed == 1)
@@ -1575,6 +1620,69 @@ mod tests {
         assert_ne!(first.approval.ap_id(), second.approval.ap_id());
         assert_eq!(get(&db, &first.approval.ap_id()).unwrap().status, "expired");
         assert_eq!(second.approval.status, "pending");
+    }
+
+    #[test]
+    fn request_text_fields_are_bounded() {
+        let (_d, db) = fresh();
+        let base = || RequestInput {
+            kind: "other".into(),
+            title: "ok".into(),
+            request_note: None,
+            payload: PayloadSource::Digest("e".repeat(64)),
+            task_pt_id: None,
+            expires_in: None,
+        };
+        let long_title = RequestInput {
+            title: "t".repeat(MAX_TITLE_CHARS + 1),
+            ..base()
+        };
+        let long_note = RequestInput {
+            request_note: Some("n".repeat(2_000_000)),
+            ..base()
+        };
+        let long_name = RequestInput {
+            payload: PayloadSource::File {
+                bytes: b"x".to_vec(),
+                name: Some("f".repeat(MAX_NAME_CHARS + 1)),
+                reference: None,
+            },
+            ..base()
+        };
+        for input in [long_title, long_note, long_name] {
+            let err = request(&db, input, &ctx("hal")).unwrap_err();
+            assert!(
+                matches!(err, Error::Approval(ApprovalError::Invalid(_))),
+                "{err:?}"
+            );
+        }
+        let at_limit = RequestInput {
+            title: "é".repeat(MAX_TITLE_CHARS),
+            request_note: Some("n".repeat(MAX_NOTE_CHARS)),
+            ..base()
+        };
+        assert!(request(&db, at_limit, &ctx("hal")).unwrap().created);
+    }
+
+    #[test]
+    fn expire_never_reads_payloads() {
+        let (_d, db) = fresh();
+        let ap = request(&db, expiring("0s"), &ctx("hal")).unwrap().approval;
+        // A pending row whose payload is not a blob: any sweep that maps
+        // payload columns fails on it, one that skips them does not.
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO approvals (id, seq, kind, title, payload, payload_kind, digest,
+                                        requester, status, created_at)
+                 VALUES ('odd', 50, 'other', 'x', 42, 'file', printf('%.64c', 'f'), 'hal',
+                         'pending', '2026-09-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(expire(&db, &ctx("sweeper")).unwrap(), 1);
+        assert_eq!(get(&db, &ap.ap_id()).unwrap().status, "expired");
     }
 
     #[test]
