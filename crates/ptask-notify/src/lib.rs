@@ -61,6 +61,23 @@ fn excerpt(s: &str, max: usize) -> String {
 /// joiner, BOM, soft hyphen, variation selectors, tag characters, ...).
 /// A preview containing one can show the operator something other than
 /// the bytes being approved.
+/// True when the preview holds a character that renders invisibly or
+/// misleadingly: default-ignorable / bidi characters, or a control
+/// character other than a line break or tab. A lone CR or a backspace can
+/// make "pay 400\r9000" read as something else; CRLF line endings (every
+/// email) are ordinary.
+fn has_deceptive(preview: &str) -> bool {
+    let mut chars = preview.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let benign_control =
+            ch == '\n' || ch == '\t' || (ch == '\r' && chars.peek() == Some(&'\n'));
+        if is_deceptive(ch) || (ch.is_control() && !benign_control) {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_deceptive(ch: char) -> bool {
     matches!(ch,
         '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}'
@@ -82,7 +99,7 @@ fn tap_blocker(ap: &Approval, preview: &str) -> Option<&'static str> {
         Some("unseen")
     } else if utf16_len(preview) > PREVIEW_UNITS {
         Some("truncated")
-    } else if preview.chars().any(is_deceptive) {
+    } else if has_deceptive(preview) {
         Some("deceptive")
     } else {
         None
@@ -588,6 +605,11 @@ mod tests {
             "pay ACME\u{2060}",
             "\u{FEFF}pay ACME",
             "pay \u{E0041}ACME",
+            // Control characters: a lone CR, backspaces, ESC and C1.
+            "pay 400\r9000 GBP to ACME",
+            "pay 9000 GBP\x08\x08\x08 to ACME",
+            "pay \x1b[2Kto ACME",
+            "pay \u{0085}ACME",
         ] {
             let ap = pending_with(Some(sneaky.as_bytes().to_vec()));
             let (text, kb) = approval_telegram_message(&ap, None, true);
@@ -595,6 +617,16 @@ mod tests {
             assert!(!tap_decidable(&ap), "{sneaky:?}");
             assert!(text.contains("invisible"), "{text}");
         }
+    }
+
+    /// Ordinary multi-line text keeps its buttons: CRLF line endings,
+    /// newlines and tabs are not deceptive.
+    #[test]
+    fn line_breaks_and_tabs_keep_tap_to_decide() {
+        let ap = pending_with(Some(
+            b"Dear ACME,\r\n\tplease pay 400 GBP.\r\nThanks\n".to_vec(),
+        ));
+        assert!(tap_decidable(&ap));
     }
 
     /// Network-level failure surfaces as Ok(false), not Err — the run loop

@@ -212,9 +212,12 @@ marked **PREVIEW TRUNCATED** with the shown and total unit counts, and gets
 no decide buttons, so padding cannot push a harmful tail out of sight of a
 one-tap approval. Binary and digest-only payloads are marked "Payload not
 shown"; a preview containing bidi embeddings, overrides or isolates
-(U+202A–202E, U+2066–2069) or zero-width / default-ignorable characters is
-marked as containing invisible or direction-changing characters. Neither
-gets decide buttons. If a message would still exceed 4096 units, the note
+(U+202A–202E, U+2066–2069), zero-width / default-ignorable characters, or
+a control character other than a newline, tab or CRLF (a lone CR or a
+backspace can overwrite what is shown) is marked as containing invisible or
+direction-changing characters. Neither gets decide buttons. This is
+deliberately conservative: emoji that use a joiner (👨‍👩‍👧) or a variation
+selector (❤️, ✔️, keycaps) also lose tap-to-decide. If a message would still exceed 4096 units, the note
 is dropped first. Those requests are decided from the inbox, the CLI, or
 an admin token. Send failure never fails the request; success sets
 `notified_at`.
