@@ -704,6 +704,12 @@ def build_edit_args(tid: str, body: dict) -> tuple[list[str] | None, str | None]
     return (args, None) if len(args) > 2 else (None, None)
 
 
+# Fragment of pt's refusal (ptask_core::Error::Blocked) when `pt done` hits
+# open depends_on prerequisites; pt exits 1 for every error, so the text is
+# the only signal.
+PT_BLOCKED_MARKER = " is blocked by open task(s): "
+
+
 def pt_exec(args: list[str]) -> tuple[bool, str]:
     env = dict(os.environ)
     env["PATH"] = str(HOME / ".cargo" / "bin") + ":" + env.get("PATH", "")
@@ -1379,6 +1385,10 @@ class Handler(BaseHTTPRequestHandler):
             if not _ID_RE.match(tid):
                 return self._json({"error": "bad id"}, 400)
             ok, msg = pt_exec(["done", "--", tid])
+            if not ok and PT_BLOCKED_MARKER in msg:
+                # pt refused the close: open prerequisites. A conflict the
+                # operator resolves, not a server fault.
+                return self._json({"ok": False, "message": msg}, 409)
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         m = re.match(r"^/api/tasks/([^/]+)/priority$", u.path)

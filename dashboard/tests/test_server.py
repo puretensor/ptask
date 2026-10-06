@@ -434,6 +434,38 @@ class EditFailureTests(unittest.TestCase):
             httpd.server_close()
 
 
+class DoneBlockedTests(unittest.TestCase):
+    def _post_done(self, result):
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+        try:
+            with mock.patch.object(server, "pt_exec", return_value=result):
+                connection.request("POST", "/api/tasks/PT-3/done", body=b"{}",
+                                   headers={"Content-Type": "application/json"})
+                response = connection.getresponse()
+                return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+            httpd.shutdown()
+            thread.join(timeout=2)
+            httpd.server_close()
+
+    def test_close_refused_by_open_blockers_is_a_409_with_pts_message(self):
+        # A refused close is a state conflict the operator can act on, not a
+        # server fault; it used to come back as HTTP 500.
+        msg = ("\u2716 ERROR   PT-3 is blocked by open task(s): PT-1 \u2014 complete or "
+               "dismiss them first, or drop the edge with `pt depend PT-3 --on <PT-ID> --clear`")
+        status, body = self._post_done((False, msg))
+        self.assertEqual(status, 409)
+        self.assertEqual(body, {"ok": False, "message": msg})
+
+    def test_other_done_failures_stay_500(self):
+        status, body = self._post_done((False, "exec error: timed out"))
+        self.assertEqual(status, 500)
+        self.assertFalse(body["ok"])
+
 class OriginTests(unittest.TestCase):
     def test_cross_origin_post_is_rejected_before_mutation(self):
         old_pt_exec = server.pt_exec
