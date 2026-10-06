@@ -232,6 +232,9 @@ It walks the 6-level escalation state machine, gates on the 22:00 — 08:00 UTC
 quiet window, respects a daily Telegram budget of 3, and enforces a 4-hour
 cooldown per task between reminders.
 
+Each SMTP send is bounded at 30 s end to end (connect through DATA); a
+stalled mail server counts as a failed email send instead of hanging the run.
+
 ### Config (env)
 
 | Variable | Purpose |

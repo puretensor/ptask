@@ -222,48 +222,7 @@ impl Dispatch for HttpDispatch {
     /// Send a single email via SMTP. CC is mandatory (CLAUDE.md). Returns
     /// `Ok(true)` on send, `Ok(false)` on missing config / network failure.
     async fn send_email(&self, cfg: &DispatchCfg, subject: &str, body: &str) -> Result<bool> {
-        let (Some(host), Some(user), Some(pass), Some(to)) = (
-            cfg.smtp_host.as_deref(),
-            cfg.smtp_user.as_deref(),
-            cfg.smtp_pass.as_deref(),
-            cfg.notify_email.as_deref(),
-        ) else {
-            return Ok(false);
-        };
-        use lettre::message::Mailbox;
-        use lettre::transport::smtp::AsyncSmtpTransport;
-        use lettre::transport::smtp::authentication::Credentials;
-        use lettre::{AsyncTransport, Message, Tokio1Executor};
-
-        let from: Mailbox = format!("HAL <{}>", user)
-            .parse()
-            .map_err(|e| Error::Other(format!("invalid SMTP_USER address {:?}: {}", user, e)))?;
-        let to: Mailbox = to
-            .parse()
-            .map_err(|e| Error::Other(format!("invalid NOTIFY_EMAIL {:?}: {}", to, e)))?;
-        let mut builder = Message::builder().from(from).to(to).subject(subject);
-        if let Some(cc) = cfg.cc_email.as_deref() {
-            let cc: Mailbox = cc
-                .parse()
-                .map_err(|e| Error::Other(format!("invalid CC {:?}: {}", cc, e)))?;
-            builder = builder.cc(cc);
-        }
-        let email = builder
-            .body(body.to_string())
-            .map_err(|e| Error::Other(format!("build email: {}", e)))?;
-        let creds = Credentials::new(user.to_string(), pass.to_string());
-        let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
-            .map_err(|e| Error::Other(format!("smtp transport: {}", e)))?
-            .port(cfg.smtp_port)
-            .credentials(creds)
-            .build();
-        match mailer.send(email).await {
-            Ok(_) => Ok(true),
-            Err(e) => {
-                warn!(target: "ptask::notify", error = %e, "email send failed");
-                Ok(false)
-            }
-        }
+        send_email_within(cfg, subject, body, SMTP_SEND_TIMEOUT).await
     }
 
     /// Ask HAL to compose the message body. `None` = unavailable/failed.
@@ -292,6 +251,71 @@ impl Dispatch for HttpDispatch {
             .and_then(|m| m.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+}
+
+/// Wall-clock bound on one whole SMTP send: connect, greeting, EHLO,
+/// STARTTLS, AUTH, DATA. lettre's own tokio timeout only covers the
+/// connect, so a server that accepts and then stalls would otherwise hang
+/// the accountability run until systemd kills it.
+pub const SMTP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn send_email_within(
+    cfg: &DispatchCfg,
+    subject: &str,
+    body: &str,
+    timeout: std::time::Duration,
+) -> Result<bool> {
+    let (Some(host), Some(user), Some(pass), Some(to)) = (
+        cfg.smtp_host.as_deref(),
+        cfg.smtp_user.as_deref(),
+        cfg.smtp_pass.as_deref(),
+        cfg.notify_email.as_deref(),
+    ) else {
+        return Ok(false);
+    };
+    use lettre::message::Mailbox;
+    use lettre::transport::smtp::AsyncSmtpTransport;
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{AsyncTransport, Message, Tokio1Executor};
+
+    let from: Mailbox = format!("HAL <{}>", user)
+        .parse()
+        .map_err(|e| Error::Other(format!("invalid SMTP_USER address {:?}: {}", user, e)))?;
+    let to: Mailbox = to
+        .parse()
+        .map_err(|e| Error::Other(format!("invalid NOTIFY_EMAIL {:?}: {}", to, e)))?;
+    let mut builder = Message::builder().from(from).to(to).subject(subject);
+    if let Some(cc) = cfg.cc_email.as_deref() {
+        let cc: Mailbox = cc
+            .parse()
+            .map_err(|e| Error::Other(format!("invalid CC {:?}: {}", cc, e)))?;
+        builder = builder.cc(cc);
+    }
+    let email = builder
+        .body(body.to_string())
+        .map_err(|e| Error::Other(format!("build email: {}", e)))?;
+    let creds = Credentials::new(user.to_string(), pass.to_string());
+    let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+        .map_err(|e| Error::Other(format!("smtp transport: {}", e)))?
+        .port(cfg.smtp_port)
+        .credentials(creds)
+        .timeout(Some(timeout))
+        .build();
+    match tokio::time::timeout(timeout, mailer.send(email)).await {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(e)) => {
+            warn!(target: "ptask::notify", error = %e, "email send failed");
+            Ok(false)
+        }
+        Err(_) => {
+            warn!(
+                target: "ptask::notify",
+                timeout_s = timeout.as_secs_f64(),
+                "email send timed out"
+            );
+            Ok(false)
+        }
     }
 }
 
@@ -400,6 +424,49 @@ mod tests {
         assert!(output.contains("error_kind"), "captured logs: {output:?}");
         assert!(!output.contains(token));
         assert!(!output.contains("/sendMessage"));
+    }
+
+    /// A local SMTP "server" that accepts and never says a word.
+    fn silent_smtp() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    fn smtp_cfg(port: u16) -> DispatchCfg {
+        DispatchCfg {
+            smtp_host: Some("127.0.0.1".into()),
+            smtp_port: port,
+            smtp_user: Some("hal@example.test".into()),
+            smtp_pass: Some("secret".into()),
+            notify_email: Some("op@example.test".into()),
+            cc_email: Some("ops@example.test".into()),
+            ..Default::default()
+        }
+    }
+
+    /// Regression (DIST-7): the lettre tokio timeout only bounded the
+    /// connect, so a server that accepted and then stalled hung the whole
+    /// accountability run until systemd killed it — before the reminder
+    /// stamp was written, so the next run re-sent the Telegram nudges.
+    #[tokio::test]
+    async fn a_stalled_smtp_server_cannot_hang_the_send() {
+        let (_listener, port) = silent_smtp();
+        let started = std::time::Instant::now();
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            send_email_within(
+                &smtp_cfg(port),
+                "s",
+                "b",
+                std::time::Duration::from_millis(300),
+            ),
+        )
+        .await
+        .expect("send_email hung on a stalled server");
+        assert!(!sent.unwrap(), "a timed-out send is a delivery failure");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(SMTP_SEND_TIMEOUT <= std::time::Duration::from_secs(60));
     }
 
     #[tokio::test]
