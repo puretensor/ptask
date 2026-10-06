@@ -480,7 +480,9 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
         );
         return match row {
             Ok(t) => Ok(t),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::PtIdNotFound(pt_id_str)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::PtIdNotFound(
+                crate::text::one_line(&pt_id_str).into_owned(),
+            )),
             Err(e) => Err(e.into()),
         };
     }
@@ -503,7 +505,7 @@ pub fn resolve(db: &Db, query: &str) -> Result<Task> {
     match rows.len() {
         0 => Err(crate::Error::Other(format!(
             "no pending task matching '{}'",
-            query
+            crate::text::one_line(query)
         ))),
         1 => Ok(rows.into_iter().next().unwrap()),
         n => {
@@ -595,7 +597,9 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
         );
         return match row {
             Ok(t) => Ok(t),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::PtIdNotFound(pt_id_str)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err(crate::Error::PtIdNotFound(
+                crate::text::one_line(&pt_id_str).into_owned(),
+            )),
             Err(e) => Err(e.into()),
         };
     }
@@ -627,7 +631,8 @@ pub fn resolve_for_lookup(db: &Db, query: &str, include_terminal: bool) -> Resul
             };
             Err(crate::Error::Other(format!(
                 "no {} matching '{}'",
-                scope, query
+                scope,
+                crate::text::one_line(query)
             )))
         }
         1 => Ok(rows.into_iter().next().unwrap()),

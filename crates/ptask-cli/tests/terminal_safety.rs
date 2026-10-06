@@ -540,3 +540,38 @@ fn variation_selector_smuggling_is_flagged_everywhere() {
     let out = pt.run_as("operator", &["approve", "AP-1", "--via", "dashboard"]);
     assert_eq!(out.status.code(), Some(7));
 }
+
+/// Not-found errors echo the query: a newline in it must not print a
+/// second (forged) line.
+#[test]
+fn query_echo_in_not_found_errors_stays_one_line() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "something"]);
+    let forged = "\n  L2 forged line";
+    for args in [
+        vec!["show".to_string(), format!("x{forged}")],
+        vec!["done".to_string(), format!("x{forged}")],
+        vec!["show".to_string(), format!("PT-99{forged}")],
+        vec![
+            "goal".to_string(),
+            "show".to_string(),
+            format!("G-9{forged}"),
+        ],
+        vec![
+            "approval".to_string(),
+            "show".to_string(),
+            format!("AP-9{forged}"),
+        ],
+        vec!["view".to_string(), "show".to_string(), format!("v{forged}")],
+    ] {
+        let mut full = vec!["--no-color"];
+        full.extend(args.iter().map(String::as_str));
+        let out = pt.run(&full);
+        assert!(!out.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.lines().any(|l| l.trim_start().starts_with("L2")),
+            "{args:?}: forged line in:\n{stderr}"
+        );
+    }
+}

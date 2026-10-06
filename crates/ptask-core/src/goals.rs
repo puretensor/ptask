@@ -271,7 +271,11 @@ fn get_in_conn(conn: &rusqlite::Connection, id: &str) -> Result<Goal> {
     } else {
         load_by_uuid_conn(conn, id.trim())?
     };
-    found.ok_or_else(|| Error::Goal(GoalError::NotFound(id.trim().to_string())))
+    found.ok_or_else(|| {
+        Error::Goal(GoalError::NotFound(
+            crate::text::one_line(id.trim()).into_owned(),
+        ))
+    })
 }
 
 /// Resolve `G-n` or the row uuid.
