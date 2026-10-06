@@ -103,9 +103,11 @@ Local CLI (`pt approve` / `pt reject` / `pt approval decide`):
   with `pt approve AP-n --force`", and the cockpit shows that as its toast.
   The check only applies to a pending request.
 - what counts: control characters other than LF/tab/CRLF, bidi controls,
-  every Unicode format (Cf) character — **including a ZWJ (U+200D) and a
-  soft hyphen (U+00AD)** — the line/paragraph separators, blank Hangul
-  fillers, and variation selectors (U+FE00–FE0F, U+E0100–E01EF, the
+  every Unicode format (Cf) and Default_Ignorable code point — **including
+  a ZWJ (U+200D) and a soft hyphen (U+00AD)**, the Khmer inherent vowels,
+  unassigned U+FFF0–FFF8 and the whole U+E0000–E0FFF block — the
+  line/paragraph separators, the blank-rendering braille blank (U+2800) and
+  ideographic space (U+3000), and variation selectors (U+FE00–FE0F, U+E0100–E01EF, the
   "emoji smuggling" carrier) **except** exactly one VS15/VS16 directly after
   a pictograph or in a keycap. So a lone VS16 emoji such as ❤️, ☀️ or ✔️ in
   an email body needs no `--force`, while a second selector in a run, any

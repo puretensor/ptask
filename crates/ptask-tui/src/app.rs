@@ -710,8 +710,7 @@ mod tests {
 
     #[test]
     fn rendered_frame_carries_no_bidi_or_invisible_characters() {
-        let hostile =
-            "pay \u{202e}lve\u{2066}x\u{2069} zw\u{200b}j\u{2060} tag\u{e0041} bom\u{feff}";
+        let hostile = "pay \u{202e}lve\u{2066}x\u{2069} zw\u{200b}j\u{2060} tag\u{e0041} bom\u{feff} khmer\u{17b4}\u{17b5} fff\u{fff1} un\u{e0239}";
         let (dir, db) = fresh_db();
         let ctx = EventCtx::test();
         let mut new = NewTask::minimal(format!("title {hostile}"));
@@ -743,7 +742,9 @@ mod tests {
                         | '\u{200B}'..='\u{200F}'
                         | '\u{2060}'..='\u{206F}'
                         | '\u{FEFF}'
-                        | '\u{E0000}'..='\u{E007F}'
+                        | '\u{E0000}'..='\u{E0FFF}'
+                        | '\u{17B4}'..='\u{17B5}'
+                        | '\u{FFF0}'..='\u{FFF8}'
                 ),
                 "{c:?} reached the frame:\n{text}"
             );

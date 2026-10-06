@@ -24,14 +24,15 @@ pub fn is_bidi_control(c: char) -> bool {
 }
 
 /// Characters that render as nothing (or reflow lines) and so hide text:
-/// every Unicode general-category Cf (format) character (Unicode 15:
-/// soft hyphen, Arabic/Syriac prepended marks, zero-width characters,
-/// bidi controls, word joiner and invisible operators, BOM, interlinear
-/// annotation, Egyptian hieroglyph format controls, shorthand format
-/// controls, musical symbol beams, tags), the line/paragraph separators,
-/// the variation selectors (U+180B-180F, U+FE00-FE0F, U+E0100-E01EF, the
-/// "emoji smuggling" carrier), the combining grapheme joiner and the
-/// Hangul filler characters that render as blank.
+/// the full Unicode Default_Ignorable_Code_Point set (DerivedCoreProperties:
+/// soft hyphen, CGJ, ALM, Hangul fillers, Khmer inherent vowels, Mongolian
+/// selectors, zero-width characters, bidi controls, word joiner and
+/// invisible operators, variation selectors, BOM, U+FFF0-FFF8, shorthand
+/// format controls, musical beams, the whole U+E0000-E0FFF plane block of
+/// tags and selectors) unioned with every general-category Cf character
+/// (Arabic/Syriac prepended marks, interlinear annotation, Egyptian
+/// hieroglyph format controls) and the line/paragraph separators.
+/// Hand-encoded (Unicode 15) to stay dependency-free.
 pub fn is_invisible(c: char) -> bool {
     matches!(
         c,
@@ -44,6 +45,7 @@ pub fn is_invisible(c: char) -> bool {
             | '\u{0890}'..='\u{0891}'
             | '\u{08E2}'
             | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
             | '\u{180B}'..='\u{180F}'
             | '\u{200B}'..='\u{200F}'
             | '\u{2028}'..='\u{202E}'
@@ -52,15 +54,21 @@ pub fn is_invisible(c: char) -> bool {
             | '\u{FE00}'..='\u{FE0F}'
             | '\u{FEFF}'
             | '\u{FFA0}'
-            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{FFF0}'..='\u{FFFB}'
             | '\u{110BD}'
             | '\u{110CD}'
             | '\u{13430}'..='\u{1343F}'
             | '\u{1BCA0}'..='\u{1BCA3}'
             | '\u{1D173}'..='\u{1D17A}'
-            | '\u{E0000}'..='\u{E007F}'
-            | '\u{E0100}'..='\u{E01EF}'
+            | '\u{E0000}'..='\u{E0FFF}'
     )
+}
+
+/// Visible but blank-rendering characters (braille blank, ideographic
+/// space): ordinary in task text, but in strict mode (an approval preview)
+/// they can pad or hide a field, so they show and are flagged.
+fn is_strict_blank(c: char) -> bool {
+    matches!(c, '\u{2800}' | '\u{3000}')
 }
 
 /// A character no terminal may receive from untrusted text: every control
@@ -74,14 +82,15 @@ pub fn is_hazard(c: char) -> bool {
 /// a lone presentation selector on a pictograph (❤️) — so what is displayed
 /// differs from what is stored. Matches what [`sanitize_strict`] replaces.
 pub fn has_hazard(text: &str) -> bool {
-    if !text.chars().any(is_hazard) {
+    if !text.chars().any(|c| is_hazard(c) || is_strict_blank(c)) {
         return false;
     }
     let chars: Vec<char> = text.chars().collect();
     chars.iter().enumerate().any(|(i, &c)| {
-        is_hazard(c)
-            && !(c == '\r' && chars.get(i + 1) == Some(&'\n'))
-            && !presentation_selector_ok(&chars, i)
+        is_strict_blank(c)
+            || (is_hazard(c)
+                && !(c == '\r' && chars.get(i + 1) == Some(&'\n'))
+                && !presentation_selector_ok(&chars, i))
     })
 }
 
@@ -144,11 +153,15 @@ fn joining_zwj_ok(chars: &[char], i: usize) -> bool {
 }
 
 /// Shared walk behind [`sanitize`], [`one_line`] and [`sanitize_strict`].
-/// One presentation selector per pictograph always passes (❤️). `zwj` also
-/// lets a joining ZWJ through (👨‍👩‍👧, 🏳️‍🌈): it only shapes glyphs and hides
-/// nothing in a task list. Strict mode shows every ZWJ.
-fn clean(text: &str, fold_lines: bool, zwj: bool) -> Cow<'_, str> {
-    let needs = |c: char| c == '\t' || (fold_lines && c == '\n') || is_hazard(c);
+/// One presentation selector per pictograph always passes (❤️). General
+/// display also lets a joining ZWJ through (👨‍👩‍👧, 🏳️‍🌈): it only shapes
+/// glyphs and hides nothing in a task list. Strict mode shows every ZWJ and
+/// the blank-rendering characters.
+fn clean(text: &str, fold_lines: bool, strict: bool) -> Cow<'_, str> {
+    let zwj = !strict;
+    let needs = |c: char| {
+        c == '\t' || (fold_lines && c == '\n') || is_hazard(c) || (strict && is_strict_blank(c))
+    };
     if !text.chars().any(needs) {
         return Cow::Borrowed(text);
     }
@@ -168,7 +181,7 @@ fn clean(text: &str, fold_lines: bool, zwj: bool) -> Cow<'_, str> {
             '\r' | '\n' | '\u{2028}' | '\u{2029}' if fold_lines => out.push(LINE_MARK),
             '\u{200D}' if zwj && joining_zwj_ok(&chars, i) => out.push(c),
             VS15 | VS16 if presentation_selector_ok(&chars, i) => out.push(c),
-            c if is_hazard(c) => out.push(STAND_IN),
+            c if is_hazard(c) || (strict && is_strict_blank(c)) => out.push(STAND_IN),
             c => out.push(c),
         }
         i += 1;
@@ -183,21 +196,21 @@ fn clean(text: &str, fold_lines: bool, zwj: bool) -> Cow<'_, str> {
 /// space, a CRLF line end `\n`. Newlines survive, and so does a ZWJ inside
 /// an emoji sequence. Borrows when there is nothing to change.
 pub fn sanitize(text: &str) -> Cow<'_, str> {
-    clean(text, false, true)
+    clean(text, false, false)
 }
 
 /// Like [`sanitize`] but every ZWJ shows as U+FFFD too (a lone VS15/VS16 on
 /// a pictograph still passes; every other selector shows): for text whose
 /// exact bytes matter (an approval preview).
 pub fn sanitize_strict(text: &str) -> Cow<'_, str> {
-    clean(text, false, false)
+    clean(text, false, true)
 }
 
 /// Single-line safe text for a slot that must stay one line (a title in a
 /// list, an error, a prompt): like [`sanitize`], but every line break (LF,
 /// CR, CRLF, U+2028, U+2029) becomes the visible [`LINE_MARK`].
 pub fn one_line(text: &str) -> Cow<'_, str> {
-    clean(text, true, true)
+    clean(text, true, false)
 }
 
 /// Characters serde_json leaves raw but a terminal would act on: DEL, C1,
@@ -328,6 +341,36 @@ mod tests {
             one_line("ok\u{fe0f}\u{200d}\u{fe0f}\u{200d}\u{fe0f}done"),
             "ok\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}done"
         );
+    }
+
+    #[test]
+    fn default_ignorable_carriers_are_invisible_hazards() {
+        // The reviewer's approved carriers: Khmer inherent vowels, the
+        // unassigned U+FFF0-FFF8, and unassigned U+E01F0-E0FFF.
+        for c in [
+            '\u{17b4}',
+            '\u{17b5}',
+            '\u{fff0}',
+            '\u{fff8}',
+            '\u{e01f0}',
+            '\u{e0239}',
+            '\u{e0fff}',
+        ] {
+            let s = format!("pay{c}x");
+            assert!(has_hazard(&s), "{c:?}");
+            assert_eq!(sanitize(&s), "pay\u{fffd}x", "{c:?}");
+            assert_eq!(one_line(&s), "pay\u{fffd}x", "{c:?}");
+            let json = json_terminal_safe(&serde_json::to_string(&s).unwrap()).into_owned();
+            assert!(!json.contains(c), "{c:?}: {json}");
+        }
+        // Blank-rendering characters: kept in general display, flagged and
+        // shown in strict mode only.
+        for c in ['\u{2800}', '\u{3000}'] {
+            let s = format!("a{c}b");
+            assert_eq!(sanitize(&s), s);
+            assert_eq!(sanitize_strict(&s), "a\u{fffd}b");
+            assert!(has_hazard(&s), "{c:?}");
+        }
     }
 
     #[test]

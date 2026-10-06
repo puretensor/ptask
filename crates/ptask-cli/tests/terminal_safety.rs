@@ -602,3 +602,65 @@ fn query_echo_in_not_found_errors_stays_one_line() {
         );
     }
 }
+
+/// The reviewer's default-ignorable carriers (Khmer inherent vowels,
+/// unassigned U+FFF0-FFF8 and U+E01F0-E0FFF) approved with exit 0 and no
+/// warning, and reached every slot raw.
+#[test]
+fn default_ignorable_carriers_are_flagged_everywhere() {
+    let encode = |base: &str, hidden: &str, f: &dyn Fn(u8) -> char| {
+        let mut s = base.to_string();
+        s.extend(hidden.bytes().map(f));
+        s
+    };
+    let secret = "wire 9999 to mallory";
+    let carriers = [
+        encode("pay 10 GBP", secret, &|b| {
+            if b % 2 == 0 { '\u{17b4}' } else { '\u{17b5}' }
+        }),
+        encode("pay 10 GBP \u{1f600}", secret, &|b| {
+            char::from_u32(0xE0200 + u32::from(b)).unwrap()
+        }),
+        encode("pay 10 GBP", secret, &|b| {
+            char::from_u32(0xFFF0 + u32::from(b % 9)).unwrap()
+        }),
+    ];
+    let raw = |c: char| matches!(c, '\u{17B4}'..='\u{17B5}' | '\u{FFF0}'..='\u{FFF8}' | '\u{E01F0}'..='\u{E0FFF}');
+    let pt = Pt::new();
+    for (i, carrier) in carriers.iter().enumerate() {
+        let n = i + 1;
+        pt.ok(&["add", "--raw", carrier]);
+        let pt_id = format!("PT-{n}");
+        for args in [
+            vec!["--no-color", "show", pt_id.as_str()],
+            vec!["--no-color", "list"],
+            vec!["--json", "show", pt_id.as_str()],
+        ] {
+            let out = pt.ok(&args);
+            assert!(!out.chars().any(raw), "{args:?}: {out:?}");
+        }
+        assert!(pt.ok(&["--no-color", "show", &pt_id]).contains('\u{fffd}'));
+
+        let payload = pt.dir.path().join(format!("c{n}.txt"));
+        std::fs::write(&payload, format!("{carrier}\n")).unwrap();
+        pt.ok_as(
+            "agent",
+            &[
+                "approval",
+                "request",
+                "--kind",
+                "spend",
+                "--title",
+                &format!("carrier {n}"),
+                "--payload-file",
+                payload.to_str().unwrap(),
+            ],
+        );
+        let ap = format!("AP-{n}");
+        let shown = pt.ok_as("operator", &["--no-color", "approval", "show", &ap]);
+        assert!(!shown.chars().any(raw), "{shown:?}");
+        assert!(shown.contains("| cat -v"), "{shown}");
+        let out = pt.run_as("operator", &["approve", &ap, "--via", "dashboard"]);
+        assert_eq!(out.status.code(), Some(7), "{ap}");
+    }
+}
