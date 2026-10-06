@@ -101,6 +101,15 @@ Local CLI (`pt approve` / `pt reject` / `pt approval decide`):
   gated the same way and never forces: the sidecar answers 409
   `{"code": "payload_flagged"}` with pt's message plus "approve from the CLI
   with `pt approve AP-n --force`", and the cockpit shows that as its toast.
+  The check only applies to a pending request.
+- what counts: control characters other than LF/tab/CRLF, bidi controls,
+  every Unicode format (Cf) character — **including a ZWJ (U+200D) and a
+  soft hyphen (U+00AD)** — the line/paragraph separators, blank Hangul
+  fillers, and **every variation selector** (U+FE00–FE0F, U+E0100–E01EF,
+  the "emoji smuggling" carrier). The preview is shown strictly: unlike task
+  lists, it does not keep emoji joiners or VS16. So an ordinary email body
+  with a family emoji (👨‍👩‍👧), a coloured emoji such as ❤️, or a soft
+  hyphen also needs `--force` after inspection.
 
 HTTP `POST /api/approvals/{id}/decide` requires **admin** scope;
 `decided_via=api`. Write-scope tokens may request and withdraw (own rows
