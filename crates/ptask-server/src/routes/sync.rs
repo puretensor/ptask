@@ -458,7 +458,16 @@ fn apply_command(
             ))
         }
         "task_done" => {
-            let task = resolve_task(state, &cmd.args)?;
+            let expected = match cmd.args.get("expected_deadline") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.as_str()),
+                Some(_) => {
+                    return Err(anyhow::anyhow!(
+                        "task_done: args.expected_deadline must be a string"
+                    ));
+                }
+            };
+            let task = tasks::expect_deadline(resolve_task(state, &cmd.args)?, expected)?;
             let outcome = tasks::mark_done(&state.db, &task, &sync_ctx(actor, &cmd.uuid))?;
             let (event_type, payload) = match outcome {
                 DoneOutcome::Completed => (
@@ -823,6 +832,44 @@ mod tests {
             .db
             .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?))
             .unwrap()
+    }
+
+    #[test]
+    fn task_done_with_expected_deadline_completes_one_occurrence_once() {
+        // Regression (round 2, item 4ii): /sync resolved the task when each
+        // command ran, so [task_done d1, task_done d2] for the same
+        // occurrence advanced it twice. expected_deadline pins the
+        // occurrence the client saw.
+        let (_dir, state) = test_state();
+        let mut new = tasks::NewTask::minimal("daily");
+        new.deadline = Some("2099-01-01".into());
+        let ext = ptask_core::Extensions {
+            recurrence: Some(ptask_core::recurrence::parse("every day").unwrap()),
+            ..Default::default()
+        };
+        let t = tasks::create_with_extensions(&state.db, new, ext, &EventCtx::test()).unwrap();
+        let done = |uuid: &str| Command {
+            kind: "task_done".into(),
+            uuid: uuid.into(),
+            temp_id: None,
+            args: serde_json::json!({ "task_uuid": t.id, "expected_deadline": "2099-01-01" }),
+        };
+        assert!(outcome_ok(&apply_one(&state, &done("d1"), "hal")).is_ok());
+        let second = outcome_ok(&apply_one(&state, &done("d2"), "hal"));
+        assert!(second.is_err(), "second completion of the same occurrence");
+        let after = task_by_uuid(&state.db, &t.id).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some("2099-01-02"));
+
+        // Without it, behaviour is unchanged: the current occurrence.
+        let plain = Command {
+            kind: "task_done".into(),
+            uuid: "d3".into(),
+            temp_id: None,
+            args: serde_json::json!({ "task_uuid": t.id }),
+        };
+        assert!(outcome_ok(&apply_one(&state, &plain, "hal")).is_ok());
+        let after = task_by_uuid(&state.db, &t.id).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some("2099-01-03"));
     }
 
     #[test]

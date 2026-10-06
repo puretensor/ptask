@@ -99,7 +99,7 @@ the environment variable is set on the client node.
 | `type` | `args` | Side effects |
 |---|---|---|
 | `task_create` | `{ text, source_type? }` | runs quick-add parser, inserts to `tasks` + `pt_extensions`, optional `pt_recurrence`. |
-| `task_done` | `{ task_uuid }` or `{ pt_id }` | flips status to `done` or advances recurrence in-place, logs an `interaction` row. |
+| `task_done` | `{ task_uuid }` or `{ pt_id }`, optional `expected_deadline` | flips status to `done` or advances recurrence in-place, logs an `interaction` row. A done task is refused. With `expected_deadline` (the deadline the client last saw; `""` = none) the command fails, changing nothing, if the task has moved on — so two queued completions of one occurrence never advance a recurring task twice. Omitted, the current occurrence completes as before. |
 | `task_priority` (v1.8.0) | `{ task_uuid \| pt_id, priority }` | sets priority (1..=5), logs a `priority_change` interaction, rescores. |
 | `task_edit` (v1.8.0) | `{ task_uuid \| pt_id, deadline }` | sets the deadline (ISO string) or clears it (JSON `null`); other JSON types or an omitted deadline are rejected without mutation; rescores. |
 | `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). |

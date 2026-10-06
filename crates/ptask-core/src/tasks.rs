@@ -933,6 +933,20 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
     Ok(DoneOutcome::Completed)
 }
 
+/// Pin the occurrence a caller completes: a surface that resolves the task
+/// at request time (/sync, MCP, the dashboard) passes the deadline its
+/// client last saw, and [`mark_done`] then refuses if the task has moved on.
+/// `None` leaves the snapshot as read; `""` means "it had no deadline".
+pub fn expect_deadline(mut task: Task, expected: Option<&str>) -> Result<Task> {
+    if let Some(expected) = expected {
+        task.deadline = match expected.trim() {
+            "" => None,
+            d => Some(normalize_when(d)?),
+        };
+    }
+    Ok(task)
+}
+
 /// True when an advance failed because the next occurrence is outside the
 /// representable range, i.e. the series is over.
 fn series_has_ended(e: &crate::Error) -> bool {

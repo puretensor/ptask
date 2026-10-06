@@ -2488,6 +2488,42 @@ Don't forget the sourdough.\r\n";
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// Round 2, item 4ii: two POST /api/tasks/{id}/done for the same
+    /// occurrence advanced it twice, because the route resolves the task at
+    /// request time. An `expected_deadline` body pins the occurrence.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_done_with_expected_deadline_advances_once() {
+        let db = open_test_db();
+        let mut new = ptask_core::NewTask::minimal("daily");
+        new.deadline = Some("2099-01-01".into());
+        let task = ptask_core::tasks::create_with_extensions(
+            &db,
+            new,
+            ptask_core::Extensions {
+                recurrence: Some(ptask_core::recurrence::parse("every day").unwrap()),
+                ..Default::default()
+            },
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let uri = format!("/api/tasks/{}/done", task.id);
+        let body = serde_json::json!({ "expected_deadline": "2099-01-01" });
+        let (first, _) = post_json(&app, &uri, &body).await;
+        assert_eq!(first, StatusCode::OK);
+        let (second, v) = post_json(&app, &uri, &body).await;
+        assert_eq!(second, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+        let after = ptask_core::tasks::resolve_for_lookup(&db, &task.id, true).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some("2099-01-02"));
+        // Absent, the current occurrence completes as before.
+        let (third, _) = post_json(&app, &uri, &serde_json::json!({})).await;
+        assert_eq!(third, StatusCode::OK);
+    }
+
     /// Cross-origin writes must be rejected even with valid Basic creds —
     /// browsers attach cached credentials cross-origin (CSRF).
     #[tokio::test(flavor = "current_thread")]

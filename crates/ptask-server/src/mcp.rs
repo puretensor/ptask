@@ -72,6 +72,18 @@ fn with_goals(
 // ------------------------------------------------------------------ args
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DoneArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// The deadline you last saw for this task. When set, the call is
+    /// refused if the task has moved on (another agent or the operator
+    /// already completed that occurrence), so a retried or duplicate
+    /// task_done never advances a recurring task twice. "" = it had none.
+    #[serde(default)]
+    pub expected_deadline: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct IdArg {
     /// Task handle: PT-N, bare number, task uuid, or a title substring.
     pub id: String,
@@ -407,12 +419,17 @@ impl PtaskMcp {
     )]
     async fn task_done(
         &self,
-        Parameters(IdArg { id }): Parameters<IdArg>,
+        Parameters(DoneArg {
+            id,
+            expected_deadline,
+        }): Parameters<DoneArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
         let ctx = self.ctx();
         on_blocking(move || {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            let t = ptask_core::tasks::expect_deadline(t, expected_deadline.as_deref())
+                .map_err(domain_err)?;
             let outcome = ptask_core::tasks::mark_done(&db, &t, &ctx).map_err(domain_err)?;
             rescore_db(&db);
             match outcome {
@@ -1034,6 +1051,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_done_with_expected_deadline_advances_one_occurrence_once() {
+        // Round 2, item 4ii: task_done resolves the task when it runs, so a
+        // duplicate call for the occurrence an agent saw advanced it again.
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let mut new = ptask_core::NewTask::minimal("daily");
+        new.deadline = Some("2099-01-01".into());
+        let t = ptask_core::tasks::create_with_extensions(
+            &db,
+            new,
+            ptask_core::Extensions {
+                recurrence: Some(ptask_core::recurrence::parse("every day").unwrap()),
+                ..Default::default()
+            },
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
+        let done = || {
+            mcp.task_done(Parameters(DoneArg {
+                id: t.pt_id.clone().unwrap(),
+                expected_deadline: Some("2099-01-01".into()),
+            }))
+        };
+        done().await.unwrap();
+        assert!(done().await.is_err());
+        let after = ptask_core::tasks::resolve_for_lookup(&db, &t.id, true).unwrap();
+        assert_eq!(after.deadline.as_deref(), Some("2099-01-02"));
+    }
+
+    #[tokio::test]
     async fn task_done_twice_journals_one_completion() {
         // Regression (MCP-13): task_done resolves PT-N/uuid across terminal
         // states, so a repeated call re-completed the task and journaled a
@@ -1047,7 +1095,12 @@ mod tests {
         )
         .unwrap();
         let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
-        let done = |id: String| mcp.task_done(Parameters(IdArg { id }));
+        let done = |id: String| {
+            mcp.task_done(Parameters(DoneArg {
+                id,
+                expected_deadline: None,
+            }))
+        };
         done(t.pt_id.clone().unwrap()).await.unwrap();
         let cursor = ptask_core::event_log::current_cursor(&db).unwrap();
         assert!(done(t.pt_id.clone().unwrap()).await.is_err());
@@ -1091,8 +1144,9 @@ mod tests {
         .unwrap();
         let mcp = PtaskMcp::new(db.clone(), "test-agent".into());
         let result = mcp
-            .task_done(Parameters(IdArg {
+            .task_done(Parameters(DoneArg {
                 id: t.pt_id.clone().unwrap(),
+                expected_deadline: None,
             }))
             .await
             .unwrap();
