@@ -240,6 +240,10 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 | `pt remote version` | compare client vs server `GET /version`; exits non-zero on skew |
 
 `--url` defaults to `$PTASK_SYNC_URL` then `http://127.0.0.1:9501`.
+`$PTASK_API_TOKEN` is sent as a bearer token; when the URL is plain `http`
+to a host that is neither loopback nor a Tailscale address (100.64.0.0/10,
+`fd7a:115c:a1e0::/48`, `*.ts.net`, all WireGuard-encrypted) the client
+prints a one-line cleartext-token warning on stderr. Use `https` there.
 
 Every remote error also runs the version handshake: a 401/404 from a
 mismatched deploy appends `version skew: client vX vs server vY` to the
