@@ -435,3 +435,17 @@ class UnitTests(unittest.TestCase):
         self.assertIn("OnFailure=ptask-failure-alert@%n.service", svc)
         self.assertIn("TimeoutStartSec=", svc)
         self.assertIn("OnCalendar=", timer)
+
+
+class PlaybookTests(unittest.TestCase):
+    PLAY = SCRIPTS / "ansible" / "ptask.yml"
+
+    def test_fresh_canonical_install_gets_wal_autocheckpoint_zero(self):
+        # Exercised for real with ansible-core (seed when absent, keep an
+        # operator value, remove on -e ptask_litestream=false); this guards
+        # that the tasks stay in the play.
+        play = self.PLAY.read_text()
+        self.assertIn("grep -c '^PTASK_WAL_AUTOCHECKPOINT=' {{ ptask_dotenv }}", play)
+        self.assertIn("line: PTASK_WAL_AUTOCHECKPOINT=0", play)
+        self.assertIn("when: ptask_run_litestream and ptask_walcp.rc == 1", play)
+        self.assertIn("regexp: '^PTASK_WAL_AUTOCHECKPOINT=0$'", play)

@@ -377,7 +377,11 @@ config — see `scripts/litestream/litestream.yml`.
 
 ```bash
 sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA journal_mode = WAL;'   # persists in the file
-grep '^PTASK_WAL_AUTOCHECKPOINT=0$' ~/puretensor-tasks/.env      # Litestream owns checkpoints
+# Leave checkpointing to Litestream for every .env-loading pt process. Adds
+# the line only when .env does not set the key (an existing value is kept);
+# the ansible playbook does the same on the canonical host.
+grep -q '^PTASK_WAL_AUTOCHECKPOINT=' ~/puretensor-tasks/.env \
+  || echo 'PTASK_WAL_AUTOCHECKPOINT=0' >> ~/puretensor-tasks/.env
 ```
 
 Only `journal_mode` is stored in the database. `wal_autocheckpoint` and
@@ -386,6 +390,13 @@ that one shell. `pt` sets `synchronous=NORMAL` itself and applies
 `PTASK_WAL_AUTOCHECKPOINT` to every connection it opens; `ptask-serve` and
 the `pt` timer units (distill, accountability, scoring, reaper, export) load
 it from `~/puretensor-tasks/.env`.
+
+Litestream does most of the checkpointing, not all of it. Processes that do
+not load `.env` (an interactive `pt`, the dashboard sidecar's `pt` calls, a
+`sqlite3` shell) keep SQLite's default and run a PASSIVE checkpoint once the
+WAL passes 1000 pages. Litestream tolerates that: a PASSIVE checkpoint never
+blocks or truncates under its read lock, and Litestream ships the frames
+before it restarts the WAL.
 
 ### Install
 
@@ -526,8 +537,9 @@ litestream generations -config ~/.config/litestream/litestream.yml "$DBDIR/tasks
 
 ### Rollback
 
-Without Litestream nothing checkpoints the WAL while `pt` runs with
-`PTASK_WAL_AUTOCHECKPOINT=0`, so it grows without bound. A `PRAGMA
+Without Litestream, while `pt` runs with `PTASK_WAL_AUTOCHECKPOINT=0`, only
+the occasional process that does not load `.env` checkpoints the WAL, so in
+practice it keeps growing. A `PRAGMA
 wal_autocheckpoint` from a `sqlite3` shell does not help: it changes only
 that shell's connection, and `pt serve`'s pooled connections keep the value
 they were opened with. Change it where `pt` reads it, then restart:
@@ -544,6 +556,12 @@ systemctl --user list-units 'ptask-*.service' --state=activating --no-legend
 sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA wal_checkpoint(TRUNCATE);'
 ls -l ~/puretensor-tasks/tasks.db-wal   # recheck after a day: stays in the low MB (~1000 pages)
 ```
+
+The ansible playbook enables Litestream and seeds the `.env` line on the
+canonical host. While rolled back, run it with `-e ptask_litestream=false`:
+it then keeps Litestream and the replica check disabled, removes
+`PTASK_WAL_AUTOCHECKPOINT=0` (any other value is left alone) and restarts
+`ptask-serve`.
 
 The weekly restore drill's Litestream check now fails, correctly: the replica
 is frozen. Expect that alert until Litestream is back, or stop

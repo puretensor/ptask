@@ -89,6 +89,11 @@
     # eventually proxy through `pt serve` over Tailscale (v0.9.5). Until
     # that lands, only the canonical host runs the timers.
     ptask_is_canonical: "{{ inventory_hostname == ptask_canonical_host }}"
+    # Litestream on the canonical host is the default; `-e ptask_litestream=false`
+    # keeps it rolled back (docs/operations.md, Litestream > Rollback): the
+    # play then disables it and removes the PTASK_WAL_AUTOCHECKPOINT=0 it seeded.
+    ptask_run_litestream: "{{ ptask_is_canonical and (ptask_litestream | default(true) | bool) }}"
+    ptask_dotenv: "{{ ansible_env.HOME }}/puretensor-tasks/.env"
 
   pre_tasks:
     # Per host, NOT run_once — the artifact path differs by architecture,
@@ -206,7 +211,7 @@
       ansible.builtin.stat:
         path: "{{ ptask_litestream_bin }}"
       register: litestream_bin
-      when: ptask_is_canonical
+      when: ptask_run_litestream
 
     - name: fail if litestream is not installed on canonical host
       ansible.builtin.fail:
@@ -214,14 +219,14 @@
           {{ ptask_litestream_bin }} is missing on {{ inventory_hostname }}.
           Install it first (docs/operations.md, Litestream > Pre-requisites);
           the unit would otherwise crash-loop into failed.
-      when: ptask_is_canonical and not litestream_bin.stat.exists
+      when: ptask_run_litestream and not litestream_bin.stat.exists
 
     - name: ensure litestream config dir exists on canonical host
       ansible.builtin.file:
         path: "{{ ptask_litestream_dir }}"
         state: directory
         mode: '0700'
-      when: ptask_is_canonical
+      when: ptask_run_litestream
 
     # The repo file is an example ("edit paths"): install it on first deploy
     # only, never over an operator's edited copy or the documented symlink.
@@ -232,7 +237,7 @@
         mode: '0644'
         force: false
       notify: restart ptask litestream
-      when: ptask_is_canonical
+      when: ptask_run_litestream
 
     # The unit reads this file if present (EnvironmentFile=-). The CephFS
     # replica needs no settings, so an empty 0600 file is valid; existing
@@ -244,7 +249,7 @@
         mode: '0600'
         access_time: preserve
         modification_time: preserve
-      when: ptask_is_canonical
+      when: ptask_run_litestream
 
     - name: install canonical-only systemd units
       ansible.builtin.copy:
@@ -255,7 +260,49 @@
       notify:
         - daemon-reload
         - restart ptask litestream
+      when: ptask_run_litestream
+
+    # pt reads PTASK_WAL_AUTOCHECKPOINT from ~/puretensor-tasks/.env; =0 leaves
+    # checkpointing to Litestream for every .env-loading pt process. Seed it
+    # only when the key is absent: an operator's own value is never changed.
+    - name: check the canonical host's .env
+      ansible.builtin.stat:
+        path: "{{ ptask_dotenv }}"
+      register: ptask_dotenv_stat
       when: ptask_is_canonical
+
+    - name: fail if the canonical host has no .env
+      ansible.builtin.fail:
+        msg: |
+          {{ ptask_dotenv }} is missing on {{ inventory_hostname }}; ptask-serve
+          and the timers cannot start without it (PTASK_API_TOKEN, bind address).
+      when: ptask_is_canonical and not ptask_dotenv_stat.stat.exists
+
+    - name: look for PTASK_WAL_AUTOCHECKPOINT in .env
+      ansible.builtin.command: "grep -c '^PTASK_WAL_AUTOCHECKPOINT=' {{ ptask_dotenv }}"
+      register: ptask_walcp
+      changed_when: false
+      failed_when: ptask_walcp.rc > 1
+      when: ptask_run_litestream
+
+    - name: seed PTASK_WAL_AUTOCHECKPOINT=0 when .env does not set it
+      ansible.builtin.lineinfile:
+        path: "{{ ptask_dotenv }}"
+        line: PTASK_WAL_AUTOCHECKPOINT=0
+        insertafter: EOF
+        create: false
+      notify: restart ptask serve
+      when: ptask_run_litestream and ptask_walcp.rc == 1
+
+    # Rolled back (-e ptask_litestream=false): nothing checkpoints for pt, so
+    # drop the value this play seeds (other values are the operator's).
+    - name: remove PTASK_WAL_AUTOCHECKPOINT=0 when Litestream is rolled back
+      ansible.builtin.lineinfile:
+        path: "{{ ptask_dotenv }}"
+        regexp: '^PTASK_WAL_AUTOCHECKPOINT=0$'
+        state: absent
+      notify: restart ptask serve
+      when: ptask_is_canonical and not ptask_run_litestream
 
     - name: ensure linger enabled (timers must run when operator is logged out)
       ansible.builtin.command: "loginctl enable-linger {{ ansible_env.USER }}"
@@ -278,7 +325,7 @@
       loop:
         - ptask-litestream.service
         - ptask-replica-check.timer
-      when: ptask_is_canonical
+      when: ptask_run_litestream
 
     - name: enable + start timers on canonical host
       ansible.builtin.systemd:
@@ -332,7 +379,7 @@
       when: not ptask_is_canonical
       failed_when: false
 
-    - name: keep litestream and its check disabled on non-canonical hosts
+    - name: keep litestream and its check disabled (clients, or rolled back)
       ansible.builtin.systemd:
         name: "{{ item }}"
         scope: user
@@ -341,7 +388,7 @@
       loop:
         - ptask-litestream.service
         - ptask-replica-check.timer
-      when: not ptask_is_canonical
+      when: not ptask_run_litestream
       failed_when: false
 
   handlers:
@@ -366,4 +413,4 @@
         name: ptask-litestream.service
         scope: user
         state: restarted
-      when: ptask_is_canonical
+      when: ptask_run_litestream
