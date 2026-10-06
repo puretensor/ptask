@@ -66,12 +66,10 @@ pub fn chunk_disposition(kept_len: usize, covered_len: usize) -> ChunkDispositio
     }
 }
 
+/// Lowercase word set for the similarity gates. Date/time tokens are left
+/// out (see [`identifiers_conflict`]): "… by 5pm" is the same task.
 fn title_tokens(s: &str) -> std::collections::HashSet<String> {
-    s.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_string())
-        .collect()
+    tokens_without_dates(s).into_iter().collect()
 }
 
 /// Two titles name different things when their identifier tokens — any
@@ -79,6 +77,10 @@ fn title_tokens(s: &str) -> std::collections::HashSet<String> {
 /// differ. Word overlap and embeddings both score "pay invoice 4411" and
 /// "pay invoice 4412" as near-identical, which deduped real new work away
 /// (even against done tasks). Fails toward creating a possible duplicate.
+///
+/// Date and time tokens are not identifiers: "… by 5pm", "… for 2026",
+/// "on the 5th", "12 March", "9:30am", "2026-10-06" restate when, not which
+/// thing, and counting them blocked genuine duplicates.
 fn identifiers_conflict(a: &str, b: &str) -> bool {
     let ids = |s: &str| {
         title_tokens(s)
@@ -87,6 +89,96 @@ fn identifiers_conflict(a: &str, b: &str) -> bool {
             .collect::<std::collections::HashSet<_>>()
     };
     ids(a) != ids(b)
+}
+
+const MONTHS: &[&str] = &[
+    "jan",
+    "january",
+    "feb",
+    "february",
+    "mar",
+    "march",
+    "apr",
+    "april",
+    "may",
+    "jun",
+    "june",
+    "jul",
+    "july",
+    "aug",
+    "august",
+    "sep",
+    "sept",
+    "september",
+    "oct",
+    "october",
+    "nov",
+    "november",
+    "dec",
+    "december",
+];
+
+fn is_year(t: &str) -> bool {
+    t.len() == 4
+        && t.bytes().all(|b| b.is_ascii_digit())
+        && (t.starts_with("19") || t.starts_with("20"))
+}
+
+fn is_small_number(t: &str) -> bool {
+    (1..=2).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `5pm`, `9:30am`, `17:00`.
+fn is_time(t: &str) -> bool {
+    let (clock, meridiem) = match t.strip_suffix("am").or_else(|| t.strip_suffix("pm")) {
+        Some(rest) => (rest, true),
+        None => (t, false),
+    };
+    match clock.split_once(':') {
+        Some((h, m)) => is_small_number(h) && m.len() == 2 && m.bytes().all(|b| b.is_ascii_digit()),
+        None => meridiem && is_small_number(clock),
+    }
+}
+
+/// `1st`, `22nd`, `3rd`, `5th`.
+fn is_ordinal(t: &str) -> bool {
+    ["st", "nd", "rd", "th"]
+        .iter()
+        .any(|suffix| t.strip_suffix(suffix).is_some_and(is_small_number))
+}
+
+/// Lowercase tokens with date/time tokens removed. `:` is kept inside a
+/// token so a clock time stays whole; remaining tokens are split on it.
+fn tokens_without_dates(s: &str) -> Vec<String> {
+    let raw: Vec<String> = s
+        .to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || c == ':'))
+        .map(|w| w.trim_matches(':').to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+    // A 1-2 digit number within two tokens of a month name or a year is a
+    // day/month ("12 March", "March 12", "2026-10-06", "06/10/2026").
+    let near_date_word = |i: usize| {
+        (i.saturating_sub(2)..=i + 2)
+            .filter(|&j| j != i)
+            .filter_map(|j| raw.get(j))
+            .any(|w| MONTHS.contains(&w.as_str()) || is_year(w))
+    };
+    raw.iter()
+        .enumerate()
+        .filter(|(i, t)| {
+            !(is_year(t)
+                || is_time(t)
+                || is_ordinal(t)
+                || (is_small_number(t) && near_date_word(*i)))
+        })
+        .flat_map(|(_, t)| {
+            t.split(':')
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Similarity gate: normalized token overlap (Jaccard on lowercase words),
@@ -2075,6 +2167,44 @@ mod tests {
             .unwrap();
         assert!(stored.contains("preflight failed"), "{stored}");
         assert!(stored.contains("context length exceeded"), "{stored}");
+    }
+
+    /// Regression (round 2, DIST-2): every digit-bearing token counted as an
+    /// identifier, so a genuine duplicate that only adds a date or time
+    /// ("… by 5pm", "… for 2026") was no longer deduped.
+    #[test]
+    fn date_and_time_tokens_are_not_identifiers() {
+        for (a, b) in [
+            ("Email Alan the quote", "Email Alan the quote by 5pm"),
+            ("File VAT return", "File VAT return for 2026"),
+            ("Call the bank at 9:30am", "call the bank"),
+            ("Renew the lease on the 5th", "Renew the lease"),
+            ("Book the venue for 12 March", "Book the venue"),
+            ("Book the venue for March 12", "Book the venue for March"),
+            ("Ship the release 2026-10-06", "Ship the release"),
+            ("Pay rent at 17:00", "pay rent"),
+        ] {
+            assert!(!identifiers_conflict(a, b), "{a:?} vs {b:?}");
+            assert!(title_similar(a, b), "{a:?} vs {b:?}");
+        }
+        // Real identifiers still block a match.
+        assert!(!title_similar(
+            "Pay invoice 4411 to Acme",
+            "Pay invoice 4412 to Acme"
+        ));
+        assert!(!title_similar(
+            "Reboot the fox-n1 node",
+            "Reboot the fox-n3 node"
+        ));
+        assert!(!title_similar(
+            "Renew cert for host7 today",
+            "Renew cert for host9 today"
+        ));
+        // A bare small number with no month nearby is still an identifier.
+        assert!(identifiers_conflict(
+            "Replace disk 12 in the rack",
+            "Replace disk 14 in the rack"
+        ));
     }
 
     /// Regression (DIST-2): the 0.6 Jaccard gate ignored identifiers, so a
