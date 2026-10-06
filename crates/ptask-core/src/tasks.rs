@@ -873,8 +873,13 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             };
 
             tx.execute(
+                // A new occurrence restarts the reminder ladder: the escalation
+                // belonged to the occurrence just completed.
                 "UPDATE tasks SET deadline=?1, updated_at=?2, status='pending',
-                              status_v2='todo', snoozed_until=NULL WHERE id=?3",
+                              status_v2='todo', snoozed_until=NULL,
+                              escalation_level=0, level_changed_at=NULL,
+                              last_reminded=NULL, next_reminder=NULL
+                  WHERE id=?3",
                 params![next_iso, now, task.id],
             )?;
             tx.execute(
@@ -1340,7 +1345,12 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
         ));
     }
     tx.execute(
-        "UPDATE tasks SET status='pending', status_v2='todo', snoozed_until=NULL, updated_at=?1 WHERE id=?2",
+        // Reopening restarts the reminder ladder; a stale level 5 would
+        // otherwise exclude the task from accountability forever.
+        "UPDATE tasks SET status='pending', status_v2='todo', snoozed_until=NULL, updated_at=?1,
+                          escalation_level=0, level_changed_at=NULL,
+                          last_reminded=NULL, next_reminder=NULL
+          WHERE id=?2",
         params![now, task_uuid],
     )?;
     tx.execute(

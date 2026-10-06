@@ -54,8 +54,10 @@ fn email_blocking(state: AppState, headers: HeaderMap, body: Bytes) -> axum::res
     let message_id = msg.message_id().unwrap_or("none").to_string();
 
     // Compose the raw_items text: subject + blank line + body. Distill's
-    // speech-act classifier handles the rest. Keep it short — anything too
-    // long gets truncated by the LLM downstream anyway.
+    // speech-act classifier handles the rest. The full text is stored; the
+    // distill providers cap what they send per item (`MAX_ITEM_CHARS`, with
+    // a visible truncation marker), so the subject and the head of a long
+    // body are what the model sees.
     let text = if body_text.is_empty() {
         subject.clone()
     } else {

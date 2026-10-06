@@ -9,7 +9,7 @@
 //! (`run_check_at`); these implementations assume real config and that a
 //! live send is wanted.
 
-use ptask_core::accountability::{Dispatch, NudgeRequest, html_escape};
+use ptask_core::accountability::{Dispatch, NudgeRequest, html_escape, truncate_utf16};
 use ptask_core::approvals::Approval;
 use ptask_core::config::DispatchCfg;
 use ptask_core::{Db, Error, Result};
@@ -23,16 +23,10 @@ pub enum InlineButton {
     Url { text: String, url: String },
 }
 
+/// At most `max` UTF-16 code units — the unit Telegram's 4096 limit is
+/// counted in (an emoji counts as two, so a `char` budget overshoots).
 fn excerpt(s: &str, max: usize) -> String {
-    let mut out = String::new();
-    for (i, ch) in s.chars().enumerate() {
-        if i >= max {
-            out.push('…');
-            break;
-        }
-        out.push(ch);
-    }
-    out
+    truncate_utf16(s, max)
 }
 
 /// Body + keyboard for an approval Telegram ping.
@@ -49,7 +43,7 @@ pub fn approval_telegram_message(
     let mut text = format!(
         "<b>{}</b> · {} · {}\nRequester: {}\nDigest: {}…\n\nPreview:\n{}",
         html_escape(&ap.ap_id()),
-        html_escape(&ap.kind),
+        html_escape(&excerpt(&ap.kind, 50)),
         html_escape(&excerpt(&ap.title, 200)),
         html_escape(&excerpt(&ap.requester, 100)),
         html_escape(&digest_prefix),
@@ -125,7 +119,18 @@ pub async fn send_telegram_markup(
     {
         Ok(r) if r.status().is_success() => Ok(true),
         Ok(r) => {
-            warn!(target: "ptask::notify", status = %r.status(), "telegram send failed");
+            // Telegram explains a rejection in the JSON `description`
+            // ("message is too long", "can't parse entities"). The body
+            // never echoes the URL, so unlike transport errors it is safe
+            // to log.
+            let status = r.status();
+            let description = r
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("description")?.as_str().map(|d| excerpt(d, 300)))
+                .unwrap_or_default();
+            warn!(target: "ptask::notify", status = %status, description = %description, "telegram send failed");
             Ok(false)
         }
         Err(e) => {
@@ -222,48 +227,7 @@ impl Dispatch for HttpDispatch {
     /// Send a single email via SMTP. CC is mandatory (CLAUDE.md). Returns
     /// `Ok(true)` on send, `Ok(false)` on missing config / network failure.
     async fn send_email(&self, cfg: &DispatchCfg, subject: &str, body: &str) -> Result<bool> {
-        let (Some(host), Some(user), Some(pass), Some(to)) = (
-            cfg.smtp_host.as_deref(),
-            cfg.smtp_user.as_deref(),
-            cfg.smtp_pass.as_deref(),
-            cfg.notify_email.as_deref(),
-        ) else {
-            return Ok(false);
-        };
-        use lettre::message::Mailbox;
-        use lettre::transport::smtp::AsyncSmtpTransport;
-        use lettre::transport::smtp::authentication::Credentials;
-        use lettre::{AsyncTransport, Message, Tokio1Executor};
-
-        let from: Mailbox = format!("HAL <{}>", user)
-            .parse()
-            .map_err(|e| Error::Other(format!("invalid SMTP_USER address {:?}: {}", user, e)))?;
-        let to: Mailbox = to
-            .parse()
-            .map_err(|e| Error::Other(format!("invalid NOTIFY_EMAIL {:?}: {}", to, e)))?;
-        let mut builder = Message::builder().from(from).to(to).subject(subject);
-        if let Some(cc) = cfg.cc_email.as_deref() {
-            let cc: Mailbox = cc
-                .parse()
-                .map_err(|e| Error::Other(format!("invalid CC {:?}: {}", cc, e)))?;
-            builder = builder.cc(cc);
-        }
-        let email = builder
-            .body(body.to_string())
-            .map_err(|e| Error::Other(format!("build email: {}", e)))?;
-        let creds = Credentials::new(user.to_string(), pass.to_string());
-        let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
-            .map_err(|e| Error::Other(format!("smtp transport: {}", e)))?
-            .port(cfg.smtp_port)
-            .credentials(creds)
-            .build();
-        match mailer.send(email).await {
-            Ok(_) => Ok(true),
-            Err(e) => {
-                warn!(target: "ptask::notify", error = %e, "email send failed");
-                Ok(false)
-            }
-        }
+        send_email_within(cfg, subject, body, SMTP_SEND_TIMEOUT).await
     }
 
     /// Ask HAL to compose the message body. `None` = unavailable/failed.
@@ -292,6 +256,119 @@ impl Dispatch for HttpDispatch {
             .and_then(|m| m.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+    }
+}
+
+/// Wall-clock bound on one whole SMTP send: connect, greeting, EHLO,
+/// STARTTLS, AUTH, DATA. lettre's own tokio timeout only covers the
+/// connect, so a server that accepts and then stalls would otherwise hang
+/// the accountability run until systemd kills it.
+pub const SMTP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Parsed (From, To, CC) mailboxes, or `None` when email is unconfigured.
+fn mailboxes(
+    cfg: &DispatchCfg,
+) -> std::result::Result<
+    Option<(
+        lettre::message::Mailbox,
+        lettre::message::Mailbox,
+        Option<lettre::message::Mailbox>,
+    )>,
+    String,
+> {
+    use lettre::message::Mailbox;
+    if !cfg.email_configured() {
+        return Ok(None);
+    }
+    let (user, to) = (
+        cfg.smtp_user.as_deref().unwrap_or_default(),
+        cfg.notify_email.as_deref().unwrap_or_default(),
+    );
+    let from: Mailbox = match cfg.smtp_from.as_deref() {
+        Some(from) => from
+            .parse()
+            .map_err(|e| format!("invalid PTASK_SMTP_FROM {from:?}: {e}"))?,
+        None => format!("HAL <{user}>").parse().map_err(|e| {
+            format!("SMTP_USER {user:?} is not an address and PTASK_SMTP_FROM is unset: {e}")
+        })?,
+    };
+    let to: Mailbox = to
+        .parse()
+        .map_err(|e| format!("invalid NOTIFY_EMAIL {to:?}: {e}"))?;
+    let cc = match cfg.cc_email.as_deref() {
+        Some(cc) => Some(
+            cc.parse()
+                .map_err(|e| format!("invalid CC address {cc:?}: {e}"))?,
+        ),
+        None => None,
+    };
+    Ok(Some((from, to, cc)))
+}
+
+/// Check every configured email address before anything is sent, so a bad
+/// From/To/CC is reported up front instead of failing mid-run after other
+/// channels have already delivered. `Ok` when email is unconfigured.
+pub fn validate_email_cfg(cfg: &DispatchCfg) -> std::result::Result<(), String> {
+    mailboxes(cfg).map(|_| ())
+}
+
+fn build_email(cfg: &DispatchCfg, subject: &str, body: &str) -> Result<lettre::Message> {
+    let (from, to, cc) = mailboxes(cfg)
+        .map_err(Error::Other)?
+        .ok_or_else(|| Error::Other("email is not configured".into()))?;
+    let mut builder = lettre::Message::builder()
+        .from(from)
+        .to(to)
+        .subject(subject);
+    if let Some(cc) = cc {
+        builder = builder.cc(cc);
+    }
+    builder
+        .body(body.to_string())
+        .map_err(|e| Error::Other(format!("build email: {}", e)))
+}
+
+async fn send_email_within(
+    cfg: &DispatchCfg,
+    subject: &str,
+    body: &str,
+    timeout: std::time::Duration,
+) -> Result<bool> {
+    let (Some(host), Some(user), Some(pass), Some(_)) = (
+        cfg.smtp_host.as_deref(),
+        cfg.smtp_user.as_deref(),
+        cfg.smtp_pass.as_deref(),
+        cfg.notify_email.as_deref(),
+    ) else {
+        return Ok(false);
+    };
+    use lettre::AsyncTransport;
+    use lettre::Tokio1Executor;
+    use lettre::transport::smtp::AsyncSmtpTransport;
+    use lettre::transport::smtp::authentication::Credentials;
+
+    let email = build_email(cfg, subject, body)?;
+    let creds = Credentials::new(user.to_string(), pass.to_string());
+    let mailer = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+        .map_err(|e| Error::Other(format!("smtp transport: {}", e)))?
+        .port(cfg.smtp_port)
+        .credentials(creds)
+        .timeout(Some(timeout))
+        .build();
+    match tokio::time::timeout(timeout, mailer.send(email)).await {
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(e)) => {
+            warn!(target: "ptask::notify", error = %e, "email send failed");
+            Ok(false)
+        }
+        Err(_) => {
+            warn!(
+                target: "ptask::notify",
+                timeout_s = timeout.as_secs_f64(),
+                "email send timed out"
+            );
+            Ok(false)
+        }
     }
 }
 
@@ -364,6 +441,88 @@ mod tests {
         assert!(!text.contains("<b><b>"), "title must be escaped");
     }
 
+    /// Regression (PARSE-11): the approval excerpts counted `char`s, but
+    /// Telegram's 4096 limit is in UTF-16 units — astral characters (emoji)
+    /// count twice, so an emoji-heavy approval still went over.
+    #[test]
+    fn approval_ping_fits_the_limit_in_utf16_units() {
+        let ap = Approval {
+            uuid: "u".into(),
+            seq: 8,
+            kind: "email".into(),
+            title: "😀".repeat(2_000),
+            request_note: Some("🚀".repeat(5_000)),
+            payload: Some("🔥".repeat(5_000).into_bytes()),
+            payload_kind: Some("text".into()),
+            payload_name: None,
+            payload_bytes: Some(20_000),
+            payload_ref: None,
+            digest: "ab".repeat(32),
+            requester: "🤖".repeat(500),
+            task_uuid: None,
+            task_pt_id: None,
+            status: "pending".into(),
+            decided_by: None,
+            decided_via: None,
+            decision_note: None,
+            created_at: "2026-09-25T00:00:00+00:00".into(),
+            decided_at: None,
+            expires_at: None,
+            notified_at: None,
+            consumed_at: None,
+            consumed_by: None,
+        };
+        let (text, _) = approval_telegram_message(&ap, None, false);
+        let rendered = text.replace("<b>", "").replace("</b>", "");
+        let units = rendered.encode_utf16().count();
+        assert!(units <= 4096, "{units} UTF-16 units");
+    }
+
+    /// Regression (PARSE-11): a rejected send logged only the status, so the
+    /// reason ("message is too long", "can't parse entities") was lost.
+    #[tokio::test(flavor = "current_thread")]
+    async fn telegram_rejection_logs_the_api_description_not_the_token() {
+        use std::io::{Read, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 65536];
+            let _ = stream.read(&mut buf);
+            let body =
+                r#"{"ok":false,"error_code":400,"description":"Bad Request: message is too long"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let token = "sentinel-secret-token";
+        let cfg = DispatchCfg {
+            telegram_token: Some(token.into()),
+            telegram_chat_id: Some(1),
+            telegram_api_base: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
+        let logs = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let sent = HttpDispatch.send_telegram(&cfg, "x", &[]).await.unwrap();
+        assert!(!sent);
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("message is too long"),
+            "captured logs: {output:?}"
+        );
+        assert!(!output.contains(token));
+    }
+
     /// Network-level failure surfaces as Ok(false), not Err — the run loop
     /// counts it as a send failure and circuit-breaks. Uses an unroutable
     /// port so no real network is touched.
@@ -400,6 +559,80 @@ mod tests {
         assert!(output.contains("error_kind"), "captured logs: {output:?}");
         assert!(!output.contains(token));
         assert!(!output.contains("/sendMessage"));
+    }
+
+    /// A local SMTP "server" that accepts and never says a word.
+    fn silent_smtp() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    fn smtp_cfg(port: u16) -> DispatchCfg {
+        DispatchCfg {
+            smtp_host: Some("127.0.0.1".into()),
+            smtp_port: port,
+            smtp_user: Some("hal@example.test".into()),
+            smtp_pass: Some("secret".into()),
+            notify_email: Some("op@example.test".into()),
+            cc_email: Some("ops@example.test".into()),
+            ..Default::default()
+        }
+    }
+
+    /// Regression (DIST-7): the lettre tokio timeout only bounded the
+    /// connect, so a server that accepted and then stalled hung the whole
+    /// accountability run until systemd killed it — before the reminder
+    /// stamp was written, so the next run re-sent the Telegram nudges.
+    #[tokio::test]
+    async fn a_stalled_smtp_server_cannot_hang_the_send() {
+        let (_listener, port) = silent_smtp();
+        let started = std::time::Instant::now();
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            send_email_within(
+                &smtp_cfg(port),
+                "s",
+                "b",
+                std::time::Duration::from_millis(300),
+            ),
+        )
+        .await
+        .expect("send_email hung on a stalled server");
+        assert!(!sent.unwrap(), "a timed-out send is a delivery failure");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(SMTP_SEND_TIMEOUT <= std::time::Duration::from_secs(60));
+    }
+
+    /// Regression (DIST-8): SMTP_USER was used as the From address, so a
+    /// relay login that is not an address ("apikey") made every email fail,
+    /// and a bad NOTIFY_EMAIL/CC was only discovered mid-run.
+    #[test]
+    fn from_address_is_configurable_and_addresses_validate_up_front() {
+        let mut cfg = smtp_cfg(587);
+        cfg.smtp_user = Some("apikey".into());
+        assert!(validate_email_cfg(&cfg).is_err(), "login is not an address");
+        cfg.smtp_from = Some("HAL <hal@puretensor.ai>".into());
+        validate_email_cfg(&cfg).unwrap();
+        let email = build_email(&cfg, "subject", "body").unwrap();
+        let headers = String::from_utf8(email.formatted()).unwrap();
+        assert!(
+            headers.contains("From: HAL <hal@puretensor.ai>"),
+            "{headers}"
+        );
+
+        let mut bad_to = smtp_cfg(587);
+        bad_to.notify_email = Some("not an address".into());
+        let err = validate_email_cfg(&bad_to).unwrap_err();
+        assert!(err.contains("NOTIFY_EMAIL"), "{err}");
+
+        let mut bad_cc = smtp_cfg(587);
+        bad_cc.cc_email = Some("ops@@example".into());
+        let err = validate_email_cfg(&bad_cc).unwrap_err();
+        assert!(err.contains("CC"), "{err}");
+
+        // Unconfigured email is not an error; there is nothing to validate.
+        validate_email_cfg(&DispatchCfg::default()).unwrap();
     }
 
     #[tokio::test]

@@ -48,30 +48,48 @@ pub enum ChunkDisposition {
     Retain,
 }
 
-/// Keep signal-bearing input when consolidation unexpectedly produces no
-/// candidates; consuming it would silently destroy work while reporting it as
-/// successfully kept. Noise is still consumed, and any non-empty output
-/// means the kept input has been handled.
-pub fn chunk_disposition(kept_len: usize, candidates_len: usize) -> ChunkDisposition {
-    if kept_len > 0 && candidates_len == 0 {
+/// Keep signal-bearing input when consolidation unexpectedly covers none of
+/// it; consuming it would silently destroy work while reporting it as
+/// successfully kept. Noise is still consumed. `covered_len` is the number of
+/// kept captures some created or deduped candidate covers — when it is
+/// non-zero the covered captures are consumed and the uncovered remainder is
+/// walked again (see `process_chunk`).
+pub fn chunk_disposition(kept_len: usize, covered_len: usize) -> ChunkDisposition {
+    if kept_len > 0 && covered_len == 0 {
         ChunkDisposition::Retain
     } else {
         ChunkDisposition::Consume
     }
 }
 
-/// Similarity gate: normalized token overlap (Jaccard on lowercase words).
-/// Cheap, deterministic, no model download.
-fn title_similar(a: &str, b: &str) -> bool {
-    let toks = |s: &str| {
-        s.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| !w.is_empty())
-            .map(|w| w.to_string())
+fn title_tokens(s: &str) -> std::collections::HashSet<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Two titles name different things when their identifier tokens — any
+/// token containing a digit (`4411`, `n1` from `fox-n1`, `host7`, `v2`) —
+/// differ. Word overlap and embeddings both score "pay invoice 4411" and
+/// "pay invoice 4412" as near-identical, which deduped real new work away
+/// (even against done tasks). Fails toward creating a possible duplicate.
+fn identifiers_conflict(a: &str, b: &str) -> bool {
+    let ids = |s: &str| {
+        title_tokens(s)
+            .into_iter()
+            .filter(|w| w.chars().any(|c| c.is_numeric()))
             .collect::<std::collections::HashSet<_>>()
     };
-    let (ta, tb) = (toks(a), toks(b));
-    if ta.is_empty() || tb.is_empty() {
+    ids(a) != ids(b)
+}
+
+/// Similarity gate: normalized token overlap (Jaccard on lowercase words),
+/// never across distinct identifiers. Cheap, deterministic, no model download.
+fn title_similar(a: &str, b: &str) -> bool {
+    let (ta, tb) = (title_tokens(a), title_tokens(b));
+    if ta.is_empty() || tb.is_empty() || identifiers_conflict(a, b) {
         return false;
     }
     let inter = ta.intersection(&tb).count() as f64;
@@ -82,7 +100,7 @@ fn title_similar(a: &str, b: &str) -> bool {
 /// Select kept inputs only after proving the provider returned a complete,
 /// one-to-one index permutation. A response with the right length can still
 /// duplicate one index and omit another; silently accepting that drops work.
-fn select_kept_texts(texts: &[String], verdicts: &[Classification]) -> Result<Vec<String>> {
+fn select_kept(texts: &[String], verdicts: &[Classification]) -> Result<Vec<usize>> {
     if verdicts.len() != texts.len() {
         bail!(
             "provider returned {} verdicts for {} items — failing closed",
@@ -93,13 +111,13 @@ fn select_kept_texts(texts: &[String], verdicts: &[Classification]) -> Result<Ve
     let mut seen = vec![false; texts.len()];
     let mut kept = Vec::new();
     for verdict in verdicts {
-        let Some(text) = texts.get(verdict.idx) else {
+        if verdict.idx >= texts.len() {
             bail!(
                 "provider returned out-of-range verdict index {} for {} items — failing closed",
                 verdict.idx,
                 texts.len()
             );
-        };
+        }
         if std::mem::replace(&mut seen[verdict.idx], true) {
             bail!(
                 "provider returned duplicate verdict index {} — failing closed",
@@ -107,9 +125,11 @@ fn select_kept_texts(texts: &[String], verdicts: &[Classification]) -> Result<Ve
             );
         }
         if verdict.keep {
-            kept.push(text.clone());
+            kept.push(verdict.idx);
         }
     }
+    // Input order, so consolidate's item numbers follow the capture order.
+    kept.sort_unstable();
     Ok(kept)
 }
 
@@ -276,6 +296,9 @@ struct RunState {
     /// No new provider call starts after this instant.
     stop_at: Option<std::time::Instant>,
     budget_exhausted: bool,
+    /// The provider became unavailable mid-run (see `ProviderUnavailable`):
+    /// no further call starts and nothing more is charged.
+    aborted: bool,
 }
 
 /// Why a chunk failed, and whether the capture may be blamed for it.
@@ -287,13 +310,20 @@ struct ChunkError {
     /// Gemini client already retries transient transport/5xx failures three
     /// times, so a failure here is much more likely to be the data.
     chargeable: bool,
+    /// The provider itself is down/rate-limited/timing out. Bisecting would
+    /// only multiply calls against the outage, so the run stops instead.
+    abort: bool,
 }
 
 impl ChunkError {
     fn provider(e: anyhow::Error) -> Self {
+        let outage = e
+            .downcast_ref::<crate::providers::ProviderUnavailable>()
+            .is_some();
         Self {
             reason: format!("{e:#}"),
-            chargeable: true,
+            chargeable: !outage,
+            abort: outage,
         }
     }
 
@@ -303,12 +333,18 @@ impl ChunkError {
         Self {
             reason: format!("{e:#}"),
             chargeable: false,
+            abort: false,
         }
     }
 }
 
 /// Classify one chunk, consolidate what it kept, and create the survivors.
 /// Any error here is the chunk's error: the caller isolates it.
+///
+/// On success, returns the kept captures no created or deduped candidate
+/// covers. They are NOT consumed — the caller walks them again as a smaller
+/// chunk — so a model that merges too eagerly or stops early can never make
+/// a commitment disappear while the run reports it as handled.
 fn process_chunk<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
@@ -316,44 +352,66 @@ fn process_chunk<P: LlmProvider + ?Sized>(
     dedup: &mut Dedup,
     st: &mut RunState,
     ctx: &EventCtx,
-) -> std::result::Result<(), ChunkError> {
+) -> std::result::Result<Vec<ptask_core::raw_items::RawItem>, ChunkError> {
     st.calls += 1;
     let texts: Vec<String> = items.iter().map(|i| i.text.clone()).collect();
     let verdicts = provider
         .classify_batch(&texts)
         .map_err(ChunkError::provider)?;
-    let kept = select_kept_texts(&texts, &verdicts).map_err(ChunkError::provider)?;
-    let candidates = if !kept.is_empty() {
+    let kept = select_kept(&texts, &verdicts).map_err(ChunkError::provider)?;
+    let mut covered = vec![false; kept.len()];
+    if !kept.is_empty() {
         st.calls += 1;
-        Some(provider.consolidate(&kept).map_err(ChunkError::provider)?)
-    } else {
-        None
-    };
-    let candidates_len = candidates.as_ref().map_or(0, Vec::len);
-    match chunk_disposition(kept.len(), candidates_len) {
-        ChunkDisposition::Consume => {
-            if let Some(candidates) = candidates {
-                create_candidates(db, provider, candidates, dedup, st, ctx)
-                    .map_err(ChunkError::local)?;
+        let kept_texts: Vec<String> = kept.iter().map(|&i| texts[i].clone()).collect();
+        let mut candidates = provider
+            .consolidate(&kept_texts)
+            .map_err(ChunkError::provider)?;
+        for cand in &mut candidates {
+            if let Some(&bad) = cand.sources.iter().find(|&&i| i >= kept.len()) {
+                return Err(ChunkError::provider(anyhow::anyhow!(
+                    "provider returned out-of-range source index {bad} for {} kept items — failing closed",
+                    kept.len()
+                )));
             }
-            // Chunk complete — kept items became candidates, or every item
-            // was judged noise. Either way the input was deliberately handled.
-            st.kept += kept.len();
-            st.consumed_ids.extend(items.iter().map(|i| i.id));
+            // With one kept capture there is nothing else a task can be from.
+            if kept.len() == 1 {
+                cand.sources = vec![0];
+            }
         }
-        ChunkDisposition::Retain => {
-            // Preserve the input, but use the same isolation and bounded retry
-            // path as other provider failures. Returning success leaves the
-            // oldest captures eligible forever and can starve the queue.
-            // Nothing is consumed here: bisection reclassifies each child,
-            // including noise, and accounts for it exactly once.
-            return Err(ChunkError::provider(anyhow::anyhow!(
-                "empty consolidation for {} kept captures",
-                kept.len()
-            )));
+        create_candidates(db, provider, candidates, &mut covered, dedup, st, ctx)
+            .map_err(ChunkError::local)?;
+    }
+    let covered_len = covered.iter().filter(|&&c| c).count();
+    if chunk_disposition(kept.len(), covered_len) == ChunkDisposition::Retain {
+        // Preserve the input, but use the same isolation and bounded retry
+        // path as other provider failures. Returning success leaves the
+        // oldest captures eligible forever and can starve the queue.
+        // Nothing is consumed here: bisection reclassifies each child,
+        // including noise, and accounts for it exactly once.
+        return Err(ChunkError::provider(anyhow::anyhow!(
+            "consolidation covered none of {} kept captures",
+            kept.len()
+        )));
+    }
+    // Noise was deliberately dropped and covered captures became (or match)
+    // tasks: both are handled. Uncovered kept captures go round again.
+    let mut uncovered = Vec::new();
+    let mut kept_pos = kept.iter().zip(&covered).peekable();
+    for (idx, item) in items.iter().enumerate() {
+        match kept_pos.peek() {
+            Some(&(&k, &is_covered)) if k == idx => {
+                kept_pos.next();
+                if is_covered {
+                    st.kept += 1;
+                    st.consumed_ids.push(item.id);
+                } else {
+                    uncovered.push(item.clone());
+                }
+            }
+            _ => st.consumed_ids.push(item.id),
         }
     }
-    Ok(())
+    Ok(uncovered)
 }
 
 /// Walk a chunk, halving it on failure so a single unprocessable row is
@@ -366,7 +424,7 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
     st: &mut RunState,
     ctx: &EventCtx,
 ) {
-    if items.is_empty() {
+    if items.is_empty() || st.aborted {
         return;
     }
     if st.calls >= MAX_PROVIDER_CALLS || st.stop_at.is_some_and(|t| std::time::Instant::now() >= t)
@@ -374,11 +432,34 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
         st.budget_exhausted = true;
         return;
     }
-    let Err(e) = process_chunk(db, provider, items, dedup, st, ctx) else {
-        return;
+    let e = match process_chunk(db, provider, items, dedup, st, ctx) {
+        Ok(uncovered) if uncovered.is_empty() => return,
+        Ok(uncovered) => {
+            // Strictly smaller than `items` (something was covered), so this
+            // terminates; the call/wall budget bounds it as well.
+            warn!(
+                target: "ptask::distill",
+                chunk = items.len(),
+                uncovered = uncovered.len(),
+                "consolidation left kept captures uncovered — walking them again"
+            );
+            walk_chunk(db, provider, &uncovered, dedup, st, ctx);
+            return;
+        }
+        Err(e) => e,
     };
-    if st.first_error.is_none() {
+    if st.first_error.is_none() || e.abort {
         st.first_error = Some(e.reason.clone());
+    }
+    if e.abort {
+        warn!(
+            target: "ptask::distill",
+            chunk = items.len(),
+            error = %e.reason,
+            "provider unavailable — aborting the run; remaining rows deferred, uncharged"
+        );
+        st.aborted = true;
+        return;
     }
     if items.len() == 1 {
         warn!(
@@ -407,22 +488,45 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
 }
 
 /// Create the survivors of one chunk's consolidation, running every dedup
-/// gate against the shared run universe.
+/// gate against the shared run universe. A candidate that is created or
+/// deduped (it already exists as a task) marks its `sources` as `covered`.
 fn create_candidates<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
     candidates: Vec<crate::providers::Candidate>,
+    covered: &mut [bool],
     dedup: &mut Dedup,
     st: &mut RunState,
     ctx: &EventCtx,
 ) -> Result<()> {
-    for cand in candidates {
+    let mut cover = |sources: &[usize]| {
+        for &i in sources {
+            covered[i] = true;
+        }
+    };
+    for mut cand in candidates {
+        // A blank title is not a task. It is skipped without covering its
+        // sources, so those captures go round again instead of being
+        // consumed — and it never reaches the temporal hash, where every
+        // later blank would "dedup" against the first.
+        let trimmed = cand.title.trim();
+        if trimmed.is_empty() {
+            warn!(target: "ptask::distill", sources = ?cand.sources, "candidate with a blank title — skipped");
+            continue;
+        }
+        if trimmed.len() != cand.title.len() {
+            cand.title = trimmed.to_string();
+        }
+        if cand.sources.is_empty() {
+            warn!(target: "ptask::distill", title = %cand.title, "candidate names no source captures — it covers none");
+        }
         if dedup
             .existing
             .iter()
             .any(|(_, t)| title_similar(t, &cand.title))
         {
             st.skipped += 1;
+            cover(&cand.sources);
             info!(target: "ptask::distill", title = %cand.title, "dedup skip (jaccard)");
             continue;
         }
@@ -434,6 +538,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         {
             Ok(true) => {
                 st.skipped += 1;
+                cover(&cand.sources);
                 info!(target: "ptask::distill", title = %cand.title, "dedup skip (temporal)");
                 continue;
             }
@@ -449,9 +554,12 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             Ok(SemanticCheck {
                 best: Some((idx, score)),
                 ..
-            }) if score >= crate::semantic_dedup::DEFAULT_THRESHOLD => {
+            }) if score >= crate::semantic_dedup::DEFAULT_THRESHOLD
+                && !identifiers_conflict(&dedup.existing[idx].1, &cand.title) =>
+            {
                 let (dup_id, dup_title) = dedup.existing[idx].clone();
                 st.skipped += 1;
+                cover(&cand.sources);
                 info!(
                     target: "ptask::distill",
                     title = %cand.title,
@@ -520,6 +628,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         }
         dedup.existing.push((created.id, title));
         st.created += 1;
+        cover(&cand.sources);
     }
     Ok(())
 }
@@ -533,9 +642,15 @@ fn create_candidates<P: LlmProvider + ?Sized>(
 /// queue. Only provider/classification failures are chargeable; a database
 /// failure during task creation is not.
 ///
+/// A provider *outage* (rate limit, 5xx, timeout, unreachable, rejected
+/// credentials — `ProviderUnavailable`) is different: it aborts the run at
+/// once, without bisecting and without charging anything, and the run fails
+/// closed after marking the chunks that finished.
+///
 /// A run in which nothing got through still fails closed. Note what that does
 /// NOT mean: an attempt is charged whether or not anything else succeeded this
-/// run, so a total provider outage charges every row it bisects down to (~31
+/// run, so a provider that keeps *answering* with unusable output (a schema
+/// regression, a bad model deploy) charges every row it bisects down to (~31
 /// captures at the current CHUNK / MAX_PROVIDER_CALLS settings). That is
 /// bounded and recoverable rather than prevented — quarantined rows are
 /// retained and countable via `pt_distill_quarantined_captures`. See the
@@ -548,6 +663,44 @@ pub fn run_native<P: LlmProvider + ?Sized>(
     run_native_within(db, provider, batch, RUN_WALL_BUDGET)
 }
 
+/// Another distill run holds the run lock; this one consumed nothing.
+#[derive(Debug)]
+pub struct DistillBusy(pub String);
+
+impl std::fmt::Display for DistillBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "another distill run is already running (lock {}) — nothing consumed",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for DistillBusy {}
+
+/// Exclusive per-database run lock (`<db>.distill.lock`). Nothing claims
+/// `raw_items` rows, so two concurrent runs would fetch, classify and create
+/// tasks from the same captures. An OS file lock is released by the kernel
+/// when its holder exits or is killed, so a crashed run can never wedge the
+/// next one the way a lease row could.
+fn acquire_run_lock(db: &Db) -> Result<std::fs::File> {
+    let path = format!("{}.distill.lock", db.path().display());
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open distill run lock {path}"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(anyhow::Error::new(DistillBusy(path))),
+        Err(std::fs::TryLockError::Error(e)) => {
+            Err(anyhow::Error::new(e).context(format!("lock distill run lock {path}")))
+        }
+    }
+}
+
 fn run_native_within<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
@@ -556,6 +709,8 @@ fn run_native_within<P: LlmProvider + ?Sized>(
 ) -> Result<NativeReport> {
     let start = std::time::Instant::now();
     let ctx = EventCtx::system("distill");
+    // Held until this function returns (dropping the File unlocks it).
+    let _run_lock = acquire_run_lock(db)?;
 
     provider
         .preflight()
@@ -631,6 +786,18 @@ fn run_native_within<P: LlmProvider + ?Sized>(
         }
     }
 
+    // The provider went away mid-run. What finished is kept (marked above)
+    // and nothing was charged for the outage, but the run fails closed so
+    // the outage is reported rather than looking like a short queue.
+    if st.aborted {
+        bail!(
+            "{} ({} capture(s) completed before the outage; the rest are deferred, uncharged)",
+            st.first_error
+                .unwrap_or_else(|| "provider unavailable".into()),
+            st.consumed_ids.len()
+        );
+    }
+
     // Nothing at all got through. Attempts are charged (above) so the queue
     // still advances, but the run itself stays FAIL CLOSED: the caller
     // records `distill.failed` and exits non-zero, which is what the May-2026
@@ -697,13 +864,15 @@ pub fn record_run(db: &Db, ctx: &EventCtx, report: &NativeReport, success: bool)
 }
 
 /// Record a failure manifest (provider/preflight errors happen before a
-/// report exists).
-pub fn record_failure(db: &Db, provider: &str, error: &str) {
+/// report exists). Takes the error itself, not a string, and stores the
+/// alternate (`{:#}`) form: the outermost context alone ("provider preflight
+/// failed") hides the provider's actual answer underneath it.
+pub fn record_failure(db: &Db, provider: &str, error: &anyhow::Error) {
     let ctx = EventCtx::system("distill");
     let payload = serde_json::json!({
         "native": true,
         "provider": provider,
-        "error": error,
+        "error": format!("{error:#}"),
     });
     let uuid = format!("distill-native:{}", uuid::Uuid::new_v4());
     if let Err(e) = event_log::record(db, &uuid, None, "distill.failed", &payload, &ctx) {
@@ -765,10 +934,12 @@ mod tests {
         fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
             Ok(items
                 .iter()
-                .map(|t| Candidate {
+                .enumerate()
+                .map(|(i, t)| Candidate {
                     title: t.clone(),
                     priority: 2,
                     description: String::new(),
+                    sources: vec![i],
                 })
                 .collect())
         }
@@ -826,10 +997,12 @@ mod tests {
             }
             Ok(items
                 .iter()
-                .map(|text| Candidate {
+                .enumerate()
+                .map(|(i, text)| Candidate {
                     title: text.clone(),
                     priority: 2,
                     description: String::new(),
+                    sources: vec![i],
                 })
                 .collect())
         }
@@ -909,11 +1082,13 @@ mod tests {
                     title: "Email Alan about the GPU quote".into(),
                     priority: 3,
                     description: String::new(),
+                    sources: vec![],
                 },
                 Candidate {
                     title: "Book the Reykjavik flight".into(),
                     priority: 2,
                     description: "carry-on only".into(),
+                    sources: vec![],
                 },
             ],
         };
@@ -1048,6 +1223,7 @@ mod tests {
                 title: "Call the supplier".into(),
                 priority: 3,
                 description: String::new(),
+                sources: vec![],
             }],
         };
 
@@ -1131,6 +1307,255 @@ mod tests {
         assert_eq!(attempts(&db, "REDACTED trips the safety filter"), 1);
     }
 
+    /// Regression (DIST-1): the consolidate prompt capped output at "1-4
+    /// tasks" (and the code at 8) while the whole chunk of up to 25 kept
+    /// captures was marked processed — every commitment past the cap was
+    /// silently lost. Kept captures are now consumed only when a candidate
+    /// covers them; the rest go round again.
+    #[test]
+    fn captures_past_the_consolidation_cap_are_not_lost() {
+        /// Emits one candidate per item, but never more than four.
+        struct CappedProvider;
+        impl LlmProvider for CappedProvider {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                Ok(PoisonProvider { poison: "\u{0}" }
+                    .consolidate(items)?
+                    .into_iter()
+                    .take(4)
+                    .collect())
+            }
+            fn preflight(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "capped-test"
+            }
+        }
+        let (_dir, db) = fresh_db();
+        let texts: Vec<String> = [
+            "call the bank about the mandate",
+            "book the Reykjavik flight",
+            "renew the office lease",
+            "email Alan the revised quote",
+            "file the VAT return",
+            "order replacement fans for the rack",
+            "send the board pack to Sigrid",
+            "cancel the unused colo cross-connect",
+            "update the insurance policy address",
+            "pay the electricity bill",
+        ]
+        .map(String::from)
+        .to_vec();
+        for t in &texts {
+            ptask_core::raw_items::insert(&db, t, "test", "test://x").unwrap();
+        }
+
+        let report = run_native(&db, &CappedProvider, 100).unwrap();
+        assert_eq!(report.created, 10, "every kept commitment became a task");
+        assert_eq!(report.consumed, 10);
+        assert_eq!(report.kept, 10);
+        assert_eq!(report.failed, 0);
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 0);
+    }
+
+    /// A kept capture no candidate covers is retained, not consumed, even when
+    /// its neighbours were covered — and it is charged only once isolated.
+    #[test]
+    fn an_uncovered_capture_is_retained_while_covered_ones_are_consumed() {
+        struct SkipsOne;
+        impl LlmProvider for SkipsOne {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                Ok(PoisonProvider { poison: "\u{0}" }
+                    .consolidate(items)?
+                    .into_iter()
+                    .filter(|c| !c.title.contains("IGNORED"))
+                    .collect())
+            }
+            fn preflight(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "skips-one-test"
+            }
+        }
+        let (_dir, db) = fresh_db();
+        seed_inbox(
+            &db,
+            &[
+                "call the bank about the mandate",
+                "IGNORED commitment the model drops",
+                "renew the office lease",
+            ],
+        );
+        let report = run_native(&db, &SkipsOne, 100).unwrap();
+        assert_eq!(report.created, 2);
+        assert_eq!(report.consumed, 2);
+        assert_eq!(report.failed, 1);
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+        assert_eq!(attempts(&db, "IGNORED commitment the model drops"), 1);
+    }
+
+    /// Regression (DIST-3): a blank/whitespace candidate title created a
+    /// task (and consumed its capture); the next blank was then "deduped" by
+    /// the temporal hash of the empty string, consuming that capture too.
+    #[test]
+    fn a_blank_candidate_title_creates_nothing_and_consumes_nothing() {
+        struct BlankForBank;
+        impl LlmProvider for BlankForBank {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                Ok(PoisonProvider { poison: "\u{0}" }
+                    .consolidate(items)?
+                    .into_iter()
+                    .map(|mut c| {
+                        if c.title.contains("bank") {
+                            c.title = " \t\u{a0} ".into();
+                        }
+                        c
+                    })
+                    .collect())
+            }
+            fn preflight(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "blank-test"
+            }
+        }
+        let (_dir, db) = fresh_db();
+        seed_inbox(
+            &db,
+            &[
+                "call the bank about the mandate",
+                "book the Reykjavik flight",
+            ],
+        );
+        let report = run_native(&db, &BlankForBank, 100).unwrap();
+        assert_eq!(report.created, 1);
+        assert_eq!(report.consumed, 1, "the blank's capture is retained");
+        assert_eq!(report.failed, 1);
+        seed_inbox(&db, &["ring the bank again about the loan"]);
+        let report = run_native(&db, &BlankForBank, 100).unwrap_err();
+        assert!(report.to_string().contains("covered none"), "{report:#}");
+        let blank_tasks: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE trim(title, ' ' || char(9) || char(160)) = ''",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(blank_tasks, 0, "no task may have a blank title");
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 2);
+    }
+
+    /// Regression (DIST-12): nothing claimed the rows, so two concurrent runs
+    /// (the hourly timer and a manual `pt distill`) both fetched, classified
+    /// and created tasks from the same captures.
+    #[test]
+    fn a_concurrent_run_is_refused_without_touching_the_queue() {
+        let (_dir, db) = fresh_db();
+        seed_inbox(&db, &["call the bank about the mandate"]);
+        let lock_path = format!("{}.distill.lock", db.path().display());
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        held.lock().unwrap();
+
+        let err = run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100).unwrap_err();
+        assert!(err.to_string().contains("already running"), "{err:#}");
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+
+        held.unlock().unwrap();
+        let report = run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100).unwrap();
+        assert_eq!(report.consumed, 1, "the lock is released with its holder");
+    }
+
+    /// Regression (DIST-5): a 429/5xx/timeout was charged to the captures as
+    /// a chargeable failure, and bisection multiplied the calls against the
+    /// outage (7 classify calls and 4 charges for a 4-row batch).
+    #[test]
+    fn a_provider_outage_aborts_without_charging_or_bisecting() {
+        struct OutageProvider {
+            calls: std::cell::Cell<usize>,
+            healthy_calls: usize,
+        }
+        impl LlmProvider for OutageProvider {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                self.calls.set(self.calls.get() + 1);
+                if self.calls.get() > self.healthy_calls {
+                    return Err(anyhow::Error::new(crate::providers::ProviderUnavailable(
+                        "http 503: overloaded".into(),
+                    )));
+                }
+                PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                PoisonProvider { poison: "\u{0}" }.consolidate(items)
+            }
+            fn preflight(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "outage-test"
+            }
+        }
+
+        // Total outage after preflight: nothing charged, one call, fail closed.
+        let (_dir, db) = fresh_db();
+        let texts = [
+            "call the bank about the mandate",
+            "book the Reykjavik flight",
+            "renew the office lease",
+            "email Alan the revised quote",
+        ];
+        seed_inbox(&db, &texts);
+        let provider = OutageProvider {
+            calls: std::cell::Cell::new(0),
+            healthy_calls: 0,
+        };
+        let err = run_native(&db, &provider, 100).unwrap_err();
+        assert!(err.to_string().contains("provider unavailable"), "{err:#}");
+        assert_eq!(provider.calls.get(), 1, "an outage must not be bisected");
+        for t in texts {
+            assert_eq!(attempts(&db, t), 0, "{t} was charged for an outage");
+        }
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 4);
+
+        // Outage mid-run: the finished chunk is kept, the rest waits uncharged.
+        let (_dir, db) = fresh_db();
+        let many: Vec<String> = (0..CHUNK * 3)
+            .map(|i| format!("distinct capture number {i} about topic {}", i * 7919))
+            .collect();
+        for t in &many {
+            ptask_core::raw_items::insert(&db, t, "test", "test://x").unwrap();
+        }
+        let provider = OutageProvider {
+            calls: std::cell::Cell::new(0),
+            healthy_calls: 1,
+        };
+        assert!(run_native(&db, &provider, 200).is_err());
+        assert_eq!(provider.calls.get(), 2, "the run stops at the first outage");
+        assert_eq!(
+            ptask_core::raw_items::unprocessed_count(&db).unwrap(),
+            (CHUNK * 2) as i64,
+            "the first chunk landed before the outage"
+        );
+        assert!(many.iter().all(|t| attempts(&db, t) == 0));
+    }
+
     /// The poison row must not become a permanent head-of-queue block either:
     /// once it has failed in isolation `MAX_DISTILL_ATTEMPTS` times it stops
     /// being served, and a later capture behind it distills normally.
@@ -1171,6 +1596,7 @@ mod tests {
                 title: "Call the supplier".into(),
                 priority: 3,
                 description: String::new(),
+                sources: vec![],
             }],
         };
         db.with_conn(|c| {
@@ -1253,6 +1679,7 @@ mod tests {
                 title: "Renew the office lease".into(),
                 priority: 2,
                 description: String::new(),
+                sources: vec![],
             }],
         };
 
@@ -1260,6 +1687,90 @@ mod tests {
         assert_eq!(report.consumed, CHUNK + 1);
         assert_eq!(report.created, 1, "the second chunk deduped, not recreated");
         assert!(report.skipped_dedup >= 1);
+    }
+
+    /// Regression (DIST-10): the failure manifest stored `e.to_string()`,
+    /// which is only the outermost context, so `distill.failed` said
+    /// "classify failed" and dropped the actual provider error underneath.
+    #[test]
+    fn record_failure_keeps_the_whole_error_chain() {
+        let (_dir, db) = fresh_db();
+        let e = anyhow::anyhow!("http 400: context length exceeded")
+            .context("provider preflight failed — nothing consumed");
+        record_failure(&db, "mock", &e);
+        let stored: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT json_extract(payload, '$.error') FROM pt_event_log
+                      WHERE event_type='distill.failed'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(stored.contains("preflight failed"), "{stored}");
+        assert!(stored.contains("context length exceeded"), "{stored}");
+    }
+
+    /// Regression (DIST-2): the 0.6 Jaccard gate ignored identifiers, so a
+    /// different invoice number or host deduped against the old task —
+    /// including a *done* one, so the new commitment was never created.
+    #[test]
+    fn distinct_identifiers_never_dedup() {
+        assert!(!title_similar(
+            "Pay invoice 4411 to Acme",
+            "Pay invoice 4412 to Acme"
+        ));
+        assert!(!title_similar(
+            "Reboot the fox-n1 node",
+            "Reboot the fox-n3 node"
+        ));
+        assert!(!title_similar(
+            "Renew cert for host7 today",
+            "Renew cert for host9 today"
+        ));
+        assert!(!title_similar(
+            "Pay invoice 4411 to Acme",
+            "Pay invoice to Acme"
+        ));
+        // Same identifiers still dedup.
+        assert!(title_similar(
+            "Pay invoice 4411 to Acme",
+            "pay Acme invoice 4411"
+        ));
+        assert!(title_similar(
+            "Reboot the fox-n1 node",
+            "reboot fox-n1 node now"
+        ));
+
+        let (_dir, db) = fresh_db();
+        let done = ptask_core::tasks::create(
+            &db,
+            NewTask::minimal("Pay invoice 4411 to Acme"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET status='done', status_v2='done' WHERE id=?1",
+                [&done.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        seed_inbox(&db, &["pay Acme invoice 4412 by Friday"]);
+        let provider = MockProvider {
+            broken: false,
+            emit: vec![Candidate {
+                title: "Pay invoice 4412 to Acme".into(),
+                priority: 3,
+                description: String::new(),
+                sources: vec![],
+            }],
+        };
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert_eq!(report.created, 1, "invoice 4412 is new work, not 4411");
+        assert_eq!(report.skipped_dedup, 0);
     }
 
     #[test]

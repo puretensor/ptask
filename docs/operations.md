@@ -102,6 +102,12 @@ work, whichever comes first, and marks what finished as processed. The unit's
 30-minute `TimeoutStartSec` therefore never kills a run mid-batch; rows left
 over wait for the next hourly run.
 
+Only one run distills at a time. A run holds an exclusive OS file lock on
+`<db>.distill.lock` (e.g. `~/puretensor-tasks/tasks.db.distill.lock`) for its
+whole duration; a concurrent `pt distill` prints `distill skipped`, consumes
+nothing, records no event and exits 0. The kernel drops the lock when the
+holder exits or is killed, so a crashed run never blocks the next one.
+
 ### Inspect
 
 ```bash
@@ -134,12 +140,24 @@ raw item is consumed.
 The batch is sent to the provider in chunks of 25, not in one call. A chunk
 the provider cannot classify is halved until the offending row is alone, so
 one unprocessable capture no longer takes its whole batch down — every other
-chunk still lands and is marked processed. A consolidation that returns no
-candidates for captures classified as commitments uses the same isolation
-and retry path. Those captures remain unprocessed and are quarantined after
-three failed attempts, so empty provider output cannot block newer captures
-indefinitely. Noise in a failed chunk is reclassified during bisection and
-counted as consumed only once.
+chunk still lands and is marked processed.
+
+Consolidation output is not capped: the model is asked for one task per
+distinct commitment, and each task names the input captures it covers
+(`sources`). A kept capture is marked processed only when a created or
+deduplicated task covers it. Kept captures the model left uncovered are
+walked again as a smaller chunk in the same run, so a model that stops early
+or merges too eagerly cannot make a commitment disappear. A consolidation
+that covers none of the captures classified as commitments uses the same
+isolation and retry path as a provider failure. Those captures remain
+unprocessed and are quarantined after three failed attempts, so empty
+provider output cannot block newer captures indefinitely. Noise in a failed
+chunk is reclassified during bisection and counted as consumed only once.
+
+Each capture is capped at 4,000 characters in the prompt (`MAX_ITEM_CHARS`),
+with a visible `[… N chars truncated]` marker, so one very long email cannot
+exceed the model context and end up quarantined. The stored `raw_items.text`
+is never truncated.
 
 The isolated row is charged one `raw_items.distill_attempts`, with the reason
 in `raw_items.distill_error`. After 3 charges it is **quarantined**: no longer
@@ -147,6 +165,14 @@ served by `fetch_unprocessed`, so it cannot sit at the head of the
 oldest-first queue and block newer captures. A *database* failure (as opposed
 to a provider/classification failure) is never charged — a local outage must
 not push a good capture toward quarantine.
+
+A provider **outage** is not charged either. Once retries are exhausted, a
+timeout, connection failure, HTTP 408/429/5xx, or a 401/403/404 (credentials
+or model gone) aborts the run immediately: no bisection, no attempt charged,
+the chunks that already finished are still marked processed, and the run
+fails closed with `distill.failed` ("provider unavailable: …"). Retries honour
+a `Retry-After` header of up to 30 s; a longer one aborts at once instead of
+waiting.
 
 Quarantine is visible, never silent:
 
@@ -159,13 +185,14 @@ Quarantine is visible, never silent:
   cross the ceiling, so reporting it only on success would hide it exactly
   when it matters.
 
-#### Known exposure: a total provider outage still charges attempts
+#### Known exposure: a provider answering with garbage still charges attempts
 
 An attempt is charged whether or not anything else succeeded in the same run.
 This is a deliberate simplification, and it has a cost worth stating rather
-than discovering: a *total* provider failure — a bad model deploy, a schema
-regression in the structured output, an expired key — charges every row the
-bisection reaches, not just genuinely-unprocessable ones.
+than discovering: a provider that keeps *answering* but with unusable output
+— a bad model deploy, a schema regression in the structured output — charges
+every row the bisection reaches, not just genuinely-unprocessable ones.
+(Outages and rejected keys no longer do; see above.)
 
 Measured at the current `CHUNK = 25` / `MAX_PROVIDER_CALLS = 64` settings, a
 fully-failing run charges roughly **31 captures**. Three consecutive fully
@@ -205,6 +232,34 @@ It walks the 6-level escalation state machine, gates on the 22:00 — 08:00 UTC
 quiet window, respects a daily Telegram budget of 3, and enforces a 4-hour
 cooldown per task between reminders.
 
+Task age is measured from the start of the current occurrence. Completing a
+recurring task (which advances it to its next occurrence) or reopening a
+done/dismissed task resets its escalation level, level timestamp and reminder
+cooldown, so an on-schedule daily task never climbs the ladder and a task
+reopened after the level-5 final notice is reminded again from level 1.
+
+Each reminder is recorded before it is sent. Immediately before the send,
+one conditional update re-checks the task's current row (still pending, not
+snoozed or completed meanwhile, same level, not already reminded by a
+concurrent run) and stamps the 4-hour cooldown; the Telegram budget slot is
+reserved at the same point. A failed delivery releases both. A database
+write that fails after a delivered nudge is logged and reported on that task
+but no longer aborts the run, and the nudge is not repeated.
+
+A level whose channels are all unconfigured falls back to the configured
+channel: on a Telegram-only install the level-5 final notice goes to Telegram
+(budgeted like any Telegram nudge); on an email-only install levels 1-2 go to
+email.
+
+Each SMTP send is bounded at 30 s end to end (connect through DATA); a
+stalled mail server counts as a failed email send instead of hanging the run.
+
+The From, To and CC addresses are validated before anything is sent. If one
+is invalid, the run prints `email misconfigured`, disables email for that run
+(nudges still go out on Telegram and are stamped), then exits non-zero. A
+channel error during a send (for example a rejected address) only fails that
+channel: the run continues and stamps what was delivered elsewhere.
+
 ### Config (env)
 
 | Variable | Purpose |
@@ -214,6 +269,7 @@ cooldown per task between reminders.
 | `PTASK_SMTP_HOST` *(or `SMTP_HOST`)* | SMTP server |
 | `PTASK_SMTP_PORT` *(or `SMTP_PORT`)* | default 587 |
 | `PTASK_SMTP_USER` / `PTASK_SMTP_PASS` *(or `SMTP_USER` / `SMTP_PASS`)* | STARTTLS creds |
+| `PTASK_SMTP_FROM` *(or `SMTP_FROM`)* | From mailbox, e.g. `HAL <hal@puretensor.ai>`; defaults to `HAL <SMTP_USER>`, so set it whenever the SMTP login is not an address |
 | `PTASK_NOTIFY_EMAIL` *(or `NOTIFY_EMAIL`)* | escalation recipient |
 | `PTASK_NOTIFY_CC` *(or `PTASK_OPS_EMAIL`)* | always CC'd (defaults to `ops@puretensor.ai` per CLAUDE.md) |
 | `PTASK_HAL_NUDGE_URL` | optional HAL endpoint that POSTs back `{message: "..."}`; falls back to static templates if unset |
