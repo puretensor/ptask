@@ -185,8 +185,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         // Only a real time of day: `!re:invoice` or `!note:` used to be
         // swallowed out of the title as a "reminder" nothing stores.
         if let Some(rest) = tok.strip_prefix('!')
-            && rest.len() <= 8
-            && rest.parse::<jiff::civil::Time>().is_ok()
+            && is_hh_mm(rest)
         {
             out.reminder = Some(rest.to_string());
             idx += 1;
@@ -306,6 +305,17 @@ fn parse_duration(s: &str) -> Option<i64> {
         'h' => Some(n.checked_mul(60)?),
         'd' => Some(n.checked_mul(60 * 24)?),
         _ => None,
+    }
+}
+
+/// Exact `HH:MM` (00:00..=23:59). Stricter than `civil::Time` parsing,
+/// which also takes `12`, `2026`, `T12:00` and `12:00:00`.
+fn is_hh_mm(s: &str) -> bool {
+    match s.as_bytes() {
+        [h0, h1, b':', m0, m1] if [h0, h1, m0, m1].iter().all(|b| b.is_ascii_digit()) => {
+            (h0 - b'0') * 10 + (h1 - b'0') < 24 && (m0 - b'0') * 10 + (m1 - b'0') < 60
+        }
+        _ => false,
     }
 }
 
@@ -842,6 +852,20 @@ mod tests {
         let q = parse_at("Reply to Bob !re:invoice", anchor()).unwrap();
         assert!(q.reminder.is_none());
         assert_eq!(q.title, "Reply to Bob !re:invoice");
+    }
+
+    #[test]
+    fn reminder_token_is_strictly_hh_mm() {
+        // PARSE-15: jiff's civil::Time parser accepts `12`, `2026`,
+        // `T12:00` and `12:00:00`, so those were swallowed as reminders
+        // although the documented grammar is `!HH:MM`.
+        for tok in ["!12", "!2026", "!T12:00", "!12:00:00", "!9:30", "!24:00"] {
+            let q = parse_at(&format!("ping ops {tok}"), anchor()).unwrap();
+            assert!(q.reminder.is_none(), "{tok} -> {:?}", q.reminder);
+            assert_eq!(q.title, format!("ping ops {tok}"));
+        }
+        let q = parse_at("ping ops !23:59", anchor()).unwrap();
+        assert_eq!(q.reminder.as_deref(), Some("23:59"));
     }
 
     #[test]
