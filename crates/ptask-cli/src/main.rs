@@ -797,6 +797,111 @@ fn already_applied(db: &Db, ctx: &ptask_core::event_log::EventCtx) -> Result<boo
     })
 }
 
+/// What a keyed command acts on, for the replay check.
+enum KeyTarget {
+    Task(String),
+    Goal(String),
+    Untargeted,
+}
+
+/// The journal event types a keyed single-target command writes, and what
+/// it targets. `None` for commands without a single keyed event (reads,
+/// multi-task verbs, which key each task as `key:<task uuid>`).
+fn keyed_replay_spec(cmd: &Command) -> Option<(&'static [&'static str], KeyTarget)> {
+    use KeyTarget::{Goal, Task, Untargeted};
+    use goals::GoalCommand as G;
+    const UPDATED: &[&str] = &["task.updated"];
+    Some(match cmd {
+        Command::Add(_) => (&["task.created"], Untargeted),
+        Command::Done(a) if a.queries.len() == 1 => (
+            &["task.completed", "task.recurrence_advanced"],
+            Task(a.queries[0].clone()),
+        ),
+        Command::Priority(a) => (UPDATED, Task(a.query.clone())),
+        Command::Edit(a) => (UPDATED, Task(a.query.clone())),
+        Command::Reopen(a) => (UPDATED, Task(a.query.clone())),
+        Command::Dismiss(a) => (UPDATED, Task(a.query.clone())),
+        Command::Start(a) => (UPDATED, Task(a.query.clone())),
+        Command::Snooze(a) => (UPDATED, Task(a.query.clone())),
+        Command::Depend(a) => (UPDATED, Task(a.query.clone())),
+        Command::Kind(a) => (UPDATED, Task(a.query.clone())),
+        Command::Promote(a) => (&["task.promoted"], Task(a.query.clone())),
+        Command::Rm(a) => (&["task.deleted"], Task(a.query.clone())),
+        Command::Goal(G::Add(_)) => (&["goal.created"], Untargeted),
+        Command::Goal(G::Link(a)) => (&["task.goal_linked"], Task(a.task.clone())),
+        Command::Goal(G::Unlink(a)) => (&["task.goal_unlinked"], Task(a.task.clone())),
+        Command::Goal(G::Done(a) | G::Abandon(a)) => (&["goal.updated"], Goal(a.id.clone())),
+        Command::Goal(G::SetParent(a)) => (&["goal.updated"], Goal(a.id.clone())),
+        _ => return None,
+    })
+}
+
+/// True when `key` already journaled this very command: report it as
+/// replayed. Errors when the key was used for another command or task —
+/// the old check only asked whether the key existed, so a reused key
+/// printed "replayed" and silently skipped the new command.
+fn replay_keyed(db: &Db, key: &str, cmd: &Command) -> Result<bool> {
+    let Some((types, target)) = keyed_replay_spec(cmd) else {
+        return Ok(false);
+    };
+    let Some(event) = ptask_core::event_log::get_by_uuid(db, key)? else {
+        return Ok(false);
+    };
+    // The target as it resolves now; a deleted task (replayed rm) no longer
+    // does, and the event type alone decides.
+    let target_uuid = match &target {
+        KeyTarget::Task(q) => tasks::resolve_for_lookup(db, q, true).ok().map(|t| t.id),
+        KeyTarget::Goal(id) => ptask_core::goals::get(db, id).ok().map(|g| g.uuid),
+        KeyTarget::Untargeted => None,
+    };
+    ptask_core::event_log::verify_replay(key, &event, target_uuid.as_deref(), types)
+        .map_err(anyhow::Error::msg)?;
+
+    let subject = event.task_uuid.as_deref().unwrap_or_default();
+    if event.event_type.starts_with("goal.") {
+        let goal = ptask_core::goals::get(db, subject).map_err(anyhow::Error::msg)?;
+        if json_mode() {
+            println!("{}", serde_json::to_string_pretty(&goal.to_json())?);
+        } else {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Ok,
+                    "replayed",
+                    &goal.g_id(),
+                    &goal.title,
+                    "idempotency key already applied"
+                )
+            );
+        }
+        return Ok(true);
+    }
+    let task = tasks::resolve_for_lookup(db, subject, true).ok();
+    let mut out = match &task {
+        Some(t) => serde_json::to_value(t)?,
+        None => serde_json::json!({ "id": subject }),
+    };
+    out["outcome"] = serde_json::json!("replayed");
+    emit(&out, || {
+        let handle = task
+            .as_ref()
+            .and_then(|t| t.pt_id.clone())
+            .unwrap_or_else(|| short_id(subject).to_string());
+        let title = task.as_ref().map(|t| t.title.as_str()).unwrap_or("");
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Ok,
+                "replayed",
+                &handle,
+                title,
+                "idempotency key already applied"
+            )
+        );
+    })?;
+    Ok(true)
+}
+
 /// `pt remote list` filter with `-p` folded in as a DSL `pN` term.
 fn remote_list_filter(filter: Option<&str>, priority: Option<i64>) -> Option<String> {
     match (filter, priority) {
@@ -859,6 +964,14 @@ fn run() -> Result<()> {
                 Some(p) => Db::open(p).with_context(|| format!("opening db at {}", p))?,
                 None => Db::open_default().context("opening default db")?,
             };
+
+            // A retried keyed mutation reports success without re-applying;
+            // a key reused for a different command or task is an error.
+            if let (Some(key), Some(cmd)) = (cli_idempotency_key(), other.as_ref())
+                && replay_keyed(&db, &key, cmd)?
+            {
+                return Ok(());
+            }
 
             match other {
                 Some(Command::Add(a)) => cmd_add(&db, a),

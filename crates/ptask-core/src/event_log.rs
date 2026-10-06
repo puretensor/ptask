@@ -93,6 +93,8 @@ pub struct LoggedEvent {
     pub id: i64,
     pub task_uuid: Option<String>,
     pub event_type: String,
+    /// NULL for events from before actor attribution (V009).
+    pub actor: Option<String>,
 }
 
 /// Record an attributed event. Returns the new `pt_event_log.id`.
@@ -145,18 +147,64 @@ pub fn get_by_uuid(db: &Db, uuid: &str) -> Result<Option<LoggedEvent>> {
     let conn = db.get()?;
     let found = conn
         .query_row(
-            "SELECT id, task_uuid, event_type FROM pt_event_log WHERE uuid = ?1",
+            "SELECT id, task_uuid, event_type, actor FROM pt_event_log WHERE uuid = ?1",
             [uuid],
             |r| {
                 Ok(LoggedEvent {
                     id: r.get(0)?,
                     task_uuid: r.get(1)?,
                     event_type: r.get(2)?,
+                    actor: r.get(3)?,
                 })
             },
         )
         .optional()?;
     Ok(found)
+}
+
+/// Is `event` (already journaled under idempotency key `key`) a replay of
+/// the command now being retried? It is when it has one of `event_types`
+/// and, if `task_uuid` is given, belongs to that task. Anything else is a
+/// key reused for a different command: an error, never a silent "ok" that
+/// skips the new command.
+pub fn verify_replay(
+    key: &str,
+    event: &LoggedEvent,
+    task_uuid: Option<&str>,
+    event_types: &[&str],
+) -> Result<()> {
+    if !event_types.contains(&event.event_type.as_str()) {
+        return Err(crate::Error::Other(format!(
+            "idempotency key {key:?} was already used for a different command ({}); \
+             use a fresh key",
+            event.event_type
+        )));
+    }
+    if let Some(expected) = task_uuid
+        && event.task_uuid.as_deref() != Some(expected)
+    {
+        return Err(crate::Error::Other(format!(
+            "idempotency key {key:?} was already used for another task; use a fresh key"
+        )));
+    }
+    Ok(())
+}
+
+/// The replay check every keyed mutation runs first: `Ok(None)` when `key`
+/// has not been used, `Ok(Some(event))` when this is a retry of the same
+/// command (report success without re-applying), and an error when the key
+/// was used for something else (see [`verify_replay`]).
+pub fn check_replay(
+    db: &Db,
+    key: &str,
+    task_uuid: Option<&str>,
+    event_types: &[&str],
+) -> Result<Option<LoggedEvent>> {
+    let Some(event) = get_by_uuid(db, key)? else {
+        return Ok(None);
+    };
+    verify_replay(key, &event, task_uuid, event_types)?;
+    Ok(Some(event))
 }
 
 /// Highest `id` currently in the log, or 0 if empty. The sync token.
@@ -302,6 +350,30 @@ mod tests {
         assert_eq!(event.id, 1);
         assert_eq!(event.task_uuid.as_deref(), Some("task-1"));
         assert_eq!(event.event_type, "task.created");
+    }
+
+    #[test]
+    fn check_replay_accepts_the_same_command_and_rejects_reuse() {
+        let (_dir, db) = fresh_db();
+        record(
+            &db,
+            "k1",
+            Some("task-1"),
+            "task.created",
+            &serde_json::json!({}),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        assert!(
+            check_replay(&db, "unused", None, &["task.created"])
+                .unwrap()
+                .is_none()
+        );
+        let replay = check_replay(&db, "k1", Some("task-1"), &["task.created"]).unwrap();
+        assert_eq!(replay.unwrap().actor.as_deref(), Some("test"));
+        // Same key, different command or different task: an error.
+        assert!(check_replay(&db, "k1", Some("task-1"), &["task.completed"]).is_err());
+        assert!(check_replay(&db, "k1", Some("task-2"), &["task.created"]).is_err());
     }
 
     #[test]
