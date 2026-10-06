@@ -107,8 +107,12 @@ lost with the row — prefer `pt dismiss` unless you truly want it gone.
 
 ### `pt next [-n LIMIT]`
 
-DAG-ready tasks: every `depends_on` predecessor is `done` (or missing).
-Ordered by `priority_score DESC, priority DESC, created_at DESC`.
+DAG-ready tasks: open tasks (triage, backlog, todo, in progress; snoozed and
+blocked tasks don't compete) whose every `depends_on` prerequisite is done
+or dismissed. A deleted prerequisite no longer blocks. Ordered severity
+first: `priority DESC, priority_score DESC, created_at DESC`, so the
+composite score only breaks ties inside a severity band (`pt why` explains
+the score).
 
 ### `pt plan [--days N] [--work 09:00-18:00] [--tz TZ] [--slot-default 30] [-n LIMIT] [--gcal PATH] [--write]` (v3.2.0)
 
@@ -171,7 +175,7 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 
 | Verb | Cadence | Description |
 |---|---|---|
-| `pt distill [--batch 200]` | hourly (`*:15`) | Native fail-closed distillation: consumes new `raw_items` only, Gemini structured-output classify+consolidate with `thinkingBudget=0`, transient retry, and token/semantic/temporal dedup. Exit 3 = missing GOOGLE_API_KEY before consumption. |
+| `pt distill [--batch 200]` | hourly (`*:15`) | Native fail-closed distillation: consumes new `raw_items` only; LLM classify+consolidate via `PTASK_LLM_BACKEND` (default `local`: the OpenAI-compatible endpoint at `LOCAL_LLM_URL`, default `http://127.0.0.1:8600/v1`; `gemini`: structured output with `thinkingBudget=0`), transient retry, token/semantic/temporal dedup. Exit 3 = `gemini` backend without `GOOGLE_API_KEY`, before consumption; a failed provider preflight exits 1 with a `distill.failed` event. Env: [operations.md](operations.md#provider-env). |
 | `pt accountability run [--dry-run]` | `*:0/15` | Escalation state machine + dispatch. |
 | `pt scoring run [--dry-run]` | `hourly` | Composite priority recompute. |
 | `pt backfill` | one-shot | Mint PT-N for any task lacking one. |
@@ -278,6 +282,13 @@ the release helper run it automatically.
 | Code | Meaning |
 |---|---|
 | `0` | success |
-| `1` | runtime error (DB, network, parse) |
-| `2` | argparse error (clap) |
+| `1` | runtime error (DB, network, parse, a refused mutation such as a blocked `pt done`) and any failure without a code below |
+| `2` | command-line usage error (clap) |
+| `3` | `pt approval verify` / `consume`: the approval is still pending. `pt distill`: `PTASK_LLM_BACKEND=gemini` without `GOOGLE_API_KEY` (nothing consumed) |
+| `4` | `pt approval verify` / `consume`: rejected, withdrawn or expired |
+| `5` | `pt approval verify` / `consume`: payload digest mismatch (consume does not latch) |
+| `6` | `pt approval verify` / `consume`: already consumed |
 | `64` | usage error from `scripts/release.sh` and similar helpers |
+
+`pt` keeps the default SIGPIPE action, so when a downstream reader closes
+early (`pt list | head`) it ends by signal and shells report `141`.

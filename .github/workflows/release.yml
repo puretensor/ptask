@@ -42,15 +42,44 @@ jobs:
             strip: aarch64-linux-gnu-strip
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history: the next step proves the tagged commit is on main,
+          # which a shallow clone cannot answer.
+          fetch-depth: 0
+
+      # The tag == version gate alone would release any commit, from any
+      # branch, that someone tagged; release.sh's main/clean check is local.
+      - name: verify the tagged commit is on main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::${GITHUB_REF_NAME} ($(git rev-parse --short HEAD)) is not on origin/main; release tags must be cut from main"
+            exit 1
+          fi
+          echo "${GITHUB_REF_NAME} ($(git rev-parse --short HEAD)) is on origin/main"
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
           targets: ${{ matrix.target }}
 
-      - name: install aarch64 cross toolchain
+      - name: aarch64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
+        # The production runner must not need root: pre-install
+        # gcc-aarch64-linux-gnu + g++-aarch64-linux-gnu on the host and drop
+        # ghrunner's sudo grant. sudo apt-get runs only when the toolchain is
+        # missing AND the runner's env sets PTASK_ALLOW_SUDO_APT=1.
         run: |
+          if command -v aarch64-linux-gnu-gcc >/dev/null \
+             && command -v aarch64-linux-gnu-g++ >/dev/null \
+             && command -v aarch64-linux-gnu-strip >/dev/null; then
+            echo "aarch64 cross toolchain present: $(aarch64-linux-gnu-gcc --version | head -n1)"
+            exit 0
+          fi
+          if [ "${PTASK_ALLOW_SUDO_APT:-}" != "1" ]; then
+            echo "::error::aarch64-linux-gnu-gcc/g++/strip not on PATH. Pre-install gcc-aarch64-linux-gnu and g++-aarch64-linux-gnu on the runner host (preferred), or set PTASK_ALLOW_SUDO_APT=1 in the runner's environment to let this job sudo apt-get them."
+            exit 1
+          fi
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
@@ -90,6 +119,10 @@ jobs:
     name: github release
     needs: build
     runs-on: [self-hosted, tensor-core]
+    # The publishing job runs in the `release` environment, so deployment
+    # rules there (only protected v* tags may deploy) gate publishing; see
+    # docs/operations.md "Release tags". Without rules it changes nothing.
+    environment: release
     permissions:
       contents: write
     steps:
@@ -126,15 +159,13 @@ jobs:
             - `pt-x86_64-unknown-linux-gnu` — Linux x86_64 (glibc ≥ 2.39, x86-64-v3 baseline)
             - `pt-aarch64-unknown-linux-gnu` — Linux arm64 (mon3)
 
-            ### Verifying
-            ```
-            sha256sum -c pt-<target>.sha256
-            ```
-
             ### Install
+            Check the binary against its published `.sha256` before installing:
             ```
-            curl -L -o pt https://github.com/puretensor/ptask/releases/download/${{ github.ref_name }}/pt-$(uname -m)-unknown-linux-gnu
-            chmod +x pt && sudo mv pt /usr/local/bin/
+            T=pt-$(uname -m)-unknown-linux-gnu
+            curl -fLO https://github.com/puretensor/ptask/releases/download/${{ github.ref_name }}/$T
+            curl -fLO https://github.com/puretensor/ptask/releases/download/${{ github.ref_name }}/$T.sha256
+            sha256sum -c "$T.sha256" && chmod +x "$T" && sudo mv "$T" /usr/local/bin/pt
             pt --version
             ```
 

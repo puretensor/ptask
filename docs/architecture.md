@@ -85,20 +85,27 @@ carries no HTTP/TLS/executor dependencies.
 | `PTASK_DASH_DECIDE_TOKEN` | dashboard sidecar | Secret (≥ 16 characters) the cockpit must send to approve or reject; unset disables approval decisions on the sidecar. |
 | `PTASK_DASH_FRAME_ANCESTOR` | `pt serve` cockpit | Optional single HTTPS origin allowed to frame dashboard documents through CSP. Unset or invalid values fail closed with `X-Frame-Options: DENY`. |
 | `PTASK_ALLOW_UNAUTHENTICATED` | `pt serve` | Emergency/test override for unauthenticated non-loopback binds. Do not set in production. |
-| `GOOGLE_API_KEY`, `GEMINI_CONSOLIDATE_MODEL` | `pt distill` | Gemini structured-output credentials/model for native classify+consolidate. Missing key = preflight exit 3, fail closed. |
+| `PTASK_LLM_BACKEND` | `pt distill` | LLM provider for native classify+consolidate: `local` (default) or `gemini`. |
+| `LOCAL_LLM_URL`, `LOCAL_LLM_MODEL` | `pt distill` | `local` backend: OpenAI-compatible endpoint (default `http://127.0.0.1:8600/v1`) and model (default `nemotron-lightning`). A failed preflight records `distill.failed` and exits 1, nothing consumed. |
+| `GOOGLE_API_KEY`, `GEMINI_CONSOLIDATE_MODEL` | `pt distill` | `gemini` backend: credential (required there; missing = exit 3 before anything is consumed) and model (default `gemini-3.5-flash`). |
 | `PTASK_TELEGRAM_BOT_TOKEN`, `PTASK_ACCOUNTABILITY_CHAT_ID`, `PTASK_SMTP_*` | accountability | Existing v0.7 surface. |
 | `PTASK_LITESTREAM_*` | `litestream` | Used only by the optional S3 replica config. |
 
 ## Recovery
 
-- **Lose canonical disk, replica intact:** stop `ptask-serve` and
-  `ptask-litestream`, `litestream restore` into a new `tasks.db`, swap
-  atomically, restart. RPO is the Litestream interval (default under one
-  minute).
+- **Lose canonical disk, replica intact:** `litestream restore` to a scratch
+  file, verify it, then put it live with
+  [Promote a restored copy over the live DB](operations.md#promote-a-restored-copy-over-the-live-db):
+  stop every pTask unit (dashboard, `ptask-serve`, `ptask-litestream`, the
+  timers), confirm nothing holds the files, move `tasks.db` and its
+  `-wal`/`-shm` aside, install and check the restored file, restart in order.
+  A rename alone is not enough: a stale `-wal` next to the new file corrupts
+  or reverts it. RPO is the Litestream interval (default under one minute).
 - **Lose the canonical host:** promote a client: restore from the replica,
-  update inventory, point `PTASK_SYNC_URL` at the new host.
+  install it with the same procedure, update inventory, point
+  `PTASK_SYNC_URL` at the new host.
 - **Lose the replica:** the nightly `ptask-backup.timer` snapshot is the
-  last-resort path (default 30-day retention).
+  last-resort path (default 30-day retention), promoted the same way.
 - **Lose a client node:** no data loss; clients rebuild from the canonical
   URL.
 

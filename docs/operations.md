@@ -49,17 +49,53 @@ systemctl --user start ptask-backup.service
 ### Verifying a backup
 
 ```bash
-scp backup-host:/var/backups/ptask/ptask-tasks-$(date -u +%Y-%m-%d).db /tmp/
-sqlite3 /tmp/ptask-tasks-*.db 'SELECT COUNT(*) FROM tasks, COUNT(*) FROM pt_extensions'
+F=ptask-tasks-$(date -u +%Y-%m-%d).db
+scp backup-host:/var/backups/ptask/$F /tmp/
+sqlite3 /tmp/$F 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
+sqlite3 "file:$HOME/puretensor-tasks/tasks.db?mode=ro" 'SELECT COUNT(*) FROM tasks;'
 ```
 
-The count should match the live DB row counts.
+`integrity_check` must print `ok`, and the snapshot's task count should be at
+or a little below the live count (the snapshot is up to a day old).
+`ptask-restore-verify.timer` runs this check weekly, together with a
+Litestream restore and the off-site copy (`scripts/ptask-restore-verify.sh`,
+which also compares the off-site copy's sha256 with the same-date nearby
+one). `ptask-replica-check.timer` runs the Litestream part alone daily
+(`ptask-restore-verify.sh --replica-only`): it restores the replica to a
+scratch file and fails, and alerts, when any task write older than 10
+minutes is missing from it, so a Litestream that runs but has stopped
+replicating is caught within a day.
 
 ### Recovery
 
-Restore: copy a snapshot back to `~/puretensor-tasks/tasks.db` (stop Python
-services first if running). The pre-v0.1.0 baseline is at
-`~/puretensor-tasks/tasks.db.pre-ptask-backup`.
+Never `cp` a snapshot over the live `tasks.db`. Copy it to a scratch path,
+verify it as above, then put it live with
+[Promote a restored copy over the live DB](#promote-a-restored-copy-over-the-live-db).
+The pre-v0.1.0 baseline is at `~/puretensor-tasks/tasks.db.pre-ptask-backup`.
+
+### Failure alerts
+
+Every pTask oneshot (backup, restore drill, replica check, distill,
+accountability, scoring, reaper, export) and `ptask-litestream.service` carry
+`OnFailure=ptask-failure-alert@%n.service`, which sends one Telegram message
+naming the failed unit and host. The alert unit reads
+`~/puretensor-tasks/.env` and then `~/.config/ptask/alert.env`; both are
+optional and the second wins. Keep the alert credentials in `alert.env` so
+alerts still go out when `.env` itself is missing or broken (one of the
+failures they report):
+
+```bash
+install -d -m 0700 ~/.config/ptask
+install -m 0600 /dev/null ~/.config/ptask/alert.env
+cat >> ~/.config/ptask/alert.env <<'EOF'
+PTASK_TELEGRAM_BOT_TOKEN=...
+PTASK_ACCOUNTABILITY_CHAT_ID=...
+EOF
+```
+
+With no token in either file the helper exits 64 and logs "not configured"
+at err priority; a failed send logs "delivery failed" at err priority. Both
+show in `journalctl --user -p err`, the backstop when Telegram is down.
 
 ### Rolling back a release
 
@@ -92,10 +128,20 @@ that over a restore when the data written since the deploy matters.
 
 `pt distill` runs the native Rust delta pipeline over unprocessed
 `raw_items` and records each invocation in `pt_event_log`. It preflights
-Gemini before consuming data, sends classify/consolidate calls with
-`thinkingBudget=0`, retries transient Gemini failures, deduplicates
-candidates, writes tasks through `ptask-core`, and fails closed with a
-`distill.failed` event on provider or pipeline errors.
+the configured LLM provider before consuming data, retries transient
+provider failures, deduplicates candidates, writes tasks through
+`ptask-core`, and fails closed with a `distill.failed` event on provider or
+pipeline errors.
+
+### Provider (env)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PTASK_LLM_BACKEND` | `local` | `local` (an OpenAI-compatible endpoint) or `gemini`. Any other value exits 1 before a provider call. |
+| `LOCAL_LLM_URL` | `http://127.0.0.1:8600/v1` | `local` backend base URL; `/chat/completions` is appended. |
+| `LOCAL_LLM_MODEL` | `nemotron-lightning` | `local` backend model id. |
+| `GOOGLE_API_KEY` | — | `gemini` backend only, and required there. |
+| `GEMINI_CONSOLIDATE_MODEL` | `gemini-3.5-flash` | `gemini` backend model; calls use structured output with `thinkingBudget=0`. |
 
 The legacy Python distiller is retired from the CLI and from the timer path.
 It remains only in `~/puretensor-tasks-legacy` as historical reference.
@@ -182,8 +228,11 @@ Any native provider or pipeline error writes a `distill.failed` event to
 `pt_event_log` with the provider name and detailed error chain, then exits
 non-zero. systemd records the failure; the operator's existing Telegram
 alert pipeline (or any HMAC webhook subscriber) can scrape `pt_event_log`
-for `distill.failed` events. A missing `GOOGLE_API_KEY` exits 3 before any
-raw item is consumed.
+for `distill.failed` events. With `PTASK_LLM_BACKEND=gemini`, a missing
+`GOOGLE_API_KEY` exits 3 before any raw item is consumed (no event: nothing
+was attempted). The default `local` backend needs no key; an unreachable or
+misbehaving endpoint fails the preflight, which records `distill.failed` and
+exits 1 with nothing consumed.
 
 ### Poison captures and quarantine (v3.8.0)
 
@@ -333,8 +382,9 @@ sqlite3 ~/puretensor-tasks/tasks.db \
 ## Accountability (v0.7.0)
 
 `pt accountability run` is the Rust port of the Python `accountability/engine.py`.
-It walks the 6-level escalation state machine, gates on the 22:00 — 08:00 UTC
-quiet window, respects a daily Telegram budget of 3, and enforces a 4-hour
+It walks the 6-level escalation state machine, gates on the 22:00 — 08:00
+Europe/London quiet window (the operator's wall clock, so it follows BST),
+respects a daily Telegram budget of 3, and enforces a 4-hour
 cooldown per task between reminders.
 
 Task age is measured from the start of the current occurrence. Completing a
@@ -496,24 +546,42 @@ spawns.
 ### One-time SQLite tunings
 
 ```bash
-sqlite3 ~/puretensor-tasks/tasks.db <<'SQL'
-PRAGMA journal_mode = WAL;
-PRAGMA wal_autocheckpoint = 0;   -- Litestream owns checkpoints
-PRAGMA synchronous = NORMAL;
-SQL
+sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA journal_mode = WAL;'   # persists in the file
+# Leave checkpointing to Litestream for every .env-loading pt process. Adds
+# the line only when .env does not set the key (an existing value is kept);
+# the ansible playbook does the same on the canonical host.
+grep -q '^PTASK_WAL_AUTOCHECKPOINT=' ~/puretensor-tasks/.env \
+  || echo 'PTASK_WAL_AUTOCHECKPOINT=0' >> ~/puretensor-tasks/.env
 ```
+
+Only `journal_mode` is stored in the database. `wal_autocheckpoint` and
+`synchronous` are per-connection: running them in a `sqlite3` shell changes
+that one shell. `pt` sets `synchronous=NORMAL` itself and applies
+`PTASK_WAL_AUTOCHECKPOINT` to every connection it opens; `ptask-serve` and
+the `pt` timer units (distill, accountability, scoring, reaper, export) load
+it from `~/puretensor-tasks/.env`.
+
+Litestream does most of the checkpointing, not all of it. Processes that do
+not load `.env` (an interactive `pt`, the dashboard sidecar's `pt` calls, a
+`sqlite3` shell) keep SQLite's default and run a PASSIVE checkpoint once the
+WAL passes 1000 pages. Litestream tolerates that: a PASSIVE checkpoint never
+blocks or truncates under its read lock, and Litestream ships the frames
+before it restarts the WAL.
 
 ### Install
 
 ```bash
 mkdir -p ~/.config/litestream ~/.config/systemd/user
-sudo mkdir -p /var/backups/ptask-litestream  # CephFS replica root
-sudo chown ptask:ptask /var/backups/ptask-litestream
+# CephFS replica root, owner-only: the replica is the whole DB (raw captures,
+# approval payloads, token hashes). Existing install: sudo chmod -R go-rwx it.
+sudo install -d -m 0700 -o ptask -g ptask /var/backups/ptask-litestream
 ln -sf ~/ptask/scripts/litestream/litestream.yml ~/.config/litestream/litestream.yml
 ln -sf ~/ptask/scripts/systemd/ptask-litestream.service ~/.config/systemd/user/
+ln -sf ~/ptask/scripts/systemd/ptask-replica-check.service ~/.config/systemd/user/
+ln -sf ~/ptask/scripts/systemd/ptask-replica-check.timer   ~/.config/systemd/user/
 
 systemctl --user daemon-reload
-systemctl --user enable --now ptask-litestream.service
+systemctl --user enable --now ptask-litestream.service ptask-replica-check.timer
 loginctl enable-linger "$USER"
 ```
 
@@ -521,12 +589,15 @@ loginctl enable-linger "$USER"
 
 The canonical host also runs the Rust HTTP server so fleet clients can
 hit `/sync`. The unit binds a non-loopback Tailscale address and always mounts
-the dashboard, so both `PTASK_API_TOKEN` and `PTASK_DASH_PASS` must be present
-in `~/puretensor-tasks/.env` before the service will start:
+the dashboard, so it refuses to start without both machine-API auth and a
+dashboard password: `PTASK_DASH_PASS` in `~/puretensor-tasks/.env`, and either
+an active named token (`pt token create`, checked with `pt token list`) or the
+legacy `PTASK_API_TOKEN` in the same file:
 
 ```bash
-grep '^PTASK_API_TOKEN=' ~/puretensor-tasks/.env
 grep '^PTASK_DASH_PASS=' ~/puretensor-tasks/.env
+pt token list                                  # at least one active token, or:
+grep '^PTASK_API_TOKEN=' ~/puretensor-tasks/.env
 # Optional: allow only the Command Center to frame the cockpit. Without this
 # exact HTTPS origin, dashboard documents retain X-Frame-Options: DENY.
 grep '^PTASK_DASH_FRAME_ANCESTOR=' ~/puretensor-tasks/.env || true
@@ -539,8 +610,7 @@ systemctl --user enable --now ptask-serve.service
 # it actually binds: loopback does not answer a tailnet-only bind.
 BIND=$(sed -n 's/^PTASK_SERVE_BIND=//p' ~/puretensor-tasks/.env); BIND=${BIND:-127.0.0.1:9501}
 curl "http://$BIND/healthz"   # → ok
-curl -H "Authorization: Bearer $PTASK_API_TOKEN" \
-  "http://$BIND/version"       # → {"ptask_core":"<current version>"}
+curl "http://$BIND/version"   # → {"ptask_core":"<current version>"} (no token needed)
 ```
 
 Fleet clients reach this over Tailscale at the canonical host's tailnet
@@ -587,27 +657,111 @@ litestream restore -config ~/.config/litestream/litestream.yml \
     -o /tmp/tasks-restored.db \
     -timestamp $(date -u -d '5 minutes ago' '+%FT%TZ') \
     ~/puretensor-tasks/tasks.db
-sqlite3 /tmp/tasks-restored.db 'SELECT count(*) FROM tasks'
+sqlite3 /tmp/tasks-restored.db 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
 ```
 
-Promote a restore over the live DB (requires stopping `pt distill`,
-`ptask-backup`, etc. first):
+### Promote a restored copy over the live DB
+
+The one procedure for putting any restored file live: a Litestream restore,
+a nightly snapshot, or the pre-v0.1.0 baseline. Every step is load-bearing.
+SQLite treats whatever `tasks.db-wal` sits next to `tasks.db` as that file's
+log, so a WAL left by the old database is replayed onto the restored one: a
+small WAL gives "database disk image is malformed", a large one silently
+reverts the restore. `pt serve` keeps pooled connections open (with
+`PTASK_WAL_AUTOCHECKPOINT=0` SQLite never checkpoints its WAL), the dashboard
+sidecar holds long-lived read connections, and a killed process leaves its
+WAL behind. So: stop everything, prove nothing holds the files, and move the
+`-wal`/`-shm` aside together with the database. Run the steps one at a time
+and check each result before going on.
 
 ```bash
-systemctl --user stop ptask-backup.timer ptask-distill.timer \
-    ptask-accountability.timer ptask-scoring.timer ptask-litestream.service
-cp /tmp/tasks-restored.db ~/puretensor-tasks/tasks.db
+DBDIR=~/puretensor-tasks
+RESTORED=/tmp/tasks-restored.db     # the copy to promote
+
+# 1. Verify the copy out of place: "ok", and note the task count.
+sqlite3 "$RESTORED" 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
+test ! -e "$RESTORED-wal" || echo "STOP: $RESTORED has its own WAL; checkpoint it first"
+
+# 2. Stop every pTask unit: timers first so nothing new starts, then the
+#    dashboard, pt serve, Litestream and any oneshot still running.
+systemctl --user list-units 'ptask-*' --state=active --no-legend   # note what to restart
+systemctl --user stop 'ptask-*.timer'
+systemctl --user stop 'ptask-*.service'
+systemctl --user list-units 'ptask-*' --state=active,activating,deactivating --no-legend
+#    ^ must print nothing
+
+# 3. Nothing may still hold the files (pt bot, pt tui, an open sqlite3 shell);
+#    use sudo if a reader runs as another user. Go only on "nothing holds".
+#    Without fuser (psmisc) the check cannot run, which is not a "go".
+if ! command -v fuser >/dev/null; then
+    echo "STOP: fuser not installed (apt install psmisc), so nothing is checked"
+elif fuser -v "$DBDIR"/tasks.db*; then
+    echo "STOP: the processes above still hold the DB"
+else
+    echo "nothing holds the DB"
+fi
+
+# 4. Move the database AND its -wal/-shm aside (kept as the way back).
+ASIDE="$DBDIR/pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -m 0700 "$ASIDE"
+for f in tasks.db tasks.db-wal tasks.db-shm; do
+    if [ -e "$DBDIR/$f" ]; then mv "$DBDIR/$f" "$ASIDE/"; fi
+done
+
+# 5. Install the restored file: copy under a temp name, rename into place.
+install -m 0600 "$RESTORED" "$DBDIR/tasks.db.restoring"
+mv "$DBDIR/tasks.db.restoring" "$DBDIR/tasks.db"
+
+# 6. Check what is now live: "ok" and the count from step 1.
+sqlite3 "$DBDIR/tasks.db" 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
+
+# 7. Replication first, then serve, the dashboard and the timers (plus
+#    anything else step 2 listed).
 systemctl --user start ptask-litestream.service
-systemctl --user start ptask-backup.timer ptask-distill.timer \
-    ptask-accountability.timer ptask-scoring.timer
+systemctl --user start ptask-serve.service
+systemctl --user start ptask-dashboard.service
+systemctl --user start ptask-backup.timer ptask-distill.timer ptask-accountability.timer \
+    ptask-scoring.timer ptask-reaper.timer ptask-export.timer ptask-restore-verify.timer \
+    ptask-replica-check.timer
+litestream generations -config ~/.config/litestream/litestream.yml "$DBDIR/tasks.db"
+#    ^ Litestream starts a new generation for the replaced file
 ```
+
+`$ASIDE` keeps the pre-restore database with its own WAL: open
+`$ASIDE/tasks.db` in place to read that state, or move the three files back
+(steps 2–7 again) to undo the promotion.
 
 ### Rollback
 
+Without Litestream, while `pt` runs with `PTASK_WAL_AUTOCHECKPOINT=0`, only
+the occasional process that does not load `.env` checkpoints the WAL, so in
+practice it keeps growing. A `PRAGMA
+wal_autocheckpoint` from a `sqlite3` shell does not help: it changes only
+that shell's connection, and `pt serve`'s pooled connections keep the value
+they were opened with. Change it where `pt` reads it, then restart:
+
 ```bash
-systemctl --user disable --now ptask-litestream.service
-sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA wal_autocheckpoint = 1000;'
+systemctl --user disable --now ptask-litestream.service ptask-replica-check.timer
+# Drop the override: pt then keeps SQLite's default (checkpoint every 1000 pages).
+sed -i '/^PTASK_WAL_AUTOCHECKPOINT=/d' ~/puretensor-tasks/.env
+# Long-lived processes reopen their connections; oneshot timers re-read .env
+# on every run (let any running one finish: the second command lists them).
+systemctl --user restart ptask-serve.service ptask-dashboard.service
+systemctl --user list-units 'ptask-*.service' --state=activating --no-legend
+# Verify: prints 0|0|0 (not blocked, WAL emptied); retry if the first field is 1.
+sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA wal_checkpoint(TRUNCATE);'
+ls -l ~/puretensor-tasks/tasks.db-wal   # recheck after a day: stays in the low MB (~1000 pages)
 ```
+
+The ansible playbook enables Litestream and seeds the `.env` line on the
+canonical host. While rolled back, run it with `-e ptask_litestream=false`:
+it then keeps Litestream and the replica check disabled, removes
+`PTASK_WAL_AUTOCHECKPOINT=0` (any other value is left alone) and restarts
+`ptask-serve`.
+
+The weekly restore drill's Litestream check now fails, correctly: the replica
+is frozen. Expect that alert until Litestream is back, or stop
+`ptask-restore-verify.timer` (which also pauses its nightly checks).
 
 Nightly Ceph snapshot via `ptask-backup.timer` keeps a 30-day file
 backup independent of Litestream — it is the recovery path of last
@@ -632,3 +786,29 @@ a workflow of its own that targets `[self-hosted, tensor-core]`.
   diff for `.github/` changes before approving a run.
 - To test a fork's change, push its branch into this repository after reading
   it. CI then runs as a same-repository pull request.
+
+## Release tags (who can publish a release)
+
+Both release workflows refuse a tag whose commit is not on `main` (the
+"verify the tagged commit is on main" step). That stops accidents only. A
+tag push runs the workflow file from the tagged commit, so whoever can push
+a `v*` tag can also delete that step in the commit they tag, and
+`scripts/release.sh`'s clean-`main` check runs only on the operator's
+machine. Who can publish a release is decided by who can push `v*` tags,
+and these forge settings are the real controls:
+
+- **GitHub tag ruleset**: Settings → Rules → Rulesets → New tag ruleset,
+  targeting `refs/tags/v*`: restrict creation, update and deletion to the
+  release maintainers (bypass list) and block force pushes.
+- **GitHub `release` environment**: the publishing job of
+  `.github/workflows/release.yml` declares `environment: release`. In
+  Settings → Environments → `release`, limit deployment branches and tags
+  to the protected `v*` tags (optionally add a required reviewer). A run
+  from any other ref then cannot publish. Until rules are set the
+  environment gates nothing.
+- **Gitea protected tags**: repository Settings → Tags → protect `v*` and
+  allow only the release maintainers, so a tag pushed straight to the
+  mirror cannot publish the Gitea release either.
+
+A tag that edits the workflow to drop the `environment:` line escapes the
+environment rule too, which is why the tag ruleset comes first.

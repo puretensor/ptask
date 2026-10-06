@@ -1,7 +1,25 @@
 # cargo-deny policy for CI supply-chain checks.
 
+# Check the graph production actually ships. Release builds use
+# `--features native-ml`; with default features the ML-only crates (candle,
+# tokenizers, hf-hub, ureq, zip, onig_sys, safetensors, gemm, ...) were never
+# checked for advisories, licenses, or sources.
+[graph]
+all-features = true
+
 [advisories]
-ignore = []
+# Accepted "unmaintained" notices (no vulnerability), both reachable only
+# through the native-ml feature, neither with an upgrade path today.
+# Revisit when candle/tokenizers/hf-hub move on.
+ignore = [
+    # paste 1.0.15: proc-macro crate, archived by its author. Pulled in by
+    # gemm/candle-core, pulp, macro_rules_attribute and tokenizers; it runs
+    # only at compile time and generates identifiers.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time macro via candle/tokenizers; no alternative upstream" },
+    # number_prefix 0.4.0: formats byte counts for indicatif 0.17, which
+    # hf-hub 0.4.3 pins. Pure formatting, no I/O or unsafe surface we feed.
+    { id = "RUSTSEC-2025-0119", reason = "unmaintained formatting helper via hf-hub -> indicatif 0.17; hf-hub pins it" },
+]
 
 [sources]
 unknown-registry = "deny"

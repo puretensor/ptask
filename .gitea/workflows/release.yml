@@ -1,15 +1,21 @@
 name: release
 
 # Sovereign release mirror — runs on the self-hosted Gitea act_runner
-# (puretensor-act-runner on tensor-core). Fires when an operator pushes
-# a `vX.Y.Z` tag.
+# (puretensor-act-runner on tensor-core). Fires on a pushed `vX.Y.Z` tag.
+# scripts/release.sh pushes tags to GitHub only; whether the tag arriving
+# here by mirror sync triggers this workflow is UNVERIFIED (Gitea may not
+# fire push events for mirror updates). If no Gitea release appears, push
+# the tag to this remote directly.
 #
-# Why this exists: .github/workflows/release.yml is GitHub-only and dead
-# while GitHub Actions billing is blocked (PT-1215). This mirror builds
-# the `pt` binary for x86_64-unknown-linux-gnu AND aarch64-unknown-linux-gnu
-# (mon3), generates SHA-256 manifests, and attaches everything to the
-# Gitea Release — with zero GitHub dependency and zero third-party
-# marketplace actions:
+# Why this exists: sovereignty. .github/workflows/release.yml publishes
+# the GitHub Release from the self-hosted tensor-core runner; this mirror
+# builds `pt` from the same tag for x86_64-unknown-linux-gnu AND
+# aarch64-unknown-linux-gnu (mon3) under the same asset names. The x86_64
+# binaries are not identical: this one is built on ubuntu-22.04 (glibc
+# 2.35 floor), GitHub's on tensor-core (2.39). It generates SHA-256 manifests, and
+# attaches everything to the Gitea Release, so a GitHub outage or a
+# billing block (as in PT-1215) cannot leave the fleet without a release.
+# It has zero GitHub dependency and zero third-party marketplace actions:
 #   - no softprops/action-gh-release, no actions/upload-artifact
 #   - assets are POSTed straight to the Gitea release API with the
 #     built-in ${{ secrets.GITHUB_TOKEN }} (Gitea injects this into
@@ -75,7 +81,21 @@ jobs:
             strip: aarch64-linux-gnu-strip
             apt: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history: the next step proves the tagged commit is on main.
+          fetch-depth: 0
+
+      - name: verify the tagged commit is on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::${TAG} ($(git rev-parse --short HEAD)) is not on origin/main; release tags must be cut from main"
+            exit 1
+          fi
+          echo "${TAG} ($(git rev-parse --short HEAD)) is on origin/main"
 
       - name: install build deps + cross toolchain
         run: |
@@ -83,9 +103,23 @@ jobs:
           apt-get install -y curl file jq build-essential ${{ matrix.apt }}
 
       - name: install rust (stable, rustup)
+        # rustup-init for the runner arch, checked against its published
+        # .sha256 before it runs (never `curl | sh`).
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain 1.98.1
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) triple=x86_64-unknown-linux-gnu ;;
+            aarch64) triple=aarch64-unknown-linux-gnu ;;
+            *) echo "::error::no rustup-init for $(uname -m)"; exit 1 ;;
+          esac
+          dir=$(mktemp -d)
+          base="https://static.rust-lang.org/rustup/dist/${triple}"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$dir/rustup-init" "$base/rustup-init"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$dir/rustup-init.sha256" "$base/rustup-init.sha256"
+          # The manifest reads "<sha256> *./rustup-init": check our download against that hash.
+          echo "$(cut -d' ' -f1 "$dir/rustup-init.sha256")  $dir/rustup-init" | sha256sum -c --strict -
+          chmod +x "$dir/rustup-init"
+          "$dir/rustup-init" -y --profile minimal --default-toolchain 1.98.1
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: add rust target

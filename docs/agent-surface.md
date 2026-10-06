@@ -1,7 +1,8 @@
 # Agent-native surface (v2.4.0)
 
-pTask is native vocabulary for agents: an MCP server, claim/lease mechanics,
-provenance links, idempotent capture, and a git-diffable export.
+pTask is native vocabulary for agents: an MCP server, an atomic task claim
+(a claim, not a lease; see below), provenance links, idempotent capture, and
+a git-diffable export.
 
 ## MCP server
 
@@ -14,9 +15,12 @@ agents request, they never decide; see [`approvals.md`](approvals.md) — plus
 carry `goal_chain` and `goal_source` per task; see [`goals.md`](goals.md)):
 
 - **streamable-HTTP** at `http://127.0.0.1:9501/mcp` (or your `PTASK_SYNC_URL`),
-  bearer-gated to a named write token. Per-request identity cannot reach rmcp
-  tool handlers, so attribution is pinned `actor=<token-name>, source=mcp`.
-  Other agents use the scoped REST API with their own named tokens.
+  bearer-gated to HAL alone: only a named token whose client is `hal` with
+  write (or admin) scope (`pt token create hal --scope write`) is accepted.
+  Any other named token, and the legacy `PTASK_API_TOKEN`, gets 401 `mcp
+  requires the hal token`. Per-request identity cannot reach rmcp tool
+  handlers, so attribution is pinned `actor=hal, source=mcp`. Other agents
+  use the scoped REST API with their own named tokens, or stdio.
 - **stdio** via `pt mcp` — local registration without a network hop; actor
   from `$PTASK_MCP_ACTOR`, else `$PTASK_ACTOR`, default `mcp` (deliberately
   not the CLI's `shell`, so the operator can decide the client's approval
@@ -28,9 +32,16 @@ Registration (`~/.claude.json` → `mcpServers`):
 "ptask": {
   "type": "http",
   "url": "http://127.0.0.1:9501/mcp",
-  "headers": { "Authorization": "Bearer $(cat ~/.config/ptask/agent.token)" }
+  "headers": { "Authorization": "Bearer <hal token>" }
 }
 ```
+
+The header value is sent verbatim: nothing in `~/.claude.json` runs shell
+substitutions, so `$(cat ~/.config/ptask/agent.token)` would be sent as
+those literal characters (401). Paste the token itself and keep the file
+mode 0600, since it now holds a write credential. A project-scoped
+`.mcp.json` can instead reference an environment variable, which Claude
+Code expands there: `"Bearer ${PTASK_HAL_TOKEN}"`.
 
 or stdio: `{ "type": "stdio", "command": "pt", "args": ["mcp"], "env": {"PTASK_MCP_ACTOR": "hal"} }`.
 
@@ -51,11 +62,23 @@ commit; a scoring failure does not roll back a successful edit.
   same arg. Completing an already-done task is an error.
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
+  It is a claim, not a lease: the task stores no owner (the claimer appears
+  only in the `task.claimed` event), there is no expiry and no release verb,
+  and any writer can still `task_done` or `task_dismiss` a claimed task. A
+  crashed agent's claim stays `in_progress` until someone finishes it,
+  snoozes it (it wakes as todo) or dismisses and reopens it.
 - **task_depend** — `task` depends `on` a prerequisite (`remove=true` drops the
   edge). **A task with open prerequisites cannot be closed** — `task_done`
-  (and `pt done`, the dashboard, Telegram, sync, git-webhook auto-close) all
-  refuse with a `Blocked` error naming every open blocker; HTTP surfaces
-  return 409. Chains (`3 on 2 on 1`) enforce strict order; fan-out (`2 on 1`,
+  (and `pt done`, the dashboard, Telegram, sync, git-webhook auto-close,
+  capture close-on-recovery) all refuse with a `Blocked` error naming every
+  open blocker. How each surface reports it: `pt serve`'s dashboard route
+  (`POST /api/tasks/{id}/done`) returns 409; Telegram's `/tg/callback`
+  returns 422; `/sync` answers 200 with the error in that command's
+  `sync_status` entry; the git webhook lists it under `errors`;
+  `POST /capture/resolve` answers 200 and simply leaves the blocked task
+  open (it is missing from `closed` and `pt_ids`; the refusal is only in the
+  server log); the cockpit sidecar relays `pt done`'s refusal with HTTP 500;
+  MCP answers with a JSON-RPC invalid-params error. Chains (`3 on 2 on 1`) enforce strict order; fan-out (`2 on 1`,
   `3 on 1`) lets 2 and 3 close in any order once 1 is done. A dismissed
   prerequisite counts as satisfied. `task_show` returns `blocked_by`.
 - **task_promote** — flips an investigation into implementation work

@@ -3,18 +3,24 @@
 #
 # Installs the `pt` binary into ~/.cargo/bin/, drops the user-mode
 # systemd units (serve / backup / distill / accountability / scoring), enables
-# the canonical API service + timers, and verifies the binary version.
+# the canonical API service + timers, installs and enables Litestream WAL
+# replication on the canonical host only, and verifies the binary version.
 #
-# Usage from the workstation — populate dist/ with the per-arch release
-# artifacts first (the fleet is heterogeneous: mon3 is aarch64, mon2 has
-# a glibc-2.35 floor; both are covered by the release.yml artifacts):
+# Usage from the workstation. The playbook downloads nothing: it installs
+# dist/pt-<triple> from the controller, so populate dist/ with the per-arch
+# release artifacts first (the fleet is heterogeneous: mon3 is aarch64).
+# Both forges' release workflows publish the same asset names, each with a
+# .sha256 (the Gitea one only if the tag reached Gitea's workflow; see
+# scripts/release.sh). The x86_64 binaries differ in glibc floor; fetch from
+# either, and keep each binary with its own .sha256:
 #
 #   cd ~/ptask
-#   # Fetch the per-arch artifacts from the Gitea release. GitHub Actions
-#   # billing is blocked (PT-1215), so releases now publish to Gitea via
-#   # .gitea/workflows/release.yml and `gh release download` no longer works.
-#   GITEA=http://100.92.245.5:3002
 #   TAG=vX.Y.Z
+#   # GitHub Release (canonical; x86_64 built on tensor-core, glibc 2.39):
+#   gh release download "$TAG" --repo puretensor/ptask --pattern 'pt-*' -D dist --clobber
+#   # or the Gitea release (sovereign mirror; x86_64 built on ubuntu-22.04,
+#   # glibc 2.35 floor: use it if any host is older than glibc 2.39):
+#   GITEA=http://100.92.245.5:3002
 #   for a in pt-x86_64-unknown-linux-gnu pt-x86_64-unknown-linux-gnu.sha256 \
 #            pt-aarch64-unknown-linux-gnu pt-aarch64-unknown-linux-gnu.sha256; do
 #     curl -fsSL -o "dist/$a" "$GITEA/puretensor/ptask/releases/download/$TAG/$a"
@@ -29,7 +35,8 @@
 # controller-built target/release/pt to the whole fleet — that is how
 # mon3 got an x86_64 binary (exec format error).
 #
-# Force one specific binary onto every host (single-arch escape hatch):
+# Force one specific binary onto every host (single-arch escape hatch; the
+# play still requires /path/to/pt.sha256 beside it):
 #
 #   ansible-playbook ... -e ptask_binary=/path/to/pt
 #
@@ -72,10 +79,23 @@
     ptask_service_units:
       - ptask-serve.service
     ptask_units: "{{ ptask_timer_units + ptask_service_units }}"
+    # Installed and enabled on the canonical host only; clients hold no
+    # tasks.db to replicate (docs/operations.md, Litestream WAL replication).
+    ptask_canonical_units:
+      - ptask-litestream.service
+      - ptask-replica-check.service
+      - ptask-replica-check.timer
+    ptask_litestream_dir: "{{ ansible_env.HOME }}/.config/litestream"
+    ptask_litestream_bin: /usr/local/bin/litestream
     # The canonical-store host owns `tasks.db`. Other tier-0 nodes will
     # eventually proxy through `pt serve` over Tailscale (v0.9.5). Until
     # that lands, only the canonical host runs the timers.
     ptask_is_canonical: "{{ inventory_hostname == ptask_canonical_host }}"
+    # Litestream on the canonical host is the default; `-e ptask_litestream=false`
+    # keeps it rolled back (docs/operations.md, Litestream > Rollback): the
+    # play then disables it and removes the PTASK_WAL_AUTOCHECKPOINT=0 it seeded.
+    ptask_run_litestream: "{{ ptask_is_canonical and (ptask_litestream | default(true) | bool) }}"
+    ptask_dotenv: "{{ ansible_env.HOME }}/puretensor-tasks/.env"
 
   pre_tasks:
     # Per host, NOT run_once — the artifact path differs by architecture,
@@ -92,12 +112,35 @@
         msg: |
           Binary not found at {{ ptask_binary }} (host {{ inventory_hostname }},
           triple {{ ptask_target_triple }}).
-          Download the release artifacts first:
-            gh release download vX.Y.Z --pattern 'pt-*' -D dist --clobber
+          Download the release artifacts first (GitHub, or the Gitea mirror
+          as shown in this playbook's header):
+            gh release download vX.Y.Z --repo puretensor/ptask --pattern 'pt-*' -D dist --clobber
           or cross-build:
             cargo build --release --bin pt --features native-ml --target {{ ptask_target_triple }} --locked
             cp target/{{ ptask_target_triple }}/release/pt dist/pt-{{ ptask_target_triple }}
+            (cd dist && sha256sum pt-{{ ptask_target_triple }} > pt-{{ ptask_target_triple }}.sha256)
       when: not pt_local.stat.exists
+
+    # Integrity before anything leaves the controller: every release asset
+    # has a pt-<triple>.sha256 beside it. The manifest must name exactly this
+    # file (sha256sum -c checks whatever path a manifest lists), then
+    # sha256sum -c must pass. A missing manifest or a mismatch fails the play.
+    - name: verify binary against its published .sha256
+      delegate_to: localhost
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cd "$(dirname "{{ ptask_binary }}")"
+        bin="$(basename "{{ ptask_binary }}")"
+        if [ ! -f "$bin.sha256" ]; then
+          echo "missing $bin.sha256 beside $bin: fetch it with the binary" >&2
+          exit 1
+        fi
+        awk -v f="$bin" '$2 != f && $2 != "*" f { bad = 1 } END { exit bad || NR != 1 }' "$bin.sha256" \
+          || { echo "$bin.sha256 must be one line naming $bin" >&2; exit 1; }
+        sha256sum -c --strict "$bin.sha256"
+      args:
+        executable: /bin/bash
+      changed_when: false
 
     # Belt-and-braces: refuse to copy a binary whose ELF architecture does
     # not match the target host. Catches a hand-copied wrong-arch file in
@@ -165,6 +208,104 @@
         - daemon-reload
         - restart ptask serve
 
+    # ---- Litestream: canonical host only --------------------------------
+    - name: check litestream binary on canonical host
+      ansible.builtin.stat:
+        path: "{{ ptask_litestream_bin }}"
+      register: litestream_bin
+      when: ptask_run_litestream
+
+    - name: fail if litestream is not installed on canonical host
+      ansible.builtin.fail:
+        msg: |
+          {{ ptask_litestream_bin }} is missing on {{ inventory_hostname }}.
+          Install it first (docs/operations.md, Litestream > Pre-requisites);
+          the unit would otherwise crash-loop into failed.
+      when: ptask_run_litestream and not litestream_bin.stat.exists
+
+    - name: ensure litestream config dir exists on canonical host
+      ansible.builtin.file:
+        path: "{{ ptask_litestream_dir }}"
+        state: directory
+        mode: '0700'
+      when: ptask_run_litestream
+
+    # The repo file is an example ("edit paths"): install it on first deploy
+    # only, never over an operator's edited copy or the documented symlink.
+    - name: install litestream config on canonical host (first deploy only)
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../litestream/litestream.yml"
+        dest: "{{ ptask_litestream_dir }}/litestream.yml"
+        mode: '0644'
+        force: false
+      notify: restart ptask litestream
+      when: ptask_run_litestream
+
+    # The unit reads this file if present (EnvironmentFile=-). The CephFS
+    # replica needs no settings, so an empty 0600 file is valid; existing
+    # contents (S3 credentials) are never touched.
+    - name: ensure litestream env file exists on canonical host
+      ansible.builtin.file:
+        path: "{{ ptask_litestream_dir }}/.env"
+        state: touch
+        mode: '0600'
+        access_time: preserve
+        modification_time: preserve
+      when: ptask_run_litestream
+
+    - name: install canonical-only systemd units
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../systemd/{{ item }}"
+        dest: "{{ ptask_systemd_dir }}/{{ item }}"
+        mode: '0644'
+      loop: "{{ ptask_canonical_units }}"
+      notify:
+        - daemon-reload
+        - restart ptask litestream
+      when: ptask_run_litestream
+
+    # pt reads PTASK_WAL_AUTOCHECKPOINT from ~/puretensor-tasks/.env; =0 leaves
+    # checkpointing to Litestream for every .env-loading pt process. Seed it
+    # only when the key is absent: an operator's own value is never changed.
+    - name: check the canonical host's .env
+      ansible.builtin.stat:
+        path: "{{ ptask_dotenv }}"
+      register: ptask_dotenv_stat
+      when: ptask_is_canonical
+
+    - name: fail if the canonical host has no .env
+      ansible.builtin.fail:
+        msg: |
+          {{ ptask_dotenv }} is missing on {{ inventory_hostname }}; ptask-serve
+          and the timers cannot start without it (PTASK_API_TOKEN, bind address).
+      when: ptask_is_canonical and not ptask_dotenv_stat.stat.exists
+
+    - name: look for PTASK_WAL_AUTOCHECKPOINT in .env
+      ansible.builtin.command: "grep -c '^PTASK_WAL_AUTOCHECKPOINT=' {{ ptask_dotenv }}"
+      register: ptask_walcp
+      changed_when: false
+      failed_when: ptask_walcp.rc > 1
+      when: ptask_run_litestream
+
+    - name: seed PTASK_WAL_AUTOCHECKPOINT=0 when .env does not set it
+      ansible.builtin.lineinfile:
+        path: "{{ ptask_dotenv }}"
+        line: PTASK_WAL_AUTOCHECKPOINT=0
+        insertafter: EOF
+        create: false
+      notify: restart ptask serve
+      when: ptask_run_litestream and ptask_walcp.rc == 1
+
+    # Rolled back (-e ptask_litestream=false): nothing checkpoints for pt, so
+    # drop the value this play seeds (other values are the operator's).
+    - name: remove PTASK_WAL_AUTOCHECKPOINT=0 when Litestream is rolled back
+      ansible.builtin.lineinfile:
+        path: "{{ ptask_dotenv }}"
+        regexp: '^PTASK_WAL_AUTOCHECKPOINT=0$'
+        state: absent
+      notify: restart ptask serve
+      when: ptask_is_canonical and not ptask_run_litestream
+
     - name: ensure linger enabled (timers must run when operator is logged out)
       ansible.builtin.command: "loginctl enable-linger {{ ansible_env.USER }}"
       register: linger_result
@@ -173,6 +314,20 @@
 
     - name: flush handlers so daemon-reload runs before enable
       ansible.builtin.meta: flush_handlers
+
+    # Replication first, then the writers (timers, API). The daily replica
+    # check proves the replication is still landing.
+    - name: enable + start litestream and its daily check on canonical host
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        scope: user
+        enabled: true
+        state: started
+        daemon_reload: false
+      loop:
+        - ptask-litestream.service
+        - ptask-replica-check.timer
+      when: ptask_run_litestream
 
     - name: enable + start timers on canonical host
       ansible.builtin.systemd:
@@ -226,6 +381,18 @@
       when: not ptask_is_canonical
       failed_when: false
 
+    - name: keep litestream and its check disabled (clients, or rolled back)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        scope: user
+        enabled: false
+        state: stopped
+      loop:
+        - ptask-litestream.service
+        - ptask-replica-check.timer
+      when: not ptask_run_litestream
+      failed_when: false
+
   handlers:
     - name: daemon-reload
       ansible.builtin.systemd:
@@ -242,3 +409,10 @@
         scope: user
         state: restarted
       when: ptask_is_canonical
+
+    - name: restart ptask litestream
+      ansible.builtin.systemd:
+        name: ptask-litestream.service
+        scope: user
+        state: restarted
+      when: ptask_run_litestream

@@ -1,8 +1,9 @@
 # Example Litestream config for the canonical pTask host.
 #
 # Copy to ~/.config/litestream/litestream.yml and edit paths.
-# The pTask DB should open with journal_mode=WAL and wal_autocheckpoint=0
-# so Litestream owns the checkpoint cadence.
+# The pTask DB runs with journal_mode=WAL, and pt processes that load
+# ~/puretensor-tasks/.env get PTASK_WAL_AUTOCHECKPOINT=0, so Litestream does
+# most of the checkpointing (see docs/operations.md, One-time SQLite tunings).
 #
 # RPO target: under one minute.
 

@@ -80,6 +80,38 @@ class FailureAlertTests(unittest.TestCase):
         self.assertIn(token, request.full_url)
         self.assertIn(b"chat_id=42", request.data)
 
+    def _failed_send_stderr(self, journal_stream, fstat_ids):
+        """Fail a send with stderr on an fd whose (dev, ino) is fstat_ids."""
+
+        class FdStringIO(io.StringIO):
+            def fileno(self):
+                return 2
+
+        stderr = FdStringIO()
+        env = {"TELEGRAM_BOT_TOKEN": "123:" + "D" * 35, "TELEGRAM_CHAT_ID": "1"}
+        if journal_stream is not None:
+            env["JOURNAL_STREAM"] = journal_stream
+        stat = mock.Mock(st_dev=fstat_ids[0], st_ino=fstat_ids[1])
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            MODULE.urllib.request, "urlopen", side_effect=OSError("down")
+        ), mock.patch.object(MODULE.os, "fstat", return_value=stat), contextlib.redirect_stderr(
+            stderr
+        ):
+            self.assertEqual(MODULE.send_failure_alert("ptask-backup.service", "host1"), 1)
+        return stderr.getvalue()
+
+    def test_failed_send_logs_at_err_priority_on_the_journal(self):
+        out = self._failed_send_stderr("8:4242", (8, 4242))
+        self.assertTrue(out.startswith("<3>"), out)
+        self.assertIn("ptask-backup.service failed on host1", out)
+
+    def test_failed_send_has_no_priority_prefix_off_the_journal(self):
+        # Interactive run, and a JOURNAL_STREAM inherited by a redirected stderr.
+        for stream in (None, "8:4242"):
+            out = self._failed_send_stderr(stream, (9, 1))
+            self.assertFalse(out.startswith("<"), out)
+            self.assertIn("delivery failed", out)
+
     def test_systemd_and_ansible_never_expand_token_into_argv(self):
         root = Path(__file__).parents[2]
         unit = (root / "scripts/systemd/ptask-failure-alert@.service").read_text()
@@ -93,6 +125,42 @@ class FailureAlertTests(unittest.TestCase):
         self.assertIn(
             'dest: "{{ ptask_libexec_dir }}/ptask-failure-alert"', ansible
         )
+
+    def test_alert_unit_starts_without_dot_env(self):
+        # The alert must still run when ~/puretensor-tasks/.env is gone (that
+        # is one of the failures it reports), and may take its credentials
+        # from a file independent of .env, which wins when both set a key.
+        root = Path(__file__).parents[2]
+        unit = (root / "scripts/systemd/ptask-failure-alert@.service").read_text()
+        env_lines = [l for l in unit.splitlines() if l.startswith("EnvironmentFile=")]
+        self.assertEqual(
+            env_lines,
+            [
+                "EnvironmentFile=-%h/puretensor-tasks/.env",
+                "EnvironmentFile=-%h/.config/ptask/alert.env",
+            ],
+        )
+
+    def test_no_credentials_at_all_exits_64_at_err_priority(self):
+        # What the unit does when neither env file exists: no token, exit 64,
+        # and on the journal the line carries the err priority.
+        import subprocess
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryFile() as err:
+            st = os.fstat(err.fileno())
+            env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                   "JOURNAL_STREAM": f"{st.st_dev}:{st.st_ino}"}
+            rc = subprocess.run(
+                [sys.executable, str(SCRIPT), "ptask-distill.service", "host1"],
+                env=env, stderr=err, timeout=30,
+            ).returncode
+            err.seek(0)
+            line = err.read().decode()
+        self.assertEqual(rc, 64)
+        self.assertTrue(line.startswith("<3>"), line)
+        self.assertIn("ptask-distill.service failed on host1", line)
 
 
 if __name__ == "__main__":

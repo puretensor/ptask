@@ -16,5 +16,8 @@ IOSchedulingPriority=7
 StandardOutput=journal
 StandardError=journal
 # A oneshot has no start timeout by default: a hang never fails the unit,
-# so OnFailure never fires and later nightly runs never start.
-TimeoutStartSec=30min
+# so OnFailure never fires and later nightly runs never start. Must exceed
+# the script's own worst case (two legs of per-step timeouts, 1780 s with
+# the defaults; arithmetic in ptask-backup.sh) plus the local snapshot, so a
+# hung nearby leg is cut off by the script and the off-site leg still runs.
+TimeoutStartSec=40min

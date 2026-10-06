@@ -18,6 +18,14 @@ EnvironmentFile=%h/puretensor-tasks/.env
 ExecStart=%h/.cargo/bin/pt serve --bind ${PTASK_SERVE_BIND}
 Restart=on-failure
 RestartSec=5
+# Network-facing and holding PTASK_API_TOKEN: the same cheap hardening as
+# dashboard/ptask-dashboard.service. ProtectSystem=strict/ProtectHome are
+# deliberately absent until tested on the host (DB writes, -wal/-shm,
+# export and Litestream all share ~/puretensor-tasks).
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
 StandardOutput=journal
 StandardError=journal
 

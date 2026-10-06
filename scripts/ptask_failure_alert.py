@@ -17,6 +17,26 @@ def first_nonempty(*names: str) -> str:
     return ""
 
 
+def log_err(message: str) -> None:
+    """Write to stderr, at journald priority err when stderr is the journal.
+
+    Telegram is the only alert channel, so a failed send must at least reach
+    `journalctl -p err`. systemd sets JOURNAL_STREAM=<dev>:<inode> for
+    StandardError=journal and honours a leading "<3>" (sd-daemon SD_ERR) on
+    each line; anywhere else (a terminal, a redirect) the line stays bare.
+    """
+    prefix = ""
+    stream = os.environ.get("JOURNAL_STREAM", "")
+    if stream:
+        try:
+            st = os.fstat(sys.stderr.fileno())
+            if stream == f"{st.st_dev}:{st.st_ino}":
+                prefix = "<3>"
+        except (OSError, ValueError):
+            pass
+    print(f"{prefix}{message}", file=sys.stderr)
+
+
 def send_failure_alert(unit: str, host: str) -> int:
     token = first_nonempty("PTASK_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN")
     chat_id = first_nonempty(
@@ -25,7 +45,7 @@ def send_failure_alert(unit: str, host: str) -> int:
         "TELEGRAM_CHAT_ID",
     ).split(",", 1)[0].strip()
     if not token or not chat_id:
-        print("ptask failure alert is not configured", file=sys.stderr)
+        log_err(f"ptask failure alert is not configured; {unit} failed on {host}")
         return 64
 
     text = (
@@ -45,14 +65,14 @@ def send_failure_alert(unit: str, host: str) -> int:
     except Exception:
         # Exception strings may contain Request.full_url, which contains the
         # credential. Keep the journal message deliberately generic.
-        print("ptask failure alert delivery failed", file=sys.stderr)
+        log_err(f"ptask failure alert delivery failed; {unit} failed on {host}")
         return 1
     return 0
 
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print("usage: ptask-failure-alert UNIT HOST", file=sys.stderr)
+        log_err("usage: ptask-failure-alert UNIT HOST")
         return 64
     return send_failure_alert(sys.argv[1], sys.argv[2])
 

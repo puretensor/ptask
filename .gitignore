@@ -6,6 +6,8 @@ Cargo.lock.bak
 # Local env / secrets
 .env
 .env.local
+*.env
+*secret*
 *.db
 *.db-journal
 *.db-shm

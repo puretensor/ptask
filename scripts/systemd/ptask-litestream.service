@@ -2,17 +2,26 @@
 Description=pTask Litestream WAL → Ceph replication (canonical host only)
 Documentation=https://github.com/puretensor/ptask
 Documentation=https://litestream.io/
-# Operator drops endpoint + bucket creds into this file. Refuse to
-# start without it.
-ConditionPathExists=%h/.config/litestream/.env
+# No ConditionPathExists: a failed Condition skips the unit as a success, so
+# replication would silently not run and OnFailure would never fire. The
+# CephFS replica needs no settings; endpoint + bucket credentials for an S3
+# replica go in ~/.config/litestream/.env (ansible creates it, 0600), which
+# is optional here ("-").
 After=network-online.target
 Wants=network-online.target
+# A crash loop must end in `failed` and alert, not restart quietly forever:
+# with RestartSec=5 the default limit (5 starts in 10s) can never trip.
+# Five starts in ten minutes fails the unit; after fixing the cause,
+# `systemctl --user reset-failed ptask-litestream.service` and start it.
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+OnFailure=ptask-failure-alert@%n.service
 
 [Service]
 Type=simple
 Restart=on-failure
 RestartSec=5
-EnvironmentFile=%h/.config/litestream/.env
+EnvironmentFile=-%h/.config/litestream/.env
 ExecStart=/usr/local/bin/litestream replicate -config %h/.config/litestream/litestream.yml
 Nice=10
 StandardOutput=journal
