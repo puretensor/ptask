@@ -2015,6 +2015,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn git_push_skipped_list_is_counted_and_capped() {
+        // Round-2 SRV-11: the over-cap ids were deduplicated with a Vec
+        // `contains` on an async worker -- quadratic (40k ids took 35 s in
+        // debug) -- and every one went back in the response.
+        let db = open_test_db();
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db, Default::default(), hooks));
+        let message: String = (1..=170).map(|i| format!("Closes PT-{i}\n")).collect();
+        let resp = signed_gitea_push(
+            &app,
+            &serde_json::json!({
+                "ref": "refs/heads/main",
+                // The same ids again in a second commit count once.
+                "commits": [{"id": "c1", "message": message}, {"id": "c2", "message": message}],
+            }),
+        )
+        .await;
+        assert_eq!(resp["skipped_count"], 150, "{resp}");
+        let skipped = resp["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 100);
+        assert_eq!(skipped[0], "PT-21");
+    }
+
+    #[tokio::test]
     async fn git_close_repos_allowlist_limits_which_repos_close_tasks() {
         // SRV-11: any repository holding the shared secret could close any
         // PT-N. PTASK_GIT_CLOSE_REPOS names the ones that may.

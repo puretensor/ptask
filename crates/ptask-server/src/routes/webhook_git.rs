@@ -63,6 +63,8 @@ struct PushRepository {
 /// default-branch push is scanned, inner commits of a merged PR included,
 /// so one PR carrying `Closes PT-1 ... Closes PT-900` closed 900 tasks.
 const MAX_CLOSES_PER_DELIVERY: usize = 20;
+/// Most over-cap ids echoed back in `skipped`; `skipped_count` has them all.
+const MAX_REPORTED_SKIPS: usize = 100;
 
 /// Whether `full_name` may close tasks under the configured allowlist
 /// (empty = any repository holding the secret).
@@ -208,7 +210,9 @@ async fn handle(
 
     let mut closed: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
+    // Over-cap ids: all counted, the first MAX_REPORTED_SKIPS reported.
+    let mut skipped: HashSet<String> = HashSet::new();
+    let mut skipped_report: Vec<String> = Vec::new();
     let mut handled_pt_ids: HashSet<String> = HashSet::new();
     let outbox = crate::webhooks::Outbox::start(state);
     for commit in &event.commits {
@@ -227,9 +231,10 @@ async fn handle(
                 continue;
             }
             if handled_pt_ids.len() >= MAX_CLOSES_PER_DELIVERY {
-                if !skipped.contains(&pt_id) {
-                    skipped.push(pt_id);
+                if skipped_report.len() < MAX_REPORTED_SKIPS && !skipped.contains(&pt_id) {
+                    skipped_report.push(pt_id.clone());
                 }
+                skipped.insert(pt_id);
                 continue;
             }
             handled_pt_ids.insert(pt_id.clone());
@@ -301,10 +306,12 @@ async fn handle(
             target: "ptask::webhook",
             source,
             cap = MAX_CLOSES_PER_DELIVERY,
-            skipped = ?skipped,
+            skipped_count = skipped.len(),
+            first_skipped = ?skipped_report.iter().take(5).collect::<Vec<_>>(),
             "close directives over the per-delivery cap were not applied"
         );
-        resp["skipped"] = serde_json::json!(skipped);
+        resp["skipped"] = serde_json::json!(skipped_report);
+        resp["skipped_count"] = serde_json::json!(skipped.len());
     }
     (StatusCode::OK, Json(resp)).into_response()
 }
