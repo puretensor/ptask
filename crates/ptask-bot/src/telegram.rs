@@ -199,25 +199,25 @@ fn split_for_telegram(text: &str, max: usize) -> Vec<String> {
     }
     // Telegram rejects a whitespace-only message as empty (a hard-split line
     // of exactly `max` units leaves its "\n" alone), and send_all would then
-    // report a failure for a message that fully arrived. Attach such a chunk
-    // to its neighbour: Telegram trims surrounding whitespace, so the limit
-    // still holds for what it counts.
+    // report a failure for a message that fully arrived. Such a chunk joins
+    // its predecessor only while that stays within `max`; otherwise it is
+    // dropped (Telegram strips surrounding whitespace anyway). An
+    // all-whitespace message keeps its single chunk.
     let mut merged: Vec<String> = Vec::with_capacity(chunks.len());
-    let mut leading = String::new();
+    let only = chunks.len() == 1;
     for chunk in chunks {
-        if chunk.trim().is_empty() {
-            match merged.last_mut() {
-                Some(prev) => prev.push_str(&chunk),
-                None => leading.push_str(&chunk),
+        if !only && chunk.trim().is_empty() {
+            if let Some(prev) = merged.last_mut()
+                && prev.encode_utf16().count() + chunk.encode_utf16().count() <= max
+            {
+                prev.push_str(&chunk);
             }
-        } else if merged.is_empty() && !leading.is_empty() {
-            merged.push(std::mem::take(&mut leading) + &chunk);
-        } else {
-            merged.push(chunk);
+            continue;
         }
+        merged.push(chunk);
     }
     if merged.is_empty() {
-        merged.push(leading);
+        merged.push(String::new());
     }
     merged
 }
@@ -324,10 +324,16 @@ mod tests {
                 "{:?}",
                 chunks.iter().map(|c| utf16(c)).collect::<Vec<_>>()
             );
-            // Within the limit once Telegram trims surrounding whitespace.
-            assert!(chunks.iter().all(|c| utf16(c.trim()) <= 4096));
-            assert_eq!(chunks.concat(), text);
+            // Within the limit as sent, before any trimming: the exact-4096
+            // line must not become 4097 by gaining its newline.
+            let sizes: Vec<usize> = chunks.iter().map(|c| utf16(c)).collect();
+            assert!(sizes.iter().all(|&n| n <= 4096), "{sizes:?}");
+            // Only whitespace-only chunks are dropped; all other text arrives.
+            let ink = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            assert_eq!(ink(&chunks.concat()), ink(&text));
         }
+        // An all-whitespace message is still sent as its one chunk.
+        assert_eq!(split_for_telegram("\n\n", 4096), vec!["\n\n".to_string()]);
     }
 
     #[test]
