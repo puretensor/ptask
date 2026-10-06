@@ -512,8 +512,26 @@ pub fn list(db: &Db, status: Option<&str>) -> Result<Vec<Approval>> {
     }
 }
 
+/// The stored payload, for an executor: released only while the approval is
+/// in force (approved, not past `expires_at`, not yet consumed), so an
+/// executor that skips the status check cannot act on bytes the operator
+/// never approved. Errors carry the verify/consume exit codes.
 pub fn payload_bytes(db: &Db, id: &str) -> Result<Vec<u8>> {
     let ap = get(db, id)?;
+    gate_status(&ap, &dates::now_in_operator_tz()?)?;
+    if ap.consumed_at.is_some() {
+        return Err(Error::Approval(ApprovalError::AlreadyConsumed));
+    }
+    stored_payload(ap)
+}
+
+/// The stored payload whatever the status: the operator inspecting bytes the
+/// preview cannot show (binary files). Callers gate this to the operator.
+pub fn inspect_payload_bytes(db: &Db, id: &str) -> Result<Vec<u8>> {
+    stored_payload(get(db, id)?)
+}
+
+fn stored_payload(ap: Approval) -> Result<Vec<u8>> {
     match ap.payload {
         Some(bytes) => Ok(bytes),
         None => Err(Error::Approval(ApprovalError::Invalid(format!(
@@ -842,11 +860,12 @@ fn offered_digest(src: &PayloadSource) -> Result<String> {
     Ok(resolve_payload(src)?.digest)
 }
 
-/// `expires_at` bounds the whole approval, not just the decision window: an
-/// approval for "send before Friday" must not authorise a send on Monday.
-/// The row stays `approved` (decided rows are frozen); the gate reports it
-/// as expired.
-fn gate_status_and_digest(ap: &Approval, offered: &str, now: &jiff::Zoned) -> Result<()> {
+/// The approval is in force: approved and, unless already consumed, not past
+/// `expires_at`. `expires_at` bounds the whole approval, not just the
+/// decision window: an approval for "send before Friday" must not authorise
+/// a send on Monday. The row stays `approved` (decided rows are frozen); the
+/// gate reports it as expired.
+fn gate_status(ap: &Approval, now: &jiff::Zoned) -> Result<()> {
     if ap.status == "pending" {
         return Err(Error::Approval(ApprovalError::Pending));
     }
@@ -866,6 +885,11 @@ fn gate_status_and_digest(ap: &Approval, offered: &str, now: &jiff::Zoned) -> Re
             ap.expires_at.as_deref().unwrap_or_default()
         ))));
     }
+    Ok(())
+}
+
+fn gate_status_and_digest(ap: &Approval, offered: &str, now: &jiff::Zoned) -> Result<()> {
+    gate_status(ap, now)?;
     if offered != ap.digest {
         return Err(Error::Approval(ApprovalError::DigestMismatch));
     }
@@ -1291,6 +1315,47 @@ mod tests {
             "{err:?}"
         );
         assert!(get(&db, &id).unwrap().consumed_at.is_none());
+    }
+
+    #[test]
+    fn payload_is_released_only_while_approved_and_unconsumed() {
+        let (_d, db) = fresh();
+        let code = |r: Result<Vec<u8>>| match r {
+            Ok(_) => 0,
+            Err(Error::Approval(e)) => e.verify_exit_code().unwrap_or(1),
+            Err(other) => panic!("{other:?}"),
+        };
+        let mk = |body: &[u8]| {
+            let input = RequestInput {
+                kind: "email".into(),
+                title: "x".into(),
+                request_note: None,
+                payload: file_src(body),
+                task_pt_id: None,
+                expires_in: None,
+            };
+            request(&db, input, &ctx("hal")).unwrap().approval.ap_id()
+        };
+        let decide_as = |id: &str, d: Decision| {
+            decide(&db, id, d, DecidedVia::Dashboard, None, &ctx("operator")).unwrap();
+        };
+
+        let pending = mk(b"pending");
+        assert_eq!(code(payload_bytes(&db, &pending)), 3);
+        let rejected = mk(b"rejected");
+        decide_as(&rejected, Decision::Reject);
+        assert_eq!(code(payload_bytes(&db, &rejected)), 4);
+        let approved = mk(b"approved");
+        decide_as(&approved, Decision::Approve);
+        assert_eq!(payload_bytes(&db, &approved).unwrap(), b"approved");
+        consume(&db, &approved, &file_src(b"approved"), &ctx("hal")).unwrap();
+        assert_eq!(code(payload_bytes(&db, &approved)), 6);
+        let stale = approved_past_expiry(&db, b"late");
+        assert_eq!(code(payload_bytes(&db, &stale)), 4);
+
+        // The operator's inspection path ignores status.
+        assert_eq!(inspect_payload_bytes(&db, &pending).unwrap(), b"pending");
+        assert_eq!(inspect_payload_bytes(&db, &stale).unwrap(), b"late");
     }
 
     #[test]

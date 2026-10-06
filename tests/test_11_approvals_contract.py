@@ -209,8 +209,9 @@ def test_request_stores_payload_and_binds_digest(env, tmp_path):
     s = show(env, ap["id"])
     assert "the Q3 numbers are attached" in s["preview"], "preview is rendered from the stored payload"
     assert "operator asked for it" in s["request_note"], "agent prose is a separate, labelled note"
-    fetched = run(env, "approval", "payload", ap["id"], raw=True).stdout
-    assert fetched == raw
+    assert exit_of(env, "approval", "payload", ap["id"]) == 3, "a pending payload is not released"
+    fetched = run(env, "approval", "payload", ap["id"], "--any-status", raw=True, tty=True).stdout
+    assert fetched == raw, "the operator can inspect the exact stored bytes"
 
 
 def test_json_payload_is_canonicalised(env, tmp_path):
@@ -222,7 +223,7 @@ def test_json_payload_is_canonicalised(env, tmp_path):
     assert ap["digest"] == sha256_bytes(canonical_json(obj))
     assert ap["payload_kind"] == "json"
     assert "ACME Ltd" in show(env, ap["id"])["preview"]
-    assert run(env, "approval", "payload", ap["id"], raw=True).stdout == canonical_json(obj)
+    assert run(env, "approval", "payload", ap["id"], "--any-status", raw=True, tty=True).stdout == canonical_json(obj)
     bad = run(env, "approval", "request", "--kind", "spend", "--title", "x", "--payload-json", "{not json", check=False)
     assert bad.returncode != 0
 
@@ -231,6 +232,25 @@ def test_digest_only_request_is_marked_unstored(env, tmp_path):
     ap = pj(env, "approval", "request", "--kind", "ebay", "--title", "List GPU", "--note", "photos too big", "--digest", "a" * 64)
     assert ap["payload_stored"] is False and ap["digest"] == "a" * 64
     assert run(env, "approval", "payload", ap["id"], check=False).returncode != 0
+
+
+def test_payload_is_released_only_while_the_approval_is_in_force(env, tmp_path):
+    """Executor pattern payload -> act -> consume: an executor that forgets
+    to check status must still never receive unapproved bytes."""
+    ap = request(env, tmp_path, "exec", "wire 400 GBP to ACME")
+    p = run(env, "approval", "payload", ap["id"], check=False, raw=True)
+    assert p.returncode == 3 and p.stdout == b"", "pending"
+    assert exit_of(env, "approval", "payload", ap["id"], "--any-status") != 0, "inspection needs a TTY"
+    p = run(env, "approval", "payload", ap["id"], "--any-status", check=False, tty=True, CLAUDECODE="1")
+    assert p.returncode != 0, "inspection is refused to agents"
+    dash_decide(env, "approve", ap["id"])
+    assert run(env, "approval", "payload", ap["id"], raw=True).stdout == b"wire 400 GBP to ACME"
+    run(env, "approval", "consume", ap["id"], "--payload-file", str(tmp_path / "exec.html"))
+    p = run(env, "approval", "payload", ap["id"], check=False, raw=True)
+    assert p.returncode == 6 and p.stdout == b"", "consumed"
+    rej = request(env, tmp_path, "nope", "do not send")
+    dash_decide(env, "reject", rej["id"])
+    assert exit_of(env, "approval", "payload", rej["id"]) == 4, "rejected"
 
 
 def test_request_validation(env, tmp_path):

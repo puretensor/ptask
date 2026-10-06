@@ -11,8 +11,8 @@ tasks mint `PT-<n>`.
 
 | Role | Who | What they may do |
 |---|---|---|
-| Requester | any write-capable actor (`$PTASK_ACTOR`, HTTP `client_id`, MCP actor) | `request`, `withdraw` (own pending rows), `list`/`show`/`payload` |
-| Operator | a human at a TTY, the dashboard, Telegram (operator chat), or an **admin** HTTP token | `approve` / `reject` / `decide` |
+| Requester | any write-capable actor (`$PTASK_ACTOR`, HTTP `client_id`, MCP actor) | `request`, `withdraw` (own pending rows), `list`/`show` |
+| Operator | a human at a TTY, the dashboard, Telegram (operator chat), or an **admin** HTTP token | `approve` / `reject` / `decide`, `payload --any-status` (inspect) |
 | Executor | a script or agent holding the approved bytes | `payload` → act → `consume` |
 
 A request is pending until it is approved, rejected, withdrawn, or expired.
@@ -62,6 +62,19 @@ pt approval payload AP-12 > /tmp/letter.html
 # send / publish / transfer using those exact bytes
 pt approval consume AP-12 --payload-file /tmp/letter.html
 ```
+
+`payload` releases the bytes only while the approval is in force: approved,
+not past `expires_at`, not yet consumed. Otherwise it writes nothing to
+stdout and exits 3 (pending), 4 (rejected / withdrawn / expired) or 6
+(already consumed), so an executor that skips the status check still cannot
+act on bytes the operator never approved. A digest-only request has no bytes
+to release (exit 1).
+
+`payload --any-status` is the operator's inspection path (for example a
+binary file whose preview is `<binary N bytes>`): it prints the bytes
+whatever the status, and is refused when `CLAUDECODE` is set or stdin is
+not a TTY. `show`/`approval_status` still carry `preview` at every status,
+since that is what the operator decides on.
 
 `verify` is the same check without the latch. Exit codes (both verbs):
 
