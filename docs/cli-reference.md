@@ -194,8 +194,11 @@ Globals (v2.0.0): `--json` on task-facing verbs emits machine-readable
 output; `--idempotency-key <k>` keys the mutation's event so retries are
 safe: a retry of the same command on the same task prints `replayed` and
 exits 0 without re-applying (a retried `add` returns the task it created);
-a key already used for a different command or task is an error. Over
-`/sync`, command uuids are scoped to the authenticated client. Since v3.25.0 the human output renders through the shared PureTensor
+a key already used for a different command, different arguments, another
+task or by another actor is an error. Verbs that cannot replay safely
+(`undo`, `token`, `approval`, `approve`/`reject`, `reap`, `review`, reads)
+refuse the flag outright. Over `/sync`, command uuids are scoped to the
+authenticated client. Since v3.25.0 the human output renders through the shared PureTensor
 terminal theme (the `fleet-upgrade` look: gradient headline rules, box-ruled
 severity-banded tables, semantic pills — green done, amber needs a human, red
 critical). Colour is on only when stdout is a TTY; `--color always|never`,

@@ -6,11 +6,15 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn pt(db: &Path, args: &[&str]) -> Output {
+    pt_as(db, "shell", args)
+}
+
+fn pt_as(db: &Path, actor: &str, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_pt"))
         .arg("--db")
         .arg(db)
         .args(args)
-        .env("PTASK_ACTOR", "shell")
+        .env("PTASK_ACTOR", actor)
         .env("NO_COLOR", "1")
         .env_remove("PTASK_DB")
         .stdin(Stdio::null())
@@ -246,6 +250,108 @@ fn ending_a_series_warns_in_plain_text_and_stops_recurring() {
     );
     let shown = pt(&db, &["show", "PT-1"]);
     assert!(!String::from_utf8_lossy(&shown.stdout).contains("recurs"));
+}
+
+/// `pt --idempotency-key <key> <first...>` then `<second...>` with the same
+/// key: the second must fail loudly, never print "replayed".
+fn assert_key_reuse_refused(db: &Path, key: &str, first: &[&str], second: &[&str]) {
+    let mut a = vec!["--idempotency-key", key];
+    a.extend_from_slice(first);
+    ok(db, &a);
+    let mut b = vec!["--idempotency-key", key];
+    b.extend_from_slice(second);
+    let out = pt(db, &b);
+    assert!(
+        !out.status.success(),
+        "{second:?} with {first:?}'s key was accepted: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("replayed"),
+        "{second:?} reported as a replay"
+    );
+}
+
+#[test]
+fn a_key_reused_with_different_arguments_is_refused() {
+    // Regression (round 2, 9a): replay compared only the event type, so
+    // every task.updated verb looked alike and arguments were never compared.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    for title in ["one", "two", "three"] {
+        ok(&db, &["add", "--raw", title]);
+    }
+    assert_key_reuse_refused(&db, "k-dr", &["dismiss", "PT-1"], &["reopen", "PT-1"]);
+    assert_eq!(ok(&db, &["--json", "show", "PT-1"])["status"], "dismissed");
+    assert_key_reuse_refused(
+        &db,
+        "k-ss",
+        &["snooze", "PT-2", "2099-01-01"],
+        &["start", "PT-2"],
+    );
+    assert_key_reuse_refused(
+        &db,
+        "k-pp",
+        &["priority", "PT-3", "high"],
+        &["priority", "PT-3", "low"],
+    );
+    assert_eq!(ok(&db, &["--json", "show", "PT-3"])["priority"], 3);
+    ok(&db, &["add", "--raw", "four"]);
+    assert_key_reuse_refused(
+        &db,
+        "k-dep",
+        &["depend", "PT-4", "--on", "PT-2"],
+        &["depend", "PT-4", "--on", "PT-3"],
+    );
+    assert_key_reuse_refused(
+        &db,
+        "k-add",
+        &["add", "--raw", "fresh"],
+        &["add", "--raw", "other"],
+    );
+    assert!(!open_titles(&db).contains(&"other".to_string()));
+}
+
+#[test]
+fn another_actors_key_is_not_your_replay() {
+    // Regression (round 2, 9a): a retry by a different actor counted as a
+    // replay of someone else's command.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    let argv = ["--idempotency-key", "shared", "add", "--raw", "same text"];
+    ok(&db, &argv);
+    let out = pt_as(&db, "hal", &argv);
+    assert!(!out.status.success(), "hal's add replayed shell's");
+}
+
+#[test]
+fn verbs_that_cannot_replay_reject_an_idempotency_key() {
+    // Regression (round 2, 9c): `pt --idempotency-key tk token create bob`
+    // twice minted two tokens; undo, approvals, reap and review ignored the
+    // key or hit a raw UNIQUE error on retry.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    ok(&db, &["add", "--raw", "x"]);
+    for args in [
+        &["token", "create", "bob"][..],
+        &["undo", "--yes"],
+        &["reap", "--dry-run"],
+        &["review"],
+        &["approval", "list"],
+    ] {
+        let mut argv = vec!["--idempotency-key", "tk"];
+        argv.extend_from_slice(args);
+        let out = pt(&db, &argv);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} accepted a key it ignores");
+        assert!(stderr.contains("--idempotency-key"), "{args:?}: {stderr}");
+        assert!(!stderr.contains("UNIQUE"), "{args:?}: {stderr}");
+    }
+    let tokens = pt(&db, &["token", "list"]);
+    assert!(
+        !String::from_utf8_lossy(&tokens.stdout).contains("bob"),
+        "a token was minted"
+    );
 }
 
 #[test]

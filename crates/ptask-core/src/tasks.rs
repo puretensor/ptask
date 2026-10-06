@@ -4307,6 +4307,7 @@ mod tests {
             actor: "gate".into(),
             source: "test".into(),
             event_uuid: None,
+            command: None,
         };
         let count = |db: &Db| -> i64 {
             db.with_conn(
@@ -4908,6 +4909,7 @@ mod tests {
             actor: actor.into(),
             source: source.into(),
             event_uuid: None,
+            command: None,
         }
     }
 

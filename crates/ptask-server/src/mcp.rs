@@ -291,6 +291,7 @@ impl PtaskMcp {
             actor: self.actor.clone(),
             source: "mcp".into(),
             event_uuid: None,
+            command: None,
         }
     }
 

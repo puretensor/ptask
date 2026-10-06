@@ -73,7 +73,7 @@ the environment variable is set on the client node.
 | `sync_token` | `"*"`, `""`, or absent → full sync. Otherwise an opaque integer string from a prior response. |
 | `resource_types` | advisory; `["tasks"]` is the only meaningful value today. |
 | `commands` | optional; pure read if empty. |
-| `commands[].uuid` | client-generated, idempotency key. Replays return `"ok"` without re-applying. |
+| `commands[].uuid` | client-generated, idempotency key, scoped to the authenticated client. Replaying the *same* command (same `type`, `args` and `temp_id`) returns `"ok"` (with its `temp_id_mapping`) without re-applying; the same uuid with a different type, args or temp_id is a per-command error and nothing is applied. |
 | `commands[].temp_id` | optional client-side handle; mapped to the real `task_uuid` in the response. |
 
 ### Response

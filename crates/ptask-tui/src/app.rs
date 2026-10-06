@@ -21,6 +21,7 @@ fn tui_ctx() -> ptask_core::event_log::EventCtx {
         actor: "shell".into(),
         source: "tui".into(),
         event_uuid: None,
+        command: None,
     }
 }
 
