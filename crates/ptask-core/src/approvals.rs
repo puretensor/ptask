@@ -1184,6 +1184,13 @@ fn offered_digest(src: &PayloadSource) -> Result<String> {
 /// gate reports it as expired.
 fn gate_status(ap: &Approval, now: &jiff::Zoned) -> Result<()> {
     if ap.status == "pending" {
+        // Not yet swept: it can no longer be approved, so say expired.
+        if is_past(ap.expires_at.as_deref(), now) {
+            return Err(Error::Approval(ApprovalError::Terminal(format!(
+                "expired (pending past expires_at {})",
+                ap.expires_at.as_deref().unwrap_or_default()
+            ))));
+        }
         return Err(Error::Approval(ApprovalError::Pending));
     }
     if TERMINAL.contains(&ap.status.as_str()) {
@@ -1286,12 +1293,13 @@ pub fn expire(db: &Db, ctx: &EventCtx) -> Result<usize> {
     Ok(n)
 }
 
-/// True when `expires_at` parses and is at or before `now`. Unparseable or
-/// absent means "never expires".
+/// True when `expires_at` is at or before `now`. Absent means "never
+/// expires"; present but unparseable fails closed (treated as past), since
+/// pTask only ever writes ISO timestamps and anything else is damage.
 fn is_past(expires_at: Option<&str>, now: &jiff::Zoned) -> bool {
-    expires_at
-        .and_then(dates::parse_iso_to_utc)
-        .is_some_and(|z| z.timestamp() <= now.timestamp())
+    expires_at.is_some_and(|s| {
+        dates::parse_iso_to_utc(s).is_none_or(|z| z.timestamp() <= now.timestamp())
+    })
 }
 
 /// Flip one pending row to expired inside `tx`. False if it was no longer
@@ -1805,6 +1813,64 @@ mod tests {
         })
         .unwrap();
         "AP-99".into()
+    }
+
+    /// A row inserted as-is (no sweep, no validation) with a stored payload.
+    fn raw_row(db: &Db, seq: i64, status: &str, expires_at: &str, bytes: &[u8]) -> String {
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO approvals (id, seq, kind, title, payload, payload_kind,
+                                        payload_bytes, digest, requester, status,
+                                        decided_by, decided_via, created_at, decided_at,
+                                        expires_at)
+                 VALUES (?1, ?2, 'email', 'x', ?3, 'file', ?4, ?5, 'hal', ?6,
+                         CASE WHEN ?6 = 'pending' THEN NULL ELSE 'operator' END,
+                         CASE WHEN ?6 = 'pending' THEN NULL ELSE 'dashboard' END,
+                         '2026-09-01T00:00:00Z',
+                         CASE WHEN ?6 = 'pending' THEN NULL ELSE '2026-09-01T00:01:00Z' END,
+                         ?7)",
+                params![
+                    format!("raw-{seq}"),
+                    seq,
+                    bytes,
+                    bytes.len() as i64,
+                    sha256_hex(bytes),
+                    status,
+                    expires_at
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        format_ap_id(seq)
+    }
+
+    fn exit_code<T>(r: Result<T>) -> i32 {
+        match r {
+            Ok(_) => 0,
+            Err(Error::Approval(e)) => e.verify_exit_code().unwrap_or(1),
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn unswept_pending_row_past_expiry_reports_expired_not_pending() {
+        let (_d, db) = fresh();
+        let id = raw_row(&db, 70, "pending", "2026-09-01T00:02:00Z", b"late");
+        assert_eq!(exit_code(payload_bytes(&db, &id)), 4);
+        assert_eq!(exit_code(verify(&db, &id, &file_src(b"late"))), 4);
+        assert_eq!(
+            exit_code(consume(&db, &id, &file_src(b"late"), &ctx("x"))),
+            4
+        );
+    }
+
+    #[test]
+    fn unparseable_expiry_fails_closed() {
+        let (_d, db) = fresh();
+        let id = raw_row(&db, 71, "approved", "next tuesday", b"when");
+        assert_eq!(exit_code(payload_bytes(&db, &id)), 4);
+        assert_eq!(exit_code(verify(&db, &id, &file_src(b"when"))), 4);
     }
 
     #[test]

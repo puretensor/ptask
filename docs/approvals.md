@@ -99,7 +99,7 @@ since that is what the operator decides on.
 |---|---|
 | 0 | approved, digest matches, not yet consumed (consume then latches) |
 | 3 | pending |
-| 4 | rejected / withdrawn / expired, or approved but past `expires_at` |
+| 4 | rejected / withdrawn / expired, or approved or pending but past `expires_at` |
 | 5 | digest mismatch (consume does **not** latch) |
 | 6 | already consumed |
 | 1 | anything else (unknown id, bad args) |
@@ -176,10 +176,20 @@ timer) sweeps stale rows before pinging, and a re-request of an expired
 payload mints a fresh `AP-n` instead of returning the stale one.
 `pt approval expire` runs the same sweep on demand (idempotent).
 
-`expires_at` bounds the approval itself, not only the decision window. An
-approved row whose `expires_at` has passed stays `approved` in the record
-(decided rows are frozen), but `verify` and `consume` refuse it with exit 4
+**`expires_at` bounds execution too, not only the decision window.** It is
+one deadline for the whole approval: an approval granted five minutes
+before its `expires_at` is usable for those five minutes and then dies.
+Pick `--expires-in` to cover the time the executor needs after the
+decision, not just the time the operator needs to decide. An approved row
+whose `expires_at` has passed stays `approved` in the record (decided rows
+are frozen), but `payload`, `verify` and `consume` refuse it with exit 4
 unless it was already consumed. Ask for a fresh approval instead.
+
+A pending row past `expires_at` that no sweep has flipped yet is reported
+the same way (exit 4, "expired"), not as pending (3): it can no longer be
+approved. An `expires_at` that does not parse as a timestamp (pTask never
+writes one; only damage or a hand edit can) is treated as already past:
+the row cannot be decided, released, verified or consumed.
 
 ## Surfaces
 
