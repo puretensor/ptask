@@ -168,9 +168,14 @@ not push a good capture toward quarantine.
 
 A provider **outage** is not charged either. Once retries are exhausted, a
 timeout, connection failure, HTTP 408/429/5xx, or a 401/403/404 (credentials
-or model gone) aborts the run immediately: no bisection, no attempt charged,
-the chunks that already finished are still marked processed, and the run
-fails closed with `distill.failed` ("provider unavailable: …"). Retries honour
+or model gone) triggers a fresh preflight. If the preflight also fails, it is
+an outage: the run aborts immediately, with no bisection and no attempt
+charged, the chunks that already finished are still marked processed, and the
+run fails closed with `distill.failed` ("provider unavailable: …"). If the
+preflight succeeds, the error is specific to that input (for example a server
+that returns 500 on context overflow), and the chunk takes the normal
+bisect/charge/quarantine path, so one such capture cannot stall the
+oldest-first queue. Retries honour
 a `Retry-After` header of up to 30 s; a longer one aborts at once instead of
 waiting.
 

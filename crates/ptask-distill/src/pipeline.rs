@@ -448,6 +448,31 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
         }
         Err(e) => e,
     };
+    let mut e = e;
+    if e.abort {
+        // An outage-class error (5xx/408/timeout…) can also be deterministic
+        // for one input — Gemini 500s on some content, a local server 500s on
+        // context overflow. Treating that as an outage aborts every run
+        // before bisection and, with oldest-first fetching, stalls the whole
+        // queue forever. Re-check liveness: a healthy provider means the
+        // failure is this chunk's, so isolate/charge/quarantine as usual.
+        st.calls += 1;
+        match provider.preflight() {
+            Ok(()) => {
+                warn!(
+                    target: "ptask::distill",
+                    chunk = items.len(),
+                    error = %e.reason,
+                    "provider-side error but preflight is healthy — treating it as input-specific"
+                );
+                e.abort = false;
+                e.chargeable = true;
+            }
+            Err(p) => {
+                e.reason = format!("{} (preflight also failed: {p:#})", e.reason);
+            }
+        }
+    }
     if st.first_error.is_none() || e.abort {
         st.first_error = Some(e.reason.clone());
     }
@@ -643,9 +668,11 @@ fn create_candidates<P: LlmProvider + ?Sized>(
 /// failure during task creation is not.
 ///
 /// A provider *outage* (rate limit, 5xx, timeout, unreachable, rejected
-/// credentials — `ProviderUnavailable`) is different: it aborts the run at
-/// once, without bisecting and without charging anything, and the run fails
-/// closed after marking the chunks that finished.
+/// credentials — `ProviderUnavailable`) confirmed by a failing re-preflight
+/// is different: it aborts the run at once, without bisecting and without
+/// charging anything, and the run fails closed after marking the chunks that
+/// finished. If the re-preflight succeeds the error is input-specific and
+/// takes the normal isolate/charge path.
 ///
 /// A run in which nothing got through still fails closed. Note what that does
 /// NOT mean: an attempt is charged whether or not anything else succeeded this
@@ -1483,6 +1510,66 @@ mod tests {
         assert_eq!(report.consumed, 1, "the lock is released with its holder");
     }
 
+    /// Regression (round 2, DIST-5): a capture that deterministically gets a
+    /// 5xx/408 (Gemini 500 on certain inputs, a local server 500 on context
+    /// overflow) was treated as an outage, aborting every run before
+    /// bisection. Rows are served oldest first, so the queue stalled forever
+    /// with nothing charged. A healthy preflight now proves the failure is
+    /// input-specific and the normal isolate/charge/quarantine path runs.
+    #[test]
+    fn a_poison_5xx_with_a_healthy_provider_is_isolated_not_an_outage() {
+        struct Poison5xx {
+            preflights: std::cell::Cell<usize>,
+        }
+        impl LlmProvider for Poison5xx {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                if texts.iter().any(|t| t.contains("POISON")) {
+                    return Err(anyhow::Error::new(crate::providers::ProviderUnavailable(
+                        "local llm request failed after 3 attempt(s): http 500".into(),
+                    )));
+                }
+                PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                PoisonProvider { poison: "\u{0}" }.consolidate(items)
+            }
+            fn preflight(&self) -> Result<()> {
+                self.preflights.set(self.preflights.get() + 1);
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "poison-5xx-test"
+            }
+        }
+        let (_dir, db) = fresh_db();
+        seed_inbox(
+            &db,
+            &[
+                "POISON memo that overflows the context",
+                "call the bank about the mandate",
+                "book the Reykjavik flight",
+                "renew the office lease",
+            ],
+        );
+        let provider = Poison5xx {
+            preflights: std::cell::Cell::new(0),
+        };
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert_eq!(report.consumed, 3, "the queue moves past the poison row");
+        assert_eq!(report.failed, 1);
+        assert_eq!(attempts(&db, "POISON memo that overflows the context"), 1);
+        assert!(
+            provider.preflights.get() >= 2,
+            "re-checked liveness before blaming input"
+        );
+
+        // Alone in the queue it is still charged each run, then quarantined.
+        for _ in 1..ptask_core::raw_items::MAX_DISTILL_ATTEMPTS {
+            assert!(run_native(&db, &provider, 100).is_err());
+        }
+        assert_eq!(ptask_core::raw_items::quarantined_count(&db).unwrap(), 1);
+    }
+
     /// Regression (DIST-5): a 429/5xx/timeout was charged to the captures as
     /// a chargeable failure, and bisection multiplied the calls against the
     /// outage (7 classify calls and 4 charges for a 4-row batch).
@@ -1505,7 +1592,13 @@ mod tests {
             fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
                 PoisonProvider { poison: "\u{0}" }.consolidate(items)
             }
+            /// A real outage fails the liveness check too (once it has begun).
             fn preflight(&self) -> Result<()> {
+                if self.calls.get() > self.healthy_calls {
+                    return Err(anyhow::Error::new(crate::providers::ProviderUnavailable(
+                        "http 503: overloaded".into(),
+                    )));
+                }
                 Ok(())
             }
             fn name(&self) -> &'static str {
