@@ -672,6 +672,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_with_a_deeply_nested_filter_is_400_not_an_abort() {
+        // SRV-1: /list handed the filter to a recursive parser on a 2 MiB
+        // blocking-pool thread; ~1000 nested parens overflowed it and aborted
+        // the whole server (a stack overflow is not a catchable panic).
+        let app = router(AppState::new(
+            open_test_db(),
+            Default::default(),
+            Default::default(),
+        ));
+        let filter = format!("{}today{}", "%28".repeat(5000), "%29".repeat(5000));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/list?filter={filter}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn sync_priority_batch_is_rescored_once_after_the_loop() {
         let db = open_test_db();
         let app = router(AppState::new(
@@ -1891,6 +1914,113 @@ mod tests {
         .unwrap();
     }
 
+    /// POST a gitea push signed with `test-secret`.
+    async fn signed_gitea_push(app: &Router, body: &serde_json::Value) -> serde_json::Value {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let bytes = serde_json::to_vec(body).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-secret").unwrap();
+        mac.update(&bytes);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/webhook/gitea")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header(
+                        "X-Gitea-Signature",
+                        hex::encode(mac.finalize().into_bytes()),
+                    )
+                    .body(Body::from(bytes))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn task_status(db: &Db, pt_id: &str) -> String {
+        ptask_core::tasks::resolve_for_lookup(db, pt_id, true)
+            .unwrap()
+            .status
+    }
+
+    #[tokio::test]
+    async fn git_push_closes_at_most_twenty_tasks() {
+        // SRV-11: every Closes/Fixes in a default-branch push was applied,
+        // inner PR commits included, with no cap: one merged public PR
+        // carrying `Closes PT-1 ... Closes PT-900` closed 900 tasks.
+        let db = open_test_db();
+        for i in 1..=25 {
+            ptask_core::tasks::create(
+                &db,
+                ptask_core::NewTask::minimal(format!("t{i}")),
+                &EventCtx::test(),
+            )
+            .unwrap();
+        }
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), Default::default(), hooks));
+        let message: String = (1..=25).map(|i| format!("Closes PT-{i}\n")).collect();
+        let resp = signed_gitea_push(
+            &app,
+            &serde_json::json!({
+                "ref": "refs/heads/main",
+                "commits": [{"id": "c1", "message": message}],
+            }),
+        )
+        .await;
+        assert_eq!(resp["closed"].as_array().unwrap().len(), 20, "{resp}");
+        assert_eq!(
+            resp["skipped"],
+            serde_json::json!(["PT-21", "PT-22", "PT-23", "PT-24", "PT-25"])
+        );
+        assert_eq!(task_status(&db, "PT-20"), "done");
+        assert_ne!(task_status(&db, "PT-21"), "done");
+    }
+
+    #[tokio::test]
+    async fn git_close_repos_allowlist_limits_which_repos_close_tasks() {
+        // SRV-11: any repository holding the shared secret could close any
+        // PT-N. PTASK_GIT_CLOSE_REPOS names the ones that may.
+        let db = open_test_db();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("ship it"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let hooks = WebhookConfig {
+            gitea_secret: "test-secret".into(),
+            git_close_repos: vec!["puretensor/ptask".into()],
+            ..Default::default()
+        };
+        let app = router(AppState::new(db.clone(), Default::default(), hooks));
+        let push = |repo: &str, id: &str| {
+            serde_json::json!({
+                "ref": "refs/heads/main",
+                "repository": {"full_name": repo},
+                "commits": [{"id": id, "message": "Fixes PT-1"}],
+            })
+        };
+        let resp = signed_gitea_push(&app, &push("someone/fork", "c1")).await;
+        assert_eq!(resp["closed"], serde_json::json!([]), "{resp}");
+        assert_eq!(resp["skipped_repo"], "someone/fork");
+        assert_ne!(task_status(&db, "PT-1"), "done");
+
+        let resp = signed_gitea_push(&app, &push("PureTensor/ptask", "c2")).await;
+        assert_eq!(resp["closed"], serde_json::json!(["PT-1=done"]), "{resp}");
+        assert_eq!(task_status(&db, "PT-1"), "done");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn gitea_webhook_ignores_fixes_on_a_feature_branch() {
         use hmac::{Hmac, Mac};
@@ -2019,6 +2149,115 @@ Don't forget the sourdough.\r\n";
             Ok(())
         })
         .unwrap();
+    }
+
+    /// `levels` unencoded message/rfc822 parts nested in one another
+    /// (the reviewer's mknest.py).
+    fn nested_rfc822(levels: usize) -> String {
+        format!(
+            "Subject: probe\r\nMessage-ID: <probe-{levels}@x>\r\n{}Subject: inner\r\n\r\nbody\r\n",
+            "Content-Type: message/rfc822\r\n\r\n".repeat(levels)
+        )
+    }
+
+    async fn post_email(app: &Router, raw: Vec<u8>) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/email")
+                    .method("POST")
+                    .header("content-type", "message/rfc822")
+                    .body(Body::from(raw))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn email_with_deeply_nested_messages_is_400_not_an_abort() {
+        // SRV-2: mail-parser nests one Message per unencoded message/rfc822
+        // part with no limit, and dropping the tree recursed once per level:
+        // ~10k levels (320 KB) overflowed the blocking thread and aborted pt
+        // serve -- after the raw_items insert, so a re-send crashed it again.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        assert_eq!(
+            post_email(&app, nested_rfc822(10_000).into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+        // The deepest chain the 2 MiB body limit admits (~61k levels).
+        assert_eq!(
+            post_email(&app, nested_rfc822(61_000).into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // Variants a scan for the literal type misses: mail-parser accepts
+        // whitespace inside the type, and nests untyped digest parts.
+        let spaced = nested_rfc822(10_000).replace("message/rfc822", "message/ rfc822");
+        assert_eq!(
+            post_email(&app, spaced.into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+        let digest = format!(
+            "Subject: digest\r\n{}Subject: inner\r\n\r\nbody\r\n",
+            "Content-Type: multipart/digest; boundary=d\r\n\r\n--d\r\n\r\n".repeat(10_000)
+        );
+        assert_eq!(
+            post_email(&app, digest.into_bytes()).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // The same chain hidden in a base64 part is invisible to any scan of
+        // the raw body; mail-parser decodes and re-parses it, copying the
+        // decoded buffer once per nested message (quadratic memory). The
+        // header name may even carry whitespace mail-parser ignores.
+        use base64::Engine as _;
+        let hidden = base64::engine::general_purpose::STANDARD.encode(nested_rfc822(10_000));
+        for cte in ["Content-Transfer-Encoding", "Content-Transfer- Encoding"] {
+            let raw = format!(
+                "Subject: probe\r\nMessage-ID: <b64@x>\r\nContent-Type: message/rfc822\r\n\
+                 {cte}: base64\r\n\r\n{hidden}\r\n"
+            );
+            assert_eq!(
+                post_email(&app, raw.into_bytes()).await,
+                StatusCode::BAD_REQUEST,
+                "{cte}"
+            );
+        }
+        assert_eq!(
+            ptask_core::raw_items::unprocessed_count(&db).unwrap(),
+            0,
+            "a rejected mail must not land in the inbox"
+        );
+
+        // An ordinary forward (one embedded message) is still captured.
+        let forward = format!(
+            "Subject: Fwd: renew the cert\r\nMessage-ID: <fwd@x>\r\n\
+             Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\
+             Content-Type: text/plain\r\n\r\nplease handle\r\n--b\r\n{}--b--\r\n",
+            nested_rfc822(1)
+        );
+        assert_eq!(
+            post_email(&app, forward.into_bytes()).await,
+            StatusCode::CREATED
+        );
+        // ...including one whose embedded message declares an identity
+        // transfer encoding, as Thunderbird does.
+        let forward_7bit = "Subject: Fwd: rotate keys\r\nMessage-ID: <fwd7@x>\r\n\
+             Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\
+             Content-Type: text/plain\r\n\r\nsee below\r\n--b\r\n\
+             Content-Type: message/rfc822\r\nContent-Transfer-Encoding: 7bit\r\n\r\n\
+             Subject: rotate keys\r\n\r\nbefore friday\r\n--b--\r\n";
+        assert_eq!(
+            post_email(&app, forward_7bit.as_bytes().to_vec()).await,
+            StatusCode::CREATED
+        );
     }
 
     /// mail-parser 0.11.3 panics when a `Received` header ends on a folded

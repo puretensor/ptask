@@ -20,6 +20,7 @@ trailing `//description` becomes the description.
 | `//description` | everything from `//` to end-of-text → description. |
 | `every monday`, `every weekday`, `every! 5 days`, etc. | recurrence — see [recurrence.md](recurrence.md). |
 | `YYYY-MM-DD` | deadline, when it is a standalone date in the future. |
+| `due:`*date* | scheduled date (`due_at`): when you plan to do it, distinct from the deadline. One word: `due:2026-10-02`, `due:tomorrow`. |
 
 ### Dates
 
@@ -40,36 +41,44 @@ pt add 'investigate ceph mon quorum @ops p4 #fleet'
 pt add 'review PR #42 //sync via gh pr view 42'
 ```
 
-## Filter DSL (`pt list`, saved views)
+## Filter DSL (`pt list`, saved views, `GET /list`, MCP `task_list`, bot `/list`)
 
-Boolean expressions over field tokens.
+Boolean expressions over field tokens. Status is not a token: use
+`pt list -s/--status` (or `status=` on `GET /list`).
 
 ### Field tokens
 
+A "day" is a calendar day in the operator timezone (`Europe/London`). A
+date-only deadline (`2026-10-02`) compares as a date; a datetime deadline
+compares as an instant against that day's local start and end, whatever
+offset it was stored with (`2026-10-20T23:30:00Z` is 21 Oct in BST).
+
 | Token | Predicate |
 |---|---|
-| `today` | `deadline = today` or due today |
-| `overdue` | `deadline < today`, not done or dismissed |
-| `no date` | `deadline IS NULL` |
+| `today` | deadline on today, or scheduled (`due_at`, quick-add `due:`) for today |
+| `tomorrow`, `yesterday` | deadline on that day |
+| `overdue` | not done or dismissed, and a date-only deadline before today, a datetime deadline before now, or a deadline that can't be read as a date |
+| `no date` (alias `no deadline`) | no deadline |
 | `recurring` | row has a `pt_recurrence` entry |
 | `p1`..`p5` | exact priority match |
-| `@label` | label in `pt_extensions.labels` |
-| `#project` | project match |
-| `due:`*phrase* | resolves a date phrase; exact-day match |
-| `due before:`*phrase* | `deadline < parsed_date` |
-| `created:`*phrase* | `created_at` on that day |
-| `search:`*str* | `title LIKE %str%` (case-insensitive) |
-| `status:STATE` | exact status; same lexicon as `-s` |
+| `@label` | label in `pt_extensions.labels`; the name runs to the next space or operator (`@domain:mgmt`, `@v1.2`) |
+| `#project` | exact project match; same name rule (`#infra/core`) |
+| `due:`*phrase* | deadline on the day the phrase resolves to |
+| `due before:`*phrase* | deadline before that day |
+| `due after:`*phrase* | deadline after that day |
+| `search:`*str* | `str` in the title or description (case-insensitive); an empty `str` is an error |
 | `kind:`*scout\|ship* | investigation vs implementation (see `pt promote`) |
 
 ### Operators
 
 | Op | Form |
 |---|---|
-| AND | `a & b` or whitespace `a b` |
+| AND | `a & b` (binds tighter than OR; juxtaposition `a b` is an error) |
 | OR | `a | b` |
-| NOT | `!a` |
+| NOT | `!a` — true whenever `a` is not (a task with no project matches `!#fleet`) |
 | group | `(a | b) & c` |
+
+Limits: at most 2048 bytes, 32 levels of `(` / `!` nesting and 256 terms.
 
 ### Examples
 

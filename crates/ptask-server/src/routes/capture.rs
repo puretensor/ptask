@@ -76,11 +76,17 @@ fn resolve_blocking(
         )
             .into_response();
     }
+    // Not between a capture's create and its capture_key stamp.
+    let _lane = incident_lane();
     let open: Vec<String> = match state.db.with_conn(|c| {
-        let mut stmt = c.prepare(
+        // Only tasks the capture lane created: a key stamped onto any other
+        // incident (before refresh_matched_incident checked) must not hand
+        // it to a capture-scope client.
+        let mut stmt = c.prepare(&format!(
             "SELECT id FROM tasks
-                 WHERE capture_key = ?1 AND status_v2 NOT IN ('done','dismissed')",
-        )?;
+                 WHERE capture_key = ?1 AND status_v2 NOT IN ('done','dismissed')
+                   AND {CAPTURE_LANE_TASK}"
+        ))?;
         let rows = stmt.query_map([&key], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }) {
@@ -194,6 +200,21 @@ pub struct CaptureResp {
     pub pt_id: Option<String>,
 }
 
+/// Serialises the incident fast lane and close-on-recovery. The open-task
+/// lookup, raw insert, episode decision and create-or-refresh (with its
+/// capture_key) read and write across several statements, and concurrent
+/// re-sends of one incident interleaved them into duplicate P5 tasks.
+/// `tasks::create_with_extensions` commits in a transaction of its own, so
+/// the lane can't be one SQLite transaction; `/capture` is the only writer
+/// of `capture_key`, so one in-process lock closes the race.
+static INCIDENT_LANE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn incident_lane() -> std::sync::MutexGuard<'static, ()> {
+    INCIDENT_LANE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Delivery idempotency vs incident identity.
 enum CaptureIdentity {
     Proceed,
@@ -241,6 +262,41 @@ fn open_incident_for_key(db: &ptask_core::Db, key: &str) -> Result<bool, ptask_c
     })
 }
 
+/// SQL predicate (over `tasks`): the capture fast lane created this task.
+/// Its `task.created` journal row is keyed `capture:<raw_items id>` and
+/// commits with the insert; incidents HAL files over MCP and /sync tasks
+/// typed `incident` carry other keys.
+const CAPTURE_LANE_TASK: &str = "EXISTS (SELECT 1 FROM pt_event_log e
+     WHERE e.task_uuid = tasks.id AND e.event_type = 'task.created'
+       AND e.uuid LIKE 'capture:%')";
+
+/// Bump a matched open incident's occurrence counters. The capture's key is
+/// stamped only onto an unkeyed task the capture lane created: resolve
+/// closes every open task carrying a key, so stamping one onto an incident
+/// filed elsewhere let a capture-scope client close work it never created.
+fn refresh_matched_incident(
+    db: &ptask_core::Db,
+    uuid: &str,
+    capture_key: Option<&str>,
+    now: &str,
+) -> Result<(), ptask_core::Error> {
+    db.with_conn(|c| {
+        c.execute(
+            &format!(
+                "UPDATE tasks SET
+                     capture_count = capture_count + 1,
+                     last_captured_at = ?1,
+                     updated_at = ?1,
+                     capture_key = CASE WHEN capture_key IS NULL AND {CAPTURE_LANE_TASK}
+                                        THEN ?2 ELSE capture_key END
+                 WHERE id = ?3"
+            ),
+            rusqlite::params![now, capture_key, uuid],
+        )?;
+        Ok(())
+    })
+}
+
 fn next_episode_source_file(
     db: &ptask_core::Db,
     source_file: &str,
@@ -271,6 +327,22 @@ fn duplicate_capture_response(r: ptask_core::raw_items::RawItem) -> axum::respon
         .into_response()
 }
 
+/// N from a literal `[puresentinel sevN]` marker (case-insensitive).
+fn marker_severity(text: &str) -> Option<i64> {
+    const MARKER: &str = "[puresentinel sev";
+    // ASCII lowercasing keeps byte offsets.
+    let lower = text.to_ascii_lowercase();
+    lower.match_indices(MARKER).find_map(|(idx, _)| {
+        let rest = &lower[idx + MARKER.len()..];
+        let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0 && rest[digits..].starts_with(']') {
+            rest[..digits].parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
 /// Severity from the explicit field, else parsed from a puresentinel
 /// incident marker (`[puresentinel sevN]`) when the source says incident.
 fn effective_severity(req: &CaptureReq, source: &str) -> Option<i64> {
@@ -278,14 +350,18 @@ fn effective_severity(req: &CaptureReq, source: &str) -> Option<i64> {
         return Some(s);
     }
     if source.starts_with("puresentinel:incident:") {
-        // First `sev` followed by digits: an earlier word ("several OSDs
-        // down [puresentinel sev4]") must not hide the marker.
-        let marked = req.text.match_indices("sev").find_map(|(idx, _)| {
-            let digits: String = req.text[idx + 3..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-            digits.parse::<i64>().ok()
+        // The literal marker wins: an earlier number ("prior sev1 cleared",
+        // a host named sev01-db) demoted a sev4 out of the fast lane.
+        // Without one, the first `sev` followed by digits: an earlier word
+        // ("several OSDs down") must not hide it.
+        let marked = marker_severity(&req.text).or_else(|| {
+            req.text.match_indices("sev").find_map(|(idx, _)| {
+                let digits: String = req.text[idx + 3..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse::<i64>().ok()
+            })
         });
         // Incident source without a parsable marker still counts as critical.
         return Some(marked.unwrap_or(3));
@@ -345,6 +421,9 @@ fn capture_blocking(
     // episode so a later identical capture can create work again.
     let severity = effective_severity(&req, &source);
     let is_incident = severity.is_some_and(|s| s >= 3);
+    // Held until the incident's task exists with its key (or the capture
+    // turned out to be a duplicate).
+    let lane = is_incident.then(incident_lane);
     let has_open_keyed_task = match capture_key.as_deref() {
         Some(key) => match open_incident_for_key(&state.db, key) {
             Ok(open) => open,
@@ -473,18 +552,8 @@ fn capture_blocking(
             let now = ptask_core::dates::format_iso(
                 &ptask_core::dates::now_in_operator_tz().unwrap_or_else(|_| jiff::Zoned::now()),
             );
-            let refresh = state.db.with_conn(|c| {
-                c.execute(
-                    "UPDATE tasks SET
-                         capture_count = capture_count + 1,
-                         last_captured_at = ?1,
-                         updated_at = ?1,
-                         capture_key = COALESCE(capture_key, ?2)
-                     WHERE id = ?3",
-                    rusqlite::params![now, capture_key, existing_uuid],
-                )?;
-                Ok(())
-            });
+            let refresh =
+                refresh_matched_incident(&state.db, &existing_uuid, capture_key.as_deref(), &now);
             match refresh {
                 Ok(()) => {
                     let ctx = EventCtx {
@@ -590,6 +659,9 @@ fn capture_blocking(
                 if let Err(e) = ptask_core::raw_items::mark_processed(&state.db, row.id) {
                     tracing::warn!(target: "ptask::capture", error = %e, "mark_processed failed");
                 }
+                // The incident is recorded; rescoring rewrites every active
+                // row and needn't hold up the next capture.
+                drop(lane);
                 if let Err(e) = ptask_core::scoring::run_once(&state.db, false) {
                     tracing::warn!(target: "ptask::capture", error = %e, "rescore failed");
                 }
@@ -642,6 +714,177 @@ mod tests {
     fn severity_marker_is_found_past_an_earlier_sev_word() {
         assert_eq!(incident("several OSDs down [puresentinel sev4]"), Some(4));
         assert_eq!(incident("[puresentinel sev5] mon quorum lost"), Some(5));
+    }
+
+    #[test]
+    fn concurrent_keyed_captures_make_one_incident() {
+        // SRV-4: the keyed fast lane read "is there an open task for this
+        // key?" before inserting, and stamped capture_key in a separate
+        // UPDATE after creating the task, with nothing in between to stop a
+        // concurrent capture: barrier-synced re-sends of one incident minted
+        // several open P5 tasks, and a pure re-send took the NewEpisode path
+        // and answered 201 instead of 200 duplicate.
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("race.db")).unwrap();
+        let state = AppState::new(db.clone(), Default::default(), Default::default());
+        // Odd trials: each sentinel words the incident differently, so every
+        // capture is a new raw row refreshing the one keyed task.
+        for trial in 0..10 {
+            let key = format!("race:{trial}");
+            let text = format!("[puresentinel sev4] ceph HEALTH_ERR {trial}");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let threads: Vec<_> = (0..8)
+                .map(|i| {
+                    let (state, barrier) = (state.clone(), barrier.clone());
+                    let req = CaptureReq {
+                        text: if trial % 2 == 0 {
+                            text.clone()
+                        } else {
+                            format!("{text} from sentinel {i}")
+                        },
+                        source: Some("puresentinel:incident:ceph".into()),
+                        source_file: None,
+                        severity: None,
+                        client_key: Some(key.clone()),
+                    };
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        capture_blocking(state, HeaderMap::new(), req).status()
+                    })
+                })
+                .collect();
+            let mut statuses: Vec<StatusCode> =
+                threads.into_iter().map(|t| t.join().unwrap()).collect();
+            statuses.sort();
+            let (open, raw): (i64, i64) = db
+                .with_conn(|c| {
+                    Ok((
+                        c.query_row(
+                            "SELECT COUNT(*) FROM tasks WHERE capture_key = ?1
+                               AND status_v2 NOT IN ('done','dismissed')",
+                            [&key],
+                            |r| r.get(0),
+                        )?,
+                        c.query_row(
+                            "SELECT COUNT(*) FROM raw_items WHERE text LIKE ?1 || '%'",
+                            [&text],
+                            |r| r.get(0),
+                        )?,
+                    ))
+                })
+                .unwrap();
+            let raw_rows = if trial % 2 == 0 { 1 } else { 8 };
+            assert_eq!((open, raw), (1, raw_rows), "trial {trial}: {statuses:?}");
+            let mut expected = vec![StatusCode::OK; 7];
+            expected.push(StatusCode::CREATED);
+            assert_eq!(statuses, expected, "trial {trial}");
+        }
+    }
+
+    async fn closed_by_resolve(state: &AppState, key: &str) -> i64 {
+        let resp = resolve_blocking(
+            state.clone(),
+            HeaderMap::new(),
+            ResolveReq {
+                client_key: key.into(),
+                note: None,
+            },
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["closed"]
+            .as_i64()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn semantic_merge_does_not_hand_a_capture_client_someone_elses_incident() {
+        // SRV-15: a semantic merge stamped the capture's key onto any
+        // unkeyed open incident (`COALESCE(capture_key, ?)`), e.g. one HAL
+        // filed over MCP, and /capture/resolve closes every open task with
+        // that key -- so a capture-scope client could close work it never
+        // created.
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("merge.db")).unwrap();
+        let state = AppState::new(db.clone(), Default::default(), Default::default());
+        let now = "2026-10-05T09:00:00+00:00";
+        let hal = EventCtx {
+            actor: "hal".into(),
+            source: "mcp".into(),
+            event_uuid: None,
+        };
+        let filed_by_hal = ptask_core::tasks::create_with_extensions(
+            &db,
+            ptask_core::NewTask {
+                source_type: "incident".into(),
+                ..ptask_core::NewTask::minimal("ceph mon quorum lost")
+            },
+            ptask_core::Extensions::default(),
+            &hal,
+        )
+        .unwrap();
+        // The merge path the embedder takes for "mons out of quorum".
+        refresh_matched_incident(&db, &filed_by_hal.id, Some("sentinel:quorum"), now).unwrap();
+        assert_eq!(closed_by_resolve(&state, "sentinel:quorum").await, 0);
+        let status = ptask_core::tasks::resolve_for_lookup(&db, &filed_by_hal.id, true)
+            .unwrap()
+            .status;
+        assert_ne!(status, "done");
+
+        // A key stamped onto it before the fix is out of resolve's reach too.
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET capture_key = 'legacy:quorum' WHERE id = ?1",
+                [&filed_by_hal.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(closed_by_resolve(&state, "legacy:quorum").await, 0);
+
+        // An unkeyed incident the capture lane created still takes the key
+        // and closes on recovery.
+        let resp = capture_blocking(
+            state.clone(),
+            HeaderMap::new(),
+            CaptureReq {
+                text: "disk 97% on fox-n2".into(),
+                source: None,
+                source_file: None,
+                severity: Some(4),
+                client_key: None,
+            },
+        );
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let lane_task = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["task_uuid"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        refresh_matched_incident(&db, &lane_task, Some("sentinel:disk"), now).unwrap();
+        assert_eq!(closed_by_resolve(&state, "sentinel:disk").await, 1);
+    }
+
+    #[test]
+    fn the_puresentinel_marker_beats_an_earlier_sev_number() {
+        // SRV-10: the first `sev<digits>` anywhere won, so an earlier mention
+        // or a host name demoted a sev4 incident to sev1 and out of the
+        // fast lane.
+        assert_eq!(
+            incident("prior sev1 cleared; [puresentinel sev4] ceph HEALTH_ERR"),
+            Some(4)
+        );
+        assert_eq!(
+            incident("disk full on sev01-db [puresentinel sev4]"),
+            Some(4)
+        );
+        assert_eq!(incident("[PureSentinel SEV5] site down"), Some(5));
+        // No marker: the first sev number still counts.
+        assert_eq!(incident("sev2 latency on fox-n1"), Some(2));
     }
 
     #[test]

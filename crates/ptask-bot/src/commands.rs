@@ -129,15 +129,19 @@ async fn handle_add(bot: &Bot, chat_id: ChatId, db: &Db, text: &str) -> Result<(
 }
 
 async fn handle_list(bot: &Bot, chat_id: ChatId, db: &Db, filter: &str) -> Result<()> {
+    send(bot, chat_id, list_reply(db, filter)).await
+}
+
+/// The `/list` reply text. Every outcome, a bad filter included, is a
+/// message: the bot confirms an update only on the next poll, so a crash
+/// here would replay the same update on every restart.
+fn list_reply(db: &Db, filter: &str) -> String {
     let expr = if filter.trim().is_empty() {
         None
     } else {
         match ptask_core::filter::parse(filter) {
             Ok(e) => Some(e),
-            Err(e) => {
-                send(bot, chat_id, format!("filter parse failed: {}", e)).await?;
-                return Ok(());
-            }
+            Err(e) => return format!("filter parse failed: {}", e),
         }
     };
     // Open tasks only, filter or not: the DSL has no status predicate, so a
@@ -145,14 +149,10 @@ async fn handle_list(bot: &Bot, chat_id: ChatId, db: &Db, filter: &str) -> Resul
     let rows =
         match ptask_core::tasks::list_with_filter(db, expr.as_ref(), Some("pending"), None, 20) {
             Ok(r) => r,
-            Err(e) => {
-                send(bot, chat_id, format!("list failed: {}", e)).await?;
-                return Ok(());
-            }
+            Err(e) => return format!("list failed: {}", e),
         };
     if rows.is_empty() {
-        send(bot, chat_id, "no tasks").await?;
-        return Ok(());
+        return "no tasks".into();
     }
     let mut out = String::new();
     for t in &rows {
@@ -161,8 +161,7 @@ async fn handle_list(bot: &Bot, chat_id: ChatId, db: &Db, filter: &str) -> Resul
         out.push_str(&format!("{} [{}] {}\n", pt, label, t.title));
     }
     out.push_str(&format!("\n{} task(s)", rows.len()));
-    send(bot, chat_id, out).await?;
-    Ok(())
+    out
 }
 
 async fn handle_done(bot: &Bot, chat_id: ChatId, db: &Db, query: &str) -> Result<()> {
@@ -255,5 +254,25 @@ mod tests {
     fn ignores_non_commands_and_unknown_commands() {
         assert_eq!(PtCommand::parse_message("add Buy bread"), None);
         assert_eq!(PtCommand::parse_message("/unknown"), None);
+    }
+
+    #[test]
+    fn hostile_list_filter_is_a_reply_not_a_crash() {
+        // CLI-7: a Telegram-sized (4096-char) nested filter overflowed the
+        // handler's 2 MiB stack and aborted the bot; the unconfirmed update
+        // then replayed on every restart.
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("bot.db")).unwrap();
+        let text = format!("/list {}today{}", "(".repeat(2040), ")".repeat(2040));
+        let Some(PtCommand::List(filter)) = PtCommand::parse_message(&text) else {
+            panic!("not a /list command");
+        };
+        let reply = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || super::list_reply(&db, &filter))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(reply.starts_with("filter parse failed"), "{reply}");
     }
 }

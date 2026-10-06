@@ -164,7 +164,10 @@ Drops into `raw_items` for the distillation pipeline. Returns:
 ## `POST /email`
 
 Accepts a raw RFC 822 message body (`message/rfc822` or `text/plain`); parses
-subject/body into one `raw_items` row with `source_type="email"`. Returns:
+subject/body into one `raw_items` row with `source_type="email"`. Bodies over
+2 MiB get 413. Embedded messages nested more than 32 deep, or an embedded
+message with a base64/quoted-printable transfer encoding (which RFC 2046
+forbids), get 400 and nothing is stored. Returns:
 
 ```json
 { "id": 123, "subject": "Subject line", "source_file": "email:<message-id>" }
@@ -180,6 +183,13 @@ not close tasks.
 HMAC verification: the secret comes from `PTASK_GITEA_WEBHOOK_SECRET` /
 `PTASK_GITHUB_WEBHOOK_SECRET`. Body signature is `X-Hub-Signature-256`
 (GitHub) or `X-Gitea-Signature` (Gitea).
+
+One delivery closes at most 20 distinct PT-N; the rest are listed under
+`skipped` in the response and logged. `PTASK_GIT_CLOSE_REPOS=owner/repo,...`
+limits which repositories (`repository.full_name`, case-insensitive) may
+close tasks at all; a push from any other repository gets 200 with
+`skipped_repo` and closes nothing. Unset, any repository holding the secret
+may close tasks.
 
 ## Outbound webhooks
 

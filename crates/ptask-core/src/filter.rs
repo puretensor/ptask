@@ -24,6 +24,10 @@
 //!             | kind:       scout|ship
 //! ```
 //!
+//! Semantics (docs/dsl.md): day atoms use the operator-local (London) day;
+//! `today` also matches a task scheduled (`due_at`) for today; `!a` is true
+//! wherever `a` is not, including rows where `a` reads a NULL column.
+//!
 //! Examples:
 //! - `today & p1`
 //! - `(today | overdue) & #fleet`
@@ -59,6 +63,14 @@ pub enum Expr {
     Kind(String),
 }
 
+/// Longest filter accepted, in bytes. Real filters are a few dozen bytes.
+pub const MAX_FILTER_BYTES: usize = 2048;
+/// Deepest `(` / `!` nesting accepted; each level is a recursive parser call.
+pub const MAX_FILTER_NESTING: usize = 32;
+/// Most terms accepted. The AST is compiled and dropped recursively, one
+/// stack frame per node, and SQLite rejects expression trees deeper than 1000.
+pub const MAX_FILTER_TERMS: usize = 256;
+
 /// Compiled SQL fragment + bound parameter values (positional).
 pub struct Sql {
     pub where_clause: String,
@@ -66,7 +78,18 @@ pub struct Sql {
 }
 
 /// Public entry point: parse a filter DSL string into an AST.
+///
+/// Size, nesting and term count are capped here, so every caller (CLI,
+/// saved views, `/list`, MCP, the bot) is protected: the parser, `to_sql`
+/// and the AST's drop all recurse, and a hostile filter used to abort the
+/// whole process with a stack overflow no panic guard can catch.
 pub fn parse(input: &str) -> Result<Expr> {
+    if input.len() > MAX_FILTER_BYTES {
+        return Err(Error::Other(format!(
+            "filter: {} bytes is over the {MAX_FILTER_BYTES}-byte limit",
+            input.len()
+        )));
+    }
     let mut p = ParseCtx::new(input);
     p.skip_ws();
     let expr = p.parse_or()?;
@@ -106,21 +129,27 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             compile(l, now, params)?,
             compile(r, now, params)?
         ),
-        Expr::Not(inner) => format!("(NOT ({}))", compile(inner, now, params)?),
+        // Atoms read nullable columns (no deadline, no project, no
+        // pt_extensions row for a task without a pt_id), and NOT NULL is
+        // NULL, which WHERE drops: `!#fleet` lost every project-less task.
+        // An atom that is unknown for a row is false for it, so its
+        // negation is true.
+        Expr::Not(inner) => format!("(NOT COALESCE(({}), 0))", compile(inner, now, params)?),
 
-        Expr::Today => {
-            params.push(Value::Text(now.date().to_string()));
-            format!("substr(t.deadline,1,10) = ?{}", params.len())
-        }
+        // Deadline today, or scheduled (`due:` quick-add token -> due_at)
+        // for today.
+        Expr::Today => format!(
+            "({} OR {})",
+            day_cmp("t.deadline", DayCmp::On, now.date(), now, params)?,
+            day_cmp("t.due_at", DayCmp::On, now.date(), now, params)?
+        ),
         Expr::Tomorrow => {
-            let d = now.date().checked_add(jiff::Span::new().days(1)).unwrap();
-            params.push(Value::Text(d.to_string()));
-            format!("substr(t.deadline,1,10) = ?{}", params.len())
+            let d = now.date().tomorrow().map_err(day_err)?;
+            day_cmp("t.deadline", DayCmp::On, d, now, params)?
         }
         Expr::Yesterday => {
-            let d = now.date().checked_sub(jiff::Span::new().days(1)).unwrap();
-            params.push(Value::Text(d.to_string()));
-            format!("substr(t.deadline,1,10) = ?{}", params.len())
+            let d = now.date().yesterday().map_err(day_err)?;
+            day_cmp("t.deadline", DayCmp::On, d, now, params)?
         }
         Expr::Overdue => {
             params.push(Value::Text(now.date().to_string()));
@@ -156,18 +185,9 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             params.push(Value::Text(name.clone()));
             format!("x.project = ?{}", params.len())
         }
-        Expr::DueOn(d) => {
-            params.push(Value::Text(d.clone()));
-            format!("substr(t.deadline,1,10) = ?{}", params.len())
-        }
-        Expr::DueBefore(d) => {
-            params.push(Value::Text(d.clone()));
-            format!("substr(t.deadline,1,10) < ?{}", params.len())
-        }
-        Expr::DueAfter(d) => {
-            params.push(Value::Text(d.clone()));
-            format!("substr(t.deadline,1,10) > ?{}", params.len())
-        }
+        Expr::DueOn(d) => day_cmp("t.deadline", DayCmp::On, iso_day(d)?, now, params)?,
+        Expr::DueBefore(d) => day_cmp("t.deadline", DayCmp::Before, iso_day(d)?, now, params)?,
+        Expr::DueAfter(d) => day_cmp("t.deadline", DayCmp::After, iso_day(d)?, now, params)?,
         Expr::Kind(k) => {
             params.push(Value::Text(k.clone()));
             format!("COALESCE(t.kind,'ship') = ?{}", params.len())
@@ -182,6 +202,77 @@ fn compile(expr: &Expr, now: &Zoned, params: &mut Vec<rusqlite::types::Value>) -
             )
         }
     })
+}
+
+/// Which side of an operator-local day a column must fall on.
+#[derive(Clone, Copy)]
+enum DayCmp {
+    Before,
+    On,
+    After,
+}
+
+fn day_err(e: jiff::Error) -> Error {
+    Error::Other(format!("filter: day out of range: {e}"))
+}
+
+fn iso_day(d: &str) -> Result<jiff::civil::Date> {
+    d.parse()
+        .map_err(|e| Error::Other(format!("filter: bad date {d:?}: {e}")))
+}
+
+/// SQL for `col` falling before / on / after `day` in `now`'s (operator)
+/// timezone. A date-only value (`YYYY-MM-DD`) compares as a date; anything
+/// longer is an instant, bucketed by the day's start and end there. Stored
+/// offsets are mixed (`Z`, `+00:00`, `+01:00`), so the stored date prefix is
+/// not the operator's day: 23:30Z on 20 Oct is 00:30 on 21 Oct in London.
+fn day_cmp(
+    col: &str,
+    cmp: DayCmp,
+    day: jiff::civil::Date,
+    now: &Zoned,
+    params: &mut Vec<rusqlite::types::Value>,
+) -> Result<String> {
+    use rusqlite::types::Value;
+    let start_of = |d: jiff::civil::Date| -> Result<Value> {
+        let start = d.to_zoned(now.time_zone().clone()).map_err(day_err)?;
+        Ok(Value::Text(dates::format_iso(
+            &start.with_time_zone(jiff::tz::TimeZone::UTC),
+        )))
+    };
+    let next = day.tomorrow().map_err(day_err)?;
+    params.push(Value::Text(day.to_string()));
+    let date = params.len();
+    let (date_op, instant) = match cmp {
+        DayCmp::Before => {
+            params.push(start_of(day)?);
+            (
+                "<",
+                format!("julianday({col}) < julianday(?{})", params.len()),
+            )
+        }
+        DayCmp::On => {
+            params.push(start_of(day)?);
+            params.push(start_of(next)?);
+            let (start, end) = (params.len() - 1, params.len());
+            (
+                "=",
+                format!(
+                    "julianday({col}) >= julianday(?{start}) AND julianday({col}) < julianday(?{end})"
+                ),
+            )
+        }
+        DayCmp::After => {
+            params.push(start_of(next)?);
+            (
+                ">",
+                format!("julianday({col}) >= julianday(?{})", params.len()),
+            )
+        }
+    };
+    Ok(format!(
+        "((length({col}) = 10 AND {col} {date_op} ?{date}) OR (length({col}) > 10 AND {instant}))"
+    ))
 }
 
 pub(crate) fn escape_like(input: &str) -> String {
@@ -203,11 +294,32 @@ pub(crate) fn escape_like(input: &str) -> String {
 struct ParseCtx<'a> {
     input: &'a str,
     pos: usize,
+    /// Current `(` / `!` nesting.
+    depth: usize,
+    /// Terms parsed so far.
+    terms: usize,
 }
 
 impl<'a> ParseCtx<'a> {
     fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+        Self {
+            input,
+            pos: 0,
+            depth: 0,
+            terms: 0,
+        }
+    }
+
+    /// Enter one `(` / `!` level.
+    fn descend(&mut self) -> Result<()> {
+        self.depth += 1;
+        if self.depth > MAX_FILTER_NESTING {
+            return Err(Error::Other(format!(
+                "filter: nested deeper than {MAX_FILTER_NESTING} levels at byte {}",
+                self.pos
+            )));
+        }
+        Ok(())
     }
 
     fn peek(&self) -> Option<char> {
@@ -267,7 +379,9 @@ impl<'a> ParseCtx<'a> {
         self.skip_ws();
         if self.peek() == Some('!') {
             self.pos += 1;
+            self.descend()?;
             let inner = self.parse_atom()?;
+            self.depth -= 1;
             Ok(Expr::Not(Box::new(inner)))
         } else {
             self.parse_atom()
@@ -278,6 +392,7 @@ impl<'a> ParseCtx<'a> {
         self.skip_ws();
         if self.peek() == Some('(') {
             self.pos += 1;
+            self.descend()?;
             let inner = self.parse_or()?;
             self.skip_ws();
             if self.peek() != Some(')') {
@@ -287,6 +402,7 @@ impl<'a> ParseCtx<'a> {
                 )));
             }
             self.pos += 1;
+            self.depth -= 1;
             Ok(inner)
         } else {
             self.parse_term()
@@ -295,6 +411,12 @@ impl<'a> ParseCtx<'a> {
 
     fn parse_term(&mut self) -> Result<Expr> {
         self.skip_ws();
+        self.terms += 1;
+        if self.terms > MAX_FILTER_TERMS {
+            return Err(Error::Other(format!(
+                "filter: more than {MAX_FILTER_TERMS} terms"
+            )));
+        }
         // Order matters: longer keywords before shorter overlapping ones.
         for (kw, expr) in &[
             ("today", Expr::Today),
@@ -329,6 +451,13 @@ impl<'a> ParseCtx<'a> {
         }
         if self.match_keyword("search:") {
             let phrase = self.consume_phrase();
+            // An empty keyword compiles to LIKE '%%' -- every task.
+            if phrase.is_empty() {
+                return Err(Error::Other(format!(
+                    "filter: empty search: at byte {}",
+                    self.pos
+                )));
+            }
             return Ok(Expr::Search(phrase));
         }
         // p1..p5 — native pTask scale (p1=low .. p5=critical), no inversion.
@@ -400,15 +529,16 @@ impl<'a> ParseCtx<'a> {
         }
     }
 
-    /// Consume an identifier (letters/digits/`_`/`-`). Trims trailing whitespace.
+    /// Consume a `@label` / `#project` name: everything up to whitespace or
+    /// an operator character, so `domain:mgmt`, `v1.2` and `team/ops` are
+    /// whole names (the CLI and MCP write `domain:<x>` labels).
     fn consume_ident(&mut self) -> String {
         let start = self.pos;
         while let Some(c) = self.peek() {
-            if c.is_alphanumeric() || c == '_' || c == '-' {
-                self.pos += c.len_utf8();
-            } else {
+            if c.is_whitespace() || matches!(c, '&' | '|' | '(' | ')' | '!') {
                 break;
             }
+            self.pos += c.len_utf8();
         }
         self.input[start..self.pos].to_string()
     }
@@ -492,6 +622,58 @@ mod tests {
     }
 
     #[test]
+    fn label_and_project_names_run_to_the_next_operator() {
+        // PARSE-3: names stopped at the first char outside [alnum _ -], so
+        // the system's own `domain:<x>` labels (pt add --label domain:mgmt,
+        // MCP labels_add) were unfilterable: "unexpected trailing input".
+        for name in ["domain:mgmt", "v1.2", "team/ops", "a_b-c"] {
+            assert_eq!(ast(&format!("@{name}")), Expr::Label(name.into()));
+            assert_eq!(ast(&format!("#{name}")), Expr::Project(name.into()));
+        }
+        assert_eq!(
+            ast("(@domain:mgmt&#infra/core)|!@x"),
+            Expr::Or(
+                Box::new(Expr::And(
+                    Box::new(Expr::Label("domain:mgmt".into())),
+                    Box::new(Expr::Project("infra/core".into())),
+                )),
+                Box::new(Expr::Not(Box::new(Expr::Label("x".into())))),
+            )
+        );
+        assert!(parse("@").is_err());
+        assert!(parse("# & p1").is_err());
+    }
+
+    #[test]
+    fn colon_label_filter_lists_the_labelled_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path().join("labels.db")).unwrap();
+        let ext = crate::Extensions {
+            labels: vec!["domain:mgmt".into()],
+            ..Default::default()
+        };
+        let task = crate::tasks::create_with_extensions(
+            &db,
+            crate::NewTask::minimal("quarterly board pack"),
+            ext,
+            &crate::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        crate::tasks::create(
+            &db,
+            crate::NewTask::minimal("unlabelled"),
+            &crate::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        let expr = parse("@domain:mgmt").unwrap();
+        let rows = crate::tasks::list_with_filter(&db, Some(&expr), None, None, 10).unwrap();
+        assert_eq!(
+            rows.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            [task.id.as_str()]
+        );
+    }
+
+    #[test]
     fn kind_token_parses_and_rejects_junk() {
         assert!(matches!(ast("kind: scout"), Expr::Kind(ref k) if k == "scout"));
         assert!(matches!(ast("kind: implement"), Expr::Kind(ref k) if k == "ship"));
@@ -548,6 +730,87 @@ mod tests {
         assert!(matches!(e, Expr::Search(ref s) if s == "ceph"));
     }
 
+    /// A migrated store whose rows leave every column an atom reads NULL
+    /// somewhere: no pt_id (so no pt_extensions row), no project, no
+    /// deadline, an unreadable deadline, NULL description and legacy status.
+    fn nullable_fixture() -> (tempfile::TempDir, crate::Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path().join("filter.db")).unwrap();
+        db.with_conn(|c| {
+            c.execute_batch(
+                "INSERT INTO tasks (id, title, description, priority, status, created_at,
+                                    updated_at, deadline, pt_id, project, kind, due_at) VALUES
+                   ('full', 'ceph mon', 'ceph quorum', 5, 'pending', 'x', 'x', '2026-05-13',
+                    'PT-1', 'fleet', 'scout', '2026-05-13T10:00:00+01:00'),
+                   ('bare', 'bare', NULL, 2, 'pending', 'x', 'x', NULL, NULL, NULL, 'ship', NULL),
+                   ('nulls', 'nulls', NULL, 3, NULL, 'x', 'x', '2020-01-01T00:00:00Z', 'PT-3',
+                    NULL, 'ship', NULL),
+                   ('junk', 'junk', '', 1, 'pending', 'x', 'x', 'in two weeks', 'PT-4', NULL,
+                    'ship', NULL);
+                 INSERT INTO task_labels (task_uuid, label) VALUES ('full', 'ops');
+                 INSERT INTO pt_recurrence (task_uuid, rrule, mode, original_input,
+                                            next_occurrence)
+                   VALUES ('full', 'FREQ=DAILY', 'fixed', 'every day', '2026-05-13');",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn every_atom_or_its_negation_covers_every_row() {
+        // PARSE-2: `!A` compiled to `NOT (A)`, and A is NULL -- not false -- on
+        // a row missing the column it reads, so `!#fleet` dropped every
+        // project-less task and `#fleet | !#fleet` returned part of the table.
+        let (_dir, db) = nullable_fixture();
+        let count = |f: &str| {
+            let expr = parse(f).unwrap();
+            crate::tasks::list_with_filter(&db, Some(&expr), None, None, 100)
+                .unwrap()
+                .len()
+        };
+        let all = crate::tasks::list_with_filter(&db, None, None, None, 100)
+            .unwrap()
+            .len();
+        assert_eq!(all, 4);
+        for atom in [
+            "today",
+            "tomorrow",
+            "yesterday",
+            "overdue",
+            "no date",
+            "recurring",
+            "p1",
+            "p5",
+            "@ops",
+            "#fleet",
+            "due: 2026-05-13",
+            "due before: 2026-05-13",
+            "due after: 2026-05-13",
+            "search: ceph",
+            "kind: scout",
+        ] {
+            assert_eq!(count(&format!("{atom} | !{atom}")), all, "{atom} | !{atom}");
+            assert_eq!(count(&format!("{atom} & !{atom}")), 0, "{atom} & !{atom}");
+        }
+    }
+
+    #[test]
+    fn empty_search_is_an_error_not_a_match_all() {
+        // CLI-15: `pt bulk "search: $TERM" --done` with an empty TERM matched
+        // `%%` -- every task -- while empty `@` / `#` were already rejected.
+        for f in [
+            "search:",
+            "search:   ",
+            "search: & p1",
+            "p1 & search:",
+            "(search: )",
+        ] {
+            assert!(parse(f).is_err(), "{f:?} must not parse");
+        }
+    }
+
     #[test]
     fn search_stops_at_operator() {
         let e = ast("search: ceph & @ops");
@@ -565,11 +828,93 @@ mod tests {
         assert!(parse("today garbage").is_err());
     }
 
+    /// Run `f` on a thread with a tokio-worker-sized (2 MiB) stack, where a
+    /// recursion bomb aborts the whole process instead of failing a test.
+    fn on_small_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap()
+    }
+
     #[test]
-    fn compile_today_emits_substring_match() {
+    fn deeply_nested_filter_is_an_error_not_a_stack_overflow() {
+        // SRV-1: one GET /list with 1000 nested parens aborted `pt serve`.
+        on_small_stack(|| {
+            let bomb = format!("{}today{}", "(".repeat(200_000), ")".repeat(200_000));
+            assert!(parse(&bomb).is_err());
+            // Short enough to pass the length cap, still too deep.
+            let deep = format!("{}today{}", "(".repeat(40), ")".repeat(40));
+            assert!(parse(&deep).is_err());
+            let negated = format!("{}today{}", "!(".repeat(40), ")".repeat(40));
+            assert!(parse(&negated).is_err());
+        });
+    }
+
+    #[test]
+    fn long_flat_chain_is_an_error_not_a_stack_overflow() {
+        // A flat `p5&p5&…` chain parses iteratively but compiles and drops
+        // recursively, one frame per term.
+        on_small_stack(|| {
+            assert!(parse(&vec!["p5"; 100_000].join("&")).is_err());
+            assert!(parse(&vec!["p5"; MAX_FILTER_TERMS + 1].join("|")).is_err());
+        });
+    }
+
+    #[test]
+    fn filters_at_the_limits_still_parse_compile_and_run() {
+        on_small_stack(|| {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (id TEXT, title TEXT, description TEXT, priority INTEGER,
+                                     deadline TEXT, due_at TEXT, status TEXT, kind TEXT);
+                 CREATE TABLE pt_extensions (task_uuid TEXT, labels TEXT, project TEXT);
+                 CREATE TABLE pt_recurrence (task_uuid TEXT);
+                 INSERT INTO tasks (id, title, priority) VALUES ('a', 'x', 5);",
+            )
+            .unwrap();
+            let terms = vec!["p5"; MAX_FILTER_TERMS].join("&");
+            let nested = format!(
+                "{}today{}",
+                "(".repeat(MAX_FILTER_NESTING),
+                ")".repeat(MAX_FILTER_NESTING)
+            );
+            for f in [terms, nested] {
+                let sql = to_sql(&parse(&f).unwrap(), &anchor()).unwrap();
+                let query = format!(
+                    "SELECT COUNT(*) FROM tasks t LEFT JOIN pt_extensions x ON x.task_uuid = t.id
+                     WHERE {}",
+                    sql.where_clause
+                );
+                let params = bind_refs(&sql.params);
+                conn.query_row(&query, params.as_slice(), |r| r.get::<_, i64>(0))
+                    .unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn compile_today_binds_the_operator_local_day_bounds() {
         let sql = to_sql(&ast("today"), &anchor()).unwrap();
-        assert_eq!(sql.where_clause, "substr(t.deadline,1,10) = ?1");
-        assert_eq!(sql.params.len(), 1);
+        assert!(sql.where_clause.contains("julianday(t.deadline)"));
+        assert!(sql.where_clause.contains("julianday(t.due_at)"));
+        let text = |v: &rusqlite::types::Value| match v {
+            rusqlite::types::Value::Text(s) => s.clone(),
+            other => panic!("{other:?}"),
+        };
+        // 13 May is BST: the London day runs 23:00Z to 23:00Z, bound once
+        // for the deadline and once for the scheduled date.
+        let day = [
+            "2026-05-13",
+            "2026-05-12T23:00:00+00:00",
+            "2026-05-13T23:00:00+00:00",
+        ];
+        assert_eq!(
+            sql.params.iter().map(text).collect::<Vec<_>>(),
+            [day, day].concat()
+        );
     }
 
     #[test]
@@ -713,6 +1058,117 @@ mod tests {
             rows,
             vec!["free text long", "free text ten"],
             "unparseable deadlines must surface as overdue, and only those"
+        );
+    }
+
+    /// Titles matched by `expr` at `now` over `(title, deadline)` rows.
+    fn day_titles(rows: &[(&str, &str)], expr: &Expr, now: &Zoned) -> Vec<String> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (title TEXT, deadline TEXT, due_at TEXT, status TEXT);
+             CREATE TABLE pt_extensions (task_uuid TEXT, labels TEXT);",
+        )
+        .unwrap();
+        for (title, deadline) in rows {
+            conn.execute(
+                "INSERT INTO tasks (title, deadline, status) VALUES (?1, ?2, 'pending')",
+                [title, deadline],
+            )
+            .unwrap();
+        }
+        let sql = to_sql(expr, now).unwrap();
+        let query = format!(
+            "SELECT title FROM tasks t LEFT JOIN pt_extensions x ON 1=0 WHERE {} ORDER BY title",
+            sql.where_clause
+        );
+        let params = bind_refs(&sql.params);
+        conn.prepare(&query)
+            .unwrap()
+            .query_map(params.as_slice(), |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap()
+    }
+
+    fn london(y: i16, m: i8, d: i8, h: i8) -> Zoned {
+        let tz = jiff::tz::TimeZone::get(dates::OPERATOR_TZ).unwrap();
+        jiff::civil::date(y, m, d)
+            .at(h, 0, 0, 0)
+            .to_zoned(tz)
+            .unwrap()
+    }
+
+    #[test]
+    fn today_lists_a_task_scheduled_for_today() {
+        // PARSE-5: quick-add `due:<date>` stores due_at, which no filter read,
+        // while docs/dsl.md promises `today` = "deadline = today or due today".
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path().join("due.db")).unwrap();
+        let ctx = crate::event_log::EventCtx::test();
+        let today = dates::now_in_operator_tz().unwrap().date();
+        let (new, ext) = crate::quickadd::parse(&format!("x due:{today}"))
+            .unwrap()
+            .task_parts("test");
+        assert!(ext.due_at.is_some() && new.deadline.is_none());
+        let scheduled = crate::tasks::create_with_extensions(&db, new, ext, &ctx).unwrap();
+        let (new, ext) = crate::quickadd::parse("y due:2020-01-01")
+            .unwrap()
+            .task_parts("test");
+        crate::tasks::create_with_extensions(&db, new, ext, &ctx).unwrap();
+        crate::tasks::create(&db, crate::NewTask::minimal("z"), &ctx).unwrap();
+
+        let expr = parse("today").unwrap();
+        let rows = crate::tasks::list_with_filter(&db, Some(&expr), None, None, 10).unwrap();
+        assert_eq!(
+            rows.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            [scheduled.id.as_str()]
+        );
+    }
+
+    #[test]
+    fn day_atoms_bucket_instants_by_the_operator_local_day() {
+        // PARSE-4: day atoms compared substr(deadline,1,10) -- the date in
+        // whatever offset was stored. `2026-10-20T23:30:00Z` is 00:30 on
+        // 21 Oct in London (BST) but matched `due: 2026-10-20`.
+        let rows = [
+            ("z-late", "2026-10-20T23:30:00Z"),
+            ("bst-late", "2026-10-21T00:30:00+01:00"),
+            ("date-only", "2026-10-21"),
+            ("prev", "2026-10-20T22:30:00Z"),
+            ("next", "2026-10-21T23:30:00Z"),
+        ];
+        let now = london(2026, 10, 21, 12);
+        let today = ["bst-late", "date-only", "z-late"];
+        assert_eq!(day_titles(&rows, &Expr::Today, &now), today);
+        assert_eq!(
+            day_titles(&rows, &Expr::DueOn("2026-10-21".into()), &now),
+            today
+        );
+        assert_eq!(day_titles(&rows, &Expr::Yesterday, &now), ["prev"]);
+        assert_eq!(day_titles(&rows, &Expr::Tomorrow, &now), ["next"]);
+        assert_eq!(
+            day_titles(&rows, &Expr::DueBefore("2026-10-21".into()), &now),
+            ["prev"]
+        );
+        assert_eq!(
+            day_titles(&rows, &Expr::DueAfter("2026-10-21".into()), &now),
+            ["next"]
+        );
+        assert_eq!(
+            day_titles(&rows, &Expr::DueAfter("2026-10-20".into()), &now),
+            ["bst-late", "date-only", "next", "z-late"]
+        );
+
+        // The 25-hour day the clocks go back: 23:00Z on the 24th to 00:00Z
+        // on the 26th, not a fixed-offset guess.
+        let rows = [
+            ("first", "2026-10-24T23:30:00Z"),
+            ("last", "2026-10-25T23:30:00Z"),
+            ("before", "2026-10-24T22:30:00Z"),
+        ];
+        assert_eq!(
+            day_titles(&rows, &Expr::Today, &london(2026, 10, 25, 12)),
+            ["first", "last"]
         );
     }
 
