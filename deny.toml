@@ -1,5 +1,12 @@
 # cargo-deny policy for CI supply-chain checks.
 
+# Check the graph production actually ships. Release builds use
+# `--features native-ml`; with default features the ML-only crates (candle,
+# tokenizers, hf-hub, ureq, zip, onig_sys, safetensors, gemm, ...) were never
+# checked for advisories, licenses, or sources.
+[graph]
+all-features = true
+
 [advisories]
 ignore = []
 

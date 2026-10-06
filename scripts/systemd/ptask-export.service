@@ -8,3 +8,8 @@ EnvironmentFile=%h/puretensor-tasks/.env
 ExecStart=%h/.cargo/bin/pt export --git
 Nice=15
 IOSchedulingClass=best-effort
+StandardOutput=journal
+StandardError=journal
+# A oneshot has no start timeout by default: a hung `git` (stale index.lock,
+# stuck mount) would hang the export forever without failing or alerting.
+TimeoutStartSec=10min

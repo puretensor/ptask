@@ -10,8 +10,9 @@
 # Put the two legs in different failure domains. A replica on the same
 # storage cluster as the primary is not a disaster-recovery copy.
 #
-# Both legs are load-bearing: failure of either exits non-zero so the
-# OnFailure Telegram alert fires.
+# Both legs are load-bearing and independent: each runs even when the other
+# fails (a dead nearby host must not cost the off-site copy), and failure of
+# either exits non-zero so the OnFailure Telegram alert fires.
 #
 # Env overrides:
 #   PTASK_DB               — source DB (default: ~/puretensor-tasks/tasks.db)
@@ -54,32 +55,31 @@ SIZE=$(stat -c%s "$TMP")
 # OnFailure never alerts (the unit also carries TimeoutStartSec).
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
 
-remote_host="${REMOTE%%:*}"
-remote_dir="${REMOTE#*:}"
+# Upload the snapshot to one target, prune it to RETAIN_DAYS, count what is
+# retained. Called from `||`, where bash suspends errexit (also inside the
+# function), so every step carries its own `|| return 1`.
+upload_leg() {
+    local label=$1 target=$2
+    local host="${target%%:*}" dir="${target#*:}" retained
+    ssh "${SSH_OPTS[@]}" "$host" "mkdir -p '$dir'" || return 1
+    scp -q "${SSH_OPTS[@]}" "$TMP" "$target/ptask-tasks-$DATE.db" || return 1
+    # Retention prune. `-mtime +N` means strictly older than N days.
+    ssh "${SSH_OPTS[@]}" "$host" \
+        "find '$dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' \
+         -mtime +$((RETAIN_DAYS - 1)) -delete" || return 1
+    retained=$(ssh "${SSH_OPTS[@]}" "$host" \
+        "find '$dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' | wc -l") || return 1
+    echo "ptask-backup: $label ok ${target}/ptask-tasks-${DATE}.db (${SIZE} bytes, ${retained} backups retained)"
+}
 
-ssh "${SSH_OPTS[@]}" "$remote_host" "mkdir -p '$remote_dir'"
-scp -q "${SSH_OPTS[@]}" "$TMP" "$REMOTE/ptask-tasks-$DATE.db"
-
-# Retention prune. `-mtime +N` means strictly older than N days.
-ssh "${SSH_OPTS[@]}" "$remote_host" \
-    "find '$remote_dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' \
-     -mtime +$((RETAIN_DAYS - 1)) -delete"
-
-REMAINING=$(ssh "${SSH_OPTS[@]}" "$remote_host" \
-    "find '$remote_dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' | wc -l")
-
-echo "ptask-backup: ok ${REMOTE}/ptask-tasks-${DATE}.db (${SIZE} bytes, ${REMAINING} backups retained)"
-
+failed=()
+upload_leg nearby "$REMOTE" || failed+=("nearby ($REMOTE)")
 # ---- Off-site leg (different failure domain) ----------------------------
 if [ "$OFFSITE" != "none" ]; then
-    offsite_host="${OFFSITE%%:*}"
-    offsite_dir="${OFFSITE#*:}"
-    ssh "${SSH_OPTS[@]}" "$offsite_host" "mkdir -p '$offsite_dir'"
-    scp -q "${SSH_OPTS[@]}" "$TMP" "$OFFSITE/ptask-tasks-$DATE.db"
-    ssh "${SSH_OPTS[@]}" "$offsite_host" \
-        "find '$offsite_dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' \
-         -mtime +$((RETAIN_DAYS - 1)) -delete"
-    OFF_REMAINING=$(ssh "${SSH_OPTS[@]}" "$offsite_host" \
-        "find '$offsite_dir' -maxdepth 1 -type f -name 'ptask-tasks-*.db' | wc -l")
-    echo "ptask-backup: offsite ok ${OFFSITE}/ptask-tasks-${DATE}.db (${OFF_REMAINING} retained)"
+    upload_leg offsite "$OFFSITE" || failed+=("off-site ($OFFSITE)")
+fi
+
+if [ "${#failed[@]}" -gt 0 ]; then
+    echo "ptask-backup: FAILED leg(s): ${failed[*]}" >&2
+    exit 1
 fi

@@ -4,8 +4,9 @@ Documentation=https://github.com/puretensor/ptask
 
 [Timer]
 # Mirrors the legacy puretensor-tasks-accountability.timer cadence. The
-# accountability engine itself enforces 22:00 — 08:00 UTC quiet hours; this
-# timer fires regardless and run_check returns a no-op when appropriate.
+# accountability engine itself enforces 22:00 — 08:00 Europe/London quiet
+# hours; this timer fires regardless and run_check returns a no-op when
+# appropriate.
 OnCalendar=*:0/15
 RandomizedDelaySec=60
 Persistent=true

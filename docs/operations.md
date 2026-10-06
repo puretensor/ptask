@@ -49,26 +49,42 @@ systemctl --user start ptask-backup.service
 ### Verifying a backup
 
 ```bash
-scp backup-host:/var/backups/ptask/ptask-tasks-$(date -u +%Y-%m-%d).db /tmp/
-sqlite3 /tmp/ptask-tasks-*.db 'SELECT COUNT(*) FROM tasks, COUNT(*) FROM pt_extensions'
+F=ptask-tasks-$(date -u +%Y-%m-%d).db
+scp backup-host:/var/backups/ptask/$F /tmp/
+sqlite3 /tmp/$F 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
+sqlite3 "file:$HOME/puretensor-tasks/tasks.db?mode=ro" 'SELECT COUNT(*) FROM tasks;'
 ```
 
-The count should match the live DB row counts.
+`integrity_check` must print `ok`, and the snapshot's task count should be at
+or a little below the live count (the snapshot is up to a day old).
+`ptask-restore-verify.timer` runs this check weekly, together with a
+Litestream restore and the off-site copy (`scripts/ptask-restore-verify.sh`).
 
 ### Recovery
 
-Restore: copy a snapshot back to `~/puretensor-tasks/tasks.db` (stop Python
-services first if running). The pre-v0.1.0 baseline is at
-`~/puretensor-tasks/tasks.db.pre-ptask-backup`.
+Never `cp` a snapshot over the live `tasks.db`. Copy it to a scratch path,
+verify it as above, then put it live with
+[Promote a restored copy over the live DB](#promote-a-restored-copy-over-the-live-db).
+The pre-v0.1.0 baseline is at `~/puretensor-tasks/tasks.db.pre-ptask-backup`.
 
 ## Distillation (v3.0.0)
 
 `pt distill` runs the native Rust delta pipeline over unprocessed
 `raw_items` and records each invocation in `pt_event_log`. It preflights
-Gemini before consuming data, sends classify/consolidate calls with
-`thinkingBudget=0`, retries transient Gemini failures, deduplicates
-candidates, writes tasks through `ptask-core`, and fails closed with a
-`distill.failed` event on provider or pipeline errors.
+the configured LLM provider before consuming data, retries transient
+provider failures, deduplicates candidates, writes tasks through
+`ptask-core`, and fails closed with a `distill.failed` event on provider or
+pipeline errors.
+
+### Provider (env)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PTASK_LLM_BACKEND` | `local` | `local` (an OpenAI-compatible endpoint) or `gemini`. Any other value exits 1 before a provider call. |
+| `LOCAL_LLM_URL` | `http://127.0.0.1:8600/v1` | `local` backend base URL; `/chat/completions` is appended. |
+| `LOCAL_LLM_MODEL` | `nemotron-lightning` | `local` backend model id. |
+| `GOOGLE_API_KEY` | — | `gemini` backend only, and required there. |
+| `GEMINI_CONSOLIDATE_MODEL` | `gemini-3.5-flash` | `gemini` backend model; calls use structured output with `thinkingBudget=0`. |
 
 The legacy Python distiller is retired from the CLI and from the timer path.
 It remains only in `~/puretensor-tasks-legacy` as historical reference.
@@ -126,8 +142,11 @@ Any native provider or pipeline error writes a `distill.failed` event to
 `pt_event_log` with the provider name and detailed error chain, then exits
 non-zero. systemd records the failure; the operator's existing Telegram
 alert pipeline (or any HMAC webhook subscriber) can scrape `pt_event_log`
-for `distill.failed` events. A missing `GOOGLE_API_KEY` exits 3 before any
-raw item is consumed.
+for `distill.failed` events. With `PTASK_LLM_BACKEND=gemini`, a missing
+`GOOGLE_API_KEY` exits 3 before any raw item is consumed (no event: nothing
+was attempted). The default `local` backend needs no key; an unreachable or
+misbehaving endpoint fails the preflight, which records `distill.failed` and
+exits 1 with nothing consumed.
 
 ### Poison captures and quarantine (v3.8.0)
 
@@ -201,8 +220,9 @@ sqlite3 ~/puretensor-tasks/tasks.db \
 ## Accountability (v0.7.0)
 
 `pt accountability run` is the Rust port of the Python `accountability/engine.py`.
-It walks the 6-level escalation state machine, gates on the 22:00 — 08:00 UTC
-quiet window, respects a daily Telegram budget of 3, and enforces a 4-hour
+It walks the 6-level escalation state machine, gates on the 22:00 — 08:00
+Europe/London quiet window (the operator's wall clock, so it follows BST),
+respects a daily Telegram budget of 3, and enforces a 4-hour
 cooldown per task between reminders.
 
 ### Config (env)
@@ -326,19 +346,24 @@ config — see `scripts/litestream/litestream.yml`.
 ### One-time SQLite tunings
 
 ```bash
-sqlite3 ~/puretensor-tasks/tasks.db <<'SQL'
-PRAGMA journal_mode = WAL;
-PRAGMA wal_autocheckpoint = 0;   -- Litestream owns checkpoints
-PRAGMA synchronous = NORMAL;
-SQL
+sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA journal_mode = WAL;'   # persists in the file
+grep '^PTASK_WAL_AUTOCHECKPOINT=0$' ~/puretensor-tasks/.env      # Litestream owns checkpoints
 ```
+
+Only `journal_mode` is stored in the database. `wal_autocheckpoint` and
+`synchronous` are per-connection: running them in a `sqlite3` shell changes
+that one shell. `pt` sets `synchronous=NORMAL` itself and applies
+`PTASK_WAL_AUTOCHECKPOINT` to every connection it opens; `ptask-serve` and
+the `pt` timer units (distill, accountability, scoring, reaper, export) load
+it from `~/puretensor-tasks/.env`.
 
 ### Install
 
 ```bash
 mkdir -p ~/.config/litestream ~/.config/systemd/user
-sudo mkdir -p /var/backups/ptask-litestream  # CephFS replica root
-sudo chown ptask:ptask /var/backups/ptask-litestream
+# CephFS replica root, owner-only: the replica is the whole DB (raw captures,
+# approval payloads, token hashes). Existing install: sudo chmod -R go-rwx it.
+sudo install -d -m 0700 -o ptask -g ptask /var/backups/ptask-litestream
 ln -sf ~/ptask/scripts/litestream/litestream.yml ~/.config/litestream/litestream.yml
 ln -sf ~/ptask/scripts/systemd/ptask-litestream.service ~/.config/systemd/user/
 
@@ -369,8 +394,10 @@ systemctl --user enable --now ptask-serve.service
 # it actually binds: loopback does not answer a tailnet-only bind.
 BIND=$(sed -n 's/^PTASK_SERVE_BIND=//p' ~/puretensor-tasks/.env); BIND=${BIND:-127.0.0.1:9501}
 curl "http://$BIND/healthz"   # → ok
-curl -H "Authorization: Bearer $PTASK_API_TOKEN" \
-  "http://$BIND/version"       # → {"ptask_core":"<current version>"}
+# The header goes through stdin (-H @-), never argv: any local user can read
+# a process's command line from /proc.
+sed -n 's/^PTASK_API_TOKEN=/Authorization: Bearer /p' ~/puretensor-tasks/.env \
+  | curl -H @- "http://$BIND/version"   # → {"ptask_core":"<current version>"}
 ```
 
 Fleet clients reach this over Tailscale at the canonical host's tailnet
@@ -398,27 +425,96 @@ litestream restore -config ~/.config/litestream/litestream.yml \
     -o /tmp/tasks-restored.db \
     -timestamp $(date -u -d '5 minutes ago' '+%FT%TZ') \
     ~/puretensor-tasks/tasks.db
-sqlite3 /tmp/tasks-restored.db 'SELECT count(*) FROM tasks'
+sqlite3 /tmp/tasks-restored.db 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
 ```
 
-Promote a restore over the live DB (requires stopping `pt distill`,
-`ptask-backup`, etc. first):
+### Promote a restored copy over the live DB
+
+The one procedure for putting any restored file live: a Litestream restore,
+a nightly snapshot, or the pre-v0.1.0 baseline. Every step is load-bearing.
+SQLite treats whatever `tasks.db-wal` sits next to `tasks.db` as that file's
+log, so a WAL left by the old database is replayed onto the restored one: a
+small WAL gives "database disk image is malformed", a large one silently
+reverts the restore. `pt serve` keeps pooled connections open (with
+`PTASK_WAL_AUTOCHECKPOINT=0` SQLite never checkpoints its WAL), the dashboard
+sidecar holds long-lived read connections, and a killed process leaves its
+WAL behind. So: stop everything, prove nothing holds the files, and move the
+`-wal`/`-shm` aside together with the database. Run the steps one at a time
+and check each result before going on.
 
 ```bash
-systemctl --user stop ptask-backup.timer ptask-distill.timer \
-    ptask-accountability.timer ptask-scoring.timer ptask-litestream.service
-cp /tmp/tasks-restored.db ~/puretensor-tasks/tasks.db
+DBDIR=~/puretensor-tasks
+RESTORED=/tmp/tasks-restored.db     # the copy to promote
+
+# 1. Verify the copy out of place: "ok", and note the task count.
+sqlite3 "$RESTORED" 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
+test ! -e "$RESTORED-wal" || echo "STOP: $RESTORED has its own WAL; checkpoint it first"
+
+# 2. Stop every pTask unit: timers first so nothing new starts, then the
+#    dashboard, pt serve, Litestream and any oneshot still running.
+systemctl --user list-units 'ptask-*' --state=active --no-legend   # note what to restart
+systemctl --user stop 'ptask-*.timer'
+systemctl --user stop 'ptask-*.service'
+systemctl --user list-units 'ptask-*' --state=active,activating,deactivating --no-legend
+#    ^ must print nothing
+
+# 3. Nothing may still hold the files (pt bot, pt tui, an open sqlite3 shell);
+#    use sudo if a reader runs as another user. Silence means go.
+if fuser -v "$DBDIR"/tasks.db*; then echo "STOP: the processes above still hold the DB"; fi
+
+# 4. Move the database AND its -wal/-shm aside (kept as the way back).
+ASIDE="$DBDIR/pre-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -m 0700 "$ASIDE"
+for f in tasks.db tasks.db-wal tasks.db-shm; do
+    if [ -e "$DBDIR/$f" ]; then mv "$DBDIR/$f" "$ASIDE/"; fi
+done
+
+# 5. Install the restored file: copy under a temp name, rename into place.
+install -m 0600 "$RESTORED" "$DBDIR/tasks.db.restoring"
+mv "$DBDIR/tasks.db.restoring" "$DBDIR/tasks.db"
+
+# 6. Check what is now live: "ok" and the count from step 1.
+sqlite3 "$DBDIR/tasks.db" 'PRAGMA integrity_check; SELECT COUNT(*) FROM tasks;'
+
+# 7. Replication first, then serve, the dashboard and the timers (plus
+#    anything else step 2 listed).
 systemctl --user start ptask-litestream.service
-systemctl --user start ptask-backup.timer ptask-distill.timer \
-    ptask-accountability.timer ptask-scoring.timer
+systemctl --user start ptask-serve.service
+systemctl --user start ptask-dashboard.service
+systemctl --user start ptask-backup.timer ptask-distill.timer ptask-accountability.timer \
+    ptask-scoring.timer ptask-reaper.timer ptask-export.timer ptask-restore-verify.timer
+litestream generations -config ~/.config/litestream/litestream.yml "$DBDIR/tasks.db"
+#    ^ Litestream starts a new generation for the replaced file
 ```
+
+`$ASIDE` keeps the pre-restore database with its own WAL: open
+`$ASIDE/tasks.db` in place to read that state, or move the three files back
+(steps 2–7 again) to undo the promotion.
 
 ### Rollback
 
+Without Litestream nothing checkpoints the WAL while `pt` runs with
+`PTASK_WAL_AUTOCHECKPOINT=0`, so it grows without bound. A `PRAGMA
+wal_autocheckpoint` from a `sqlite3` shell does not help: it changes only
+that shell's connection, and `pt serve`'s pooled connections keep the value
+they were opened with. Change it where `pt` reads it, then restart:
+
 ```bash
 systemctl --user disable --now ptask-litestream.service
-sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA wal_autocheckpoint = 1000;'
+# Drop the override: pt then keeps SQLite's default (checkpoint every 1000 pages).
+sed -i '/^PTASK_WAL_AUTOCHECKPOINT=/d' ~/puretensor-tasks/.env
+# Long-lived processes reopen their connections; oneshot timers re-read .env
+# on every run (let any running one finish: the second command lists them).
+systemctl --user restart ptask-serve.service ptask-dashboard.service
+systemctl --user list-units 'ptask-*.service' --state=activating --no-legend
+# Verify: prints 0|0|0 (not blocked, WAL emptied); retry if the first field is 1.
+sqlite3 ~/puretensor-tasks/tasks.db 'PRAGMA wal_checkpoint(TRUNCATE);'
+ls -l ~/puretensor-tasks/tasks.db-wal   # recheck after a day: stays in the low MB (~1000 pages)
 ```
+
+The weekly restore drill's Litestream check now fails, correctly: the replica
+is frozen. Expect that alert until Litestream is back, or stop
+`ptask-restore-verify.timer` (which also pauses its nightly checks).
 
 Nightly Ceph snapshot via `ptask-backup.timer` keeps a 30-day file
 backup independent of Litestream — it is the recovery path of last
