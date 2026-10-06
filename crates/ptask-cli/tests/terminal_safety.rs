@@ -430,3 +430,48 @@ fn raw_text_cannot_smuggle_the_palette_sgr() {
     assert!(!plan.contains("pay\x1b"), "{plan:?}");
     assert!(plan.contains("pay\u{fffd}[38;2;"), "{plan:?}");
 }
+
+/// Emoji ZWJ sequences display intact in ordinary output, but an approval
+/// preview (the bound bytes) still shows every ZWJ and raises the warning.
+#[test]
+fn emoji_zwj_is_kept_in_titles_but_flagged_in_approval_previews() {
+    let pt = Pt::new();
+    let family = "👨\u{200d}👩\u{200d}👧";
+    let flag = "🏳\u{fe0f}\u{200d}🌈";
+    pt.ok(&["add", "--raw", &format!("Book {family} trip {flag}")]);
+    for args in [
+        vec!["--no-color", "list"],
+        vec!["--no-color", "show", "PT-1"],
+    ] {
+        let out = pt.ok(&args);
+        assert!(
+            out.contains(family) && out.contains(flag),
+            "{args:?}:\n{out}"
+        );
+    }
+
+    let payload = pt.dir.path().join("p.txt");
+    std::fs::write(&payload, format!("pay the {family} account\n")).unwrap();
+    pt.ok_as(
+        "agent",
+        &[
+            "approval",
+            "request",
+            "--kind",
+            "spend",
+            "--title",
+            "Pay",
+            "--payload-file",
+            payload.to_str().unwrap(),
+        ],
+    );
+    let shown = pt.ok_as("operator", &["--no-color", "approval", "show", "AP-1"]);
+    assert!(
+        shown.contains("pay the 👨\u{fffd}👩\u{fffd}👧 account"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("pt approval payload AP-1 | cat -v"),
+        "{shown}"
+    );
+}

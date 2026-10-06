@@ -293,7 +293,8 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
     if let Some(w) = &warning {
         println!("{w}");
     }
-    println!("{}", ui::sanitize(&preview));
+    // Strict: the preview is the bound bytes, so even a joining ZWJ shows.
+    println!("{}", ui::sanitize_strict(&preview));
     if let Some(w) = &warning {
         println!("{w}");
     }

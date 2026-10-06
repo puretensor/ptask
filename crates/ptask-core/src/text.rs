@@ -62,49 +62,93 @@ pub fn has_hazard(text: &str) -> bool {
     false
 }
 
-/// Multi-line safe text: hazards become U+FFFD, a tab a space, a CRLF line
-/// end `\n`. Newlines survive. Borrows when there is nothing to change.
-pub fn sanitize(text: &str) -> Cow<'_, str> {
-    if !text.chars().any(|c| c == '\t' || is_hazard(c)) {
+/// A character that may sit on either side of a joining ZWJ in an emoji
+/// sequence: pictographs (including skin-tone modifiers), dingbats, misc
+/// symbols and the text/emoji variation selectors.
+fn is_emoji_part(c: char) -> bool {
+    matches!(
+        c,
+        '\u{1F000}'..='\u{1FAFF}'
+            | '\u{2190}'..='\u{21FF}'
+            | '\u{2300}'..='\u{23FF}'
+            | '\u{2460}'..='\u{24FF}'
+            | '\u{25A0}'..='\u{27BF}'
+            | '\u{2900}'..='\u{297F}'
+            | '\u{2B00}'..='\u{2BFF}'
+            | '\u{3030}'
+            | '\u{303D}'
+            | '\u{3297}'
+            | '\u{3299}'
+            | '\u{00A9}'
+            | '\u{00AE}'
+            | '\u{203C}'
+            | '\u{2049}'
+            | '\u{2122}'
+            | '\u{2139}'
+            | '\u{FE0E}'
+            | '\u{FE0F}'
+    )
+}
+
+/// Shared walk behind [`sanitize`], [`one_line`] and [`sanitize_strict`].
+/// `emoji_zwj` lets a U+200D through when both neighbours are emoji parts:
+/// it only joins glyphs (👨‍👩‍👧, 🏳️‍🌈) and hides nothing in a task list.
+fn clean(text: &str, fold_lines: bool, emoji_zwj: bool) -> Cow<'_, str> {
+    let needs = |c: char| c == '\t' || (fold_lines && c == '\n') || is_hazard(c);
+    if !text.chars().any(needs) {
         return Cow::Borrowed(text);
     }
+    let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
         match c {
             '\t' => out.push(' '),
-            '\r' if chars.peek() == Some(&'\n') => {}
+            '\r' if chars.get(i + 1) == Some(&'\n') => {
+                if fold_lines {
+                    out.push(LINE_MARK);
+                    i += 1;
+                }
+            }
+            '\r' | '\n' | '\u{2028}' | '\u{2029}' if fold_lines => out.push(LINE_MARK),
+            '\u{200D}'
+                if emoji_zwj
+                    && i > 0
+                    && is_emoji_part(chars[i - 1])
+                    && chars.get(i + 1).copied().is_some_and(is_emoji_part) =>
+            {
+                out.push(c)
+            }
             c if is_hazard(c) => out.push(STAND_IN),
             c => out.push(c),
         }
+        i += 1;
+    }
+    if out == text {
+        return Cow::Borrowed(text);
     }
     Cow::Owned(out)
+}
+
+/// Multi-line safe text for general display: hazards become U+FFFD, a tab a
+/// space, a CRLF line end `\n`. Newlines survive, and so does a ZWJ inside
+/// an emoji sequence. Borrows when there is nothing to change.
+pub fn sanitize(text: &str) -> Cow<'_, str> {
+    clean(text, false, true)
+}
+
+/// Like [`sanitize`] but every ZWJ shows as U+FFFD too: for text whose exact
+/// bytes matter (an approval preview), where nothing invisible may pass.
+pub fn sanitize_strict(text: &str) -> Cow<'_, str> {
+    clean(text, false, false)
 }
 
 /// Single-line safe text for a slot that must stay one line (a title in a
 /// list, an error, a prompt): like [`sanitize`], but every line break (LF,
 /// CR, CRLF, U+2028, U+2029) becomes the visible [`LINE_MARK`].
 pub fn one_line(text: &str) -> Cow<'_, str> {
-    if !text.chars().any(|c| c == '\t' || c == '\n' || is_hazard(c)) {
-        return Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\t' => out.push(' '),
-            '\r' => {
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                out.push(LINE_MARK);
-            }
-            '\n' | '\u{2028}' | '\u{2029}' => out.push(LINE_MARK),
-            c if is_hazard(c) => out.push(STAND_IN),
-            c => out.push(c),
-        }
-    }
-    Cow::Owned(out)
+    clean(text, true, true)
 }
 
 /// Characters serde_json leaves raw but a terminal would act on: DEL, C1,
@@ -140,6 +184,31 @@ mod tests {
     use super::*;
 
     const HOSTILE: &str = "\x1b]52;c;eA==\x07\x1b[2J\r\u{9b}31m";
+
+    #[test]
+    fn emoji_zwj_sequences_survive_general_display() {
+        for seq in [
+            "👨\u{200d}👩\u{200d}👧",               // family
+            "🏳\u{fe0f}\u{200d}🌈",                  // rainbow flag (VS16 before ZWJ)
+            "❤\u{fe0f}\u{200d}🔥",                  // heart on fire (BMP base)
+            "🧑\u{1f3fd}\u{200d}💻",                // skin tone before ZWJ
+            "ok \u{2764}\u{fe0f} \u{263a}\u{fe0e}", // variation selectors
+        ] {
+            let title = format!("ship {seq} today");
+            assert_eq!(sanitize(&title), title, "{seq:?}");
+            assert_eq!(one_line(&title), title, "{seq:?}");
+        }
+        // A ZWJ that joins no emoji still shows: letters, edges, doubled.
+        for s in [
+            "a\u{200d}b",
+            "\u{200d}👩",
+            "👨\u{200d}",
+            "👨\u{200d}\u{200d}👩",
+        ] {
+            assert!(sanitize(s).contains(STAND_IN), "{s:?}");
+            assert!(one_line(s).contains(STAND_IN), "{s:?}");
+        }
+    }
 
     #[test]
     fn sanitize_keeps_newlines_and_neutralises_hazards() {

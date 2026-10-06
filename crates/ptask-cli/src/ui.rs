@@ -129,7 +129,7 @@ const STAND_IN: char = ptask_core::text::STAND_IN;
 /// Make untrusted text safe to print (multi-line): see
 /// [`ptask_core::text::sanitize`] — the one predicate the CLI, TUI and core
 /// errors share.
-pub use ptask_core::text::{has_hazard, one_line, sanitize};
+pub use ptask_core::text::{has_hazard, one_line, sanitize, sanitize_strict};
 
 /// Length of the SGR sequence at the start of `s` if it is one this module
 /// emits outside gradients: reset, bold, dim, or a palette foreground.
