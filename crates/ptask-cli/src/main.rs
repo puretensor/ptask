@@ -247,7 +247,8 @@ struct DependArgs {
 #[derive(clap::Args, Debug)]
 struct ReviewArgs {
     /// Days of inactivity that makes a task "stale".
-    #[arg(long = "stale-days", default_value_t = 14)]
+    #[arg(long = "stale-days", default_value_t = 14,
+          value_parser = clap::value_parser!(i64).range(0..))]
     stale_days: i64,
 }
 
@@ -3820,6 +3821,15 @@ mod tests {
         ExportArgs, cmd_export, delegation_command, gcalendar_path, git_has_staged_changes,
         plan_window, remote_list_filter, run_git_checked, short_id, stale_review_tasks,
     };
+
+    #[test]
+    fn review_rejects_negative_stale_days() {
+        // A negative window moved the cutoff into the future, so every task
+        // read as stale.
+        use clap::Parser;
+        assert!(super::Cli::try_parse_from(["pt", "review", "--stale-days=-5"]).is_err());
+        assert!(super::Cli::try_parse_from(["pt", "review", "--stale-days", "0"]).is_ok());
+    }
 
     #[test]
     fn rejected_edit_leaves_cli_task_unchanged() {
