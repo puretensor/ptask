@@ -624,6 +624,7 @@ pub async fn run_check_at<D: Dispatch>(
     report.eligible = eligible.len() as i64;
     let mut sent_telegrams = 0i64;
     let mut telegram_consecutive_failures = 0i64;
+    let mut email_broken = false;
 
     for task in eligible {
         let age_days = task_age_days(&task, &now_utc);
@@ -755,7 +756,7 @@ pub async fn run_check_at<D: Dispatch>(
                     }
                 }
                 "email" => {
-                    if !cfg.email_configured() {
+                    if !cfg.email_configured() || email_broken {
                         false
                     } else {
                         let subject = format!(
@@ -776,6 +777,14 @@ pub async fn run_check_at<D: Dispatch>(
                             dispatched.email_sent = true;
                         } else {
                             report.send_failures += 1;
+                            // SMTP failures are systemic (server stalled or
+                            // down, credentials rejected) and each can cost the
+                            // full 30 s send timeout: stop trying for this run.
+                            email_broken = true;
+                            error!(
+                                target: "ptask::accountability",
+                                "email send failed — email circuit-broken for the rest of this run"
+                            );
                         }
                         r
                     }
@@ -1507,7 +1516,8 @@ mod tests {
                 .all(|d| d.telegram_sent && !d.email_sent)
         );
         assert!(report.dispatched[0].error.is_some());
-        assert_eq!(report.send_failures, 2);
+        // One email failure: the email circuit breaker skips the second.
+        assert_eq!(report.send_failures, 1);
         for id in [&task_uuid, &other] {
             let last: Option<String> = db
                 .with_conn(|c| {
@@ -1794,6 +1804,73 @@ mod tests {
             get_daily_budget(&db, &anchor.date().to_string()).unwrap(),
             1
         );
+    }
+
+    /// Telegram delivers; every email attempt fails (a stalled SMTP server
+    /// that times out after 30 s in production). Counts both.
+    #[derive(Default)]
+    struct EmailStalls {
+        telegrams: std::sync::atomic::AtomicUsize,
+        emails: std::sync::atomic::AtomicUsize,
+    }
+    impl Dispatch for EmailStalls {
+        async fn send_telegram(
+            &self,
+            _cfg: &DispatchCfg,
+            _text: &str,
+            _buttons: &[(String, String)],
+        ) -> Result<bool> {
+            self.telegrams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+        async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {
+            self.emails
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(false)
+        }
+        async fn compose_via_hal(&self, _cfg: &DispatchCfg, _req: &NudgeRequest) -> Option<String> {
+            None
+        }
+    }
+
+    /// Regression (round 2, optional): a stalled SMTP server cost the full
+    /// 30 s send timeout for every level 3/4 task in a run. After the first
+    /// failed email the channel is skipped for the rest of the run; Telegram
+    /// still goes out.
+    #[tokio::test]
+    async fn email_is_circuit_broken_after_the_first_failure_in_a_run() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        for i in 0..3 {
+            aged_task_before(&db, &format!("escalated task {i}"), 20, &anchor);
+        }
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET escalation_level=3, level_changed_at=?1",
+                params![crate::dates::format_iso(&anchor)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let cfg = DispatchCfg {
+            telegram_token: Some("test".into()),
+            telegram_chat_id: Some(1),
+            ..email_cfg()
+        };
+        let dispatch = EmailStalls::default();
+        let report = run_check_at(&db, &cfg, &dispatch, &anchor).await.unwrap();
+        assert_eq!(
+            dispatch.emails.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "email retried against a dead server"
+        );
+        assert_eq!(
+            dispatch.telegrams.load(std::sync::atomic::Ordering::SeqCst),
+            3
+        );
+        assert_eq!(report.dispatched.len(), 3);
+        assert_eq!(report.send_failures, 1);
     }
 
     /// Counts Telegram sends and yields inside each one, so two runs driven

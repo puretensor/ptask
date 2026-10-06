@@ -268,6 +268,9 @@ email.
 
 Each SMTP send is bounded at 30 s end to end (connect through DATA); a
 stalled mail server counts as a failed email send instead of hanging the run.
+After the first failed email in a run, email is skipped for the rest of that
+run (Telegram still goes out), so a dead server costs one timeout, not one
+per task.
 
 The From, To and CC addresses are validated before anything is sent. If one
 is invalid, the run prints `email misconfigured`, disables email for that run
