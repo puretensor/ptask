@@ -127,6 +127,8 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     // An explicit ISO date is the deadline whatever its position; a
     // recurrence clause only supplies the first occurrence when there is none.
     let mut explicit_deadline = false;
+    // The rule's `at <time>`, applied to an explicit date after the loop.
+    let mut rule_time: Option<Zoned> = None;
 
     while idx < raw.len() {
         let tok = raw[idx];
@@ -207,6 +209,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
                 try_recurrence_match(&raw[..scan_end], idx, &now)
             && let Ok(deadline) = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())
         {
+            rule_time = time_of_day.clone();
             // An explicit date in the text beats the rule's first occurrence.
             if !explicit_deadline {
                 if rec.freq == recurrence::Freq::Monthly && rec.bymonthday.is_empty() {
@@ -239,6 +242,9 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         {
             out.deadline_phrase = Some(tok.to_string());
             out.deadline = Some(parsed.date().to_string());
+            // A rule seen earlier anchored its cadence on `now`; the explicit
+            // date is the first occurrence, so core anchors on it instead.
+            out.recurrence_anchor = None;
             explicit_deadline = true;
             idx += 1;
             continue;
@@ -247,6 +253,19 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         // Fallback: title word.
         title_words.push(tok);
         idx += 1;
+    }
+
+    // `2026-12-25 every month at 9:00`: the series runs at 09:00 from the
+    // explicit date, so the first deadline carries the rule's time; a
+    // date-only deadline would drop it for every later occurrence.
+    if explicit_deadline
+        && out.recurrence.is_some()
+        && let (Some(time), Some(day)) = (rule_time.as_ref(), out.deadline.as_deref())
+    {
+        let day = dates::parse_at(day, now.clone())?;
+        out.deadline = Some(dates::format_iso(&crate::tasks::combine_date_with_time(
+            &day, time,
+        )?));
     }
 
     out.title = title_words.join(" ").trim().to_string();
@@ -819,6 +838,81 @@ mod tests {
         assert_eq!(q.recurrence.unwrap().original_input, "every monday");
         assert!(q.due.as_deref().unwrap().starts_with("2026-06-01"));
         assert!(q.deadline.as_deref().unwrap().starts_with("2026-05-18"));
+    }
+
+    #[test]
+    fn explicit_date_keeps_the_rules_time_and_drops_the_now_anchor() {
+        // PARSE-8 follow-up: with an explicit date the rule's `at 9:00` was
+        // dropped (date-only deadline, so the whole series lost its time),
+        // and a rule written before the date still left a now-based anchor.
+        for input in [
+            "Pay rent 2026-12-25 every month at 9:00",
+            "Pay rent every month at 9:00 2026-12-25",
+        ] {
+            let q = parse_at(input, anchor()).unwrap();
+            assert_eq!(q.title, "Pay rent", "{input}");
+            assert!(
+                q.deadline
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("2026-12-25T09:00"),
+                "{input}: {:?}",
+                q.deadline
+            );
+            assert!(q.recurrence_anchor.is_none(), "{input}");
+        }
+        for input in [
+            "Pay rent 2026-12-25 every month",
+            "Pay rent every month 2026-12-25",
+        ] {
+            let q = parse_at(input, anchor()).unwrap();
+            assert_eq!(q.deadline.as_deref(), Some("2026-12-25"), "{input}");
+            assert!(q.recurrence_anchor.is_none(), "{input}");
+        }
+    }
+
+    #[test]
+    fn explicit_date_series_advances_with_time_and_month_end_clamping() {
+        // Created through core: the explicit date becomes the anchor, so a
+        // 31st clamps to Feb 28 and returns to Mar 31, keeping 09:00.
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::Db::open(dir.path().join("q.db")).unwrap();
+        let ctx = crate::event_log::EventCtx::test();
+        for (input, expect) in [
+            (
+                "Pay rent 2099-01-31 every month at 9:00",
+                ["2099-01-31T09:00", "2099-02-28T09:00", "2099-03-31T09:00"],
+            ),
+            (
+                "Pay rent every month at 9:00 2099-01-31",
+                ["2099-01-31T09:00", "2099-02-28T09:00", "2099-03-31T09:00"],
+            ),
+            (
+                "Pay rent every month 2099-01-31",
+                ["2099-01-31", "2099-02-28", "2099-03-31"],
+            ),
+        ] {
+            let q = parse_at(input, anchor()).unwrap();
+            let (new, ext) = q.task_parts("test");
+            let task = crate::tasks::create_with_extensions(&db, new, ext, &ctx).unwrap();
+            assert!(
+                task.deadline.as_deref().unwrap().starts_with(expect[0]),
+                "{input}: {:?}",
+                task.deadline
+            );
+            for want in &expect[1..] {
+                let t = crate::tasks::resolve_for_lookup(&db, &task.id, true).unwrap();
+                let crate::tasks::DoneOutcome::Advanced { next_deadline } =
+                    crate::tasks::mark_done(&db, &t, &ctx).unwrap()
+                else {
+                    panic!("{input}: must recur")
+                };
+                assert!(
+                    next_deadline.starts_with(want),
+                    "{input}: {next_deadline} vs {want}"
+                );
+            }
+        }
     }
 
     #[test]

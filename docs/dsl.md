@@ -30,7 +30,9 @@ future ISO date (`2099-10-02`) sets the deadline. Other date prose
 silently setting a wrong deadline; pass `--deadline` for anything else.
 Recurrence phrases (`every monday at 9am`) set the first occurrence, unless
 the text also carries an explicit ISO date: that date is the first deadline
-wherever it appears, and is never folded into the rule.
+wherever it appears (at the rule's `at <time>` if it has one, and anchoring the
+cadence: `2027-01-31 every month at 9:00` runs Jan 31, Feb 28, Mar 31 at
+09:00), and is never folded into the rule.
 
 Operator timezone: `Europe/London` (DST-correct via jiff).
 
