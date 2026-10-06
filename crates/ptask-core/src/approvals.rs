@@ -214,6 +214,15 @@ impl Approval {
         )
     }
 
+    /// The payload gate's verdict right now: approved, not past
+    /// `expires_at`, not consumed. What `payload` releases on and what a
+    /// poller should wait for (`status` stays "approved" after expiry and
+    /// after consume).
+    pub fn in_force(&self) -> bool {
+        dates::now_in_operator_tz()
+            .is_ok_and(|now| gate_status(self, &now).is_ok() && self.consumed_at.is_none())
+    }
+
     /// Machine object matching the contract JSON shape. `events` is set
     /// only for `show`.
     pub fn to_json(&self, events: Option<&[ApprovalEvent]>) -> serde_json::Value {
@@ -233,6 +242,7 @@ impl Approval {
             "requester": self.requester,
             "task": self.task_pt_id,
             "status": self.status,
+            "in_force": self.in_force(),
             "decided_by": self.decided_by,
             "decided_via": self.decided_via,
             "decision_note": self.decision_note,
@@ -1863,6 +1873,26 @@ mod tests {
             exit_code(consume(&db, &id, &file_src(b"late"), &ctx("x"))),
             4
         );
+    }
+
+    #[test]
+    fn json_in_force_tracks_the_payload_gate() {
+        let (_d, db) = fresh();
+        let in_force = |id: &str| get(&db, id).unwrap().to_json(None)["in_force"].clone();
+        let pending = raw_row(&db, 80, "pending", "2999-01-01T00:00:00Z", b"p");
+        let live = raw_row(&db, 81, "approved", "2999-01-01T00:00:00Z", b"a");
+        let stale = raw_row(&db, 82, "approved", "2026-09-01T00:02:00Z", b"s");
+        let rejected = raw_row(&db, 83, "rejected", "2999-01-01T00:00:00Z", b"r");
+        assert_eq!(in_force(&pending), serde_json::json!(false));
+        assert_eq!(in_force(&live), serde_json::json!(true));
+        assert_eq!(
+            in_force(&stale),
+            serde_json::json!(false),
+            "approved but expired"
+        );
+        assert_eq!(in_force(&rejected), serde_json::json!(false));
+        consume(&db, &live, &file_src(b"a"), &ctx("x")).unwrap();
+        assert_eq!(in_force(&live), serde_json::json!(false), "consumed");
     }
 
     #[test]

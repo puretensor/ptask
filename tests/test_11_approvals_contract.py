@@ -255,9 +255,13 @@ def test_payload_is_released_only_while_the_approval_is_in_force(env, tmp_path):
     assert exit_of(env, "approval", "payload", ap["id"], "--any-status") != 0, "inspection needs a TTY"
     p = run(env, "approval", "payload", ap["id"], "--any-status", check=False, tty=True, CLAUDECODE="1")
     assert p.returncode != 0, "inspection is refused to agents"
+    assert show(env, ap["id"])["in_force"] is False
     dash_decide(env, "approve", ap["id"])
+    assert show(env, ap["id"])["in_force"] is True, "pollers wait on in_force, not status"
     assert run(env, "approval", "payload", ap["id"], raw=True).stdout == b"wire 400 GBP to ACME"
     run(env, "approval", "consume", ap["id"], "--payload-file", str(tmp_path / "exec.html"))
+    s = show(env, ap["id"])
+    assert s["status"] == "approved" and s["in_force"] is False, "consumed"
     p = run(env, "approval", "payload", ap["id"], check=False, raw=True)
     assert p.returncode == 6 and p.stdout == b"", "consumed"
     rej = request(env, tmp_path, "nope", "do not send")

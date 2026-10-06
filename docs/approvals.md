@@ -80,18 +80,37 @@ pt approval payload AP-12 > /tmp/letter.html
 pt approval consume AP-12 --payload-file /tmp/letter.html
 ```
 
-`payload` releases the bytes only while the approval is in force: approved,
-not past `expires_at`, not yet consumed. Otherwise it writes nothing to
-stdout and exits 3 (pending), 4 (rejected / withdrawn / expired) or 6
-(already consumed), so an executor that skips the status check still cannot
-act on bytes the operator never approved. A digest-only request has no bytes
-to release (exit 1).
+`payload` releases the bytes only while the approval is **in force**:
+approved, not past `expires_at`, not yet consumed. Otherwise it writes
+nothing to stdout and exits 3 (pending), 4 (rejected / withdrawn / expired)
+or 6 (already consumed). A digest-only request has no bytes to release
+(exit 1).
 
-`payload --any-status` is the operator's inspection path (for example a
-binary file whose preview is `<binary N bytes>`): it prints the bytes
-whatever the status, and is refused when `CLAUDECODE` is set or stdin is
-not a TTY. `show`/`approval_status` still carry `preview` at every status,
-since that is what the operator decides on.
+Every approval JSON object (`show`/`ls --json`, HTTP, MCP) carries
+`"in_force": true|false`, the same verdict computed at read time. Pollers
+should wait on `in_force`, not on `status`: `status` stays `approved` after
+the approval expires and after it is consumed.
+
+**What this gate is, and is not.** It is a correctness guard for executors
+that follow the documented `payload` → act → `consume` pattern: such an
+executor cannot act on bytes the operator never approved, even if it forgets
+to check the status. It is **not** a confidentiality boundary, and it does
+not withhold the bytes from an agent that wants them:
+
+- `preview` is the full text of any UTF-8 payload (JSON pretty-printed) and
+  is on every read surface at every status: `show`/`ls --json`, HTTP
+  `GET /api/approvals[/{id}]`, MCP `approval_status`/`approval_list`, and
+  the dashboard sidecar's `GET /api/approvals`, which needs no auth since
+  PT-2201 (the tailnet is the gate). It must be, since it is what the
+  operator decides on.
+- `payload --any-status` (the operator's inspection path, for example a
+  binary file whose preview is `<binary N bytes>`) prints the bytes
+  whatever the status. It is refused when `CLAUDECODE` is set or stdin is
+  not a TTY, but that guard is a speed bump against accidents: any process
+  can allocate a pseudo-terminal (`script -qc …`) and unset the variable.
+
+Do not put secrets in an approval payload on the assumption that only an
+approved executor will see them.
 
 `verify` is the same check without the latch. Exit codes (both verbs):
 
@@ -218,4 +237,5 @@ token lives in the sidecar's environment file, which any process of the same
 user can read. Anyone who can write the database, replace the
 binary, or steal an admin token can decide. The tamper triggers raise the
 cost of a confused-deputy `UPDATE`; they do not stop a process with the
-same uid from disabling them.
+same uid from disabling them. Payload bytes are not secret from any of
+these writers either: see "What this gate is, and is not" under Consume.
