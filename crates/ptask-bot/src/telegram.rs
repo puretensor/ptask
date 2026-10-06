@@ -197,7 +197,29 @@ fn split_for_telegram(text: &str, max: usize) -> Vec<String> {
     if !cur.is_empty() || chunks.is_empty() {
         chunks.push(cur);
     }
-    chunks
+    // Telegram rejects a whitespace-only message as empty (a hard-split line
+    // of exactly `max` units leaves its "\n" alone), and send_all would then
+    // report a failure for a message that fully arrived. Attach such a chunk
+    // to its neighbour: Telegram trims surrounding whitespace, so the limit
+    // still holds for what it counts.
+    let mut merged: Vec<String> = Vec::with_capacity(chunks.len());
+    let mut leading = String::new();
+    for chunk in chunks {
+        if chunk.trim().is_empty() {
+            match merged.last_mut() {
+                Some(prev) => prev.push_str(&chunk),
+                None => leading.push_str(&chunk),
+            }
+        } else if merged.is_empty() && !leading.is_empty() {
+            merged.push(std::mem::take(&mut leading) + &chunk);
+        } else {
+            merged.push(chunk);
+        }
+    }
+    if merged.is_empty() {
+        merged.push(leading);
+    }
+    merged
 }
 
 /// reqwest errors can include the request URL, and Telegram embeds the bot
@@ -284,6 +306,28 @@ mod tests {
         assert!(sizes.iter().all(|&n| n <= 4096), "{sizes:?}");
         assert!(chunks.iter().all(|c| c.ends_with('\n')));
         assert_eq!(chunks.concat(), digest);
+    }
+
+    #[test]
+    fn no_chunk_is_whitespace_only() {
+        // A hard-split line of exactly `max` units plus its newline left a
+        // chunk of just "\n", which Telegram rejects as an empty message.
+        for text in [
+            format!("{}\nnext line\n", "a".repeat(4096)),
+            format!("{}\n", "🔥".repeat(2048)),
+            format!("\n\n{}\n", "b".repeat(5000)),
+            format!("head\n{}\n\n\n", "c".repeat(8192)),
+        ] {
+            let chunks = split_for_telegram(&text, 4096);
+            assert!(
+                chunks.iter().all(|c| !c.trim().is_empty()),
+                "{:?}",
+                chunks.iter().map(|c| utf16(c)).collect::<Vec<_>>()
+            );
+            // Within the limit once Telegram trims surrounding whitespace.
+            assert!(chunks.iter().all(|c| utf16(c.trim()) <= 4096));
+            assert_eq!(chunks.concat(), text);
+        }
     }
 
     #[test]
