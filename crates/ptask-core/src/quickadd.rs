@@ -455,9 +455,12 @@ fn priority_token(tok: &str) -> Option<i64> {
     }
 }
 
-/// Strip sentence punctuation that trails a `@label` / `#project` in prose.
+/// Strip prose punctuation around a `@label` / `#project` name: trailing
+/// sentence punctuation (`@bob,`) and wrapping brackets or quotes
+/// (`@(bob)`, `#[ops]`).
 fn trim_prose_punct(s: &str) -> &str {
-    s.trim_end_matches([',', '.', ';', ':', '!', '?', ')'])
+    s.trim_start_matches(['(', '[', '{', '\'', '"'])
+        .trim_end_matches([',', '.', ';', ':', '!', '?', ')', ']', '}', '\'', '"'])
 }
 
 /// Format a quick-add into a short human echo. Convenience for `pt add` output.
@@ -1055,6 +1058,11 @@ mod tests {
         assert_eq!(q.labels, vec!["bob", "alice"]);
         assert_eq!(q.project.as_deref(), Some("fleet"));
         assert_eq!(q.title, "ping about");
+        // Wrapping punctuation goes too: `@(bob)` labels `bob`.
+        let q = parse_at("ping @(bob) @[ops] #(fleet)", anchor()).unwrap();
+        assert_eq!(q.labels, vec!["bob", "ops"]);
+        assert_eq!(q.project.as_deref(), Some("fleet"));
+        assert_eq!(q.title, "ping");
         // A bare punctuation marker is text.
         let q = parse_at("well @, ok", anchor()).unwrap();
         assert!(q.labels.is_empty());

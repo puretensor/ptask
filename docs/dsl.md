@@ -13,7 +13,7 @@ trailing `//description` becomes the description.
 | Token | Effect |
 |---|---|
 | `p1`..`p5` | priority, native scale: p1=low, p2=normal, p3=high, p4=urgent, p5=critical. Identical to `--priority` and `pt priority` — no Todoist inversion. |
-| `@label` | append to `pt_extensions.labels` JSON. Multiple allowed; trailing `,.;:!?)` is dropped (`@bob,` → `bob`). |
+| `@label` | append to `pt_extensions.labels` JSON. Multiple allowed; surrounding prose punctuation is dropped (`@bob,` and `@(bob)` → `bob`). |
 | `#project` | `pt_extensions.project` (last wins). An all-digit `#42` is an issue reference and stays title text. |
 | `~30m`, `~2h`, `~1d` | `pt_extensions.duration_min` (a positive whole number of units). |
 | `!HH:MM` | reminder time of day (a valid `HH:MM` only). Echoed by `pt add`; not persisted. |
