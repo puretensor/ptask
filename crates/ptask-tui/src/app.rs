@@ -708,6 +708,49 @@ mod tests {
         assert_eq!(app.selected_task_index(), None);
     }
 
+    #[test]
+    fn rendered_frame_carries_no_bidi_or_invisible_characters() {
+        let hostile =
+            "pay \u{202e}lve\u{2066}x\u{2069} zw\u{200b}j\u{2060} tag\u{e0041} bom\u{feff}";
+        let (dir, db) = fresh_db();
+        let ctx = EventCtx::test();
+        let mut new = NewTask::minimal(format!("title {hostile}"));
+        new.description = format!("desc {hostile}\nline two {hostile}");
+        new.ai_reasoning = format!("why {hostile}");
+        ptask_core::tasks::create(&db, new, &ctx).unwrap();
+        views::create(&db, &format!("v{hostile}"), "search: title").unwrap();
+        let mut app = App::new(db).unwrap();
+        app.action_cycle_view();
+        app.peek_open = true;
+        app.status_msg = format!("done: {hostile}");
+        app.filter_input = Some(format!("f {hostile}"));
+        app.prompt = Some(Prompt::Create {
+            buf: format!("p {hostile}"),
+        });
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 40)).unwrap();
+        terminal.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("title pay"), "the task must be on screen");
+        for c in text.chars() {
+            assert!(
+                !matches!(
+                    c,
+                    '\u{202A}'..='\u{202E}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{2060}'..='\u{206F}'
+                        | '\u{FEFF}'
+                        | '\u{E0000}'..='\u{E007F}'
+                ),
+                "{c:?} reached the frame:\n{text}"
+            );
+        }
+        drop(dir);
+    }
+
     /// (pt_id, status, priority, title) of every task, any status.
     fn snapshot(db: &Db) -> Vec<(Option<String>, String, i64, String)> {
         ptask_core::tasks::list_with_filter(db, None, None, None, 100)
