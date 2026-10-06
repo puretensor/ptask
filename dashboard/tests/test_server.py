@@ -88,14 +88,15 @@ class SystemdUnitTests(unittest.TestCase):
         # The unit loads .dashboard.env, not the .env every other pt writer
         # loads, so the pt processes the sidecar spawns never saw
         # PTASK_WAL_AUTOCHECKPOINT=0 and checkpointed on SQLite's default,
-        # racing Litestream. The unit sets it; .dashboard.env (read after)
-        # may still override it.
+        # racing Litestream. The unit sets it; .dashboard.env may still
+        # override it, because systemd lets EnvironmentFile= win over
+        # Environment= whatever their order (the comment must not claim
+        # line order matters).
         unit = (Path(server.__file__).parent / "ptask-dashboard.service").read_text()
         lines = [l.strip() for l in unit.splitlines()]
-        setting = "Environment=PTASK_WAL_AUTOCHECKPOINT=0"
-        self.assertIn(setting, lines)
-        env_file = next(i for i, l in enumerate(lines) if l.startswith("EnvironmentFile="))
-        self.assertLess(lines.index(setting), env_file)
+        self.assertIn("Environment=PTASK_WAL_AUTOCHECKPOINT=0", lines)
+        self.assertNotIn("read after this line", unit)
+        self.assertIn("EnvironmentFile= overrides Environment=", unit)
 
 
 class DeadlineTests(unittest.TestCase):

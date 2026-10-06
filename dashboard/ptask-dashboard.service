@@ -12,8 +12,9 @@ Type=simple
 # Those pt children are DB writers: like every other writer (whose units load
 # ~/puretensor-tasks/.env) they must leave WAL checkpoints to Litestream.
 # Set here rather than loading .env, which would hand the server's token and
-# actor to the sidecar. On a host without Litestream, override it in
-# .dashboard.env (read after this line), e.g. PTASK_WAL_AUTOCHECKPOINT=1000.
+# actor to the sidecar. On a host without Litestream, set it in .dashboard.env
+# (e.g. PTASK_WAL_AUTOCHECKPOINT=1000): systemd's EnvironmentFile= overrides Environment=
+# for the same variable, whichever line comes first.
 Environment=PTASK_WAL_AUTOCHECKPOINT=0
 EnvironmentFile=%h/puretensor-tasks/.dashboard.env
 WorkingDirectory=%h/worktrees/ptask-production/dashboard
