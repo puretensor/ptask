@@ -259,41 +259,18 @@ fn check_structure(
                 }
             };
             // Backstop that does not rely on matching the real decoder: a
-            // lenient decode of the same text may hold no more embedded
-            // messages than the depth limit allows.
-            if embedded_message_markers(&lenient_decode(&encoding, body, boundary))
-                > MAX_MESSAGE_DEPTH
-            {
-                return Err("embedded messages nested too deeply");
-            }
+            // lenient decode of the same text is probed too, so whatever a
+            // decoder disagreement could hide still has its nesting counted.
+            // Only depth counts: many sibling messages are legitimate.
+            let lenient = lenient_decode(&encoding, body, boundary);
+            check_structure(&lenient, depth + 1, encoded_layers + 1)?;
             // The real parser keeps an undecodable part as opaque text.
-            if end == usize::MAX {
-                continue;
+            if end != usize::MAX && decoded.as_ref() != lenient.as_slice() {
+                check_structure(&decoded, depth + 1, encoded_layers + 1)?;
             }
-            check_structure(&decoded, depth + 1, encoded_layers + 1)?;
         }
     }
     Ok(())
-}
-
-/// Case-insensitive count of `message/rfc822` and `message/global` (with
-/// any whitespace after the slash) in `bytes`.
-fn embedded_message_markers(bytes: &[u8]) -> usize {
-    let lower = bytes.to_ascii_lowercase();
-    let mut count = 0;
-    let mut rest = &lower[..];
-    while let Some(at) = rest.windows(8).position(|w| w == b"message/") {
-        let after = &rest[at + 8..];
-        let trimmed = after
-            .iter()
-            .position(|b| !b.is_ascii_whitespace())
-            .map_or(&after[after.len()..], |n| &after[n..]);
-        if trimmed.starts_with(b"rfc822") || trimmed.starts_with(b"global") {
-            count += 1;
-        }
-        rest = after;
-    }
-    count
 }
 
 /// A forgiving decode of an encoded part: the text up to the first
@@ -516,24 +493,49 @@ mod tests {
         );
     }
 
-    #[test]
-    fn markers_are_counted_case_insensitively_with_whitespace() {
-        let text = b"Content-Type: message/rfc822\r\nContent-Type: Message/ RFC822\r\n\
-                     content-type: message/global\r\nContent-Type: message/delivery-status\r\n";
-        assert_eq!(embedded_message_markers(text), 3);
-    }
-
     /// The backstop sees through either encoding, whatever junk the real
     /// decoder might be made to disagree on.
     #[test]
     fn lenient_decode_sees_through_base64_junk_and_quoted_printable() {
-        let inner = b"Content-Type: message/rfc822\r\n\r\nContent-Type: message/rfc822\r\n";
+        let inner = b"Subject: inner\r\n\r\nhello there\r\n";
         let junked = b64_lines(inner).replace("\r\n", "-*\r\n");
-        let b64 = lenient_decode(&TransferEncoding::Base64, junked.as_bytes(), None);
-        assert_eq!(embedded_message_markers(&b64), 2);
-        let qp = b"Content-Type: m=65ssage/rfc8=\r\n22\r\n";
-        let qp = lenient_decode(&TransferEncoding::QuotedPrintable, qp, None);
-        assert_eq!(embedded_message_markers(&qp), 1);
+        assert_eq!(
+            lenient_decode(&TransferEncoding::Base64, junked.as_bytes(), None),
+            inner
+        );
+        let qp = b"Subject: inn=65r\r\n\r\nhello th=\r\nere\r\n";
+        assert_eq!(
+            lenient_decode(&TransferEncoding::QuotedPrintable, qp, None),
+            b"Subject: inner\r\n\r\nhello there\r\n"
+        );
+    }
+
+    /// Breadth is legitimate: an encoded forward of an email with many
+    /// attached messages side by side nests only two deep and must pass
+    /// (a marker-count backstop refused it).
+    #[test]
+    fn an_encoded_forward_of_many_attached_messages_is_accepted() {
+        let mut inner = String::from(
+            "Subject: bundle\r\nContent-Type: multipart/mixed; boundary=\"X\"\r\n\r\n",
+        );
+        for n in 0..40 {
+            inner.push_str(&format!(
+                "--X\r\nContent-Type: message/rfc822\r\n\r\nSubject: item {n}\r\n\r\nbody {n}\r\n"
+            ));
+        }
+        inner.push_str("--X--\r\n");
+        for encoding in ["base64", "quoted-printable"] {
+            let body = if encoding == "base64" {
+                b64_lines(inner.as_bytes())
+            } else {
+                inner.replace('=', "=3D")
+            };
+            let raw = format!(
+                "Subject: Fwd\r\nContent-Type: message/rfc822\r\n\
+                 Content-Transfer-Encoding: {encoding}\r\n\r\n{body}\r\n"
+            );
+            assert_eq!(check_structure(raw.as_bytes(), 0, 0), Ok(()), "{encoding}");
+        }
     }
 
     /// An ordinary encoded forward still passes the probe.
