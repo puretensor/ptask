@@ -64,6 +64,17 @@ before merge.
 
 Residue: tag-sequence subdivision flags (England, Scotland, Wales) render as U+FFFD; space look-alikes (NBSP, U+2000–200A) pass the strict preview, since they have visible width and cannot hide text.
 
+### Fixed (3.39.0) — distill, notify and accountability
+
+| Area | Finding | Fix |
+|---|---|---|
+| Distill coverage | Consolidation was capped at 1–4 tasks (code kept 8), yet the whole chunk was marked processed, so commitments were silently lost. A blank title created a task. | Candidates name the captures they cover; a capture is consumed only when a created or deduped candidate covers it. The rest are walked again in smaller chunks. Claims of 3+ sources need the capture text to support the title; at most 8 sources per candidate. Blank titles are skipped. |
+| Distill dedup | Title similarity ignored identifiers ("invoice 4411" deduped onto a done "4412"), and dates/times blocked genuine duplicates. | Distinct numbers and identifiers block a match. Dates, times, years and day numbers are compared as values when both titles carry them, and ignored when only one does. A lone capture whose unsupported match is a closed task is left unconsumed and audited; after 3 runs it gets its own task. |
+| Distill provider failures | 429/5xx/timeouts were charged to captures and bisection amplified them; Retry-After was ignored. A capture that always 5xx'd later stalled the queue. | Failures are classed (the worst class across attempts wins; 504 is a timeout). Only a server-class failure confirmed by a passing canary on the failing stage, and followed by real success, is charged. Otherwise the capture is deferred with a `distill.deferred` event and the run fails closed. A row is charged after 6 deferrals since the last successful run, so an all-poison queue still moves. Retry-After is honoured up to 30 s. |
+| Distill prompt fence | Untrusted items could forge or break the fence: lookalike dashes, zero-width splits, line separators, a forged "END UNTRUSTED" line. | Each request uses a fence with a random nonce, plus neutralisation of control, invisible and dash-like characters. Each item is capped at 4,000 characters. |
+| Distill concurrency | Concurrent runs processed the same rows. | Every run flocks the database's (canonical) directory, never the DB file. A contended run records `distill.skipped`; the third consecutive skip exits non-zero. |
+| Notify/accountability | SMTP send had no timeout; the SMTP login was used as From; a bad address aborted the run after Telegram had sent; Telegram limits were counted in chars; email-only levels went silent without email; escalation never reset on advance or reopen; concurrent runs overran the daily budget; nudges were sent before state was re-checked. | Whole-send timeout and a per-run email circuit breaker. `PTASK_SMTP_FROM` and up-front validation; a failing channel counts only against itself. UTF-16 limits. Fallback to the configured channel. Escalation resets on advance and reopen. Conditional budget reservation. A re-check and claim before sending. |
+
 ### Operator actions (outside the repository)
 
 - GitHub → Settings → Actions → General: require approval for all external contributors.
