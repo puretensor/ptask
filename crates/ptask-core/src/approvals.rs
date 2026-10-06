@@ -274,18 +274,285 @@ pub fn is_digest_hex(s: &str) -> bool {
 }
 
 /// Canonical JSON bytes: recursively sorted keys, compact separators,
-/// non-ASCII kept as UTF-8. Matches Python
+/// non-ASCII kept as UTF-8, floats in Python `repr` form. For every value
+/// this accepts, the bytes equal Python
 /// `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
+///
+/// The digest must name one payload, so a number that cannot be carried
+/// exactly is refused rather than rounded: integers beyond 64 bits and
+/// non-integers of magnitude 2^53 or more (an f64 there is integral and may
+/// be a rounded big integer). Send such values as strings.
 pub fn canonicalize_json(value: &serde_json::Value) -> Result<Vec<u8>> {
-    serde_json::to_vec(&sort_json(value))
-        .map_err(|e| Error::Approval(ApprovalError::Invalid(format!("canonical JSON: {e}"))))
+    check_numbers(value)?;
+    let mut out = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(
+        &mut out,
+        PythonFloats(serde_json::ser::CompactFormatter),
+    );
+    serde::Serialize::serialize(&sort_json(value), &mut ser)
+        .map_err(|e| Error::Approval(ApprovalError::Invalid(format!("canonical JSON: {e}"))))?;
+    Ok(out)
 }
 
+/// Parse JSON text strictly and canonicalise it. On top of
+/// [`canonicalize_json`], refuses what the parsed value can no longer show:
+/// duplicate object keys (serde keeps the last, other parsers the first)
+/// and number literals with more precision than the f64 they parse to.
 pub fn parse_json_payload(raw: &str) -> Result<Vec<u8>> {
     let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
         Error::Approval(ApprovalError::Invalid(format!("invalid JSON payload: {e}")))
     })?;
+    check_json_text(raw)?;
     canonicalize_json(&value)
+}
+
+fn invalid_json(msg: String) -> Error {
+    Error::Approval(ApprovalError::Invalid(format!(
+        "invalid JSON payload: {msg}"
+    )))
+}
+
+/// 2^53: below it every integer-valued f64 is exactly the integer written.
+const MAX_EXACT_F64: f64 = 9_007_199_254_740_992.0;
+
+fn check_numbers(value: &serde_json::Value) -> Result<()> {
+    match value {
+        serde_json::Value::Number(n) => match n.as_f64() {
+            Some(f) if n.is_f64() && f.abs() >= MAX_EXACT_F64 => Err(invalid_json(format!(
+                "number {n} cannot be represented exactly (integers must fit 64 bits, \
+                 other numbers must be below 2^53 in magnitude); send it as a string"
+            ))),
+            _ => Ok(()),
+        },
+        serde_json::Value::Array(items) => items.iter().try_for_each(check_numbers),
+        serde_json::Value::Object(map) => map.values().try_for_each(check_numbers),
+        _ => Ok(()),
+    }
+}
+
+/// Scan syntactically valid JSON text for duplicate keys (compared after
+/// unescaping, so `"a"` and `"a"` collide) and inexact number
+/// literals.
+fn check_json_text(raw: &str) -> Result<()> {
+    enum Frame {
+        Object {
+            keys: std::collections::HashSet<String>,
+            expect_key: bool,
+        },
+        Array,
+    }
+    let b = raw.as_bytes();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'{' => {
+                stack.push(Frame::Object {
+                    keys: Default::default(),
+                    expect_key: true,
+                });
+                i += 1;
+            }
+            b'[' => {
+                stack.push(Frame::Array);
+                i += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                i += 1;
+            }
+            b',' | b':' => {
+                if let Some(Frame::Object { expect_key, .. }) = stack.last_mut() {
+                    *expect_key = b[i] == b',';
+                }
+                i += 1;
+            }
+            b'"' => {
+                let mut j = i + 1;
+                while b[j] != b'"' {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                if let Some(Frame::Object {
+                    keys,
+                    expect_key: true,
+                }) = stack.last_mut()
+                {
+                    let key: String = serde_json::from_str(&raw[i..=j])
+                        .map_err(|e| invalid_json(e.to_string()))?;
+                    if !keys.insert(key.clone()) {
+                        return Err(invalid_json(format!("duplicate key {key:?}")));
+                    }
+                }
+                i = j + 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let mut j = i;
+                while j < b.len() && matches!(b[j], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                {
+                    j += 1;
+                }
+                check_number_literal(&raw[i..j])?;
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// A non-integer literal must name exactly the f64 it parses to (as decimal
+/// values: `1.50` and `1E2` are fine, `0.1000000000000000000001` is not).
+/// Integer literals parse exactly or overflow to f64, which
+/// [`check_numbers`] refuses.
+fn check_number_literal(lit: &str) -> Result<()> {
+    let n: serde_json::Number =
+        serde_json::from_str(lit).map_err(|e| invalid_json(format!("number {lit}: {e}")))?;
+    let Some(f) = n.as_f64().filter(|_| n.is_f64()) else {
+        return Ok(());
+    };
+    if lit.bytes().all(|c| c == b'-' || c.is_ascii_digit()) {
+        // An integer literal that still became an f64: beyond 64 bits
+        // (check_numbers refuses it) or "-0", which serde reads as the
+        // float -0.0 and Python as the integer 0.
+        return if f == 0.0 {
+            Err(invalid_json(format!(
+                "number {lit} is ambiguous; write 0 or -0.0"
+            )))
+        } else {
+            Ok(())
+        };
+    }
+    if decimal_value(lit) != decimal_value(&shortest(f)) {
+        return Err(invalid_json(format!(
+            "number {lit} has more precision than a 64-bit float holds; send it as a string"
+        )));
+    }
+    Ok(())
+}
+
+/// (negative, significant digits, power of ten) of a decimal literal, with
+/// leading and trailing zeros normalised away.
+fn decimal_value(s: &str) -> Option<(bool, String, i64)> {
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let (mant, exp) = match s.find(['e', 'E']) {
+        Some(at) => (&s[..at], s[at + 1..].parse::<i64>().ok()?),
+        None => (s, 0),
+    };
+    let (int, frac) = mant.split_once('.').unwrap_or((mant, ""));
+    let mut exp = exp.checked_sub(i64::try_from(frac.len()).ok()?)?;
+    let mut digits = format!("{int}{frac}").trim_start_matches('0').to_string();
+    while digits.ends_with('0') {
+        digits.pop();
+        exp += 1;
+    }
+    if digits.is_empty() {
+        return Some((neg, digits, 0));
+    }
+    Some((neg, digits, exp))
+}
+
+/// Shortest round-trip digits of `v`, closest to its exact value when there
+/// is a tie in length (ryu, via serde_json). Rust's `{:e}` is shortest but
+/// can pick the other candidate (797815578912564.3 for …564.2), which
+/// Python's repr would not.
+fn shortest(v: f64) -> String {
+    serde_json::Number::from_f64(v).map_or_else(|| v.to_string(), |n| n.to_string())
+}
+
+/// Python's `repr(float)`: shortest round-trip digits, positional when the
+/// decimal point falls in (-4, 16], else `d.ddde±XX`.
+fn python_float_repr(v: f64) -> String {
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0.0" } else { "0.0" }.into();
+    }
+    let Some((_, digits, exp10)) = decimal_value(&shortest(v.abs())) else {
+        return shortest(v);
+    };
+    let decpt = digits.len() as i64 + exp10;
+    let exp = decpt - 1;
+    let sign = if v < 0.0 { "-" } else { "" };
+    let body = if decpt <= -4 || decpt > 16 {
+        let m = if digits.len() == 1 {
+            digits
+        } else {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        };
+        format!("{m}e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs())
+    } else if decpt <= 0 {
+        format!("0.{}{digits}", "0".repeat(decpt.unsigned_abs() as usize))
+    } else if (decpt as usize) < digits.len() {
+        format!(
+            "{}.{}",
+            &digits[..decpt as usize],
+            &digits[decpt as usize..]
+        )
+    } else {
+        format!("{digits}{}.0", "0".repeat(decpt as usize - digits.len()))
+    };
+    format!("{sign}{body}")
+}
+
+/// Wraps a serde_json formatter so floats print as Python `repr` does; the
+/// structure (compact or pretty) is the inner formatter's.
+struct PythonFloats<F>(F);
+
+impl<F: serde_json::ser::Formatter> serde_json::ser::Formatter for PythonFloats<F> {
+    fn write_f64<W: ?Sized + std::io::Write>(&mut self, w: &mut W, v: f64) -> std::io::Result<()> {
+        w.write_all(python_float_repr(v).as_bytes())
+    }
+    fn begin_array<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.begin_array(w)
+    }
+    fn end_array<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_array(w)
+    }
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        self.0.begin_array_value(w, first)
+    }
+    fn end_array_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_array_value(w)
+    }
+    fn begin_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.begin_object(w)
+    }
+    fn end_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_object(w)
+    }
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        self.0.begin_object_key(w, first)
+    }
+    fn end_object_key<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_object_key(w)
+    }
+    fn begin_object_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.begin_object_value(w)
+    }
+    fn end_object_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_object_value(w)
+    }
+}
+
+/// Pretty-printed JSON for the operator's preview, floats printed exactly as
+/// the canonical bytes carry them.
+fn pretty_json(value: &serde_json::Value) -> Option<String> {
+    let mut out = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(
+        &mut out,
+        PythonFloats(serde_json::ser::PrettyFormatter::new()),
+    );
+    serde::Serialize::serialize(value, &mut ser).ok()?;
+    String::from_utf8(out).ok()
 }
 
 fn sort_json(value: &serde_json::Value) -> serde_json::Value {
@@ -315,8 +582,7 @@ pub fn render_preview(payload: Option<&[u8]>, kind: Option<&str>, stored: bool) 
     };
     if kind == Some("json") {
         match serde_json::from_slice::<serde_json::Value>(bytes) {
-            Ok(v) => serde_json::to_string_pretty(&v)
-                .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned()),
+            Ok(v) => pretty_json(&v).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned()),
             Err(_) => match std::str::from_utf8(bytes) {
                 Ok(s) => s.to_string(),
                 Err(_) => format!("<binary {} bytes>", bytes.len()),
@@ -1155,6 +1421,72 @@ mod tests {
             std::str::from_utf8(&bytes).unwrap(),
             r#"{"a":"café","b":1,"nested":{"m":0,"z":true}}"#
         );
+    }
+
+    fn canon(raw: &str) -> std::result::Result<String, String> {
+        parse_json_payload(raw)
+            .map(|b| String::from_utf8(b).unwrap())
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn canonical_json_rejects_ambiguous_input() {
+        // Last-wins duplicates: a first-wins consumer reads a different
+        // object from the same approved digest. "a" is "a".
+        for raw in [r#"{"a":1,"a":2}"#, r#"{"x":{"a":1,"a":2}}"#] {
+            let err = canon(raw).unwrap_err();
+            assert!(err.contains("duplicate key"), "{raw}: {err}");
+        }
+        // Same key name in sibling objects is fine.
+        assert!(canon(r#"[{"a":1},{"a":2}]"#).is_ok());
+        // Precision a bignum-exact parser keeps but f64 loses.
+        for raw in [
+            "18446744073709551616",
+            "-9223372036854775809",
+            "9007199254740993.0",
+            "1e300",
+            "-0",
+            "0.1000000000000000000001",
+            r#"{"amount":12345678901234567890123}"#,
+        ] {
+            assert!(canon(raw).is_err(), "{raw} must be rejected");
+        }
+        // The same rule on the wire path, where the transport parsed it.
+        let v = serde_json::json!({"n": 18446744073709551616.0_f64});
+        assert!(canonicalize_json(&v).is_err());
+    }
+
+    #[test]
+    fn canonical_json_matches_python_json_dumps() {
+        // Expected bytes are Python's
+        // json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"),
+        //            ensure_ascii=False).
+        for (raw, python) in [
+            ("1.50", "1.5"),
+            ("1E2", "100.0"),
+            ("-0.0", "-0.0"),
+            ("0.1", "0.1"),
+            ("1e-5", "1e-05"),
+            ("0.0001", "0.0001"),
+            ("1.5e-7", "1.5e-07"),
+            ("123456.789", "123456.789"),
+            ("797815578912564.2", "797815578912564.2"),
+            ("-221972496954942.62", "-221972496954942.62"),
+            ("0.11237863004311455", "0.11237863004311455"),
+            ("1e15", "1000000000000000.0"),
+            ("18446744073709551615", "18446744073709551615"),
+            ("-9223372036854775808", "-9223372036854775808"),
+            (
+                r#""\u007f \u001f\b\u0000/""#,
+                "\"\u{7f}\u{2028}\\u001f\\b\\u0000/\"",
+            ),
+            (
+                r#"{"é":1,"z":2,"a":[3,{"b":null,"a":true}]}"#,
+                r#"{"a":[3,{"a":true,"b":null}],"z":2,"é":1}"#,
+            ),
+        ] {
+            assert_eq!(canon(raw).as_deref(), Ok(python), "{raw}");
+        }
     }
 
     #[test]

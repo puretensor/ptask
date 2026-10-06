@@ -10,7 +10,9 @@ rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+# float_roundtrip: approval payload digests need the correctly rounded f64
+# (the default fast path can be one ulp off for 17-digit literals).
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 rusqlite = { workspace = true }

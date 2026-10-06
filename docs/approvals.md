@@ -32,8 +32,18 @@ Exactly one of:
   the basename, `payload_ref` is the path. Larger files error and the message
   tells the caller to use `--digest`.
 - `--payload-json J` — parse JSON and store the **canonical** form: keys
-  sorted recursively, compact separators, non-ASCII kept as UTF-8 (the
-  `serde_json` compact encoding of a key-sorted value).
+  sorted recursively, compact separators, non-ASCII kept as UTF-8, floats
+  in Python `repr` form. For every payload pTask accepts this is
+  byte-identical to Python
+  `json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
+  One digest must name one payload, so input that different parsers read
+  differently is refused, not normalised: duplicate object keys, integers
+  beyond 64 bits, non-integers of magnitude 2^53 or more, number literals
+  with more precision than a 64-bit float (`0.1000000000000000000001`), and
+  `-0`. Send such values as strings. `payload_json` over HTTP and MCP is
+  parsed by the transport first, so there only the number-range rules can
+  apply; the strict text rules bind again at `verify`/`consume`, where the
+  executor's `--payload-json` is parsed the same way.
 - `--digest H` — 64 lowercase hex; nothing is stored (`payload_stored: false`).
 
 `digest` is always SHA-256 of the stored bytes (or the supplied digest when

@@ -228,6 +228,18 @@ def test_json_payload_is_canonicalised(env, tmp_path):
     assert bad.returncode != 0
 
 
+def test_json_payload_refuses_input_parsers_disagree_on(env):
+    """One digest must name one payload: last-wins duplicate keys and
+    f64-rounded numbers would let the executor act on JSON that differs
+    from what the operator approved, under the same digest."""
+    base = ["approval", "request", "--kind", "spend", "--title", "x", "--payload-json"]
+    for raw in ('{"to":"ACME","to":"MALLORY"}', '{"amount":18446744073709551617}', '{"amount":0.1000000000000000000001}'):
+        assert run(env, *base, raw, check=False).returncode != 0, raw
+    obj = {"amount": 12.5, "tiny": 1e-05, "big": 18446744073709551615}
+    ap = pj(env, *base, json.dumps(obj))
+    assert ap["digest"] == sha256_bytes(canonical_json(obj)), "byte-identical to Python json.dumps"
+
+
 def test_digest_only_request_is_marked_unstored(env, tmp_path):
     ap = pj(env, "approval", "request", "--kind", "ebay", "--title", "List GPU", "--note", "photos too big", "--digest", "a" * 64)
     assert ap["payload_stored"] is False and ap["digest"] == "a" * 64

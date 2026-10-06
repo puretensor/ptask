@@ -189,8 +189,9 @@ pub struct ApprovalRequestArg {
     /// UTF-8 payload stored as a file.
     #[serde(default)]
     pub payload: Option<String>,
-    /// JSON object, canonicalised (sorted keys, compact) and stored; the digest covers the
-    /// canonical bytes. Advertised as an object so every MCP client can see and fill it.
+    /// JSON object, canonicalised (sorted keys, compact, Python json.dumps bytes) and stored;
+    /// the digest covers the canonical bytes. Integers beyond 64 bits and non-integers of
+    /// magnitude 2^53 or more are refused; send them as strings. Advertised as an object so every MCP client can see and fill it.
     #[serde(default)]
     #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub payload_json: Option<serde_json::Value>,
