@@ -746,6 +746,9 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             other => Err(other),
         })?;
 
+    // Set when a recurring task's series has no next occurrence: this
+    // completion closes it for good.
+    let mut series_ended = false;
     if let Some(RecurrenceRow {
         mode: mode_str,
         original,
@@ -833,17 +836,20 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         };
         // No representable next occurrence ("every 95000 months" runs past
         // year 9999): the series is over, so this completion closes the task
-        // below instead of failing on every attempt.
+        // below instead of failing on every attempt. Only a range error ends
+        // a series; anything else is a real failure and propagates.
         let next_z = match advanced {
             Ok(next_z) => Some(next_z),
-            Err(e) => {
+            Err(e) if series_has_ended(&e) => {
                 tracing::warn!(
                     target: "ptask::tasks", task = %task.id, error = %e,
                     "no next occurrence; completing the recurring task"
                 );
                 None
             }
+            Err(e) => return Err(e),
         };
+        series_ended = next_z.is_none();
         if let Some(next_z) = next_z {
             // A date-only deadline is due all day; its next occurrence must be
             // date-only too, not a midnight timestamp that is overdue at 00:00.
@@ -915,15 +921,22 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
          VALUES (?1, 'status_change', ?2, ?3)",
         params![task.id, now, format!("Completed via {}", ctx.source),],
     )?;
-    record_event_tx(
-        &tx,
-        ctx,
-        &task.id,
-        "task.completed",
-        &serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id }),
-    )?;
+    let mut payload = serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id });
+    if series_ended {
+        // The rule has no further occurrence: drop it, so the closed task
+        // no longer reports "recurs" (and a reopen is a plain task).
+        tx.execute("DELETE FROM pt_recurrence WHERE task_uuid=?1", [&task.id])?;
+        payload["series_ended"] = serde_json::json!(true);
+    }
+    record_event_tx(&tx, ctx, &task.id, "task.completed", &payload)?;
     tx.commit()?;
     Ok(DoneOutcome::Completed)
+}
+
+/// True when an advance failed because the next occurrence is outside the
+/// representable range, i.e. the series is over.
+fn series_has_ended(e: &crate::Error) -> bool {
+    matches!(e, crate::Error::OutOfRange(_))
 }
 
 /// Open `depends_on` prerequisites of `task_uuid`, as `PT-N — title` handles
@@ -1076,7 +1089,7 @@ pub(crate) fn combine_date_with_time(
     );
     civil
         .to_zoned(tz)
-        .map_err(|e| crate::Error::Other(format!("combine date+time: {}", e)))
+        .map_err(|e| crate::Error::OutOfRange(format!("combine date+time: {}", e)))
 }
 
 /// Build a Linear-style branch name from a PT-N + title.
@@ -4791,6 +4804,57 @@ mod tests {
         );
         assert!(task_exists(&db, &b.id), "the prerequisite was deleted");
         assert_eq!(load_detail(&db, &a.id).unwrap().depends_on, vec![b.id]);
+    }
+
+    #[test]
+    fn an_ended_series_is_journaled_and_no_longer_recurs() {
+        // Round 2, item 6: the completion that ends a series says so in its
+        // event, and the task stops reporting a rule (`pt show` said
+        // "recurs" for a closed, never-recurring-again task).
+        let (_dir, db) = fresh_db();
+        let mut new = NewTask::minimal("archive");
+        new.deadline = Some("2099-01-01".into());
+        let ext = Extensions {
+            recurrence: Some(crate::recurrence::parse("every! 99999 months").unwrap()),
+            ..Default::default()
+        };
+        let t = create_with_extensions(&db, new, ext, &EventCtx::test()).unwrap();
+        assert_eq!(
+            mark_done(&db, &t, &EventCtx::test()).unwrap(),
+            DoneOutcome::Completed
+        );
+        let payload: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT payload FROM pt_event_log WHERE event_type='task.completed'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["series_ended"], true, "{payload}");
+        let detail = load_detail(&db, &t.id).unwrap();
+        assert_eq!(detail.recurrence_input, None);
+        assert_eq!(detail.recurrence_next, None);
+        // A plain completion carries no such flag.
+        let plain = create(&db, NewTask::minimal("plain"), &EventCtx::test()).unwrap();
+        mark_done(&db, &plain, &EventCtx::test()).unwrap();
+        assert_eq!(event_count(&db, "task.completed"), 2);
+    }
+
+    #[test]
+    fn only_a_range_error_ends_a_series() {
+        // Round 2, item 6: any advance error used to end the series.
+        assert!(series_has_ended(&crate::Error::OutOfRange(
+            "year 10000".into()
+        )));
+        assert!(!series_has_ended(&crate::Error::Other(
+            "weekday advance: no match within 14 days (bug?)".into()
+        )));
+        assert!(!series_has_ended(&crate::Error::Sqlite(
+            rusqlite::Error::QueryReturnedNoRows
+        )));
     }
 
     #[test]

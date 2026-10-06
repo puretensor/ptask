@@ -946,9 +946,11 @@ fn run() -> Result<()> {
     // Lightweight tracing: env-controlled, off by default.
     let filter = tracing_subscriber::EnvFilter::try_from_env("PTASK_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    // Colour only for a terminal: scripts and agents read stderr as text.
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .init();
 
     let command = cli.command;

@@ -215,6 +215,40 @@ fn keyed_goal_verbs_can_be_retried() {
 }
 
 #[test]
+fn ending_a_series_warns_in_plain_text_and_stops_recurring() {
+    // Round 2, item 6: the WARN went to a non-TTY stderr with ANSI codes,
+    // and `pt show` kept saying "recurs" for the closed task.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("t.db");
+    ok(&db, &["add", "archive every 95000 months"]);
+    // Without NO_COLOR, as a script or agent would run it.
+    let done = Command::new(env!("CARGO_BIN_EXE_pt"))
+        .arg("--db")
+        .arg(&db)
+        .args(["done", "PT-1"])
+        .env("PTASK_ACTOR", "shell")
+        .env_remove("NO_COLOR")
+        .env_remove("PT_COLOR")
+        .env_remove("PTASK_DB")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    assert!(stderr.contains("no next occurrence"), "{stderr}");
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "ANSI on non-TTY stderr: {stderr:?}"
+    );
+    let shown = pt(&db, &["show", "PT-1"]);
+    assert!(!String::from_utf8_lossy(&shown.stdout).contains("recurs"));
+}
+
+#[test]
 fn undo_of_a_completion_needs_no_confirmation() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("t.db");
