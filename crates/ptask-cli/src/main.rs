@@ -2357,7 +2357,7 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     "{}",
                     ui::section("quiet hours", ui::Ink::Slate, "no dispatch")
                 );
-                return Ok(());
+                return accountability_verdict(&report, email_misconfigured.as_deref());
             }
             let tg = report.dispatched.iter().filter(|d| d.telegram_sent).count();
             let em = report.dispatched.iter().filter(|d| d.email_sent).count();
@@ -2411,19 +2411,36 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     )
                 );
             }
-            if let Some(err) = email_misconfigured {
-                anyhow::bail!("accountability email misconfigured: {err}");
-            }
-            if all_dead {
-                anyhow::bail!(
-                    "accountability dispatch dead — {} eligible, 0 dispatched, {} send failures",
-                    report.eligible,
-                    report.send_failures
-                );
-            }
-            Ok(())
+            accountability_verdict(&report, email_misconfigured.as_deref())
         }
     }
+}
+
+/// Exit status of `pt accountability run`, decided after the report has
+/// been printed (and every delivered nudge stamped).
+fn accountability_verdict(
+    report: &ptask_core::accountability::RunReport,
+    email_misconfigured: Option<&str>,
+) -> Result<()> {
+    // Misconfiguration first: quiet hours only mean nothing was sent, not
+    // that the setup is fine, and returning early hid a bad address for ten
+    // hours a day.
+    if let Some(err) = email_misconfigured {
+        anyhow::bail!("accountability email misconfigured: {err}");
+    }
+    if report.quiet_hours {
+        return Ok(());
+    }
+    // All-channels-dead is a hard failure: the 2026-05→06 incidents (dead
+    // Gemini key, 401ing bot token) both hid behind an exit-0 "ok" line.
+    if report.eligible > 0 && report.dispatched.is_empty() && report.send_failures > 0 {
+        anyhow::bail!(
+            "accountability dispatch dead — {} eligible, 0 dispatched, {} send failures",
+            report.eligible,
+            report.send_failures
+        );
+    }
+    Ok(())
 }
 
 fn cmd_start(db: &Db, a: StartArgs) -> Result<()> {
@@ -3821,6 +3838,27 @@ fn cmd_backfill(db: &Db) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Regression (round 2, DIST-8): during quiet hours (22:00-08:00 London)
+    /// the command returned Ok before the email-misconfiguration bail, so a
+    /// bad address exited 0 for ten hours a day.
+    #[test]
+    fn email_misconfiguration_fails_the_run_even_in_quiet_hours() {
+        let quiet = ptask_core::accountability::RunReport {
+            quiet_hours: true,
+            ..Default::default()
+        };
+        let err =
+            super::accountability_verdict(&quiet, Some("invalid NOTIFY_EMAIL \"x\"")).unwrap_err();
+        assert!(err.to_string().contains("email misconfigured"), "{err:#}");
+        super::accountability_verdict(&quiet, None).unwrap();
+        let dead = ptask_core::accountability::RunReport {
+            eligible: 2,
+            send_failures: 3,
+            ..Default::default()
+        };
+        assert!(super::accountability_verdict(&dead, None).is_err());
+    }
+
     use super::{
         ExportArgs, cmd_export, delegation_command, gcalendar_path, git_has_staged_changes,
         remote_list_filter, run_git_checked, short_id, stale_review_tasks,
