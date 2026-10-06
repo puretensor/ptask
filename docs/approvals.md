@@ -69,7 +69,7 @@ pt approval consume AP-12 --payload-file /tmp/letter.html
 |---|---|
 | 0 | approved, digest matches, not yet consumed (consume then latches) |
 | 3 | pending |
-| 4 | rejected / withdrawn / expired |
+| 4 | rejected / withdrawn / expired, or approved but past `expires_at` |
 | 5 | digest mismatch (consume does **not** latch) |
 | 6 | already consumed |
 | 1 | anything else (unknown id, bad args) |
@@ -120,6 +120,11 @@ flips it to `expired` and refuses. `pt accountability run` (the 15-minute
 timer) sweeps stale rows before pinging, and a re-request of an expired
 payload mints a fresh `AP-n` instead of returning the stale one.
 `pt approval expire` runs the same sweep on demand (idempotent).
+
+`expires_at` bounds the approval itself, not only the decision window. An
+approved row whose `expires_at` has passed stays `approved` in the record
+(decided rows are frozen), but `verify` and `consume` refuse it with exit 4
+unless it was already consumed. Ask for a fresh approval instead.
 
 ## Surfaces
 

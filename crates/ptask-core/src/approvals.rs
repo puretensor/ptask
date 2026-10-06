@@ -842,7 +842,11 @@ fn offered_digest(src: &PayloadSource) -> Result<String> {
     Ok(resolve_payload(src)?.digest)
 }
 
-fn gate_status_and_digest(ap: &Approval, offered: &str) -> Result<()> {
+/// `expires_at` bounds the whole approval, not just the decision window: an
+/// approval for "send before Friday" must not authorise a send on Monday.
+/// The row stays `approved` (decided rows are frozen); the gate reports it
+/// as expired.
+fn gate_status_and_digest(ap: &Approval, offered: &str, now: &jiff::Zoned) -> Result<()> {
     if ap.status == "pending" {
         return Err(Error::Approval(ApprovalError::Pending));
     }
@@ -854,6 +858,12 @@ fn gate_status_and_digest(ap: &Approval, offered: &str) -> Result<()> {
             "{} has unexpected status {}",
             ap.ap_id(),
             ap.status
+        ))));
+    }
+    if ap.consumed_at.is_none() && is_past(ap.expires_at.as_deref(), now) {
+        return Err(Error::Approval(ApprovalError::Terminal(format!(
+            "expired (approved, but expires_at {} has passed)",
+            ap.expires_at.as_deref().unwrap_or_default()
         ))));
     }
     if offered != ap.digest {
@@ -870,7 +880,7 @@ fn gate_status_and_digest(ap: &Approval, offered: &str) -> Result<()> {
 pub fn verify(db: &Db, id: &str, offered: &PayloadSource) -> Result<Approval> {
     let ap = get(db, id)?;
     let digest = offered_digest(offered)?;
-    gate_status_and_digest(&ap, &digest)?;
+    gate_status_and_digest(&ap, &digest, &dates::now_in_operator_tz()?)?;
     Ok(ap)
 }
 
@@ -878,12 +888,13 @@ pub fn verify(db: &Db, id: &str, offered: &PayloadSource) -> Result<Approval> {
 /// `consumed_at`/`consumed_by`. A digest mismatch does not latch.
 pub fn consume(db: &Db, id: &str, offered: &PayloadSource, ctx: &EventCtx) -> Result<Approval> {
     let digest = offered_digest(offered)?;
-    let now = dates::format_iso(&dates::now_in_operator_tz()?);
+    let now_z = dates::now_in_operator_tz()?;
+    let now = dates::format_iso(&now_z);
     let actor = ctx.actor.trim();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current = get_in_conn(&tx, id)?;
-    gate_status_and_digest(&current, &digest)?;
+    gate_status_and_digest(&current, &digest, &now_z)?;
     tx.execute(
         "UPDATE approvals SET consumed_at = ?1, consumed_by = ?2
          WHERE id = ?3 AND status = 'approved' AND consumed_at IS NULL",
@@ -1243,6 +1254,43 @@ mod tests {
             err,
             Error::Approval(ApprovalError::AlreadyConsumed)
         ));
+    }
+
+    /// An approved row whose `expires_at` has passed. Inserted directly:
+    /// a decided row is frozen, so the clock cannot be moved after approve.
+    fn approved_past_expiry(db: &Db, bytes: &[u8]) -> String {
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO approvals (id, seq, kind, title, payload, payload_kind,
+                                        payload_bytes, digest, requester, status,
+                                        decided_by, decided_via, created_at, decided_at,
+                                        expires_at)
+                 VALUES ('stale', 99, 'email', 'x', ?1, 'file', ?2, ?3, 'hal', 'approved',
+                         'operator', 'dashboard', '2026-09-01T00:00:00Z',
+                         '2026-09-01T00:01:00Z', '2026-09-01T00:02:00Z')",
+                params![bytes, bytes.len() as i64, sha256_hex(bytes)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        "AP-99".into()
+    }
+
+    #[test]
+    fn approval_past_expiry_cannot_be_verified_or_consumed() {
+        let (_d, db) = fresh();
+        let id = approved_past_expiry(&db, b"late");
+        let err = verify(&db, &id, &file_src(b"late")).unwrap_err();
+        assert!(
+            matches!(&err, Error::Approval(ApprovalError::Terminal(s)) if s.starts_with("expired")),
+            "{err:?}"
+        );
+        let err = consume(&db, &id, &file_src(b"late"), &ctx("hal")).unwrap_err();
+        assert!(
+            matches!(&err, Error::Approval(e) if e.verify_exit_code() == Some(4)),
+            "{err:?}"
+        );
+        assert!(get(&db, &id).unwrap().consumed_at.is_none());
     }
 
     #[test]
