@@ -428,8 +428,9 @@ address; put a reverse proxy with body and connection limits in front if the
 API is ever exposed more widely. On SIGTERM it stops
 accepting, closes open MCP SSE streams, gives other in-flight requests up to
 10s and then closes whatever is still open (a trickled request body, say),
-and finally gives queued outbound webhooks up to 15s: about 25s worst case,
-inside systemd's default 90s stop timeout.
+and finally gives queued outbound webhooks up to 15s. A request blocked on
+SQLite's 30s busy timeout holds the runtime meanwhile, so the worst case is
+about 30s (measured 29.3s), inside systemd's default 90s stop timeout.
 
 ### Inspect
 

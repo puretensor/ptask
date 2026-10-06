@@ -96,7 +96,7 @@ const MAX_BACKLOG_PER_URL: usize = 10_000;
 /// One subscriber's ordered queue.
 struct Lane {
     url: String,
-    tx: tokio::sync::mpsc::Sender<OutboundEvent>,
+    tx: tokio::sync::mpsc::Sender<Arc<OutboundEvent>>,
 }
 
 /// What a request's [`Outbox`] holds: every lane plus the drop counter.
@@ -150,7 +150,7 @@ impl OutboundQueue {
             let mut workers = self.workers.lock().unwrap_or_else(|e| e.into_inner());
             let mut all = Vec::with_capacity(cfg.outbound_urls.len());
             for url in &cfg.outbound_urls {
-                let (tx, mut rx) = tokio::sync::mpsc::channel::<OutboundEvent>(self.backlog);
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<Arc<OutboundEvent>>(self.backlog);
                 let db = db.clone();
                 let one = WebhookConfig {
                     outbound_urls: vec![url.clone()],
@@ -158,7 +158,7 @@ impl OutboundQueue {
                 };
                 workers.push(tokio::spawn(async move {
                     while let Some(e) = rx.recv().await {
-                        dispatch(&db, &one, e).await;
+                        dispatch(&db, &one, &e).await;
                     }
                 }));
                 all.push(Lane {
@@ -208,6 +208,9 @@ impl Outbox {
     /// whose backlog is full loses this event (logged and counted).
     pub fn send(&self, event: OutboundEvent) {
         let Some(lanes) = &self.0 else { return };
+        // One shared copy per event: each lane's backlog holds a pointer,
+        // so N subscribers don't multiply a large payload N times.
+        let event = Arc::new(event);
         for lane in &lanes.lanes {
             match lane.tx.try_send(event.clone()) {
                 Ok(()) => {}
@@ -241,7 +244,7 @@ fn committed(db: &Db, event_uuid: &str) -> Option<(String, i64)> {
 
 /// Fan-out one event to every configured URL. Logs each attempt (sent or
 /// failed) to pt_webhook_log. No retries.
-async fn dispatch(db: &Db, cfg: &WebhookConfig, e: OutboundEvent) {
+async fn dispatch(db: &Db, cfg: &WebhookConfig, e: &OutboundEvent) {
     if cfg.outbound_urls.is_empty() {
         return;
     }

@@ -33,13 +33,26 @@ pub fn default_url() -> String {
 /// (a MagicDNS short name such as `tensor-core`) is resolved and trusted
 /// when every address it resolves to is on the tailnet.
 fn cleartext_token_warning(base: &str, sends_token: bool) -> Option<String> {
-    cleartext_token_warning_with(base, sends_token, |host, port| {
+    cleartext_token_warning_with(base, sends_token, resolve_within_a_second)
+}
+
+/// The host's addresses, or none if the lookup fails or takes longer than a
+/// second: a dead resolver must not stall every remote command for its full
+/// retry budget. No addresses means "not shown to be on the tailnet", so
+/// the warning prints.
+fn resolve_within_a_second(host: &str, port: u16) -> Vec<std::net::IpAddr> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let host = host.to_string();
+    std::thread::spawn(move || {
         use std::net::ToSocketAddrs;
-        (host, port)
+        let addrs: Vec<std::net::IpAddr> = (host.as_str(), port)
             .to_socket_addrs()
             .map(|addrs| addrs.map(|a| a.ip()).collect())
-            .unwrap_or_default()
-    })
+            .unwrap_or_default();
+        let _ = tx.send(addrs);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap_or_default()
 }
 
 /// Loopback or Tailscale (100.64.0.0/10, fd7a:115c:a1e0::/48).
