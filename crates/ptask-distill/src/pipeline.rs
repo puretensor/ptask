@@ -48,12 +48,14 @@ pub enum ChunkDisposition {
     Retain,
 }
 
-/// Keep signal-bearing input when consolidation unexpectedly produces no
-/// candidates; consuming it would silently destroy work while reporting it as
-/// successfully kept. Noise is still consumed, and any non-empty output
-/// means the kept input has been handled.
-pub fn chunk_disposition(kept_len: usize, candidates_len: usize) -> ChunkDisposition {
-    if kept_len > 0 && candidates_len == 0 {
+/// Keep signal-bearing input when consolidation unexpectedly covers none of
+/// it; consuming it would silently destroy work while reporting it as
+/// successfully kept. Noise is still consumed. `covered_len` is the number of
+/// kept captures some created or deduped candidate covers — when it is
+/// non-zero the covered captures are consumed and the uncovered remainder is
+/// walked again (see `process_chunk`).
+pub fn chunk_disposition(kept_len: usize, covered_len: usize) -> ChunkDisposition {
+    if kept_len > 0 && covered_len == 0 {
         ChunkDisposition::Retain
     } else {
         ChunkDisposition::Consume
@@ -82,7 +84,7 @@ fn title_similar(a: &str, b: &str) -> bool {
 /// Select kept inputs only after proving the provider returned a complete,
 /// one-to-one index permutation. A response with the right length can still
 /// duplicate one index and omit another; silently accepting that drops work.
-fn select_kept_texts(texts: &[String], verdicts: &[Classification]) -> Result<Vec<String>> {
+fn select_kept(texts: &[String], verdicts: &[Classification]) -> Result<Vec<usize>> {
     if verdicts.len() != texts.len() {
         bail!(
             "provider returned {} verdicts for {} items — failing closed",
@@ -93,13 +95,13 @@ fn select_kept_texts(texts: &[String], verdicts: &[Classification]) -> Result<Ve
     let mut seen = vec![false; texts.len()];
     let mut kept = Vec::new();
     for verdict in verdicts {
-        let Some(text) = texts.get(verdict.idx) else {
+        if verdict.idx >= texts.len() {
             bail!(
                 "provider returned out-of-range verdict index {} for {} items — failing closed",
                 verdict.idx,
                 texts.len()
             );
-        };
+        }
         if std::mem::replace(&mut seen[verdict.idx], true) {
             bail!(
                 "provider returned duplicate verdict index {} — failing closed",
@@ -107,9 +109,11 @@ fn select_kept_texts(texts: &[String], verdicts: &[Classification]) -> Result<Ve
             );
         }
         if verdict.keep {
-            kept.push(text.clone());
+            kept.push(verdict.idx);
         }
     }
+    // Input order, so consolidate's item numbers follow the capture order.
+    kept.sort_unstable();
     Ok(kept)
 }
 
@@ -320,6 +324,11 @@ impl ChunkError {
 
 /// Classify one chunk, consolidate what it kept, and create the survivors.
 /// Any error here is the chunk's error: the caller isolates it.
+///
+/// On success, returns the kept captures no created or deduped candidate
+/// covers. They are NOT consumed — the caller walks them again as a smaller
+/// chunk — so a model that merges too eagerly or stops early can never make
+/// a commitment disappear while the run reports it as handled.
 fn process_chunk<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
@@ -327,44 +336,66 @@ fn process_chunk<P: LlmProvider + ?Sized>(
     dedup: &mut Dedup,
     st: &mut RunState,
     ctx: &EventCtx,
-) -> std::result::Result<(), ChunkError> {
+) -> std::result::Result<Vec<ptask_core::raw_items::RawItem>, ChunkError> {
     st.calls += 1;
     let texts: Vec<String> = items.iter().map(|i| i.text.clone()).collect();
     let verdicts = provider
         .classify_batch(&texts)
         .map_err(ChunkError::provider)?;
-    let kept = select_kept_texts(&texts, &verdicts).map_err(ChunkError::provider)?;
-    let candidates = if !kept.is_empty() {
+    let kept = select_kept(&texts, &verdicts).map_err(ChunkError::provider)?;
+    let mut covered = vec![false; kept.len()];
+    if !kept.is_empty() {
         st.calls += 1;
-        Some(provider.consolidate(&kept).map_err(ChunkError::provider)?)
-    } else {
-        None
-    };
-    let candidates_len = candidates.as_ref().map_or(0, Vec::len);
-    match chunk_disposition(kept.len(), candidates_len) {
-        ChunkDisposition::Consume => {
-            if let Some(candidates) = candidates {
-                create_candidates(db, provider, candidates, dedup, st, ctx)
-                    .map_err(ChunkError::local)?;
+        let kept_texts: Vec<String> = kept.iter().map(|&i| texts[i].clone()).collect();
+        let mut candidates = provider
+            .consolidate(&kept_texts)
+            .map_err(ChunkError::provider)?;
+        for cand in &mut candidates {
+            if let Some(&bad) = cand.sources.iter().find(|&&i| i >= kept.len()) {
+                return Err(ChunkError::provider(anyhow::anyhow!(
+                    "provider returned out-of-range source index {bad} for {} kept items — failing closed",
+                    kept.len()
+                )));
             }
-            // Chunk complete — kept items became candidates, or every item
-            // was judged noise. Either way the input was deliberately handled.
-            st.kept += kept.len();
-            st.consumed_ids.extend(items.iter().map(|i| i.id));
+            // With one kept capture there is nothing else a task can be from.
+            if kept.len() == 1 {
+                cand.sources = vec![0];
+            }
         }
-        ChunkDisposition::Retain => {
-            // Preserve the input, but use the same isolation and bounded retry
-            // path as other provider failures. Returning success leaves the
-            // oldest captures eligible forever and can starve the queue.
-            // Nothing is consumed here: bisection reclassifies each child,
-            // including noise, and accounts for it exactly once.
-            return Err(ChunkError::provider(anyhow::anyhow!(
-                "empty consolidation for {} kept captures",
-                kept.len()
-            )));
+        create_candidates(db, provider, candidates, &mut covered, dedup, st, ctx)
+            .map_err(ChunkError::local)?;
+    }
+    let covered_len = covered.iter().filter(|&&c| c).count();
+    if chunk_disposition(kept.len(), covered_len) == ChunkDisposition::Retain {
+        // Preserve the input, but use the same isolation and bounded retry
+        // path as other provider failures. Returning success leaves the
+        // oldest captures eligible forever and can starve the queue.
+        // Nothing is consumed here: bisection reclassifies each child,
+        // including noise, and accounts for it exactly once.
+        return Err(ChunkError::provider(anyhow::anyhow!(
+            "consolidation covered none of {} kept captures",
+            kept.len()
+        )));
+    }
+    // Noise was deliberately dropped and covered captures became (or match)
+    // tasks: both are handled. Uncovered kept captures go round again.
+    let mut uncovered = Vec::new();
+    let mut kept_pos = kept.iter().zip(&covered).peekable();
+    for (idx, item) in items.iter().enumerate() {
+        match kept_pos.peek() {
+            Some(&(&k, &is_covered)) if k == idx => {
+                kept_pos.next();
+                if is_covered {
+                    st.kept += 1;
+                    st.consumed_ids.push(item.id);
+                } else {
+                    uncovered.push(item.clone());
+                }
+            }
+            _ => st.consumed_ids.push(item.id),
         }
     }
-    Ok(())
+    Ok(uncovered)
 }
 
 /// Walk a chunk, halving it on failure so a single unprocessable row is
@@ -385,8 +416,21 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
         st.budget_exhausted = true;
         return;
     }
-    let Err(e) = process_chunk(db, provider, items, dedup, st, ctx) else {
-        return;
+    let e = match process_chunk(db, provider, items, dedup, st, ctx) {
+        Ok(uncovered) if uncovered.is_empty() => return,
+        Ok(uncovered) => {
+            // Strictly smaller than `items` (something was covered), so this
+            // terminates; the call/wall budget bounds it as well.
+            warn!(
+                target: "ptask::distill",
+                chunk = items.len(),
+                uncovered = uncovered.len(),
+                "consolidation left kept captures uncovered — walking them again"
+            );
+            walk_chunk(db, provider, &uncovered, dedup, st, ctx);
+            return;
+        }
+        Err(e) => e,
     };
     if st.first_error.is_none() || e.abort {
         st.first_error = Some(e.reason.clone());
@@ -428,22 +472,33 @@ fn walk_chunk<P: LlmProvider + ?Sized>(
 }
 
 /// Create the survivors of one chunk's consolidation, running every dedup
-/// gate against the shared run universe.
+/// gate against the shared run universe. A candidate that is created or
+/// deduped (it already exists as a task) marks its `sources` as `covered`.
 fn create_candidates<P: LlmProvider + ?Sized>(
     db: &Db,
     provider: &P,
     candidates: Vec<crate::providers::Candidate>,
+    covered: &mut [bool],
     dedup: &mut Dedup,
     st: &mut RunState,
     ctx: &EventCtx,
 ) -> Result<()> {
+    let mut cover = |sources: &[usize]| {
+        for &i in sources {
+            covered[i] = true;
+        }
+    };
     for cand in candidates {
+        if cand.sources.is_empty() {
+            warn!(target: "ptask::distill", title = %cand.title, "candidate names no source captures — it covers none");
+        }
         if dedup
             .existing
             .iter()
             .any(|(_, t)| title_similar(t, &cand.title))
         {
             st.skipped += 1;
+            cover(&cand.sources);
             info!(target: "ptask::distill", title = %cand.title, "dedup skip (jaccard)");
             continue;
         }
@@ -455,6 +510,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         {
             Ok(true) => {
                 st.skipped += 1;
+                cover(&cand.sources);
                 info!(target: "ptask::distill", title = %cand.title, "dedup skip (temporal)");
                 continue;
             }
@@ -473,6 +529,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             }) if score >= crate::semantic_dedup::DEFAULT_THRESHOLD => {
                 let (dup_id, dup_title) = dedup.existing[idx].clone();
                 st.skipped += 1;
+                cover(&cand.sources);
                 info!(
                     target: "ptask::distill",
                     title = %cand.title,
@@ -541,6 +598,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         }
         dedup.existing.push((created.id, title));
         st.created += 1;
+        cover(&cand.sources);
     }
     Ok(())
 }
@@ -806,10 +864,12 @@ mod tests {
         fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
             Ok(items
                 .iter()
-                .map(|t| Candidate {
+                .enumerate()
+                .map(|(i, t)| Candidate {
                     title: t.clone(),
                     priority: 2,
                     description: String::new(),
+                    sources: vec![i],
                 })
                 .collect())
         }
@@ -867,10 +927,12 @@ mod tests {
             }
             Ok(items
                 .iter()
-                .map(|text| Candidate {
+                .enumerate()
+                .map(|(i, text)| Candidate {
                     title: text.clone(),
                     priority: 2,
                     description: String::new(),
+                    sources: vec![i],
                 })
                 .collect())
         }
@@ -950,11 +1012,13 @@ mod tests {
                     title: "Email Alan about the GPU quote".into(),
                     priority: 3,
                     description: String::new(),
+                    sources: vec![],
                 },
                 Candidate {
                     title: "Book the Reykjavik flight".into(),
                     priority: 2,
                     description: "carry-on only".into(),
+                    sources: vec![],
                 },
             ],
         };
@@ -1089,6 +1153,7 @@ mod tests {
                 title: "Call the supplier".into(),
                 priority: 3,
                 description: String::new(),
+                sources: vec![],
             }],
         };
 
@@ -1170,6 +1235,100 @@ mod tests {
             "only the poison row is left"
         );
         assert_eq!(attempts(&db, "REDACTED trips the safety filter"), 1);
+    }
+
+    /// Regression (DIST-1): the consolidate prompt capped output at "1-4
+    /// tasks" (and the code at 8) while the whole chunk of up to 25 kept
+    /// captures was marked processed — every commitment past the cap was
+    /// silently lost. Kept captures are now consumed only when a candidate
+    /// covers them; the rest go round again.
+    #[test]
+    fn captures_past_the_consolidation_cap_are_not_lost() {
+        /// Emits one candidate per item, but never more than four.
+        struct CappedProvider;
+        impl LlmProvider for CappedProvider {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                Ok(PoisonProvider { poison: "\u{0}" }
+                    .consolidate(items)?
+                    .into_iter()
+                    .take(4)
+                    .collect())
+            }
+            fn preflight(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "capped-test"
+            }
+        }
+        let (_dir, db) = fresh_db();
+        let texts: Vec<String> = [
+            "call the bank about the mandate",
+            "book the Reykjavik flight",
+            "renew the office lease",
+            "email Alan the revised quote",
+            "file the VAT return",
+            "order replacement fans for the rack",
+            "send the board pack to Sigrid",
+            "cancel the unused colo cross-connect",
+            "update the insurance policy address",
+            "pay the electricity bill",
+        ]
+        .map(String::from)
+        .to_vec();
+        for t in &texts {
+            ptask_core::raw_items::insert(&db, t, "test", "test://x").unwrap();
+        }
+
+        let report = run_native(&db, &CappedProvider, 100).unwrap();
+        assert_eq!(report.created, 10, "every kept commitment became a task");
+        assert_eq!(report.consumed, 10);
+        assert_eq!(report.kept, 10);
+        assert_eq!(report.failed, 0);
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 0);
+    }
+
+    /// A kept capture no candidate covers is retained, not consumed, even when
+    /// its neighbours were covered — and it is charged only once isolated.
+    #[test]
+    fn an_uncovered_capture_is_retained_while_covered_ones_are_consumed() {
+        struct SkipsOne;
+        impl LlmProvider for SkipsOne {
+            fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+                PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+            }
+            fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+                Ok(PoisonProvider { poison: "\u{0}" }
+                    .consolidate(items)?
+                    .into_iter()
+                    .filter(|c| !c.title.contains("IGNORED"))
+                    .collect())
+            }
+            fn preflight(&self) -> Result<()> {
+                Ok(())
+            }
+            fn name(&self) -> &'static str {
+                "skips-one-test"
+            }
+        }
+        let (_dir, db) = fresh_db();
+        seed_inbox(
+            &db,
+            &[
+                "call the bank about the mandate",
+                "IGNORED commitment the model drops",
+                "renew the office lease",
+            ],
+        );
+        let report = run_native(&db, &SkipsOne, 100).unwrap();
+        assert_eq!(report.created, 2);
+        assert_eq!(report.consumed, 2);
+        assert_eq!(report.failed, 1);
+        assert_eq!(ptask_core::raw_items::unprocessed_count(&db).unwrap(), 1);
+        assert_eq!(attempts(&db, "IGNORED commitment the model drops"), 1);
     }
 
     /// Regression (DIST-5): a 429/5xx/timeout was charged to the captures as
@@ -1285,6 +1444,7 @@ mod tests {
                 title: "Call the supplier".into(),
                 priority: 3,
                 description: String::new(),
+                sources: vec![],
             }],
         };
         db.with_conn(|c| {
@@ -1367,6 +1527,7 @@ mod tests {
                 title: "Renew the office lease".into(),
                 priority: 2,
                 description: String::new(),
+                sources: vec![],
             }],
         };
 

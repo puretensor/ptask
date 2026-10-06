@@ -134,12 +134,19 @@ raw item is consumed.
 The batch is sent to the provider in chunks of 25, not in one call. A chunk
 the provider cannot classify is halved until the offending row is alone, so
 one unprocessable capture no longer takes its whole batch down — every other
-chunk still lands and is marked processed. A consolidation that returns no
-candidates for captures classified as commitments uses the same isolation
-and retry path. Those captures remain unprocessed and are quarantined after
-three failed attempts, so empty provider output cannot block newer captures
-indefinitely. Noise in a failed chunk is reclassified during bisection and
-counted as consumed only once.
+chunk still lands and is marked processed.
+
+Consolidation output is not capped: the model is asked for one task per
+distinct commitment, and each task names the input captures it covers
+(`sources`). A kept capture is marked processed only when a created or
+deduplicated task covers it. Kept captures the model left uncovered are
+walked again as a smaller chunk in the same run, so a model that stops early
+or merges too eagerly cannot make a commitment disappear. A consolidation
+that covers none of the captures classified as commitments uses the same
+isolation and retry path as a provider failure. Those captures remain
+unprocessed and are quarantined after three failed attempts, so empty
+provider output cannot block newer captures indefinitely. Noise in a failed
+chunk is reclassified during bisection and counted as consumed only once.
 
 Each capture is capped at 4,000 characters in the prompt (`MAX_ITEM_CHARS`),
 with a visible `[… N chars truncated]` marker, so one very long email cannot
