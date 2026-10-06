@@ -38,6 +38,10 @@ const MAX_ENCODED_LAYERS: usize = 2;
 /// unencoded chain under EMAIL_BODY_LIMIT nests ~60k deep before the depth
 /// check can refuse it (a debug build drops that in under 32 MiB).
 const PARSE_STACK_BYTES: usize = 64 << 20;
+/// Concurrent parses allowed. Probing a body at the size limit costs ~40
+/// MiB (plus the stack above), and 128 unbounded parallel parses reached
+/// 4.7 GiB RSS; beyond this a sender gets 503 with Retry-After.
+pub const MAX_CONCURRENT_PARSES: usize = 4;
 
 pub fn router() -> Router<AppState> {
     Router::new().route(
@@ -57,8 +61,24 @@ async fn email(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
-    crate::blocking::db_response(move || email_blocking(state, headers, body)).await
+) -> axum::response::Response {
+    // Saturated: tell the sender to retry rather than queue parses behind
+    // each other. The permit moves into the blocking task, so a client that
+    // disconnects mid-parse does not free it early.
+    let Ok(permit) = state.email_parses.clone().try_acquire_owned() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, "5")],
+            Json(serde_json::json!({"error": "too many emails being parsed; retry"})),
+        )
+            .into_response();
+    };
+    crate::blocking::db_response(move || {
+        let _permit = permit;
+        email_blocking(state, headers, body)
+    })
+    .await
+    .into_response()
 }
 
 /// The fields a capture keeps, owned so the parsed tree can be dropped on

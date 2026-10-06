@@ -168,7 +168,9 @@ subject/body into one `raw_items` row with `source_type="email"`. Bodies over
 2 MiB get 413. An embedded message in base64 or quoted-printable (which RFC
 2046 forbids but Exchange-style gateways send) is decoded and checked like
 any other; more than 2 such encoded layers, or embedded messages nested more
-than 32 deep counting decoded ones, get 400 and nothing is stored. Returns:
+than 32 deep counting decoded ones, get 400 and nothing is stored. At most 4
+messages are parsed at once; beyond that the answer is 503 with
+`Retry-After: 5`. Returns:
 
 ```json
 { "id": 123, "subject": "Subject line", "source_file": "email:<message-id>" }

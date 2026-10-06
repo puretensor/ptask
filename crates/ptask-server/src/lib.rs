@@ -36,6 +36,8 @@ pub struct AppState {
     pub tg_approval_buttons: bool,
     /// Failed-Basic-auth lockout for the dashboard routes.
     pub dash_throttle: Arc<routes::dashboard::BasicThrottle>,
+    /// Permits for concurrent POST /email parses.
+    pub email_parses: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -49,6 +51,9 @@ impl AppState {
             tg_forwarders: Arc::new(vec!["nexus".into()]),
             tg_approval_buttons: false,
             dash_throttle: Arc::default(),
+            email_parses: Arc::new(tokio::sync::Semaphore::new(
+                routes::email::MAX_CONCURRENT_PARSES,
+            )),
         }
     }
 
@@ -2293,6 +2298,50 @@ Don't forget the sourdough.\r\n";
              Content-Type: text/plain\r\n\r\nplease handle {tag}\r\n--b\r\n{part}--b--\r\n"
         )
         .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn email_parses_are_bounded_and_overflow_is_503() {
+        // Round-2 SRV-2: /email parses were unbounded; a 1.95 MB nested
+        // body costs ~40 MiB to probe, and 128 in parallel reached 4.7 GiB
+        // RSS. Parses now take a permit; with none free the answer is 503.
+        let state = AppState::new(open_test_db(), Default::default(), Default::default());
+        let app = router(state.clone());
+        let held = state
+            .email_parses
+            .clone()
+            .acquire_many_owned(routes::email::MAX_CONCURRENT_PARSES as u32)
+            .await
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/email")
+                    .method("POST")
+                    .body(Body::from(
+                        "Subject: busy\r\nMessage-ID: <busy@x>\r\n\r\nhi\r\n",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(resp.headers().contains_key("retry-after"));
+        drop(held);
+        assert_eq!(
+            post_email(
+                &app,
+                b"Subject: free\r\nMessage-ID: <free@x>\r\n\r\nhi\r\n".to_vec()
+            )
+            .await,
+            StatusCode::CREATED
+        );
+        // Every permit is back once the parse finished.
+        assert_eq!(
+            state.email_parses.available_permits(),
+            routes::email::MAX_CONCURRENT_PARSES
+        );
     }
 
     #[tokio::test]
