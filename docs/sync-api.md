@@ -192,8 +192,13 @@ HMAC verification: the secret comes from `PTASK_GITEA_WEBHOOK_SECRET` /
 ## Outbound webhooks
 
 Configure `PTASK_WEBHOOK_URLS=<url1>,<url2>` and `PTASK_WEBHOOK_SECRET` for HMAC-signed POSTs
-on task events such as `task.created`, `task.completed`, and
-`task.recurrence_advanced`.
+of the events produced by applied `/sync` commands (`task.created`,
+`task.completed`, `task.recurrence_advanced`, `task.updated`,
+`task.deleted`, ...; replays are not re-sent) and by `/webhook/{gitea,github}`
+auto-closes. Nothing else is pushed: writes from the CLI, TUI, bot,
+dashboard, MCP mount, timers and other routes reach `pt_event_log` (and so
+`/sync` deltas) but not the webhook. Treat a push as a hint and `/sync` as
+the complete feed.
 Logged to `pt_webhook_log`. Signature header: `X-Ptask-Signature: sha256=<hex>`.
 
 Body:
