@@ -105,7 +105,12 @@ over wait for the next hourly run.
 Only one run distills at a time. For its whole duration a run holds an
 exclusive `flock` on the database's directory (e.g. `~/puretensor-tasks/`),
 opened read-only. A concurrent `pt distill` prints `distill skipped`, consumes
-nothing, records no event and exits 0. Every user who can open the database
+nothing, records a `distill.skipped` event (holder unknown: flock does not say
+who holds it) and exits 0. Anyone who can read the directory can hold that
+lock, including another database's distill in the same directory, so the
+third consecutive skipped run, counted by event history, exits non-zero and
+fires the unit's OnFailure alert. A completed run resets the count. Every user
+who can open the database
 can open its directory, so a `sudo pt distill` and the timer user always
 contend on the same object. The kernel drops the lock when the holder exits or
 is killed, so a crashed run never blocks the next one.

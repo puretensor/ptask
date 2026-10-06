@@ -3786,13 +3786,16 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
             Ok(())
         }
         Err(e) if e.is::<ptask_distill::pipeline::DistillBusy>() => {
-            // Another run (usually the timer) is already distilling. Nothing
-            // was consumed and nothing failed, so no `distill.failed` event.
+            // Another holder has the run lock (usually the timer). Nothing was
+            // consumed; the library recorded `distill.skipped`.
             println!(
                 "{}",
                 ui::section("distill skipped", ui::Ink::Slate, &e.to_string())
             );
-            Ok(())
+            match e.downcast_ref::<ptask_distill::pipeline::DistillBusy>() {
+                Some(busy) => distill_skip_verdict(busy),
+                None => Ok(()),
+            }
         }
         Err(e) => {
             ptask_distill::pipeline::record_failure(db, provider_name, &e);
@@ -3815,6 +3818,28 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
             anyhow::bail!("distill native FAILED (fail closed): {e:#}")
         }
     }
+}
+
+/// Consecutive skipped runs after which `pt distill` exits non-zero.
+const MAX_CONSECUTIVE_DISTILL_SKIPS: usize = 3;
+
+/// Exit status of a skipped run: fine once or twice (a manual run overlapping
+/// the timer), a failure from the third consecutive skip on. Anyone who can
+/// read the database directory can hold the lock (another database's
+/// distill in the same directory, a stray process), and a silent exit 0
+/// would hide that forever.
+fn distill_skip_verdict(busy: &ptask_distill::pipeline::DistillBusy) -> Result<()> {
+    if busy.consecutive_skips >= MAX_CONSECUTIVE_DISTILL_SKIPS {
+        anyhow::bail!(
+            "distill skipped {} consecutive runs — the run lock on {} is held by \
+             another process (another distill, or another database's distill in the \
+             same directory); find it with `fuser -v {}` or move the database",
+            busy.consecutive_skips,
+            busy.lock,
+            busy.lock
+        );
+    }
+    Ok(())
 }
 
 fn cmd_distill(db: &Db, a: DistillArgs) -> Result<()> {
@@ -3845,6 +3870,21 @@ fn cmd_backfill(db: &Db) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Regression (round 5): a held run lock made every `pt distill` skip
+    /// with exit 0, forever. Three consecutive skips now fail the unit so
+    /// the OnFailure alert fires.
+    #[test]
+    fn three_consecutive_distill_skips_exit_non_zero() {
+        let busy = |n| ptask_distill::pipeline::DistillBusy {
+            lock: "/srv/pt".into(),
+            consecutive_skips: n,
+        };
+        super::distill_skip_verdict(&busy(1)).unwrap();
+        super::distill_skip_verdict(&busy(2)).unwrap();
+        let err = super::distill_skip_verdict(&busy(3)).unwrap_err();
+        assert!(err.to_string().contains("3 consecutive"), "{err:#}");
+    }
+
     /// Regression (round 2, DIST-8): during quiet hours (22:00-08:00 London)
     /// the command returned Ok before the email-misconfiguration bail, so a
     /// bad address exited 0 for ten hours a day.

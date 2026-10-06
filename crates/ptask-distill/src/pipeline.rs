@@ -1148,16 +1148,22 @@ pub fn run_native<P: LlmProvider + ?Sized>(
     run_native_within(db, provider, batch, RUN_WALL_BUDGET)
 }
 
-/// Another distill run holds the run lock; this one consumed nothing.
+/// Another holder has the run lock; this run consumed nothing.
 #[derive(Debug)]
-pub struct DistillBusy(pub String);
+pub struct DistillBusy {
+    /// The locked directory.
+    pub lock: String,
+    /// Consecutive runs (this one included) that ended skipped, by
+    /// `distill.skipped` event history. 0 when not recorded.
+    pub consecutive_skips: usize,
+}
 
 impl std::fmt::Display for DistillBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "another distill run is already running (lock {}) — nothing consumed",
-            self.0
+            self.lock
         )
     }
 }
@@ -1260,7 +1266,10 @@ fn lock_directory_with(
     }
     match handle.try_lock() {
         Ok(()) => Ok(handle),
-        Err(std::fs::TryLockError::WouldBlock) => Err(anyhow::Error::new(DistillBusy(shown))),
+        Err(std::fs::TryLockError::WouldBlock) => Err(anyhow::Error::new(DistillBusy {
+            lock: shown,
+            consecutive_skips: 0,
+        })),
         Err(std::fs::TryLockError::Error(e)) => {
             Err(anyhow::Error::new(e).context(format!("flock distill lock directory {shown}")))
         }
@@ -1321,7 +1330,14 @@ fn run_native_within<P: LlmProvider + ?Sized>(
     let start = std::time::Instant::now();
     let ctx = EventCtx::system("distill");
     // Held until this function returns (dropping the File unlocks it).
-    let _run_lock = acquire_run_lock(db)?;
+    let _run_lock = match acquire_run_lock(db) {
+        Ok(lock) => lock,
+        Err(e) => {
+            let mut busy = e.downcast::<DistillBusy>()?;
+            busy.consecutive_skips = record_skip(db, &ctx, &busy.lock);
+            return Err(anyhow::Error::new(busy));
+        }
+    };
 
     provider
         .preflight()
@@ -1475,6 +1491,39 @@ fn run_native_within<P: LlmProvider + ?Sized>(
         "native distill run complete"
     );
     Ok(report)
+}
+
+/// Record a `distill.skipped` event and return how many consecutive runs,
+/// this one included, ended skipped. Anyone who can read the database
+/// directory can hold the lock (including another database's distill in the
+/// same directory), so a skip must leave a trace and a streak must
+/// eventually fail loudly rather than exit 0 forever. Best effort: a
+/// database error here reports 1.
+fn record_skip(db: &Db, ctx: &EventCtx, lock: &str) -> usize {
+    let payload = serde_json::json!({
+        "native": true,
+        "lock": lock,
+        // flock does not say who holds it.
+        "holder": "unknown",
+    });
+    let uuid = format!("distill-skipped:{}", uuid::Uuid::new_v4());
+    if let Err(e) = event_log::record(db, &uuid, None, "distill.skipped", &payload, ctx) {
+        warn!(target: "ptask::distill", error = %e, "could not record distill.skipped");
+        return 1;
+    }
+    db.with_conn(|c| {
+        let mut stmt = c.prepare(
+            "SELECT event_type FROM pt_event_log
+              WHERE event_type IN ('distill.run', 'distill.failed', 'distill.skipped')
+              ORDER BY id DESC LIMIT 100",
+        )?;
+        let types = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(types.iter().take_while(|t| *t == "distill.skipped").count())
+    })
+    .unwrap_or(1)
+    .max(1)
 }
 
 /// Runs in which a capture's server-error charge was deferred.
@@ -2523,6 +2572,46 @@ mod tests {
         let err = lock_directory_with(&real, denied).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("readable"), "no remedy named: {msg}");
+    }
+
+    /// Regression (round 5): anyone who can read the database directory —
+    /// including another database's distill in the same directory — could
+    /// hold the lock and make every run skip with exit 0, forever and
+    /// unseen. Each skip is now recorded as `distill.skipped`, and the
+    /// consecutive-skip count (by event history) is reported so the CLI can
+    /// fail the unit after three in a row.
+    #[test]
+    fn skipped_runs_are_recorded_and_counted() {
+        let (dir, db) = fresh_db();
+        seed_inbox(&db, &["call the bank about the mandate"]);
+        let holder = std::fs::File::open(dir.path()).unwrap();
+        holder.lock().unwrap();
+        for expected in 1..=3 {
+            let err = run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100).unwrap_err();
+            let busy = err.downcast_ref::<DistillBusy>().expect("busy");
+            assert_eq!(busy.consecutive_skips, expected);
+        }
+        let skipped: i64 = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM pt_event_log WHERE event_type='distill.skipped'
+                       AND json_extract(payload, '$.holder') = 'unknown'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(skipped, 3);
+        drop(holder);
+        run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100).unwrap();
+        // A completed run resets the streak.
+        let holder = std::fs::File::open(dir.path()).unwrap();
+        holder.lock().unwrap();
+        let err = run_native(&db, &PoisonProvider { poison: "\u{0}" }, 100).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<DistillBusy>().unwrap().consecutive_skips,
+            1
+        );
     }
 
     /// In-memory databases take no lock (private to the process); `file:`
