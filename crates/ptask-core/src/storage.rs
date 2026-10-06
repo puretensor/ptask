@@ -289,4 +289,31 @@ mod tests {
         assert!(msg.contains("newer pt"), "{msg}");
         assert!(msg.contains("docs/operations.md"), "{msg}");
     }
+
+    #[test]
+    fn concurrent_first_opens_all_migrate_cleanly() {
+        // CORE-12: refinery reads the applied set and applies the pending
+        // migrations in separate transactions, so two processes opening a
+        // freshly deployed DB at once both tried to apply the same
+        // migration; the loser failed once with "duplicate column name".
+        for round in 0..8 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("race.db");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        Db::open(&path).map(drop).map_err(|e| e.to_string())
+                    })
+                })
+                .collect();
+            for h in handles {
+                let r = h.join().unwrap();
+                assert!(r.is_ok(), "round {round}: {r:?}");
+            }
+        }
+    }
 }
