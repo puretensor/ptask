@@ -24,6 +24,11 @@
 //!   3 → 4  ≥ 2 days at level 3
 //!   4 → 5  ≥ 7 days at level 4
 //!
+//! A level whose channels are all unconfigured uses whichever channel is
+//! configured instead (level 5 goes to Telegram on a Telegram-only install;
+//! levels 1-2 go to email on an email-only one), so the ladder never stalls
+//! on a channel that does not exist.
+//!
 //! A new level is persisted only once its notice is delivered on some
 //! channel, so a dead or unconfigured channel cannot walk a task up the
 //! ladder unseen, and a failed level-5 email is retried rather than lost.
@@ -215,12 +220,35 @@ fn can_remind(task: &EligibleTask, now: &Zoned) -> bool {
     delta >= MIN_HOURS_BETWEEN_TASK_REMINDERS * 3600
 }
 
-fn channels_for(level: i64) -> &'static [&'static str] {
-    match level {
+/// Channels a level is delivered on. A level whose channels are all
+/// unconfigured falls back to the configured one: level 5 is email-only,
+/// so with email unset its notice could never be delivered, the level never
+/// persisted, and the task went silent; likewise Telegram-only levels on an
+/// email-only install. With nothing configured the ladder's own list is
+/// returned and nothing is sent.
+fn channels_for(level: i64, cfg: &DispatchCfg) -> Vec<&'static str> {
+    let ladder: &[&'static str] = match level {
         1 | 2 => &["telegram"],
         3 | 4 => &["telegram", "email"],
         5 => &["email"],
         _ => &[],
+    };
+    let configured = |c: &&str| match *c {
+        "telegram" => cfg.telegram_configured(),
+        "email" => cfg.email_configured(),
+        _ => false,
+    };
+    if ladder.is_empty() || ladder.iter().any(configured) {
+        return ladder.to_vec();
+    }
+    let fallback: Vec<&'static str> = ["telegram", "email"]
+        .into_iter()
+        .filter(configured)
+        .collect();
+    if fallback.is_empty() {
+        ladder.to_vec()
+    } else {
+        fallback
     }
 }
 
@@ -498,7 +526,7 @@ pub async fn run_check_at<D: Dispatch>(
             continue;
         }
 
-        let channels = channels_for(level_after_transition);
+        let channels = channels_for(level_after_transition, cfg);
         let telegram_only = channels == ["telegram"];
         if telegram_only && sent_telegrams >= telegram_remaining {
             continue;
@@ -529,7 +557,7 @@ pub async fn run_check_at<D: Dispatch>(
             ..Default::default()
         };
 
-        for channel in channels {
+        for channel in &channels {
             let ok = match *channel {
                 "telegram" => {
                     if sent_telegrams >= telegram_remaining
@@ -1344,6 +1372,50 @@ mod tests {
             .await
             .unwrap();
         assert!(again.dispatched.is_empty());
+    }
+
+    /// Regression (DIST-13): level 5 is email-only, so with email
+    /// unconfigured the 4 → 5 notice could never be delivered, the level
+    /// never persisted, and the task went silent for good. Likewise a
+    /// Telegram-only level with only email configured.
+    #[tokio::test]
+    async fn a_level_falls_back_to_the_configured_channel() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        let task_uuid = aged_task_before(&db, "final notice, telegram only", 30, &anchor);
+        let long_ago =
+            crate::dates::format_iso(&anchor.checked_sub(jiff::Span::new().hours(8 * 24)).unwrap());
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET escalation_level=4, last_reminded=?1, level_changed_at=?1
+                 WHERE id=?2",
+                params![long_ago, &task_uuid],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let telegram_only = DispatchCfg {
+            telegram_token: Some("test".into()),
+            telegram_chat_id: Some(1),
+            ..Default::default()
+        };
+        let report = run_check_at(&db, &telegram_only, &SendOk, &anchor)
+            .await
+            .unwrap();
+        assert_eq!(report.dispatched.len(), 1, "level 5 must reach Telegram");
+        assert_eq!(report.dispatched[0].level, 5);
+        assert!(report.dispatched[0].telegram_sent);
+        assert_eq!(level_and_updated_at(&db, &task_uuid).0, 5);
+        assert_eq!(report.budget_used_after, 1, "the fallback is budgeted");
+
+        let (_dir, db) = fresh_db();
+        aged_task_before(&db, "first reminder, email only", 2, &anchor);
+        let report = run_check_at(&db, &email_cfg(), &SendOk, &anchor)
+            .await
+            .unwrap();
+        assert_eq!(report.dispatched.len(), 1, "level 1 must reach email");
+        assert!(report.dispatched[0].email_sent);
+        assert!(!report.dispatched[0].telegram_sent);
     }
 
     /// Records every Telegram body it is asked to send.

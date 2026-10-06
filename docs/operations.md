@@ -232,6 +232,11 @@ It walks the 6-level escalation state machine, gates on the 22:00 — 08:00 UTC
 quiet window, respects a daily Telegram budget of 3, and enforces a 4-hour
 cooldown per task between reminders.
 
+A level whose channels are all unconfigured falls back to the configured
+channel: on a Telegram-only install the level-5 final notice goes to Telegram
+(budgeted like any Telegram nudge); on an email-only install levels 1-2 go to
+email.
+
 Each SMTP send is bounded at 30 s end to end (connect through DATA); a
 stalled mail server counts as a failed email send instead of hanging the run.
 
