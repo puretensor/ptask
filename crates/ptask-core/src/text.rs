@@ -70,19 +70,19 @@ pub fn is_hazard(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t') || is_bidi_control(c) || is_invisible(c)
 }
 
-/// True when `text` holds a hazard beyond tab expansion and CRLF line ends —
-/// so what is displayed differs from what is stored.
+/// True when `text` holds a hazard beyond tab expansion, CRLF line ends and
+/// a lone presentation selector on a pictograph (❤️) — so what is displayed
+/// differs from what is stored. Matches what [`sanitize_strict`] replaces.
 pub fn has_hazard(text: &str) -> bool {
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\r' && chars.peek() == Some(&'\n') {
-            continue;
-        }
-        if is_hazard(c) {
-            return true;
-        }
+    if !text.chars().any(is_hazard) {
+        return false;
     }
-    false
+    let chars: Vec<char> = text.chars().collect();
+    chars.iter().enumerate().any(|(i, &c)| {
+        is_hazard(c)
+            && !(c == '\r' && chars.get(i + 1) == Some(&'\n'))
+            && !presentation_selector_ok(&chars, i)
+    })
 }
 
 /// A pictograph that may carry a VS15/VS16 or sit on either side of a
@@ -114,8 +114,9 @@ fn is_pictograph(c: char) -> bool {
 const VS15: char = '\u{FE0E}';
 const VS16: char = '\u{FE0F}';
 
-/// General display keeps exactly one VS15/VS16 straight after a pictograph
-/// (❤️, ☺︎), or a VS16 in a keycap (1️⃣); every other selector shows.
+/// Both display modes keep exactly one VS15/VS16 straight after a
+/// pictograph (❤️, ☺︎), or a VS16 in a keycap (1️⃣); every other selector,
+/// including a second one in a run, shows and is flagged.
 fn presentation_selector_ok(chars: &[char], i: usize) -> bool {
     let c = chars[i];
     if c != VS15 && c != VS16 {
@@ -143,10 +144,10 @@ fn joining_zwj_ok(chars: &[char], i: usize) -> bool {
 }
 
 /// Shared walk behind [`sanitize`], [`one_line`] and [`sanitize_strict`].
-/// `emoji` lets a joining ZWJ and one presentation selector per pictograph
-/// through (👨‍👩‍👧, 🏳️‍🌈, ❤️): they only shape glyphs and hide nothing in a
-/// task list. Strict mode shows them all.
-fn clean(text: &str, fold_lines: bool, emoji: bool) -> Cow<'_, str> {
+/// One presentation selector per pictograph always passes (❤️). `zwj` also
+/// lets a joining ZWJ through (👨‍👩‍👧, 🏳️‍🌈): it only shapes glyphs and hides
+/// nothing in a task list. Strict mode shows every ZWJ.
+fn clean(text: &str, fold_lines: bool, zwj: bool) -> Cow<'_, str> {
     let needs = |c: char| c == '\t' || (fold_lines && c == '\n') || is_hazard(c);
     if !text.chars().any(needs) {
         return Cow::Borrowed(text);
@@ -165,8 +166,8 @@ fn clean(text: &str, fold_lines: bool, emoji: bool) -> Cow<'_, str> {
                 }
             }
             '\r' | '\n' | '\u{2028}' | '\u{2029}' if fold_lines => out.push(LINE_MARK),
-            '\u{200D}' if emoji && joining_zwj_ok(&chars, i) => out.push(c),
-            VS15 | VS16 if emoji && presentation_selector_ok(&chars, i) => out.push(c),
+            '\u{200D}' if zwj && joining_zwj_ok(&chars, i) => out.push(c),
+            VS15 | VS16 if presentation_selector_ok(&chars, i) => out.push(c),
             c if is_hazard(c) => out.push(STAND_IN),
             c => out.push(c),
         }
@@ -185,9 +186,9 @@ pub fn sanitize(text: &str) -> Cow<'_, str> {
     clean(text, false, true)
 }
 
-/// Like [`sanitize`] but every ZWJ and variation selector shows as U+FFFD
-/// too: for text whose exact bytes matter (an approval preview), where
-/// nothing invisible may pass.
+/// Like [`sanitize`] but every ZWJ shows as U+FFFD too (a lone VS15/VS16 on
+/// a pictograph still passes; every other selector shows): for text whose
+/// exact bytes matter (an approval preview).
 pub fn sanitize_strict(text: &str) -> Cow<'_, str> {
     clean(text, false, false)
 }
@@ -291,17 +292,27 @@ mod tests {
             );
             assert!(out.starts_with("pay 10 GBP to alice 😀\u{fffd}"), "{out:?}");
         }
-        // General display keeps exactly one VS15/VS16 straight after a
-        // pictograph (and a keycap); strict mode shows every selector.
+        // Both modes keep exactly one VS15/VS16 straight after a pictograph
+        // (and a keycap VS16): an ordinary ❤️ is benign, even in an
+        // approval preview.
         for ok in [
-            "ok \u{2764}\u{fe0f} \u{263a}\u{fe0e}",
+            "thanks \u{2764}\u{fe0f}",
+            "ok \u{2764}\u{fe0f} \u{2600}\u{fe0f} \u{2714}\u{fe0f} \u{263a}\u{fe0e}",
             "1\u{fe0f}\u{20e3}",
-            "🏳\u{fe0f}\u{200d}🌈",
         ] {
             assert_eq!(sanitize(ok), ok, "{ok:?}");
-            assert!(sanitize_strict(ok).contains(STAND_IN), "{ok:?}");
-            assert!(has_hazard(ok), "{ok:?}");
+            assert_eq!(sanitize_strict(ok), ok, "{ok:?}");
+            assert!(!has_hazard(ok), "{ok:?}");
         }
+        // A ZWJ stays visible and flagged in strict mode.
+        let flag = "🏳\u{fe0f}\u{200d}🌈";
+        assert_eq!(sanitize(flag), flag);
+        assert_eq!(sanitize_strict(flag), "🏳\u{fe0f}\u{fffd}🌈");
+        assert!(has_hazard(flag));
+        // A second selector in a run is flagged in both modes.
+        let two = "\u{2764}\u{fe0f}\u{fe0f}";
+        assert!(has_hazard(two));
+        assert_eq!(sanitize_strict(two), "\u{2764}\u{fe0f}\u{fffd}");
         for bad in [
             "x\u{fe0f}",                // after a letter
             "\u{2764}\u{fe0f}\u{fe0f}", // a second selector

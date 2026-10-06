@@ -105,11 +105,12 @@ Local CLI (`pt approve` / `pt reject` / `pt approval decide`):
 - what counts: control characters other than LF/tab/CRLF, bidi controls,
   every Unicode format (Cf) character — **including a ZWJ (U+200D) and a
   soft hyphen (U+00AD)** — the line/paragraph separators, blank Hangul
-  fillers, and **every variation selector** (U+FE00–FE0F, U+E0100–E01EF,
-  the "emoji smuggling" carrier). The preview is shown strictly: unlike task
-  lists, it does not keep emoji joiners or VS16. So an ordinary email body
-  with a family emoji (👨‍👩‍👧), a coloured emoji such as ❤️, or a soft
-  hyphen also needs `--force` after inspection.
+  fillers, and variation selectors (U+FE00–FE0F, U+E0100–E01EF, the
+  "emoji smuggling" carrier) **except** exactly one VS15/VS16 directly after
+  a pictograph or in a keycap. So a lone VS16 emoji such as ❤️, ☀️ or ✔️ in
+  an email body needs no `--force`, while a second selector in a run, any
+  other selector, a ZWJ sequence such as a family emoji (👨‍👩‍👧) — the
+  preview never keeps joiners — or a soft hyphen still does.
 
 HTTP `POST /api/approvals/{id}/decide` requires **admin** scope;
 `decided_via=api`. Write-scope tokens may request and withdraw (own rows

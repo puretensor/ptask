@@ -539,6 +539,33 @@ fn variation_selector_smuggling_is_flagged_everywhere() {
     );
     let out = pt.run_as("operator", &["approve", "AP-1", "--via", "dashboard"]);
     assert_eq!(out.status.code(), Some(7));
+
+    // A lone VS16 emoji is ordinary text: no warning, no --force.
+    let heart = pt.dir.path().join("heart.txt");
+    std::fs::write(&heart, "thanks \u{2764}\u{fe0f}\n").unwrap();
+    pt.ok_as(
+        "agent",
+        &[
+            "approval",
+            "request",
+            "--kind",
+            "email",
+            "--title",
+            "Thanks",
+            "--payload-file",
+            heart.to_str().unwrap(),
+        ],
+    );
+    let shown = pt.ok_as("operator", &["--no-color", "approval", "show", "AP-2"]);
+    assert!(shown.contains("thanks \u{2764}\u{fe0f}"), "{shown}");
+    assert!(!shown.contains("cat -v"), "{shown}");
+    let out = pt.run_as("operator", &["approve", "AP-2", "--via", "dashboard"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Not-found errors echo the query: a newline in it must not print a
