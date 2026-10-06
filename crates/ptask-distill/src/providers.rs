@@ -544,15 +544,22 @@ impl std::error::Error for CallError {}
 /// will not recover within this run: abort it instead of burning budget.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
+/// `Retry-After` in either RFC 9110 form: delta-seconds or an HTTP-date
+/// (a date already past means "now").
 fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    headers
+    let value = headers
         .get(reqwest::header::RETRY_AFTER)?
         .to_str()
         .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(Duration::from_secs)
+        .trim();
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let at = jiff::fmt::rfc2822::DateTimeParser::new()
+        .parse_timestamp(value)
+        .ok()?;
+    let wait = at.duration_since(jiff::Timestamp::now());
+    Some(Duration::try_from(wait).unwrap_or(Duration::ZERO))
 }
 
 /// Shared retry loop: retries transient failures on the backoff schedule
@@ -1323,6 +1330,36 @@ mod tests {
 
     const OK_CLASSIFY: &str =
         r#"{"choices":[{"message":{"content":"[{\"idx\":0,\"keep\":true}]"}}]}"#;
+
+    /// Regression (round 2, DIST-5): only the delta-seconds form of
+    /// Retry-After was understood; the HTTP-date form (RFC 9110) fell back to
+    /// the 250ms backoff, straight back into the rate limit.
+    #[test]
+    fn retry_after_http_date_is_honoured() {
+        let at = jiff::Timestamp::now()
+            .checked_add(jiff::SignedDuration::from_secs(3))
+            .unwrap();
+        let date = jiff::fmt::rfc2822::DateTimePrinter::new()
+            .timestamp_to_rfc9110_string(&at)
+            .unwrap();
+        let (url, served) = scripted_server(vec![
+            http_response(
+                "503 Service Unavailable",
+                &format!("Retry-After: {date}\r\n"),
+                "{}",
+            ),
+            http_response("200 OK", "", OK_CLASSIFY),
+        ]);
+        let provider = OpenAiCompatProvider::with_base_url(url, "m".into()).unwrap();
+        let started = std::time::Instant::now();
+        provider.classify_batch(&["I will ship it".into()]).unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(1500),
+            "retried after {:?}, ignoring Retry-After: {date}",
+            started.elapsed()
+        );
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
 
     /// Regression (DIST-5): Retry-After was ignored — a 429 was retried on
     /// the fixed 250ms/1s schedule, straight back into the rate limit.
