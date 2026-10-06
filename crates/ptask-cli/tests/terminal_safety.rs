@@ -12,10 +12,27 @@ use common::Pt;
 /// OSC 52 clipboard write, screen clear, carriage return, C1 CSI.
 const HOSTILE: &str = "\x1b]52;c;eA==\x07\x1b[2J\r\u{9b}31m";
 
-fn is_bidi_control(c: char) -> bool {
+/// Characters that render as nothing and so hide text: zero-width, word
+/// joiner, BOM, soft hyphen, Mongolian vowel separator, a tag character and
+/// the line separator.
+const INVISIBLE: &str = "zw\u{200b}j\u{2060}b\u{feff}s\u{ad}m\u{180e}t\u{e0041}l\u{2028}";
+
+/// Independent oracle (deliberately not ptask_core::text): what a terminal
+/// must never receive from untrusted text, besides control characters.
+fn is_bidi_or_invisible(c: char) -> bool {
     matches!(
         c,
-        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
+        '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{061C}'
+            | '\u{00AD}'
+            | '\u{180E}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{E0000}'..='\u{E007F}'
     )
 }
 
@@ -41,7 +58,7 @@ fn own_sgr_len(tail: &str) -> Option<usize> {
 }
 
 /// Colour off: no control character but '\n'. Colour on: additionally only
-/// the SGR sequences ui.rs emits. Never a bidi control.
+/// the SGR sequences ui.rs emits. Never a bidi or invisible character.
 fn assert_terminal_safe(label: &str, text: &str, colour: bool) {
     let mut rest = text;
     while let Some(c) = rest.chars().next() {
@@ -58,7 +75,7 @@ fn assert_terminal_safe(label: &str, text: &str, colour: bool) {
             }
         }
         assert!(
-            !(c.is_control() && c != '\n') && !is_bidi_control(c),
+            !(c.is_control() && c != '\n') && !is_bidi_or_invisible(c),
             "{label}: control character {c:?} reached the terminal in:\n{text}"
         );
         rest = &rest[c.len_utf8()..];
@@ -84,7 +101,7 @@ fn check(pt: &Pt, label: &str, args: &[&str]) {
 #[test]
 fn hostile_task_text_never_reaches_the_terminal_raw() {
     let pt = Pt::new();
-    let title = format!("Rotate key {HOSTILE} \u{202e}now");
+    let title = format!("Rotate key {HOSTILE} \u{202e}now {INVISIBLE}");
     pt.ok(&["add", "--raw", &title]); // PT-1
     pt.ok(&["add", "--raw", &format!("Rotate key {HOSTILE} later")]); // PT-2
     pt.ok(&["add", "--raw", "Ship the fix"]); // PT-3
@@ -100,9 +117,9 @@ fn hostile_task_text_never_reaches_the_terminal_raw() {
     pt.ok(&[
         "goal",
         "add",
-        &format!("Goal {HOSTILE}"),
+        &format!("Goal {HOSTILE} {INVISIBLE}"),
         "--why",
-        &format!("because {HOSTILE}"),
+        &format!("because {HOSTILE} {INVISIBLE}"),
     ]);
     pt.ok(&["goal", "link", "PT-1", "G-1"]);
     pt.ok(&["view", "save", "rot", "search: rotate"]);

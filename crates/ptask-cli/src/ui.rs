@@ -124,57 +124,12 @@ thread_local! {
 // ── Sanitising ────────────────────────────────────────────────────────────────
 
 /// Visible, width-1 stand-in for a character the terminal would act on.
-const STAND_IN: char = '\u{FFFD}';
+const STAND_IN: char = ptask_core::text::STAND_IN;
 
-fn is_bidi_control(c: char) -> bool {
-    matches!(
-        c,
-        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
-    )
-}
-
-/// A character a terminal would act on instead of showing: every control
-/// character but `\n` and `\t` (ESC, CR, BS, BEL, DEL, C1 such as U+009B
-/// CSI), and the bidi overrides, isolates and marks that reorder what follows.
-fn is_hazard(c: char) -> bool {
-    (c.is_control() && c != '\n' && c != '\t') || is_bidi_control(c)
-}
-
-/// Make untrusted text safe to print: hazardous characters become U+FFFD, a
-/// tab becomes a space, and a CRLF line end becomes `\n` (it displays the
-/// same, so it hides nothing). Borrows when there is nothing to change.
-pub fn sanitize(text: &str) -> Cow<'_, str> {
-    if !text.chars().any(|c| c == '\t' || is_hazard(c)) {
-        return Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\t' => out.push(' '),
-            '\r' if chars.peek() == Some(&'\n') => {}
-            c if is_hazard(c) => out.push(STAND_IN),
-            c => out.push(c),
-        }
-    }
-    Cow::Owned(out)
-}
-
-/// True when `text` holds something `sanitize` must neutralise beyond tab
-/// expansion and CRLF line ends — bytes a terminal would act on, so what is
-/// displayed differs from what is stored.
-pub fn has_hazard(text: &str) -> bool {
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\r' && chars.peek() == Some(&'\n') {
-            continue;
-        }
-        if is_hazard(c) {
-            return true;
-        }
-    }
-    false
-}
+/// Make untrusted text safe to print (multi-line): see
+/// [`ptask_core::text::sanitize`] — the one predicate the CLI, TUI and core
+/// errors share.
+pub use ptask_core::text::{has_hazard, sanitize};
 
 /// Length of the SGR sequence at the start of `s` if it is one this module
 /// emits outside gradients: reset, bold, dim, or a palette foreground.
@@ -946,7 +901,7 @@ mod tests {
                 continue;
             }
             assert!(
-                !(c.is_control() && c != '\n') && !is_bidi_control(c),
+                !(c.is_control() && c != '\n') && !ptask_core::text::is_hazard(c),
                 "{label}: {c:?} in {s:?}"
             );
             rest = &rest[c.len_utf8()..];

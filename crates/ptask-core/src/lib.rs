@@ -31,6 +31,7 @@ pub mod scoring;
 pub mod status;
 pub mod storage;
 pub mod tasks;
+pub mod text;
 pub mod tokens;
 pub mod views;
 pub mod webhook_log;
