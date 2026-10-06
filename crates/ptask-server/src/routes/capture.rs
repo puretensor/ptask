@@ -817,6 +817,7 @@ mod tests {
             actor: "hal".into(),
             source: "mcp".into(),
             event_uuid: None,
+            command: None,
         };
         let filed_by_hal = ptask_core::tasks::create_with_extensions(
             &db,
