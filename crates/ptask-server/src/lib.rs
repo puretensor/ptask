@@ -2269,6 +2269,71 @@ Don't forget the sourdough.\r\n";
             .status()
     }
 
+    /// A forward whose message/rfc822 part is wrapped `layers` times in
+    /// `cte`-encoded message/rfc822 parts.
+    fn encoded_forward(tag: &str, cte: &str, layers: usize) -> Vec<u8> {
+        use base64::Engine as _;
+        let mut inner = "Subject: rotate keys\r\n\r\nbefore friday\r\n".to_string();
+        for _ in 0..layers {
+            let body = match cte {
+                "base64" => base64::engine::general_purpose::STANDARD.encode(&inner),
+                // Short lines with `=` soft breaks, and `=3D` for '='.
+                _ => inner.replace('=', "=3D").replace("\r\n", "=0D=0A=\r\n"),
+            };
+            inner = format!(
+                "Subject: wrapped\r\nContent-Type: message/rfc822\r\n\
+                 Content-Transfer-Encoding: {cte}\r\n\r\n{body}\r\n"
+            );
+        }
+        // The outermost wrapper becomes a part of a multipart forward.
+        let part = inner.split_once("\r\n").unwrap().1;
+        format!(
+            "Subject: Fwd: {tag}\r\nMessage-ID: <{tag}@x>\r\n\
+             Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\
+             Content-Type: text/plain\r\n\r\nplease handle {tag}\r\n--b\r\n{part}--b--\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[tokio::test]
+    async fn email_forward_with_an_encoded_message_part_is_captured() {
+        // Round-2 SRV-2: an embedded message in base64 / quoted-printable
+        // (Exchange-style gateways) was refused outright and the mail lost.
+        // It is now decoded and its structure checked; at most two encoded
+        // layers.
+        let db = open_test_db();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        for (tag, cte, layers) in [
+            ("b64", "base64", 1),
+            ("qp", "quoted-printable", 1),
+            ("b64x2", "base64", 2),
+        ] {
+            assert_eq!(
+                post_email(&app, encoded_forward(tag, cte, layers)).await,
+                StatusCode::CREATED,
+                "{tag}"
+            );
+        }
+        let stored: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT text FROM raw_items WHERE source_file = 'email:qp@x'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(stored.contains("please handle qp"), "{stored}");
+        assert_eq!(
+            post_email(&app, encoded_forward("b64x3", "base64", 3)).await,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
     #[tokio::test]
     async fn email_with_deeply_nested_messages_is_400_not_an_abort() {
         // SRV-2: mail-parser nests one Message per unencoded message/rfc822

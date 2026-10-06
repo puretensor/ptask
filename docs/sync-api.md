@@ -165,9 +165,10 @@ Drops into `raw_items` for the distillation pipeline. Returns:
 
 Accepts a raw RFC 822 message body (`message/rfc822` or `text/plain`); parses
 subject/body into one `raw_items` row with `source_type="email"`. Bodies over
-2 MiB get 413. Embedded messages nested more than 32 deep, or an embedded
-message with a base64/quoted-printable transfer encoding (which RFC 2046
-forbids), get 400 and nothing is stored. Returns:
+2 MiB get 413. An embedded message in base64 or quoted-printable (which RFC
+2046 forbids but Exchange-style gateways send) is decoded and checked like
+any other; more than 2 such encoded layers, or embedded messages nested more
+than 32 deep counting decoded ones, get 400 and nothing is stored. Returns:
 
 ```json
 { "id": 123, "subject": "Subject line", "source_file": "email:<message-id>" }

@@ -16,8 +16,11 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json};
 use axum::routing::post;
-use mail_parser::{HeaderName, Message, MessageParser, MessagePart, MimeHeaders, PartType};
+use mail_parser::decoders::base64::base64_decode;
+use mail_parser::decoders::quoted_printable::quoted_printable_decode;
+use mail_parser::{HeaderName, MessageParser, MessagePart, MimeHeaders, PartType};
 use serde::Serialize;
+use std::collections::HashMap;
 
 /// Largest accepted message (axum's implicit default, made explicit).
 const EMAIL_BODY_LIMIT: usize = 2 * 1024 * 1024;
@@ -26,6 +29,10 @@ const EMAIL_BODY_LIMIT: usize = 2 * 1024 * 1024;
 /// and its tree conversion and drop recurse once per level: ~10k levels
 /// (320 KB) overflowed a 2 MiB thread and aborted pt serve.
 const MAX_MESSAGE_DEPTH: usize = 32;
+/// Most transfer-encoded embedded messages nested in one another. mail-parser
+/// copies a decoded buffer once per message nested in it, so each layer
+/// multiplies the work; real gateways add one.
+const MAX_ENCODED_LAYERS: usize = 2;
 /// Stack for the parse thread, which drops the structure probe's tree: an
 /// unencoded chain under EMAIL_BODY_LIMIT nests ~60k deep before the depth
 /// check can refuse it (a debug build drops that in under 32 MiB).
@@ -128,47 +135,131 @@ fn is_embedded_message(part: &MessagePart<'_>, in_digest: bool) -> bool {
     }
 }
 
-/// Any `Content-Transfer-Encoding` other than an identity one, read from the
-/// raw header bytes (the probe ignored its value).
-fn has_transfer_encoding(part: &MessagePart<'_>, raw: &[u8]) -> bool {
-    part.headers.iter().any(|h| {
-        h.name == HeaderName::ContentTransferEncoding
-            && raw
-                .get(h.offset_start as usize..h.offset_end as usize)
-                .map(<[u8]>::trim_ascii)
-                .is_some_and(|v| {
-                    !v.is_empty()
-                        && !["7bit", "8bit", "binary"]
-                            .iter()
-                            .any(|identity| v.eq_ignore_ascii_case(identity.as_bytes()))
-                })
-    })
+/// A part's transfer encoding, read from the raw header bytes (the probe
+/// ignored its value).
+enum TransferEncoding {
+    /// None declared, or 7bit / 8bit / binary.
+    Identity,
+    Base64,
+    QuotedPrintable,
+    /// Anything else, which mail-parser leaves undecoded.
+    Other,
 }
 
-/// Walk the undecoded structure without recursion. Refuses nesting deeper
-/// than MAX_MESSAGE_DEPTH and embedded messages with a transfer encoding,
-/// which RFC 2046 (5.2.1) forbids and which are the only parts the real
-/// parser decodes and re-parses as MIME.
-fn check_structure(probe: &Message<'_>, raw: &[u8]) -> Result<(), &'static str> {
-    let mut stack = vec![(probe, 0usize)];
+fn transfer_encoding(part: &MessagePart<'_>, raw: &[u8]) -> TransferEncoding {
+    let Some(value) = part
+        .headers
+        .iter()
+        .rev()
+        .find(|h| h.name == HeaderName::ContentTransferEncoding)
+        .and_then(|h| raw.get(h.offset_start as usize..h.offset_end as usize))
+        .map(<[u8]>::trim_ascii)
+    else {
+        return TransferEncoding::Identity;
+    };
+    let is = |name: &str| value.eq_ignore_ascii_case(name.as_bytes());
+    if value.is_empty() || is("7bit") || is("8bit") || is("binary") {
+        TransferEncoding::Identity
+    } else if is("base64") {
+        TransferEncoding::Base64
+    } else if is("quoted-printable") {
+        TransferEncoding::QuotedPrintable
+    } else {
+        TransferEncoding::Other
+    }
+}
+
+/// Probe one buffer's undecoded structure, its root `base_depth` levels
+/// down, walking without recursion. Nesting past MAX_MESSAGE_DEPTH is
+/// refused. An embedded message in base64 or quoted-printable (RFC 2046
+/// 5.2.1 forbids it, but Exchange-style gateways send it) is the one part
+/// the real parser decodes and re-parses: it is decoded here and probed in
+/// turn, so its nesting counts too. Recursion is bounded by
+/// MAX_ENCODED_LAYERS.
+fn check_structure(
+    bytes: &[u8],
+    base_depth: usize,
+    encoded_layers: usize,
+) -> Result<(), &'static str> {
+    // A buffer that doesn't parse is stored by the real parser as an opaque
+    // part: nothing nests in it.
+    let Some(probe) = structure_parser().parse(bytes) else {
+        return Ok(());
+    };
+    let mut stack = vec![(&probe, base_depth)];
     while let Some((msg, depth)) = stack.pop() {
         if depth > MAX_MESSAGE_DEPTH {
             return Err("embedded messages nested too deeply");
         }
-        let digest = msg.parts.iter().any(|p| {
-            p.content_type()
-                .is_some_and(|ct| ct.ctype() == "multipart" && ct.subtype() == Some("digest"))
-        });
-        for part in &msg.parts {
-            if is_embedded_message(part, digest) && has_transfer_encoding(part, raw) {
-                return Err("transfer-encoded embedded message");
+        // Each part's enclosing multipart: its boundary, and whether it is
+        // a digest (whose untyped parts are messages).
+        let mut parent: HashMap<usize, (Option<&str>, bool)> = HashMap::new();
+        for p in &msg.parts {
+            if let PartType::Multipart(children) = &p.body {
+                let ct = p.content_type();
+                let boundary = ct.and_then(|ct| ct.attribute("boundary"));
+                let digest = ct.is_some_and(|ct| {
+                    ct.subtype()
+                        .is_some_and(|s| s.eq_ignore_ascii_case("digest"))
+                });
+                for &child in children {
+                    parent.insert(child as usize, (boundary, digest));
+                }
             }
-            if let PartType::Message(inner) = &part.body {
-                stack.push((inner, depth + 1));
+        }
+        for (i, part) in msg.parts.iter().enumerate() {
+            let (boundary, in_digest) = parent.get(&i).copied().unwrap_or((None, false));
+            let encoding = if is_embedded_message(part, in_digest) {
+                transfer_encoding(part, bytes)
+            } else {
+                TransferEncoding::Identity
+            };
+            let decoded = match encoding {
+                TransferEncoding::Identity | TransferEncoding::Other => {
+                    if let PartType::Message(inner) = &part.body {
+                        stack.push((inner, depth + 1));
+                    }
+                    continue;
+                }
+                // The probe saw only the encoded text (as text, or parsed
+                // as a junk message); the real structure is in the decoded
+                // bytes.
+                TransferEncoding::Base64 | TransferEncoding::QuotedPrintable
+                    if encoded_layers >= MAX_ENCODED_LAYERS =>
+                {
+                    return Err("too many transfer-encoded embedded messages");
+                }
+                TransferEncoding::Base64 => base64_decode(encoded_body(part, bytes, boundary)),
+                TransferEncoding::QuotedPrintable => {
+                    quoted_printable_decode(encoded_body(part, bytes, boundary))
+                }
+            };
+            if let Some(decoded) = decoded {
+                check_structure(&decoded, depth + 1, encoded_layers + 1)?;
             }
         }
     }
     Ok(())
+}
+
+/// A part's undecoded body bytes, up to its enclosing multipart's next
+/// boundary (the last part's range runs past the closing delimiter), as
+/// the real parser's MIME decoders stop there.
+fn encoded_body<'b>(part: &MessagePart<'_>, bytes: &'b [u8], boundary: Option<&str>) -> &'b [u8] {
+    let body = bytes
+        .get(part.offset_body as usize..part.offset_end as usize)
+        .unwrap_or_default();
+    let Some(boundary) = boundary else {
+        return body;
+    };
+    let delimiter = format!("\n--{boundary}");
+    let delimiter = delimiter.as_bytes();
+    if body.starts_with(&delimiter[1..]) {
+        return &[];
+    }
+    body.windows(delimiter.len())
+        .position(|w| w == delimiter)
+        .map_or(body, |end| &body[..end])
 }
 
 /// Probe the structure, then parse and extract, on a dedicated big-stack
@@ -179,13 +270,9 @@ fn parse_email(body: Bytes) -> std::io::Result<ParseOutcome> {
         .name("ptask-email-parse".into())
         .stack_size(PARSE_STACK_BYTES)
         .spawn(move || {
-            let Some(probe) = structure_parser().parse(&body[..]) else {
-                return ParseOutcome::Unparseable;
-            };
-            if let Err(why) = check_structure(&probe, &body) {
+            if let Err(why) = check_structure(&body, 0, 0) {
                 return ParseOutcome::Refused(why);
             }
-            drop(probe);
             let Some(msg) = MessageParser::default().parse(&body[..]) else {
                 return ParseOutcome::Unparseable;
             };
