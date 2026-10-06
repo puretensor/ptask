@@ -20,6 +20,12 @@ impl Pt {
         cmd.args(args)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            // CI's setup-python toolcache python3 loads libpython only
+            // through LD_LIBRARY_PATH; the fake gcalendar runs under it.
+            .env(
+                "LD_LIBRARY_PATH",
+                std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default(),
+            )
             .env("HOME", self.dir.path())
             .env("PTASK_DB", self.dir.path().join("tasks.db"))
             .env("PTASK_ACTOR", actor)
