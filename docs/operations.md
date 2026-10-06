@@ -407,6 +407,12 @@ that interface IP directly, keeping the API off the public/LAN NICs.
 Application-level auth is now fail-closed for non-loopback binds. Only use
 `PTASK_ALLOW_UNAUTHENTICATED=1` for a deliberately isolated test deployment.
 
+The server speaks HTTP/1.1 and closes a connection whose request headers
+take longer than 30s to arrive (slow-header / slowloris protection; idle
+keep-alive connections are reaped the same way). Request bodies and streamed
+responses (the `/mcp` SSE stream) are not time-limited. On SIGTERM it
+finishes in-flight requests, then gives queued outbound webhooks up to 15s.
+
 ### Inspect
 
 ```bash
