@@ -2457,6 +2457,23 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
             if a.dry_run {
                 cfg.dry_run = true;
             }
+            // Validate From/To/CC before anything is sent. A bad address used
+            // to surface mid-run, after Telegram had delivered but before the
+            // reminder was stamped, so every later run repeated the nudge.
+            // Email is switched off for this run (the ladder falls back to
+            // Telegram) and the unit fails at the end, after stamping.
+            let email_misconfigured = ptask_notify::validate_email_cfg(&cfg).err();
+            if let Some(err) = &email_misconfigured {
+                eprintln!(
+                    "{}",
+                    ui::section(
+                        "email misconfigured",
+                        ui::Ink::Red,
+                        &format!("{err} — email disabled for this run")
+                    )
+                );
+                cfg.smtp_host = None;
+            }
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -2492,7 +2509,7 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     "{}",
                     ui::section("quiet hours", ui::Ink::Slate, "no dispatch")
                 );
-                return Ok(());
+                return accountability_verdict(&report, email_misconfigured.as_deref());
             }
             let tg = report.dispatched.iter().filter(|d| d.telegram_sent).count();
             let em = report.dispatched.iter().filter(|d| d.email_sent).count();
@@ -2532,24 +2549,50 @@ fn cmd_accountability(db: Db, c: AccountabilityCommand) -> Result<()> {
                     ui::bullet(
                         &d.task_uuid,
                         format!(
-                            "level {} · telegram {} · email {}",
-                            d.level, d.telegram_sent, d.email_sent
+                            "level {} · telegram {} · email {}{}",
+                            d.level,
+                            d.telegram_sent,
+                            d.email_sent,
+                            d.error
+                                .as_deref()
+                                .map(|e| format!(" · error: {e}"))
+                                .unwrap_or_default()
                         ),
                         ui::Ink::Cyan,
                         36
                     )
                 );
             }
-            if all_dead {
-                anyhow::bail!(
-                    "accountability dispatch dead — {} eligible, 0 dispatched, {} send failures",
-                    report.eligible,
-                    report.send_failures
-                );
-            }
-            Ok(())
+            accountability_verdict(&report, email_misconfigured.as_deref())
         }
     }
+}
+
+/// Exit status of `pt accountability run`, decided after the report has
+/// been printed (and every delivered nudge stamped).
+fn accountability_verdict(
+    report: &ptask_core::accountability::RunReport,
+    email_misconfigured: Option<&str>,
+) -> Result<()> {
+    // Misconfiguration first: quiet hours only mean nothing was sent, not
+    // that the setup is fine, and returning early hid a bad address for ten
+    // hours a day.
+    if let Some(err) = email_misconfigured {
+        anyhow::bail!("accountability email misconfigured: {err}");
+    }
+    if report.quiet_hours {
+        return Ok(());
+    }
+    // All-channels-dead is a hard failure: the 2026-05→06 incidents (dead
+    // Gemini key, 401ing bot token) both hid behind an exit-0 "ok" line.
+    if report.eligible > 0 && report.dispatched.is_empty() && report.send_failures > 0 {
+        anyhow::bail!(
+            "accountability dispatch dead — {} eligible, 0 dispatched, {} send failures",
+            report.eligible,
+            report.send_failures
+        );
+    }
+    Ok(())
 }
 
 fn cmd_start(db: &Db, a: StartArgs) -> Result<()> {
@@ -4020,6 +4063,13 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
                     )
                 )
             );
+            if r.sourceless_candidates > 0 {
+                println!(
+                    "  {} candidate(s) came back without sources — the model is ignoring \
+                     the consolidation schema; their captures were re-walked",
+                    r.sourceless_candidates
+                );
+            }
             if r.quarantined > 0 {
                 println!(
                     "  {} capture(s) quarantined after {} failed attempts — \
@@ -4032,8 +4082,20 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
             }
             Ok(())
         }
+        Err(e) if e.is::<ptask_distill::pipeline::DistillBusy>() => {
+            // Another holder has the run lock (usually the timer). Nothing was
+            // consumed; the library recorded `distill.skipped`.
+            println!(
+                "{}",
+                ui::section("distill skipped", ui::Ink::Slate, &e.to_string())
+            );
+            match e.downcast_ref::<ptask_distill::pipeline::DistillBusy>() {
+                Some(busy) => distill_skip_verdict(busy),
+                None => Ok(()),
+            }
+        }
         Err(e) => {
-            ptask_distill::pipeline::record_failure(db, provider_name, &e.to_string());
+            ptask_distill::pipeline::record_failure(db, provider_name, &e);
             // The fail-closed run is precisely the one on which rows cross the
             // ceiling, so the quarantine count matters MORE here than on the Ok
             // path. run_native returns Err without a report, so read the count
@@ -4053,6 +4115,28 @@ fn cmd_distill_native(db: &Db, batch: usize) -> Result<()> {
             anyhow::bail!("distill native FAILED (fail closed): {e:#}")
         }
     }
+}
+
+/// Consecutive skipped runs after which `pt distill` exits non-zero.
+const MAX_CONSECUTIVE_DISTILL_SKIPS: usize = 3;
+
+/// Exit status of a skipped run: fine once or twice (a manual run overlapping
+/// the timer), a failure from the third consecutive skip on. Anyone who can
+/// read the database directory can hold the lock (another database's
+/// distill in the same directory, a stray process), and a silent exit 0
+/// would hide that forever.
+fn distill_skip_verdict(busy: &ptask_distill::pipeline::DistillBusy) -> Result<()> {
+    if busy.consecutive_skips >= MAX_CONSECUTIVE_DISTILL_SKIPS {
+        anyhow::bail!(
+            "distill skipped {} consecutive runs — the run lock on {} is held by \
+             another process (another distill, or another database's distill in the \
+             same directory); find it with `fuser -v {}` or move the database",
+            busy.consecutive_skips,
+            busy.lock,
+            busy.lock
+        );
+    }
+    Ok(())
 }
 
 fn cmd_distill(db: &Db, a: DistillArgs) -> Result<()> {
@@ -4083,6 +4167,42 @@ fn cmd_backfill(db: &Db) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Regression (round 5): a held run lock made every `pt distill` skip
+    /// with exit 0, forever. Three consecutive skips now fail the unit so
+    /// the OnFailure alert fires.
+    #[test]
+    fn three_consecutive_distill_skips_exit_non_zero() {
+        let busy = |n| ptask_distill::pipeline::DistillBusy {
+            lock: "/srv/pt".into(),
+            consecutive_skips: n,
+        };
+        super::distill_skip_verdict(&busy(1)).unwrap();
+        super::distill_skip_verdict(&busy(2)).unwrap();
+        let err = super::distill_skip_verdict(&busy(3)).unwrap_err();
+        assert!(err.to_string().contains("3 consecutive"), "{err:#}");
+    }
+
+    /// Regression (round 2, DIST-8): during quiet hours (22:00-08:00 London)
+    /// the command returned Ok before the email-misconfiguration bail, so a
+    /// bad address exited 0 for ten hours a day.
+    #[test]
+    fn email_misconfiguration_fails_the_run_even_in_quiet_hours() {
+        let quiet = ptask_core::accountability::RunReport {
+            quiet_hours: true,
+            ..Default::default()
+        };
+        let err =
+            super::accountability_verdict(&quiet, Some("invalid NOTIFY_EMAIL \"x\"")).unwrap_err();
+        assert!(err.to_string().contains("email misconfigured"), "{err:#}");
+        super::accountability_verdict(&quiet, None).unwrap();
+        let dead = ptask_core::accountability::RunReport {
+            eligible: 2,
+            send_failures: 3,
+            ..Default::default()
+        };
+        assert!(super::accountability_verdict(&dead, None).is_err());
+    }
+
     use super::{
         ExportArgs, cmd_export, delegation_command, gcalendar_path, git_has_staged_changes,
         remote_list_filter, run_git_checked, short_id, stale_review_tasks,

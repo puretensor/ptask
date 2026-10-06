@@ -132,6 +132,10 @@ pub struct DispatchCfg {
     pub smtp_port: u16,
     pub smtp_user: Option<String>,
     pub smtp_pass: Option<String>,
+    /// From mailbox (`PTASK_SMTP_FROM` / `SMTP_FROM`), e.g.
+    /// `HAL <hal@puretensor.ai>`. Falls back to `HAL <smtp_user>`, which only
+    /// works when the SMTP login is itself an address.
+    pub smtp_from: Option<String>,
     pub notify_email: Option<String>,
     /// Always CC'd on every outbound email per CLAUDE.md.
     pub cc_email: Option<String>,
@@ -196,6 +200,7 @@ impl Config {
                     .unwrap_or(587),
                 smtp_user: env_first(&["PTASK_SMTP_USER", "SMTP_USER"]),
                 smtp_pass: env_first(&["PTASK_SMTP_PASS", "SMTP_PASS"]),
+                smtp_from: env_first(&["PTASK_SMTP_FROM", "SMTP_FROM"]),
                 notify_email: env_first(&["PTASK_NOTIFY_EMAIL", "NOTIFY_EMAIL"]),
                 cc_email: env_first(&["PTASK_NOTIFY_CC", "PTASK_OPS_EMAIL"])
                     .or_else(|| Some("ops@puretensor.ai".to_string())),
