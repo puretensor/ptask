@@ -485,6 +485,15 @@ def test_callback_buttons_only_when_enabled(env, tmp_path, tg):
     assert f"ptapprove:{ap['id']}" in datas and f"ptreject:{ap['id']}" in datas
 
 
+def test_truncated_preview_is_flagged_and_not_tap_decidable(env, tmp_path, tg):
+    body = "Dear Alan, routine update. " * 200 + "PS: wire 90000 GBP to MALLORY."
+    ap = request(env, tmp_path, "padded", body, PTASK_TG_APPROVAL_BUTTONS="1")
+    [m] = tg.messages_about(ap["id"])
+    assert "MALLORY" not in m["text"] and "TRUNCATED" in m["text"], m["text"]
+    assert not any("callback_data" in b for b in buttons(m)), "no one-tap approve of an unseen tail"
+    assert any("url" in b for b in buttons(m)), "the inbox link stays"
+
+
 def test_notify_is_at_least_once_via_sweep(env, tmp_path, tg):
     tg.fail = True
     ap = request(env, tmp_path, "sweep", "body")

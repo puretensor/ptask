@@ -35,7 +35,18 @@ fn excerpt(s: &str, max: usize) -> String {
     out
 }
 
+/// Characters of payload preview a ping carries. The payload gets the larger
+/// share of Telegram's 4096: it is what the operator approves, the note is
+/// only the requester's prose.
+const PREVIEW_CHARS: usize = 2000;
+const NOTE_CHARS: usize = 800;
+
 /// Body + keyboard for an approval Telegram ping.
+///
+/// Tap-to-decide buttons are offered only when the message shows the whole
+/// payload. A preview cut at [`PREVIEW_CHARS`] could hide a harmful tail
+/// behind padding, and a binary or digest-only payload shows nothing; those
+/// pings say so and link to the inbox instead.
 pub fn approval_telegram_message(
     ap: &Approval,
     dash_url: Option<&str>,
@@ -43,8 +54,15 @@ pub fn approval_telegram_message(
 ) -> (String, Vec<Vec<InlineButton>>) {
     // Every free-text field is bounded: Telegram rejects bodies over 4096
     // characters, and a rejected ping stays unnotified on every sweep.
-    let preview = excerpt(&ap.preview(), 800);
-    let note = excerpt(ap.request_note.as_deref().unwrap_or("").trim(), 1500);
+    let full_preview = ap.preview();
+    let preview_chars = full_preview.chars().count();
+    let truncated = preview_chars > PREVIEW_CHARS;
+    let readable = ap
+        .payload
+        .as_deref()
+        .is_some_and(|p| std::str::from_utf8(p).is_ok());
+    let preview = excerpt(&full_preview, PREVIEW_CHARS);
+    let note = excerpt(ap.request_note.as_deref().unwrap_or("").trim(), NOTE_CHARS);
     let digest_prefix: String = ap.digest.chars().take(12).collect();
     let mut text = format!(
         "<b>{}</b> · {} · {}\nRequester: {}\nDigest: {}…\n\nPreview:\n{}",
@@ -55,6 +73,18 @@ pub fn approval_telegram_message(
         html_escape(&digest_prefix),
         html_escape(&preview),
     );
+    if truncated {
+        text.push_str(&format!(
+            "\n\n<b>⚠ PREVIEW TRUNCATED</b>: showing {PREVIEW_CHARS} of {preview_chars} \
+             characters. The rest is not shown here; review the full payload in the \
+             inbox. Tap-to-decide is disabled for this request."
+        ));
+    } else if !readable {
+        text.push_str(
+            "\n\n<b>⚠ Payload not shown</b>: review it in the inbox. \
+             Tap-to-decide is disabled for this request.",
+        );
+    }
     if !note.is_empty() {
         text.push_str("\n\nRequester's note:\n");
         text.push_str(&html_escape(&note));
@@ -67,7 +97,7 @@ pub fn approval_telegram_message(
             url,
         }]);
     }
-    if tap_buttons {
+    if tap_buttons && readable && !truncated {
         keyboard.push(vec![
             InlineButton::Callback {
                 text: "Approve".into(),
@@ -323,6 +353,71 @@ mod tests {
 
         fn make_writer(&'a self) -> Self::Writer {
             LockedWriter(Arc::clone(&self.0))
+        }
+    }
+
+    fn pending_with(payload: Option<Vec<u8>>) -> Approval {
+        Approval {
+            uuid: "u".into(),
+            seq: 9,
+            kind: "spend".into(),
+            title: "Pay".into(),
+            request_note: None,
+            payload_kind: payload.as_ref().map(|_| "file".into()),
+            payload_bytes: payload.as_ref().map(|p| p.len() as i64),
+            payload,
+            payload_name: None,
+            payload_ref: None,
+            digest: "cd".repeat(32),
+            requester: "hal".into(),
+            task_uuid: None,
+            task_pt_id: None,
+            status: "pending".into(),
+            decided_by: None,
+            decided_via: None,
+            decision_note: None,
+            created_at: "2026-09-25T00:00:00+00:00".into(),
+            decided_at: None,
+            expires_at: None,
+            notified_at: None,
+            consumed_at: None,
+            consumed_by: None,
+        }
+    }
+
+    fn has_decide_buttons(keyboard: &[Vec<InlineButton>]) -> bool {
+        keyboard
+            .iter()
+            .flatten()
+            .any(|b| matches!(b, InlineButton::Callback { .. }))
+    }
+
+    #[test]
+    fn tap_to_decide_only_when_the_whole_payload_is_shown() {
+        let short = pending_with(Some(b"pay 400 GBP to ACME".to_vec()));
+        let (_, kb) = approval_telegram_message(&short, Some("https://d"), true);
+        assert!(has_decide_buttons(&kb));
+
+        // Padding pushes the harmful tail past the excerpt.
+        let mut padded = "pay 400 GBP to ACME ".repeat(200).into_bytes();
+        padded.extend_from_slice(b"AND 90000 GBP TO MALLORY");
+        let (text, kb) =
+            approval_telegram_message(&pending_with(Some(padded)), Some("https://d"), true);
+        assert!(
+            !has_decide_buttons(&kb),
+            "a truncated preview must not be decidable"
+        );
+        assert!(text.contains("TRUNCATED"), "{text}");
+        assert!(
+            kb.iter()
+                .flatten()
+                .any(|b| matches!(b, InlineButton::Url { .. })),
+            "the inbox link stays"
+        );
+
+        for unseen in [Some(vec![0xff, 0x00, 0xfe]), None] {
+            let (text, kb) = approval_telegram_message(&pending_with(unseen), None, true);
+            assert!(!has_decide_buttons(&kb), "{text}");
         }
     }
 

@@ -140,7 +140,13 @@ operator Telegram chat: `AP-n`, kind, title, requester, a bounded HTML-escaped
 excerpt of `preview`, the requester note labelled as such, a digest prefix,
 and an inline **URL** button to `$PTASK_DASH_URL/#approvals` (omitted if
 unset). Tap-to-decide callback buttons are added only when
-`PTASK_TG_APPROVAL_BUTTONS=1`. Send failure never fails the request;
+`PTASK_TG_APPROVAL_BUTTONS=1` **and** the message shows the whole payload.
+The preview excerpt is 2000 characters (the note 800). A longer preview is
+cut, marked **PREVIEW TRUNCATED** with the shown and total character
+counts, and gets no decide buttons, so padding cannot push a harmful tail
+out of sight of a one-tap approval. Binary and digest-only payloads are
+likewise marked "Payload not shown" with no decide buttons. Those requests
+are decided from the inbox, the CLI, or an admin token. Send failure never fails the request;
 success sets `notified_at`.
 
 `pt approval notify` retries pending rows with `notified_at` NULL. The same
