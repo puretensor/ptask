@@ -81,6 +81,13 @@ fn title_tokens(s: &str) -> std::collections::HashSet<String> {
 /// Date and time tokens are not identifiers: "… by 5pm", "… for 2026",
 /// "on the 5th", "12 March", "9:30am", "2026-10-06" restate when, not which
 /// thing, and counting them blocked genuine duplicates.
+///
+/// But "not an identifier" is not "ignored": a date/time value present in
+/// only ONE title is ignored ("… by 5pm" is the same task), while differing
+/// values of the same kind in BOTH titles are a conflict — 2025 vs 2026,
+/// 3pm vs 4pm, 5 Oct vs 6 Oct, March vs April. The dedup universe includes
+/// done tasks, so without this, this year's annual commitment was swallowed
+/// by last year's completed one.
 fn identifiers_conflict(a: &str, b: &str) -> bool {
     let ids = |s: &str| {
         title_tokens(s)
@@ -88,7 +95,124 @@ fn identifiers_conflict(a: &str, b: &str) -> bool {
             .filter(|w| w.chars().any(|c| c.is_numeric()))
             .collect::<std::collections::HashSet<_>>()
     };
-    ids(a) != ids(b)
+    ids(a) != ids(b) || DateFacts::of(a).conflicts(&DateFacts::of(b))
+}
+
+/// Normalised date/time values in a title, by kind.
+#[derive(Default)]
+struct DateFacts {
+    years: std::collections::BTreeSet<u16>,
+    /// (hour 0-23, minute)
+    times: std::collections::BTreeSet<(u8, u8)>,
+    months: std::collections::BTreeSet<u8>,
+    /// (month, day) — a day number or ordinal next to a month name.
+    days: std::collections::BTreeSet<(u8, u8)>,
+    /// Ordinal days with no month ("on the 5th").
+    bare_days: std::collections::BTreeSet<u8>,
+}
+
+impl DateFacts {
+    fn of(s: &str) -> Self {
+        let raw = raw_tokens(s);
+        let mut f = DateFacts::default();
+        let day_of = |t: &str| -> Option<u8> {
+            let digits = ["st", "nd", "rd", "th"]
+                .iter()
+                .find_map(|x| t.strip_suffix(x))
+                .unwrap_or(t);
+            is_small_number(digits)
+                .then(|| digits.parse().ok())
+                .flatten()
+                .filter(|d| (1..=31).contains(d))
+        };
+        for (i, t) in raw.iter().enumerate() {
+            if is_year(t) {
+                f.years.extend(t.parse::<u16>().ok());
+            } else if let Some(time) = normalise_time(t) {
+                f.times.insert(time);
+            } else if let Some(m) = month_number(t) {
+                f.months.insert(m);
+                // "5 Oct", "Oct 5", "October 5th", "5th of October".
+                let neighbours = [
+                    i.checked_sub(1),
+                    Some(i + 1),
+                    i.checked_sub(2)
+                        .filter(|&j| raw.get(j + 1).is_some_and(|w| w == "of")),
+                ];
+                for j in neighbours.into_iter().flatten() {
+                    if let Some(d) = raw.get(j).and_then(|w| day_of(w)) {
+                        f.days.insert((m, d));
+                    }
+                }
+            } else if is_ordinal(t) {
+                let near_month = [i.checked_sub(1), Some(i + 1), Some(i + 2)]
+                    .into_iter()
+                    .flatten()
+                    .any(|j| raw.get(j).is_some_and(|w| month_number(w).is_some()));
+                if !near_month {
+                    f.bare_days.extend(day_of(t));
+                }
+            }
+        }
+        f
+    }
+
+    /// Both sides carry a value of the same kind and the values differ.
+    fn conflicts(&self, other: &Self) -> bool {
+        fn differ<T: Ord>(
+            a: &std::collections::BTreeSet<T>,
+            b: &std::collections::BTreeSet<T>,
+        ) -> bool {
+            !a.is_empty() && !b.is_empty() && a != b
+        }
+        differ(&self.years, &other.years)
+            || differ(&self.times, &other.times)
+            || differ(&self.months, &other.months)
+            || differ(&self.days, &other.days)
+            || differ(&self.bare_days, &other.bare_days)
+    }
+}
+
+fn month_number(t: &str) -> Option<u8> {
+    if !MONTHS.contains(&t) {
+        return None;
+    }
+    const ORDER: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    ORDER
+        .iter()
+        .position(|m| t.starts_with(m))
+        .map(|i| i as u8 + 1)
+}
+
+/// `5pm` → (17, 0), `9:30am` → (9, 30), `17:00` → (17, 0).
+fn normalise_time(t: &str) -> Option<(u8, u8)> {
+    if !is_time(t) {
+        return None;
+    }
+    let (clock, pm) = match (t.strip_suffix("am"), t.strip_suffix("pm")) {
+        (Some(c), _) => (c, Some(false)),
+        (_, Some(c)) => (c, Some(true)),
+        _ => (t, None),
+    };
+    let (h, m) = clock.split_once(':').unwrap_or((clock, "0"));
+    let (mut h, m): (u8, u8) = (h.parse().ok()?, m.parse().ok()?);
+    match pm {
+        Some(true) if h < 12 => h += 12,
+        Some(false) if h == 12 => h = 0,
+        _ => {}
+    }
+    (h < 24 && m < 60).then_some((h, m))
+}
+
+/// Lowercase tokens; `:` is kept inside a token so a clock time stays whole.
+fn raw_tokens(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || c == ':'))
+        .map(|w| w.trim_matches(':').to_string())
+        .filter(|w| !w.is_empty())
+        .collect()
 }
 
 const MONTHS: &[&str] = &[
@@ -150,12 +274,7 @@ fn is_ordinal(t: &str) -> bool {
 /// Lowercase tokens with date/time tokens removed. `:` is kept inside a
 /// token so a clock time stays whole; remaining tokens are split on it.
 fn tokens_without_dates(s: &str) -> Vec<String> {
-    let raw: Vec<String> = s
-        .to_lowercase()
-        .split(|c: char| !(c.is_alphanumeric() || c == ':'))
-        .map(|w| w.trim_matches(':').to_string())
-        .filter(|w| !w.is_empty())
-        .collect();
+    let raw = raw_tokens(s);
     // A 1-2 digit number within two tokens of a month name or a year is a
     // day/month ("12 March", "March 12", "2026-10-06", "06/10/2026").
     let near_date_word = |i: usize| {
@@ -2167,6 +2286,64 @@ mod tests {
             .unwrap();
         assert!(stored.contains("preflight failed"), "{stored}");
         assert!(stored.contains("context length exceeded"), "{stored}");
+    }
+
+    /// Regression (round 3, DIST-2): dropping date/time tokens on both sides
+    /// made titles that differ only by year dedup — and the universe holds
+    /// done tasks, so "File VAT return 2026" was swallowed by last year's
+    /// completed "File VAT return 2025" and never created. A date/time value
+    /// on one side only is ignored; differing values of the same kind on
+    /// both sides block the match.
+    #[test]
+    fn differing_dates_and_times_on_both_sides_block_a_match() {
+        for (a, b) in [
+            ("File VAT return 2025", "File VAT return 2026"),
+            ("Call Bob at 3pm", "Call Bob at 4pm"),
+            ("Call Bob at 15:00", "Call Bob at 9:30am"),
+            ("Book the venue for 5 Oct", "Book the venue for 6 Oct"),
+            ("Book the venue in March", "Book the venue in April"),
+        ] {
+            assert!(!title_similar(a, b), "{a:?} vs {b:?} must not dedup");
+        }
+        for (a, b) in [
+            ("Email Alan the quote", "Email Alan the quote by 5pm"),
+            ("File VAT return 2026", "File VAT return for 2026"),
+            ("Call Bob at 3pm", "call Bob at 15:00"),
+            // Same day written two ways is the same value.
+            ("Book the venue for Oct 5", "Book the venue for October 5th"),
+        ] {
+            assert!(title_similar(a, b), "{a:?} vs {b:?} should dedup");
+        }
+
+        // End to end: last year's done task does not swallow this year's.
+        let (_dir, db) = fresh_db();
+        let done = ptask_core::tasks::create(
+            &db,
+            NewTask::minimal("File VAT return 2025"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET status='done', status_v2='done' WHERE id=?1",
+                [&done.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        seed_inbox(&db, &["file the 2026 VAT return before the deadline"]);
+        let provider = MockProvider {
+            broken: false,
+            emit: vec![Candidate {
+                title: "File VAT return 2026".into(),
+                priority: 3,
+                description: String::new(),
+                sources: vec![],
+            }],
+        };
+        let report = run_native(&db, &provider, 100).unwrap();
+        assert_eq!(report.created, 1, "this year's return is new work");
+        assert_eq!(report.skipped_dedup, 0);
     }
 
     /// Regression (round 2, DIST-2): every digit-bearing token counted as an
