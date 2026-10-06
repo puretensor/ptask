@@ -106,6 +106,17 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
     // or date phrases. (Note: the `//` description split above runs first,
     // so a quoted token-leading `//` still starts the description.)
     let (raw, literal) = tokenize_quoted(&head);
+    // `next_literal[i]` = index of the first quoted token at or after `i`
+    // (or `raw.len()`). Precomputed in one backwards pass: recomputing it
+    // per token rescanned to the end of input and made parsing O(n^2).
+    let mut next_literal = vec![raw.len(); raw.len()];
+    for i in (0..raw.len()).rev() {
+        next_literal[i] = if literal[i] {
+            i
+        } else {
+            next_literal.get(i + 1).copied().unwrap_or(raw.len())
+        };
+    }
     let mut idx = 0usize;
     let mut title_words: Vec<&str> = Vec::new();
 
@@ -120,11 +131,7 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         }
         // Multi-token lookahead (dates, recurrence) must not consume into a
         // quoted span; bound the scan at the next literal token.
-        let scan_end = literal[idx..]
-            .iter()
-            .position(|&l| l)
-            .map(|off| idx + off)
-            .unwrap_or(raw.len());
+        let scan_end = next_literal[idx];
 
         // Explicit due:<date> — scheduled date (distinct from deadline).
         if let Some(rest) = tok.strip_prefix("due:")
@@ -816,6 +823,31 @@ mod tests {
     fn token_only_input_is_rejected() {
         let err = parse_at("@ops p1 ~5m", anchor()).unwrap_err();
         assert!(format!("{}", err).contains("title is empty"));
+    }
+
+    #[test]
+    fn parse_is_linear_in_token_count() {
+        // PARSE-7: the per-token quoted-span lookahead rescanned to the end
+        // of input, so a 60k-token title (reachable via /sync task_create and
+        // MCP task_add) took ~7s in debug. 200k tokens must stay well clear
+        // of a second even unoptimised.
+        let input = "word ".repeat(200_000);
+        let started = std::time::Instant::now();
+        let q = parse_at(&input, anchor()).unwrap();
+        let took = started.elapsed();
+        assert_eq!(q.title.len(), 200_000 * 5 - 1);
+        assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+        // Recurrence lookahead and quoted spans stay linear too.
+        for input in [
+            format!("every {}", "word ".repeat(100_000)),
+            "every word ".repeat(50_000),
+            "\"q\" word ".repeat(50_000),
+        ] {
+            let started = std::time::Instant::now();
+            parse_at(&input, anchor()).unwrap();
+            let took = started.elapsed();
+            assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+        }
     }
 
     #[test]
