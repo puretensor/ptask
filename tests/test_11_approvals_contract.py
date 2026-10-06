@@ -299,6 +299,17 @@ def test_rerequest_same_payload_while_pending_is_idempotent(env, tmp_path):
     assert [x["id"] for x in pj(env, "approval", "ls")] == [a["id"]]
 
 
+def test_rerequest_with_new_expiry_keeps_the_row_and_says_so(env, tmp_path):
+    a = request(env, tmp_path, "dl", "body", extra={"--expires-in": "1h"})
+    p = tmp_path / "dl.html"
+    r = run(env, "--json", "approval", "request", "--kind", "email", "--title", "Send dl",
+            "--payload-file", str(p), "--expires-in", "3h")
+    b = json.loads(r.stdout)
+    assert b["id"] == a["id"] and b["expires_at"] == a["expires_at"], "expiry is never moved silently"
+    assert b["deduplicated"] is True and "expires_in" in b["notice"], b
+    assert "expires_in" in r.stderr, "the human sees it too"
+
+
 def test_rerequest_dedupe_never_returns_another_requesters_row(env, tmp_path):
     a = request(env, tmp_path, "shared", "body")
     b = request(env, tmp_path, "shared", "body", PTASK_ACTOR="ops-bot")

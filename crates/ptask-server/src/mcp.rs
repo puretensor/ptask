@@ -745,11 +745,11 @@ impl PtaskMcp {
         }
         let db = self.db.clone();
         let uuid = outcome.approval.uuid.clone();
-        let ap = match on_blocking(move || approvals::get(&db, &uuid).map_err(domain_err)).await {
-            Ok(ap) => ap,
-            Err(_) => outcome.approval,
-        };
-        json_ok(&ap.to_json(None))
+        let mut outcome = outcome;
+        if let Ok(ap) = on_blocking(move || approvals::get(&db, &uuid).map_err(domain_err)).await {
+            outcome.approval = ap;
+        }
+        json_ok(&outcome.to_json())
     }
 
     #[tool(description = "List approvals. Default status is pending, oldest first.")]

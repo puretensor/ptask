@@ -67,6 +67,14 @@ their row is still pending gets that row back (partial unique index on
 asking for the same payload gets a fresh `AP-n` of their own: dedupe never
 hands one actor another actor's approval.
 
+A re-request returns the existing row **unchanged**: a new `--expires-in`,
+title, note, kind or task is not applied (expiry is never moved silently).
+The response carries `"deduplicated": true` and, when something requested
+was not applied, a `"notice"` naming it (`… not applied: expires_in "3h"
+(kept expires_at …), title`); the CLI also prints the notice on stderr, and
+HTTP answers 200 instead of 201. To change those fields, withdraw the
+request and request again.
+
 `preview` is rendered by pTask **from the stored payload**, never from the
 requester's prose:
 

@@ -350,12 +350,22 @@ pub fn cmd_request(db: &Db, a: RequestArgs, ctx: EventCtx, json: bool) -> Result
         task_pt_id: a.task,
         expires_in: a.expires_in,
     };
-    let outcome = approvals::request(db, input, &ctx).map_err(map_core)?;
+    let mut outcome = approvals::request(db, input, &ctx).map_err(map_core)?;
     if outcome.created {
         notify_one(db, &outcome.approval);
     }
-    let ap = approvals::get(db, &outcome.approval.uuid).unwrap_or(outcome.approval);
-    emit_one(ap, None, json)
+    if let Some(n) = &outcome.notice {
+        // Full text, not ui::outcome: that column truncates.
+        eprintln!("notice: {n}");
+    }
+    if let Ok(fresh) = approvals::get(db, &outcome.approval.uuid) {
+        outcome.approval = fresh;
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcome.to_json())?);
+        return Ok(());
+    }
+    emit_one(outcome.approval, None, json)
 }
 
 pub fn cmd_list(db: &Db, a: ListArgs, json: bool) -> Result<()> {

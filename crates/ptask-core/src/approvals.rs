@@ -261,11 +261,72 @@ impl Approval {
 }
 
 /// Outcome of [`request`]: `created` is false on an idempotent re-request
-/// of a still-pending digest by the same requester.
+/// of a still-pending digest by the same requester. The existing row is
+/// returned unchanged; `notice` names any requested field that was not
+/// applied (a new `expires_in`, title, note, kind or task), so a caller
+/// never mistakes the old deadline for the one it just asked for.
 #[derive(Debug, Clone)]
 pub struct RequestOutcome {
     pub approval: Approval,
     pub created: bool,
+    pub notice: Option<String>,
+}
+
+impl RequestOutcome {
+    /// The approval's JSON plus `deduplicated` and, when set, `notice`.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut v = self.approval.to_json(None);
+        v["deduplicated"] = serde_json::json!(!self.created);
+        if let Some(n) = &self.notice {
+            v["notice"] = serde_json::json!(n);
+        }
+        v
+    }
+}
+
+/// What a same-requester re-request asked for that the existing pending
+/// row keeps instead. `None` when nothing differs.
+fn dedupe_notice(
+    existing: &Approval,
+    input: &RequestInput,
+    title: &str,
+    note: Option<&str>,
+) -> Option<String> {
+    let mut ignored: Vec<String> = Vec::new();
+    if let Some(spec) = input.expires_in.as_deref().map(str::trim)
+        && !spec.is_empty()
+    {
+        ignored.push(format!(
+            "expires_in {spec:?} (kept expires_at {})",
+            existing.expires_at.as_deref().unwrap_or("none")
+        ));
+    }
+    if existing.kind != input.kind {
+        ignored.push("kind".into());
+    }
+    if existing.title != title {
+        ignored.push("title".into());
+    }
+    if existing.request_note.as_deref() != note {
+        ignored.push("note".into());
+    }
+    let task = input
+        .task_pt_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if task.is_some() && existing.task_pt_id.as_deref() != task {
+        ignored.push("task".into());
+    }
+    if ignored.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} is already pending for this payload and was returned unchanged; not applied: {}. \
+         Withdraw it and request again to change them.",
+        existing.ap_id(),
+        ignored.join(", ")
+    ))
 }
 
 pub fn format_ap_id(seq: i64) -> String {
@@ -1002,9 +1063,11 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
     // decide, and the partial unique index would refuse a fresh one.
     expire(db, &EventCtx::system("approvals"))?;
     if let Some(existing) = get_pending_by_digest(db, requester, &digest)? {
+        let notice = dedupe_notice(&existing, &input, title, note.as_deref());
         return Ok(RequestOutcome {
             approval: existing,
             created: false,
+            notice,
         });
     }
 
@@ -1063,11 +1126,13 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
             Ok(RequestOutcome {
                 approval,
                 created: true,
+                notice: None,
             })
         }
         Err(e) if is_unique_constraint(&e) => {
             match get_pending_by_digest(db, requester, &digest)? {
                 Some(approval) => Ok(RequestOutcome {
+                    notice: dedupe_notice(&approval, &input, title, note.as_deref()),
                     approval,
                     created: false,
                 }),
@@ -1593,6 +1658,42 @@ mod tests {
         assert!(a.created && !b.created);
         assert_eq!(a.approval.ap_id(), b.approval.ap_id());
         assert_eq!(a.approval.digest, sha256_hex(b"hello"));
+        assert!(
+            b.notice.is_none(),
+            "an identical re-request has nothing to report"
+        );
+        assert_eq!(b.to_json()["deduplicated"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn re_request_says_what_it_did_not_change() {
+        let (_d, db) = fresh();
+        let first = RequestInput {
+            kind: "email".into(),
+            title: "Send".into(),
+            request_note: None,
+            payload: file_src(b"deadline"),
+            task_pt_id: None,
+            expires_in: Some("1h".into()),
+        };
+        let a = request(&db, first.clone(), &ctx("hal")).unwrap();
+        let again = RequestInput {
+            title: "Send now".into(),
+            expires_in: Some("2h".into()),
+            ..first
+        };
+        let b = request(&db, again, &ctx("hal")).unwrap();
+        assert!(!b.created);
+        assert_eq!(
+            b.approval.expires_at, a.approval.expires_at,
+            "expiry is not moved"
+        );
+        assert_eq!(b.approval.title, "Send");
+        let notice = b.notice.clone().expect("a notice");
+        assert!(notice.contains(&a.approval.ap_id()), "{notice}");
+        assert!(notice.contains("expires_in"), "{notice}");
+        assert!(notice.contains("title"), "{notice}");
+        assert_eq!(b.to_json()["notice"], serde_json::json!(notice));
     }
 
     #[test]
