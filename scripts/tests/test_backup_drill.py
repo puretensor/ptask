@@ -121,7 +121,7 @@ class Sandbox:
         d.mkdir(exist_ok=True)
         return d
 
-    def run(self, script: str, **env: str) -> subprocess.CompletedProcess:
+    def run(self, script: str, *args: str, **env: str) -> subprocess.CompletedProcess:
         full = {
             "PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
             "HOME": str(self.home),
@@ -136,7 +136,7 @@ class Sandbox:
         }
         full.update(env)
         return subprocess.run(
-            ["bash", str(SCRIPTS / script)],
+            ["bash", str(SCRIPTS / script), *args],
             env=full,
             capture_output=True,
             text=True,
@@ -255,9 +255,9 @@ class RestoreDrillTests(unittest.TestCase):
             self.snapshot_live(nightly)
             backdate(nightly, hours=2)
 
-    def drill(self, offsite: bool = True, **env: str) -> subprocess.CompletedProcess:
+    def drill(self, *args: str, offsite: bool = True, **env: str) -> subprocess.CompletedProcess:
         return self.sb.run(
-            "ptask-restore-verify.sh",
+            "ptask-restore-verify.sh", *args,
             STUB_REPLICA=str(self.replica),
             PTASK_BACKUP_REMOTE=f"mon1:{self.near}",
             PTASK_BACKUP_OFFSITE=f"dr:{self.dr}" if offsite else "none",
@@ -369,6 +369,42 @@ class RestoreDrillTests(unittest.TestCase):
         r = self.drill()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_hard_delete_of_newest_settled_row_during_restore_is_not_a_stall(self):
+        self.healthy_backups()
+        execute(self.sb.live, "update tasks set updated_at=? where id=500", ago(hours=1))
+        self.snapshot_live(self.replica)
+        # While the restore runs, task 500 is hard-deleted on live and the
+        # delete replicates: live's settled max drops back to 3 days ago.
+        pre = (f"python3 -c \"import sqlite3\n"
+               f"for p in ('{self.sb.live}', '{self.replica}'):\n"
+               f"    c = sqlite3.connect(p); c.execute('delete from tasks where id=500'); c.commit()\"")
+        r = self.drill(STUB_LITESTREAM_PRE=pre)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_offsite_copy_differing_from_same_date_nearby_fails(self):
+        self.healthy_backups()
+        off = self.dr / "ptask-tasks-2026-10-04.db"
+        execute(off, "update tasks set status='done' where id=1")
+        backdate(off, hours=2)
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("differs from the nearby copy", r.stderr)
+
+    def test_replica_only_mode_checks_litestream_and_nothing_else(self):
+        self.healthy_backups()
+        (self.near / "ptask-tasks-2026-10-05.db").write_bytes(b"")  # broken, ignored here
+        r = self.drill("--replica-only")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c for c in self.sb.calls() if c.startswith(("ssh ", "scp "))], [])
+        self.assertIn("litestream ok", r.stdout)
+
+    def test_replica_only_mode_catches_a_stalled_replica(self):
+        self.healthy_backups()
+        execute(self.sb.live, "update tasks set status='done', updated_at=? where id <= 3", ago(hours=1))
+        r = self.drill("--replica-only")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("replication stalled", r.stderr)
+
     def test_ssh_calls_carry_connect_timeout(self):
         self.healthy_backups()
         self.drill()
@@ -381,3 +417,21 @@ class RestoreDrillTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnitTests(unittest.TestCase):
+    UNITS = SCRIPTS / "systemd"
+
+    def test_litestream_unit_has_no_silent_skip(self):
+        # A failed Condition is recorded as success: OnFailure never fires.
+        unit = (self.UNITS / "ptask-litestream.service").read_text()
+        self.assertFalse([l for l in unit.splitlines() if l.startswith("Condition")])
+        self.assertIn("EnvironmentFile=-%h/.config/litestream/.env", unit)
+
+    def test_replica_check_runs_daily_and_alerts(self):
+        svc = (self.UNITS / "ptask-replica-check.service").read_text()
+        timer = (self.UNITS / "ptask-replica-check.timer").read_text()
+        self.assertIn("ptask-restore-verify.sh --replica-only", svc)
+        self.assertIn("OnFailure=ptask-failure-alert@%n.service", svc)
+        self.assertIn("TimeoutStartSec=", svc)
+        self.assertIn("OnCalendar=", timer)

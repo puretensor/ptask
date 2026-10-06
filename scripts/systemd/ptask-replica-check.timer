@@ -1,0 +1,11 @@
+[Unit]
+Description=pTask daily Litestream replica check
+
+[Timer]
+# Daily 04:40 UTC, clear of the nightly backup and the Monday 05:30 drill.
+OnCalendar=*-*-* 04:40:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

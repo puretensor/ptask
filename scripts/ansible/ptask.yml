@@ -81,6 +81,8 @@
     # tasks.db to replicate (docs/operations.md, Litestream WAL replication).
     ptask_canonical_units:
       - ptask-litestream.service
+      - ptask-replica-check.service
+      - ptask-replica-check.timer
     ptask_litestream_dir: "{{ ansible_env.HOME }}/.config/litestream"
     ptask_litestream_bin: /usr/local/bin/litestream
     # The canonical-store host owns `tasks.db`. Other tier-0 nodes will
@@ -232,9 +234,9 @@
       notify: restart ptask litestream
       when: ptask_is_canonical
 
-    # The unit refuses to start without this file (ConditionPathExists=).
-    # The CephFS replica needs no settings, so an empty 0600 file is valid;
-    # existing contents (S3 credentials) are never touched.
+    # The unit reads this file if present (EnvironmentFile=-). The CephFS
+    # replica needs no settings, so an empty 0600 file is valid; existing
+    # contents (S3 credentials) are never touched.
     - name: ensure litestream env file exists on canonical host
       ansible.builtin.file:
         path: "{{ ptask_litestream_dir }}/.env"
@@ -264,14 +266,18 @@
     - name: flush handlers so daemon-reload runs before enable
       ansible.builtin.meta: flush_handlers
 
-    # Replication first, then the writers (timers, API).
-    - name: enable + start litestream on canonical host
+    # Replication first, then the writers (timers, API). The daily replica
+    # check proves the replication is still landing.
+    - name: enable + start litestream and its daily check on canonical host
       ansible.builtin.systemd:
-        name: ptask-litestream.service
+        name: "{{ item }}"
         scope: user
         enabled: true
         state: started
         daemon_reload: false
+      loop:
+        - ptask-litestream.service
+        - ptask-replica-check.timer
       when: ptask_is_canonical
 
     - name: enable + start timers on canonical host
@@ -326,12 +332,15 @@
       when: not ptask_is_canonical
       failed_when: false
 
-    - name: keep litestream disabled on non-canonical hosts
+    - name: keep litestream and its check disabled on non-canonical hosts
       ansible.builtin.systemd:
-        name: ptask-litestream.service
+        name: "{{ item }}"
         scope: user
         enabled: false
         state: stopped
+      loop:
+        - ptask-litestream.service
+        - ptask-replica-check.timer
       when: not ptask_is_canonical
       failed_when: false
 

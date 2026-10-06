@@ -58,7 +58,13 @@ sqlite3 "file:$HOME/puretensor-tasks/tasks.db?mode=ro" 'SELECT COUNT(*) FROM tas
 `integrity_check` must print `ok`, and the snapshot's task count should be at
 or a little below the live count (the snapshot is up to a day old).
 `ptask-restore-verify.timer` runs this check weekly, together with a
-Litestream restore and the off-site copy (`scripts/ptask-restore-verify.sh`).
+Litestream restore and the off-site copy (`scripts/ptask-restore-verify.sh`,
+which also compares the off-site copy's sha256 with the same-date nearby
+one). `ptask-replica-check.timer` runs the Litestream part alone daily
+(`ptask-restore-verify.sh --replica-only`): it restores the replica to a
+scratch file and fails, and alerts, when any task write older than 10
+minutes is missing from it, so a Litestream that runs but has stopped
+replicating is caught within a day.
 
 ### Recovery
 
@@ -69,8 +75,8 @@ The pre-v0.1.0 baseline is at `~/puretensor-tasks/tasks.db.pre-ptask-backup`.
 
 ### Failure alerts
 
-Every pTask oneshot (backup, restore drill, distill, accountability,
-scoring, reaper, export) and `ptask-litestream.service` carry
+Every pTask oneshot (backup, restore drill, replica check, distill,
+accountability, scoring, reaper, export) and `ptask-litestream.service` carry
 `OnFailure=ptask-failure-alert@%n.service`, which sends one Telegram message
 naming the failed unit and host. The alert unit reads
 `~/puretensor-tasks/.env` and then `~/.config/ptask/alert.env`; both are
@@ -390,9 +396,11 @@ mkdir -p ~/.config/litestream ~/.config/systemd/user
 sudo install -d -m 0700 -o ptask -g ptask /var/backups/ptask-litestream
 ln -sf ~/ptask/scripts/litestream/litestream.yml ~/.config/litestream/litestream.yml
 ln -sf ~/ptask/scripts/systemd/ptask-litestream.service ~/.config/systemd/user/
+ln -sf ~/ptask/scripts/systemd/ptask-replica-check.service ~/.config/systemd/user/
+ln -sf ~/ptask/scripts/systemd/ptask-replica-check.timer   ~/.config/systemd/user/
 
 systemctl --user daemon-reload
-systemctl --user enable --now ptask-litestream.service
+systemctl --user enable --now ptask-litestream.service ptask-replica-check.timer
 loginctl enable-linger "$USER"
 ```
 
@@ -506,7 +514,8 @@ systemctl --user start ptask-litestream.service
 systemctl --user start ptask-serve.service
 systemctl --user start ptask-dashboard.service
 systemctl --user start ptask-backup.timer ptask-distill.timer ptask-accountability.timer \
-    ptask-scoring.timer ptask-reaper.timer ptask-export.timer ptask-restore-verify.timer
+    ptask-scoring.timer ptask-reaper.timer ptask-export.timer ptask-restore-verify.timer \
+    ptask-replica-check.timer
 litestream generations -config ~/.config/litestream/litestream.yml "$DBDIR/tasks.db"
 #    ^ Litestream starts a new generation for the replaced file
 ```
@@ -524,7 +533,7 @@ that shell's connection, and `pt serve`'s pooled connections keep the value
 they were opened with. Change it where `pt` reads it, then restart:
 
 ```bash
-systemctl --user disable --now ptask-litestream.service
+systemctl --user disable --now ptask-litestream.service ptask-replica-check.timer
 # Drop the override: pt then keeps SQLite's default (checkpoint every 1000 pages).
 sed -i '/^PTASK_WAL_AUTOCHECKPOINT=/d' ~/puretensor-tasks/.env
 # Long-lived processes reopen their connections; oneshot timers re-read .env

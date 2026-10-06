@@ -18,7 +18,13 @@
 #      passes integrity_check, and holds at least NIGHTLY_MIN_PCT% of live's
 #      task count (it is up to 48h of task creation behind).
 #   3. The newest off-site nightly is <48h old and at least the size floor
-#      (stat over ssh — pulling it back over the WAN weekly is unnecessary).
+#      (stat over ssh — pulling it back over the WAN weekly is unnecessary),
+#      and its sha256 equals the same-date nearby copy's (both legs upload
+#      the same snapshot; each side is hashed in place over ssh).
+#
+# `--replica-only` runs check 1 alone and touches no backup host:
+# ptask-replica-check.timer runs it daily, so a Litestream that keeps
+# running but stops replicating is caught within a day, not a week.
 #
 # Size floor: max(64 KiB, 50% of live's logical size). A nightly is a
 # page-for-page online-backup copy of live from <48h ago, so a healthy one
@@ -40,6 +46,13 @@
 # Nightlies are matched as ptask-tasks-*.db, so the .partial name an upload
 # carries until ptask-backup.sh renames it is never taken for the newest.
 set -euo pipefail
+
+MODE=full
+case "${1:-}" in
+    "") ;;
+    --replica-only) MODE=replica ;;
+    *) echo "usage: ptask-restore-verify.sh [--replica-only]" >&2; exit 64 ;;
+esac
 
 DB="${PTASK_DB:-$HOME/puretensor-tasks/tasks.db}"
 LS_CONFIG="${PTASK_LITESTREAM_CONFIG:-$HOME/.config/litestream/litestream.yml}"
@@ -63,9 +76,11 @@ RESTORE_TIMEOUT=${PTASK_VERIFY_RESTORE_TIMEOUT:-300}
 rssh() { timeout -k 10 "$STEP_TIMEOUT" ssh "${SSH_OPTS[@]}" "$@"; }
 rscp() { timeout -k 10 "$XFER_TIMEOUT" scp -q "${SSH_OPTS[@]}" "$@"; }
 # Worst case with the defaults: restore 300+10 s; nearby 2 rssh (40 s each)
-# + 1 rscp (130 s) = 210 s; off-site 2 rssh = 80 s; total 600 s.
-# ptask-restore-verify.service allows TimeoutStartSec=15min (900 s), which
-# leaves 300 s for the local sqlite checks. Raise it with the timeouts.
+# + 1 rscp (130 s) = 210 s; off-site 4 rssh (list, stat, two sha256) =
+# 160 s; total 680 s. ptask-restore-verify.service allows
+# TimeoutStartSec=15min (900 s), which leaves 220 s for the local sqlite
+# checks. Raise it with the timeouts. --replica-only: 310 s, and
+# ptask-replica-check.service allows 10min.
 
 SCRATCH=$(mktemp -d -t ptask-restore-verify-XXXXXX)
 cleanup() { rm -rf "$SCRATCH"; }
@@ -100,7 +115,8 @@ floor=$(( live_bytes * FLOOR_PCT / 100 ))
 
 # ---- 1. Litestream restore drill ----------------------------------------
 check_replica() {
-    local ic stats count settled settled_iso live_after lo hi
+    local ic stats count settled settled_iso after live_after live_settled_after lo hi
+    local need need_iso
     command -v litestream >/dev/null || { fail "litestream binary not on PATH"; return 1; }
     timeout -k 10 "$RESTORE_TIMEOUT" litestream restore -config "$LS_CONFIG" -o "$SCRATCH/restored.db" "$DB" \
         || { fail "litestream restore failed or ran past ${RESTORE_TIMEOUT}s"; return 1; }
@@ -110,19 +126,29 @@ check_replica() {
     stats=$(task_stats "$SCRATCH/restored.db") \
         || { fail "litestream restore has no readable tasks table"; return 1; }
     IFS='|' read -r count settled settled_iso <<<"$stats"
-    # Bracket the restore with live counts from before and after it: rows
-    # created or deleted while the drill runs widen the band instead of
-    # failing it, so the slack only has to cover replication lag.
-    live_after=$(sqlite3 "$LIVE" "SELECT COUNT(*) FROM tasks;") \
-        || { fail "cannot re-read live DB $DB"; return 1; }
+    # Bracket the restore with live reads from before and after it: rows
+    # created or deleted while the drill runs widen the count band instead
+    # of failing it, so the slack only has to cover replication lag.
+    after=$(task_stats "$LIVE") || { fail "cannot re-read live DB $DB"; return 1; }
+    IFS='|' read -r live_after live_settled_after _ <<<"$after"
     lo=$(( (live_count < live_after ? live_count : live_after) - COUNT_SLACK ))
     hi=$(( (live_count > live_after ? live_count : live_after) + COUNT_SLACK ))
     if [ "$count" -lt "$lo" ] || [ "$count" -gt "$hi" ]; then
         fail "litestream restore holds $count tasks vs live $live_count..$live_after (±$COUNT_SLACK) — replica diverged"
         return 1
     fi
-    if awk -v r="$settled" -v l="$live_settled" 'BEGIN { exit !(r < l) }'; then
-        fail "litestream restore lacks task writes older than ${LAG_MIN}min: its newest is $settled_iso, live's $live_settled_iso — replication stalled"
+    # The replica must hold the newest settled write live had both before
+    # and after the restore: the smaller of the two reads. A hard delete of
+    # live's newest settled row while the restore runs (replicated, so gone
+    # from the restore too) lowers the second read and must not look like a
+    # stall.
+    need=$live_settled need_iso=$live_settled_iso
+    if awk -v a="$live_settled_after" -v b="$live_settled" 'BEGIN { exit !(a < b) }'; then
+        need=$live_settled_after
+        need_iso=${after##*|}
+    fi
+    if awk -v r="$settled" -v l="$need" 'BEGIN { exit !(r < l) }'; then
+        fail "litestream restore lacks task writes older than ${LAG_MIN}min: its newest is $settled_iso, live's $need_iso — replication stalled"
         return 1
     fi
     say "litestream ok (restored $count tasks, live $live_count; newest settled write $settled_iso)"
@@ -168,11 +194,37 @@ check_offsite() {
     [ "$age_h" -lt 48 ] || { fail "newest off-site backup is ${age_h}h old (>48h): $latest"; return 1; }
     [ "$bytes" -ge "$floor" ] \
         || { fail "newest off-site backup is $bytes bytes, under the $floor-byte floor (live $live_bytes): $latest"; return 1; }
-    say "offsite ok ($(basename "$latest"), ${age_h}h old, $bytes bytes)"
+    # Same-date digest: both legs upload one snapshot, so the copies must be
+    # identical. Each side is hashed where it lives; nothing crosses the WAN.
+    local name off_sum near_sum digest_note
+    name=$(basename "$latest")
+    off_sum=$(rssh "$host" "sha256sum '$latest'") \
+        || { fail "cannot hash $latest on $host"; return 1; }
+    off_sum=${off_sum%% *}
+    if near_sum=$(rssh "${REMOTE%%:*}" \
+            "f='${REMOTE#*:}/$name'; if [ -f \"\$f\" ]; then sha256sum \"\$f\"; fi"); then
+        near_sum=${near_sum%% *}
+        if [ -z "$near_sum" ]; then
+            digest_note="no same-date nearby copy to compare"
+        elif [ "$near_sum" != "$off_sum" ]; then
+            fail "off-site $name (sha256 ${off_sum:0:16}…) differs from the nearby copy (${near_sum:0:16}…)"
+            return 1
+        else
+            digest_note="sha256 matches nearby"
+        fi
+    else
+        digest_note="nearby unreachable, digest not compared"
+    fi
+    say "offsite ok ($name, ${age_h}h old, $bytes bytes, $digest_note)"
 }
 
 failed=()
 check_replica || failed+=(litestream)
+if [ "$MODE" = replica ]; then
+    [ "${#failed[@]}" -eq 0 ] || exit 1
+    say "replica OK"
+    exit 0
+fi
 check_nightly || failed+=(nearby)
 if [ "$OFFSITE" = "none" ]; then
     say "offsite skipped (PTASK_BACKUP_OFFSITE=none)"

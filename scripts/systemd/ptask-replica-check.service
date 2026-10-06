@@ -1,0 +1,24 @@
+[Unit]
+Description=pTask daily Litestream replica check (restore + freshness)
+Documentation=https://github.com/puretensor/ptask
+After=network-online.target
+Wants=network-online.target
+OnFailure=ptask-failure-alert@%n.service
+
+# The weekly drill (ptask-restore-verify.timer) also checks the nightlies;
+# this runs only its Litestream check, daily, so a Litestream that keeps
+# running but stops replicating is caught within a day, not a week. It
+# restores the replica to a scratch path and requires every task write
+# older than 10 minutes to be in it. No ConditionPathExists: a missing
+# tasks.db must fail (and alert), not skip as a success.
+
+[Service]
+Type=oneshot
+ExecStart=%h/ptask/scripts/ptask-restore-verify.sh --replica-only
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+StandardOutput=journal
+StandardError=journal
+# Above the restore's own timeout (300+10 s) plus the local checks.
+TimeoutStartSec=10min
