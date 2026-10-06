@@ -12,6 +12,30 @@ pub fn run(conn: &mut rusqlite::Connection) -> Result<refinery::Report, refinery
     runner().set_grouped(true).run(conn)
 }
 
+/// Turn a migration failure into the crate error. A DB migrated by a newer
+/// binary is refused (an older binary can't honour schema it doesn't know:
+/// new constraints, triggers, columns its writes would leave unset), but the
+/// refusal names the cause and the way out instead of refinery's bare
+/// "migration V20__x is missing from the filesystem".
+pub fn describe_error(e: refinery::Error) -> crate::Error {
+    let newest_known = runner()
+        .get_migrations()
+        .iter()
+        .map(|m| m.version())
+        .max()
+        .unwrap_or(0);
+    if let refinery::error::Kind::MissingVersion(m) = e.kind()
+        && m.version() > newest_known
+    {
+        return crate::Error::Other(format!(
+            "database schema is at {m}, newer than this pt binary knows (latest V{newest_known}): \
+             a newer pt migrated it. Run that newer pt, or roll back by restoring the \
+             pre-upgrade backup (see \"Rolling back a release\" in docs/operations.md)"
+        ));
+    }
+    crate::Error::Migration(e)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

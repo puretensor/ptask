@@ -61,6 +61,33 @@ Restore: copy a snapshot back to `~/puretensor-tasks/tasks.db` (stop Python
 services first if running). The pre-v0.1.0 baseline is at
 `~/puretensor-tasks/tasks.db.pre-ptask-backup`.
 
+### Rolling back a release
+
+Every `pt` process applies its embedded migrations on open, so the first
+command run by a new binary moves the schema forward. An older binary then
+refuses that DB ("database schema is at V20__..., newer than this pt binary
+knows"): it cannot honour constraints, triggers or columns it has never
+heard of, so running it anyway could write rows the newer schema considers
+invalid. Migrations are forward-only; there is no down-migration.
+
+To roll back a release that added a migration:
+
+1. Before deploying, check whether it adds one
+   (`git diff --stat <old-tag>..<new-tag> -- crates/ptask-core/migrations`)
+   and, if so, take a fresh snapshot first
+   (`systemctl --user start ptask-backup.service`).
+2. To roll back, stop every `pt` writer (the timers and services listed
+   under Litestream *Recovery* below, plus `ptask-serve` and
+   `ptask-dashboard`), restore the pre-upgrade snapshot (or a Litestream
+   point-in-time restore from just before the deploy) over `tasks.db`,
+   install the old binary, and start the services again.
+3. Writes made after the upgrade are in the newer DB only; re-enter them,
+   or keep the newer binary and fix forward instead.
+
+A release whose migrations only add tables or nullable columns can also be
+rolled back by fixing forward (a patch release on the newer schema); prefer
+that over a restore when the data written since the deploy matters.
+
 ## Distillation (v3.0.0)
 
 `pt distill` runs the native Rust delta pipeline over unprocessed

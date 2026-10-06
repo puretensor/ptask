@@ -90,7 +90,8 @@ impl Db {
         // Apply migrations on a pooled connection. The pool's init has already
         // applied pragmas.
         let mut conn = pool.get().map_err(Error::Pool)?;
-        let report = crate::migrations::run(&mut conn).map_err(Error::Migration)?;
+        let report =
+            crate::migrations::run(&mut conn).map_err(crate::migrations::describe_error)?;
         drop(conn);
         debug!(
             target: "ptask::storage",
@@ -262,5 +263,30 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn db_migrated_by_a_newer_binary_fails_with_an_actionable_error() {
+        // CORE-8: refinery's abort_missing made an older binary refuse a DB
+        // a newer one migrated, with only "migration V20__x is missing from
+        // the filesystem". Running on an unknown newer schema is unsafe (the
+        // old binary can't honour constraints it doesn't know), so the
+        // refusal stays; it must say what happened and what to do.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("newer.db");
+        drop(Db::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
+             VALUES (9999, 'from_the_future', '2099-01-01T00:00:00Z', '0')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let err = Db::open(&path).err().expect("newer schema must be refused");
+        let msg = err.to_string();
+        assert!(msg.contains("V9999"), "{msg}");
+        assert!(msg.contains("newer pt"), "{msg}");
+        assert!(msg.contains("docs/operations.md"), "{msg}");
     }
 }
