@@ -12,15 +12,15 @@
 //! - `!HH:MM`        — reminder time-of-day (a valid time only; echoed by
 //!   `pt add`, not persisted)
 //! - `//rest of line` — everything after the `//` is the description
-//! - Future ISO date — an exact `YYYY-MM-DD` token. Other date-like prose is
-//!   kept as literal title text.
+//! - Future ISO date — an exact `YYYY-MM-DD` token after today, stored
+//!   date-only. Other date-like prose is kept as literal title text.
 //! - `"quoted text"` — words inside double quotes are literal title text,
 //!   never interpreted as markers or dates (`add 'Review the "p1 incident"'`).
 //! - Anything else   — title words
 //!
 //! Example:
 //!   `Buy bread 2099-05-14 @home #fleet p1 ~30m //grocery list`
-//!   →  title="Buy bread", deadline=<2099-05-14T00:00 London>, labels=["home"],
+//!   →  title="Buy bread", deadline="2099-05-14", labels=["home"],
 //!      project="fleet", priority=1, duration_min=30, description="grocery list"
 
 use crate::dates;
@@ -206,15 +206,20 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
         }
 
         // Body-text deadline inference is deliberately narrow. Only a full,
-        // standalone ISO date that is strictly in the future is eligible;
-        // ambiguous fragments (`4/5`), natural-language dates, and past ISO
-        // dates remain ordinary title text and never set-then-warn.
+        // standalone ISO date after today is eligible; ambiguous fragments
+        // (`4/5`), natural-language dates, and past ISO dates remain
+        // ordinary title text and never set-then-warn. Today's date stays
+        // text too: agent-written bodies carry it as provenance
+        // ("discovered 2026-08-01"), which must not become a due-today
+        // deadline; `--deadline` sets one explicitly. It is stored date-only,
+        // like `--deadline 2026-06-30`: due all day, not overdue from
+        // midnight.
         if is_full_iso_date(tok)
             && let Ok(parsed) = dates::parse_at(tok, now.clone())
-            && parsed > now
+            && parsed.date() > now.date()
         {
             out.deadline_phrase = Some(tok.to_string());
-            out.deadline = Some(dates::format_iso(&parsed));
+            out.deadline = Some(parsed.date().to_string());
             idx += 1;
             continue;
         }
@@ -641,6 +646,26 @@ mod tests {
         let q = parse_at("Pay invoice 2026-12-25", anchor()).unwrap();
         assert_eq!(q.title, "Pay invoice");
         assert!(q.deadline.as_deref().unwrap().starts_with("2026-12-25"));
+    }
+
+    #[test]
+    fn iso_date_token_is_stored_date_only() {
+        // PARSE-6: the token used to be stored as a midnight timestamp, so
+        // the task read overdue for the whole of its due day.
+        let q = parse_at("Pay invoice 2026-12-25", anchor()).unwrap();
+        assert_eq!(q.deadline.as_deref(), Some("2026-12-25"));
+        let q = parse_at("Pay invoice 2026-05-14", anchor()).unwrap();
+        assert_eq!(q.title, "Pay invoice");
+        assert_eq!(q.deadline.as_deref(), Some("2026-05-14"));
+        // Today and yesterday are provenance text, not deadlines.
+        for d in ["2026-05-13", "2026-05-12"] {
+            let q = parse_at(&format!("Pay invoice {d}"), anchor()).unwrap();
+            assert_eq!(q.title, format!("Pay invoice {d}"));
+            assert!(q.deadline.is_none());
+        }
+        // Semantically invalid dates stay text.
+        let q = parse_at("Pay invoice 2026-02-30", anchor()).unwrap();
+        assert!(q.deadline.is_none());
     }
 
     #[test]
