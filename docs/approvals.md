@@ -163,11 +163,13 @@ operator's tap) only from a forwarder; any other write client is journaled as
 `telegram via <client_id>`.
 
 MCP exposes `approval_request`, `approval_list`, `approval_status`,
-`approval_withdraw`. No MCP tool can decide. `pt mcp` without
-`$PTASK_ACTOR` requests as `mcp`, not the CLI's default `shell`, so the
-operator's own `pt approve` (actor `shell`) is never mistaken for the
-requester. Two unconfigured MCP clients share `mcp`; set `PTASK_ACTOR` per
-client to tell them apart.
+`approval_withdraw`. No MCP tool can decide. `pt mcp` takes its actor from
+`$PTASK_MCP_ACTOR`, else `$PTASK_ACTOR`, else `mcp` (never the CLI's
+default `shell` unless you set it), so the operator's own `pt approve`
+(actor `shell`) is not mistaken for the requester. `PTASK_MCP_ACTOR` wins
+so that an operator shell exporting `PTASK_ACTOR=shell` does not pass that
+identity to an MCP server it launches; set `PTASK_MCP_ACTOR` in each MCP
+registration. Two unconfigured MCP clients share `mcp`.
 
 ## Notify
 

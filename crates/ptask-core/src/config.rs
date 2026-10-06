@@ -20,10 +20,12 @@ pub struct Config {
     /// default "shell"). The dashboard sidecar sets PTASK_ACTOR=dashboard
     /// on its pt subprocesses; HAL sessions can set PTASK_ACTOR=hal.
     pub actor: String,
-    /// Identity for `pt mcp` over stdio: `$PTASK_ACTOR`, default "mcp".
-    /// Not "shell": an unconfigured MCP client would otherwise share the
-    /// operator's default CLI identity, and the operator's decision on its
-    /// approval request would be refused as the requester deciding.
+    /// Identity for `pt mcp` over stdio: `$PTASK_MCP_ACTOR`, else
+    /// `$PTASK_ACTOR`, else "mcp". Not "shell": an MCP client must not share
+    /// the operator's CLI identity, or the operator's decision on its
+    /// approval request is refused as the requester deciding. The MCP
+    /// variable wins so an operator shell that exports PTASK_ACTOR does not
+    /// leak its identity into an MCP server it launches.
     pub mcp_actor: String,
     pub auth: AuthConfig,
     pub notify: DispatchCfg,
@@ -180,7 +182,9 @@ impl Config {
         Config {
             db_path: env_db_path(),
             actor: env_nonempty("PTASK_ACTOR").unwrap_or_else(|| "shell".into()),
-            mcp_actor: env_nonempty("PTASK_ACTOR").unwrap_or_else(|| "mcp".into()),
+            mcp_actor: env_nonempty("PTASK_MCP_ACTOR")
+                .or_else(|| env_nonempty("PTASK_ACTOR"))
+                .unwrap_or_else(|| "mcp".into()),
             auth: AuthConfig {
                 api_token: env_nonempty("PTASK_API_TOKEN"),
                 metrics_token: env_nonempty("PTASK_METRICS_TOKEN"),
@@ -464,8 +468,20 @@ mod tests {
         }
         let cfg = Config::from_env();
         assert_eq!((cfg.actor.as_str(), cfg.mcp_actor.as_str()), ("hal", "hal"));
+        // An operator shell that exports PTASK_ACTOR=shell must not hand
+        // that identity to the MCP server: PTASK_MCP_ACTOR wins for pt mcp.
+        unsafe {
+            std::env::set_var("PTASK_ACTOR", "shell");
+            std::env::set_var("PTASK_MCP_ACTOR", "agent7");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(
+            (cfg.actor.as_str(), cfg.mcp_actor.as_str()),
+            ("shell", "agent7")
+        );
         unsafe {
             std::env::remove_var("PTASK_ACTOR");
+            std::env::remove_var("PTASK_MCP_ACTOR");
         }
     }
 

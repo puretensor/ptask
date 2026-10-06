@@ -1482,9 +1482,11 @@ const NOTHING_UNDOABLE: &str =
 /// (or is depended on by), or that parents another task, is never deleted:
 /// those relations are not journaled under its own uuid.
 fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<UndoPlan>> {
-    // "Own" is actor AND surface: CLI, TUI and an unconfigured `pt mcp` all
-    // default to actor "shell", so the actor alone let the operator's undo
-    // delete what an agent added over MCP. CLI and TUI are one surface.
+    // "Own" is actor AND surface: an MCP server can still run under the
+    // operator's actor (PTASK_ACTOR=shell exported into `pt mcp`; the
+    // unconfigured default is "mcp"), so the actor alone could let the
+    // operator's undo delete what an agent added over MCP. CLI and TUI are
+    // one surface.
     let (surface_a, surface_b) = match ctx.source.as_str() {
         "cli" | "tui" => ("cli", "tui"),
         other => (other, other),

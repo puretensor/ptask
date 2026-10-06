@@ -2078,7 +2078,8 @@ fn cmd_view(db: &Db, c: ViewCommand) -> Result<()> {
 }
 
 /// `pt mcp` — the agent-native tool surface over stdio. Actor comes from
-/// `$PTASK_ACTOR` (config), default "mcp" (not the CLI's "shell"), source=mcp.
+/// `$PTASK_MCP_ACTOR`, else `$PTASK_ACTOR` (config), default "mcp" (not the
+/// CLI's "shell"), source=mcp.
 fn cmd_mcp(db: Db) -> Result<()> {
     let config = ptask_core::Config::from_env();
     let rt = tokio::runtime::Builder::new_multi_thread()
