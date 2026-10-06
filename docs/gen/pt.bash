@@ -1245,7 +1245,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__approval__subcmd__payload)
-            opts="-h --db --json --idempotency-key --color --no-color --help <ID>"
+            opts="-h --any-status --db --json --idempotency-key --color --no-color --help <ID>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

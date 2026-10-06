@@ -20,6 +20,11 @@ pub struct Config {
     /// default "shell"). The dashboard sidecar sets PTASK_ACTOR=dashboard
     /// on its pt subprocesses; HAL sessions can set PTASK_ACTOR=hal.
     pub actor: String,
+    /// Identity for `pt mcp` over stdio: `$PTASK_ACTOR`, default "mcp".
+    /// Not "shell": an unconfigured MCP client would otherwise share the
+    /// operator's default CLI identity, and the operator's decision on its
+    /// approval request would be refused as the requester deciding.
+    pub mcp_actor: String,
     pub auth: AuthConfig,
     pub notify: DispatchCfg,
     pub webhooks: WebhookConfig,
@@ -175,6 +180,7 @@ impl Config {
         Config {
             db_path: env_db_path(),
             actor: env_nonempty("PTASK_ACTOR").unwrap_or_else(|| "shell".into()),
+            mcp_actor: env_nonempty("PTASK_ACTOR").unwrap_or_else(|| "mcp".into()),
             auth: AuthConfig {
                 api_token: env_nonempty("PTASK_API_TOKEN"),
                 metrics_token: env_nonempty("PTASK_METRICS_TOKEN"),
@@ -437,6 +443,30 @@ mod tests {
             std::env::remove_var("PTASK_GIT_CLOSE_REPOS");
         }
         assert!(Config::from_env().webhooks.git_close_repos.is_empty());
+    }
+
+    #[test]
+    fn mcp_default_actor_is_not_the_cli_default() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        unsafe {
+            std::env::remove_var("PTASK_ACTOR");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(
+            (cfg.actor.as_str(), cfg.mcp_actor.as_str()),
+            ("shell", "mcp")
+        );
+        unsafe {
+            std::env::set_var("PTASK_ACTOR", "hal");
+        }
+        let cfg = Config::from_env();
+        assert_eq!((cfg.actor.as_str(), cfg.mcp_actor.as_str()), ("hal", "hal"));
+        unsafe {
+            std::env::remove_var("PTASK_ACTOR");
+        }
     }
 
     #[test]

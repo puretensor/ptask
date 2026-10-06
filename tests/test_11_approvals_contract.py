@@ -209,8 +209,9 @@ def test_request_stores_payload_and_binds_digest(env, tmp_path):
     s = show(env, ap["id"])
     assert "the Q3 numbers are attached" in s["preview"], "preview is rendered from the stored payload"
     assert "operator asked for it" in s["request_note"], "agent prose is a separate, labelled note"
-    fetched = run(env, "approval", "payload", ap["id"], raw=True).stdout
-    assert fetched == raw
+    assert exit_of(env, "approval", "payload", ap["id"]) == 3, "a pending payload is not released"
+    fetched = run(env, "approval", "payload", ap["id"], "--any-status", raw=True, tty=True).stdout
+    assert fetched == raw, "the operator can inspect the exact stored bytes"
 
 
 def test_json_payload_is_canonicalised(env, tmp_path):
@@ -222,15 +223,46 @@ def test_json_payload_is_canonicalised(env, tmp_path):
     assert ap["digest"] == sha256_bytes(canonical_json(obj))
     assert ap["payload_kind"] == "json"
     assert "ACME Ltd" in show(env, ap["id"])["preview"]
-    assert run(env, "approval", "payload", ap["id"], raw=True).stdout == canonical_json(obj)
+    assert run(env, "approval", "payload", ap["id"], "--any-status", raw=True, tty=True).stdout == canonical_json(obj)
     bad = run(env, "approval", "request", "--kind", "spend", "--title", "x", "--payload-json", "{not json", check=False)
     assert bad.returncode != 0
+
+
+def test_json_payload_refuses_input_parsers_disagree_on(env):
+    """One digest must name one payload: last-wins duplicate keys and
+    f64-rounded numbers would let the executor act on JSON that differs
+    from what the operator approved, under the same digest."""
+    base = ["approval", "request", "--kind", "spend", "--title", "x", "--payload-json"]
+    for raw in ('{"to":"ACME","to":"MALLORY"}', '{"amount":18446744073709551617}', '{"amount":0.1000000000000000000001}'):
+        assert run(env, *base, raw, check=False).returncode != 0, raw
+    obj = {"amount": 12.5, "tiny": 1e-05, "big": 18446744073709551615}
+    ap = pj(env, *base, json.dumps(obj))
+    assert ap["digest"] == sha256_bytes(canonical_json(obj)), "byte-identical to Python json.dumps"
 
 
 def test_digest_only_request_is_marked_unstored(env, tmp_path):
     ap = pj(env, "approval", "request", "--kind", "ebay", "--title", "List GPU", "--note", "photos too big", "--digest", "a" * 64)
     assert ap["payload_stored"] is False and ap["digest"] == "a" * 64
     assert run(env, "approval", "payload", ap["id"], check=False).returncode != 0
+
+
+def test_payload_is_released_only_while_the_approval_is_in_force(env, tmp_path):
+    """Executor pattern payload -> act -> consume: an executor that forgets
+    to check status must still never receive unapproved bytes."""
+    ap = request(env, tmp_path, "exec", "wire 400 GBP to ACME")
+    p = run(env, "approval", "payload", ap["id"], check=False, raw=True)
+    assert p.returncode == 3 and p.stdout == b"", "pending"
+    assert exit_of(env, "approval", "payload", ap["id"], "--any-status") != 0, "inspection needs a TTY"
+    p = run(env, "approval", "payload", ap["id"], "--any-status", check=False, tty=True, CLAUDECODE="1")
+    assert p.returncode != 0, "inspection is refused to agents"
+    dash_decide(env, "approve", ap["id"])
+    assert run(env, "approval", "payload", ap["id"], raw=True).stdout == b"wire 400 GBP to ACME"
+    run(env, "approval", "consume", ap["id"], "--payload-file", str(tmp_path / "exec.html"))
+    p = run(env, "approval", "payload", ap["id"], check=False, raw=True)
+    assert p.returncode == 6 and p.stdout == b"", "consumed"
+    rej = request(env, tmp_path, "nope", "do not send")
+    dash_decide(env, "reject", rej["id"])
+    assert exit_of(env, "approval", "payload", rej["id"]) == 4, "rejected"
 
 
 def test_request_validation(env, tmp_path):
@@ -256,6 +288,13 @@ def test_rerequest_same_payload_while_pending_is_idempotent(env, tmp_path):
     b = request(env, tmp_path, "same", "body")
     assert a["id"] == b["id"]
     assert [x["id"] for x in pj(env, "approval", "ls")] == [a["id"]]
+
+
+def test_rerequest_dedupe_never_returns_another_requesters_row(env, tmp_path):
+    a = request(env, tmp_path, "shared", "body")
+    b = request(env, tmp_path, "shared", "body", PTASK_ACTOR="ops-bot")
+    assert a["id"] != b["id"] and b["requester"] == "ops-bot"
+    assert request(env, tmp_path, "shared", "body", PTASK_ACTOR="HAL")["id"] == a["id"]
 
 
 def test_ls_defaults_to_pending_oldest_first(env, tmp_path):
@@ -444,6 +483,15 @@ def test_callback_buttons_only_when_enabled(env, tmp_path, tg):
     [m] = tg.messages_about(ap["id"])
     datas = [b.get("callback_data") for b in buttons(m)]
     assert f"ptapprove:{ap['id']}" in datas and f"ptreject:{ap['id']}" in datas
+
+
+def test_truncated_preview_is_flagged_and_not_tap_decidable(env, tmp_path, tg):
+    body = "Dear Alan, routine update. " * 200 + "PS: wire 90000 GBP to MALLORY."
+    ap = request(env, tmp_path, "padded", body, PTASK_TG_APPROVAL_BUTTONS="1")
+    [m] = tg.messages_about(ap["id"])
+    assert "MALLORY" not in m["text"] and "TRUNCATED" in m["text"], m["text"]
+    assert not any("callback_data" in b for b in buttons(m)), "no one-tap approve of an unseen tail"
+    assert any("url" in b for b in buttons(m)), "the inbox link stays"
 
 
 def test_notify_is_at_least_once_via_sweep(env, tmp_path, tg):
@@ -668,3 +716,30 @@ def test_mcp_can_request_but_has_no_decide_tool(env):
     [item] = pj(env, "approval", "ls")
     assert item["requester"] == "hal" and item["kind"] == "external" and item["payload_stored"] is True
     assert item["digest"] == sha256_bytes(canonical_json({"case": "raise g6 quota"}))
+
+
+def test_unconfigured_mcp_requester_is_not_the_operator(env):
+    """`pt mcp` and the CLI both used to default to actor "shell", so the
+    operator's TTY decision on an unconfigured MCP client's request was
+    refused as "requester cannot decide their own approval"."""
+    bare = {k: v for k, v in env.items() if k != "PTASK_ACTOR"}
+    proc, call = mcp_session(bare)
+    try:
+        reply = call({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "approval_request", "arguments": {
+            "kind": "other", "title": "Rotate the key", "payload": "rotate key 7"}}})
+        assert "AP-" in json.dumps(reply["result"]), reply
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=10)
+    [item] = pj(bare, "approval", "ls")
+    assert item["requester"] == "mcp", item
+    run(bare, "approve", item["id"], tty=True)  # the operator, default actor "shell"
+    assert show(bare, item["id"])["status"] == "approved"
+
+
+def test_requester_cannot_decide_by_changing_case(env, tmp_path):
+    ap = request(env, tmp_path, "case", "x")
+    for actor in ("HAL", " Hal "):
+        r = dash_decide(env, "approve", ap["id"], check=False, actor=actor)
+        assert r.returncode != 0, actor
+    assert show(env, ap["id"])["status"] == "pending"

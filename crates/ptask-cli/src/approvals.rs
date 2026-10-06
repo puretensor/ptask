@@ -40,8 +40,9 @@ pub enum ApprovalCommand {
     List(ListArgs),
     /// Show one approval, including journal events.
     Show(IdArgs),
-    /// Write the stored payload bytes to stdout.
-    Payload(IdArgs),
+    /// Write the approved payload bytes to stdout (exit 3/4/6 unless the
+    /// approval is in force; see verify).
+    Payload(PayloadArgs),
     /// Withdraw a pending request (requester only).
     Withdraw(IdArgs),
     /// Check that an approval is approved and the payload still matches.
@@ -103,6 +104,17 @@ pub struct ListArgs {
 pub struct IdArgs {
     /// AP-n (or the row uuid).
     pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct PayloadArgs {
+    /// AP-n (or the row uuid).
+    pub id: String,
+    /// Operator inspection: print the bytes whatever the status (pending,
+    /// rejected, expired, consumed). Needs an operator TTY; refused under
+    /// CLAUDECODE. Not for executors.
+    #[arg(long = "any-status")]
+    pub any_status: bool,
 }
 
 #[derive(Args, Debug)]
@@ -280,6 +292,22 @@ fn print_human(ap: &approvals::Approval, events: Option<&[approvals::ApprovalEve
     }
 }
 
+fn inspect_guardrails() -> Result<()> {
+    let claudecode = std::env::var("CLAUDECODE")
+        .ok()
+        .is_some_and(|s| !s.is_empty());
+    if claudecode || !std::io::stdin().is_terminal() {
+        return Err(ExitCodeError {
+            code: 1,
+            message: "--any-status is operator inspection and needs an operator TTY; \
+                      executors get the payload only once it is approved"
+                .into(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn decide_guardrails(via_dashboard: bool) -> Result<DecidedVia> {
     let claudecode = std::env::var("CLAUDECODE")
         .ok()
@@ -363,8 +391,16 @@ pub fn cmd_show(db: &Db, a: IdArgs, json: bool) -> Result<()> {
     emit_one(ap, Some(&events), json)
 }
 
-pub fn cmd_payload(db: &Db, a: IdArgs) -> Result<()> {
-    let bytes = approvals::payload_bytes(db, &a.id).map_err(map_core)?;
+/// `--any-status` is the operator's inspection path, behind the same guards
+/// as a decision minus `--via dashboard` (the dashboard renders `preview`).
+/// Without it the bytes are released only while the approval is in force.
+pub fn cmd_payload(db: &Db, a: PayloadArgs) -> Result<()> {
+    let bytes = if a.any_status {
+        inspect_guardrails()?;
+        approvals::inspect_payload_bytes(db, &a.id).map_err(map_core)?
+    } else {
+        approvals::payload_bytes(db, &a.id).map_err(map_core)?
+    };
     let mut out = std::io::stdout().lock();
     out.write_all(&bytes)?;
     Ok(())
