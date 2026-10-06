@@ -9,7 +9,7 @@
 //! (`run_check_at`); these implementations assume real config and that a
 //! live send is wanted.
 
-use ptask_core::accountability::{Dispatch, NudgeRequest, html_escape};
+use ptask_core::accountability::{Dispatch, NudgeRequest, html_escape, truncate_utf16};
 use ptask_core::approvals::Approval;
 use ptask_core::config::DispatchCfg;
 use ptask_core::{Db, Error, Result};
@@ -23,16 +23,10 @@ pub enum InlineButton {
     Url { text: String, url: String },
 }
 
+/// At most `max` UTF-16 code units — the unit Telegram's 4096 limit is
+/// counted in (an emoji counts as two, so a `char` budget overshoots).
 fn excerpt(s: &str, max: usize) -> String {
-    let mut out = String::new();
-    for (i, ch) in s.chars().enumerate() {
-        if i >= max {
-            out.push('…');
-            break;
-        }
-        out.push(ch);
-    }
-    out
+    truncate_utf16(s, max)
 }
 
 /// Body + keyboard for an approval Telegram ping.
@@ -49,7 +43,7 @@ pub fn approval_telegram_message(
     let mut text = format!(
         "<b>{}</b> · {} · {}\nRequester: {}\nDigest: {}…\n\nPreview:\n{}",
         html_escape(&ap.ap_id()),
-        html_escape(&ap.kind),
+        html_escape(&excerpt(&ap.kind, 50)),
         html_escape(&excerpt(&ap.title, 200)),
         html_escape(&excerpt(&ap.requester, 100)),
         html_escape(&digest_prefix),
@@ -125,7 +119,18 @@ pub async fn send_telegram_markup(
     {
         Ok(r) if r.status().is_success() => Ok(true),
         Ok(r) => {
-            warn!(target: "ptask::notify", status = %r.status(), "telegram send failed");
+            // Telegram explains a rejection in the JSON `description`
+            // ("message is too long", "can't parse entities"). The body
+            // never echoes the URL, so unlike transport errors it is safe
+            // to log.
+            let status = r.status();
+            let description = r
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("description")?.as_str().map(|d| excerpt(d, 300)))
+                .unwrap_or_default();
+            warn!(target: "ptask::notify", status = %status, description = %description, "telegram send failed");
             Ok(false)
         }
         Err(e) => {
@@ -434,6 +439,88 @@ mod tests {
             .replace("&amp;", "&");
         assert!(rendered.chars().count() <= 4096, "{}", rendered.len());
         assert!(!text.contains("<b><b>"), "title must be escaped");
+    }
+
+    /// Regression (PARSE-11): the approval excerpts counted `char`s, but
+    /// Telegram's 4096 limit is in UTF-16 units — astral characters (emoji)
+    /// count twice, so an emoji-heavy approval still went over.
+    #[test]
+    fn approval_ping_fits_the_limit_in_utf16_units() {
+        let ap = Approval {
+            uuid: "u".into(),
+            seq: 8,
+            kind: "email".into(),
+            title: "😀".repeat(2_000),
+            request_note: Some("🚀".repeat(5_000)),
+            payload: Some("🔥".repeat(5_000).into_bytes()),
+            payload_kind: Some("text".into()),
+            payload_name: None,
+            payload_bytes: Some(20_000),
+            payload_ref: None,
+            digest: "ab".repeat(32),
+            requester: "🤖".repeat(500),
+            task_uuid: None,
+            task_pt_id: None,
+            status: "pending".into(),
+            decided_by: None,
+            decided_via: None,
+            decision_note: None,
+            created_at: "2026-09-25T00:00:00+00:00".into(),
+            decided_at: None,
+            expires_at: None,
+            notified_at: None,
+            consumed_at: None,
+            consumed_by: None,
+        };
+        let (text, _) = approval_telegram_message(&ap, None, false);
+        let rendered = text.replace("<b>", "").replace("</b>", "");
+        let units = rendered.encode_utf16().count();
+        assert!(units <= 4096, "{units} UTF-16 units");
+    }
+
+    /// Regression (PARSE-11): a rejected send logged only the status, so the
+    /// reason ("message is too long", "can't parse entities") was lost.
+    #[tokio::test(flavor = "current_thread")]
+    async fn telegram_rejection_logs_the_api_description_not_the_token() {
+        use std::io::{Read, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 65536];
+            let _ = stream.read(&mut buf);
+            let body =
+                r#"{"ok":false,"error_code":400,"description":"Bad Request: message is too long"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let token = "sentinel-secret-token";
+        let cfg = DispatchCfg {
+            telegram_token: Some(token.into()),
+            telegram_chat_id: Some(1),
+            telegram_api_base: Some(format!("http://{addr}")),
+            ..Default::default()
+        };
+        let logs = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let sent = HttpDispatch.send_telegram(&cfg, "x", &[]).await.unwrap();
+        assert!(!sent);
+        let output = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("message is too long"),
+            "captured logs: {output:?}"
+        );
+        assert!(!output.contains(token));
     }
 
     /// Network-level failure surfaces as Ok(false), not Err — the run loop

@@ -224,6 +224,33 @@ fn channels_for(level: i64) -> &'static [&'static str] {
     }
 }
 
+/// Telegram's message-text limit, counted in UTF-16 code units of the text
+/// after entity parsing (an emoji outside the BMP counts as two).
+pub const TELEGRAM_TEXT_LIMIT: usize = 4096;
+
+/// Cut `s` to at most `max_units` UTF-16 code units (Telegram's unit),
+/// ending in `…` when anything was removed. Never splits a character; cut
+/// plain text *before* HTML-escaping it so no entity is split either.
+pub fn truncate_utf16(s: &str, max_units: usize) -> String {
+    if s.encode_utf16().count() <= max_units {
+        return s.to_string();
+    }
+    let budget = max_units.saturating_sub(1);
+    let mut used = 0;
+    let mut out = String::new();
+    for ch in s.chars() {
+        used += ch.len_utf16();
+        if used > budget {
+            break;
+        }
+        out.push(ch);
+    }
+    if max_units > 0 {
+        out.push('…');
+    }
+    out
+}
+
 /// Escape text for a Telegram `parse_mode: HTML` message body.
 pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -514,7 +541,11 @@ pub async fn run_check_at<D: Dispatch>(
                         // parse_mode is HTML: a title like "Fix <br> in footer"
                         // is a 400 from Telegram, and three in a row trip the
                         // circuit breaker for every other nudge in the run.
-                        let prefixed = format!("<b>Task #{}:</b> {}", level, html_escape(&message));
+                        // Cap the visible text at Telegram's limit too: an
+                        // oversize title or HAL reply is a 400 just the same.
+                        let prefix_units = format!("Task #{level}: ").encode_utf16().count();
+                        let body = truncate_utf16(&message, TELEGRAM_TEXT_LIMIT - prefix_units);
+                        let prefixed = format!("<b>Task #{}:</b> {}", level, html_escape(&body));
                         let buttons = nudge_buttons(&task.id);
                         let r = if cfg.dry_run {
                             true
@@ -1333,6 +1364,86 @@ mod tests {
         }
         async fn compose_via_hal(&self, _cfg: &DispatchCfg, _req: &NudgeRequest) -> Option<String> {
             None
+        }
+    }
+
+    /// Telegram counts the 4096 limit in UTF-16 code units of the text
+    /// after HTML entity parsing.
+    fn rendered_utf16_len(html: &str) -> usize {
+        html.replace("<b>", "")
+            .replace("</b>", "")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .encode_utf16()
+            .count()
+    }
+
+    /// HAL composes whatever it likes; this one ignores any length budget.
+    struct LongHal(RecordTelegram);
+    impl Dispatch for LongHal {
+        async fn send_telegram(
+            &self,
+            cfg: &DispatchCfg,
+            text: &str,
+            buttons: &[(String, String)],
+        ) -> Result<bool> {
+            self.0.send_telegram(cfg, text, buttons).await
+        }
+        async fn send_email(&self, _cfg: &DispatchCfg, _s: &str, _b: &str) -> Result<bool> {
+            Ok(true)
+        }
+        async fn compose_via_hal(&self, _cfg: &DispatchCfg, _req: &NudgeRequest) -> Option<String> {
+            Some("&<🔥>".repeat(3_000))
+        }
+    }
+
+    /// Regression (DIST-9/PARSE-11): the fallback message embedded the full
+    /// title and the HAL message was uncapped, so a long title went over
+    /// Telegram's 4096 limit, got a 400, and three of those tripped the
+    /// circuit breaker for every other nudge in the run.
+    #[tokio::test]
+    async fn telegram_nudges_fit_the_limit_in_utf16_units() {
+        let (_dir, db) = fresh_db();
+        let anchor = noon_utc();
+        aged_task_before(&db, &"Fix 😀 <emoji> & co ".repeat(400), 2, &anchor);
+        let cfg = DispatchCfg {
+            telegram_token: Some("test".into()),
+            telegram_chat_id: Some(1),
+            ..Default::default()
+        };
+        let dispatch = RecordTelegram::default();
+        run_check_at(&db, &cfg, &dispatch, &anchor).await.unwrap();
+        let sent = dispatch.0.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        let len = rendered_utf16_len(&sent[0]);
+        assert!(len <= 4096, "fallback nudge is {len} UTF-16 units");
+        assert!(sent[0].starts_with("<b>Task #1:</b> Still open: Fix 😀"));
+
+        let (_dir, db) = fresh_db();
+        aged_task_before(&db, "short title", 2, &anchor);
+        let cfg = DispatchCfg {
+            hal_nudge_url: Some("http://hal.invalid/nudge".into()),
+            ..cfg
+        };
+        let dispatch = LongHal(RecordTelegram::default());
+        run_check_at(&db, &cfg, &dispatch, &anchor).await.unwrap();
+        let sent = dispatch.0.0.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let len = rendered_utf16_len(&sent[0]);
+        assert!(len <= 4096, "HAL nudge is {len} UTF-16 units");
+        // Truncation happens before escaping, so no entity is ever split.
+        let body = sent[0].strip_prefix("<b>Task #1:</b> ").unwrap();
+        assert!(!body.contains('<') && !body.contains('>'));
+        for (i, _) in body.match_indices('&') {
+            let rest = &body[i..];
+            assert!(
+                ["&amp;", "&lt;", "&gt;"]
+                    .iter()
+                    .any(|e| rest.starts_with(e)),
+                "split entity at {i}: {:?}",
+                &rest[..rest.len().min(8)]
+            );
         }
     }
 
