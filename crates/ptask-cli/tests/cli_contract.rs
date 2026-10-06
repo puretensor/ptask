@@ -295,3 +295,64 @@ fn json_output_escapes_del_c1_bidi_and_invisible_characters() {
         }
     }
 }
+
+/// When spawning the calendar command fails partway through
+/// `plan --write`, the error must name the holds already created (they
+/// are real calendar events the operator may need to remove).
+#[test]
+fn plan_write_names_created_holds_when_a_spawn_fails() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "first hold"]);
+    pt.ok(&["add", "--raw", "second hold"]);
+    let which = |tool: &str| {
+        let out = std::process::Command::new("sh")
+            .args(["-c", &format!("command -v {tool}")])
+            .output()
+            .unwrap();
+        let path = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        assert!(!path.is_empty(), "{tool} is needed for the fake gcalendar");
+        path
+    };
+    let (real, rm) = (which("python3"), which("rm"));
+    let bin = pt.dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // A python3 shim that removes itself after the first create, so the
+    // second spawn fails with ENOENT.
+    let shim = bin.join("python3");
+    std::fs::write(
+        &shim,
+        format!("#!/bin/sh\ncase \"$*\" in *create*) {rm} -f \"$0\";; esac\nexec {real} \"$@\"\n"),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let gcal = pt.dir.path().join("gcal.py");
+    std::fs::write(
+        &gcal,
+        "import sys, json\n\
+         if 'freebusy' in sys.argv:\n\
+         \x20   print(json.dumps({'tz': 'Europe/London', 'free_slots': [{'start': '2031-10-06T08:00:00Z', 'minutes': 480}]}))\n",
+    )
+    .unwrap();
+    let out = pt
+        .command(
+            "test",
+            &[
+                "--no-color",
+                "plan",
+                "--write",
+                "--gcal",
+                gcal.to_str().unwrap(),
+            ],
+        )
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("already created"), "{stderr}");
+    assert!(
+        stderr.contains("PT-1") || stderr.contains("PT-2"),
+        "the created hold must be named: {stderr}"
+    );
+}

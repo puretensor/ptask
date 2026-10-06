@@ -1979,11 +1979,14 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
 
     // 4. optional --write: tentative events on OUR calendar only
     let mut not_written: Vec<String> = Vec::new();
+    // Holds created so far: if a later spawn fails, they are already real
+    // calendar events and the error must say so.
+    let mut created: Vec<String> = Vec::new();
     if a.write {
         for s in &scheduled {
             let pt = s.pt_id.as_deref().unwrap_or("--");
             let title = format!("[pt] {} {}", pt, s.title);
-            let status = Proc::new("python3")
+            let spawned = Proc::new("python3")
                 .arg(&gcal)
                 .arg(&a.account)
                 .arg("create")
@@ -1992,9 +1995,23 @@ fn cmd_plan(db: &Db, a: PlanArgs) -> Result<()> {
                 .args(["--end", &s.end])
                 .args(["--calendar", &a.calendar])
                 .args(["--description", &format!("advisory-plan {}", pt)])
-                .status()
-                .with_context(|| "creating calendar event")?;
-            if !status.success() {
+                .status();
+            let status = match spawned {
+                Ok(status) => status,
+                Err(e) => {
+                    let done = if created.is_empty() {
+                        "none".to_string()
+                    } else {
+                        created.join(", ")
+                    };
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "creating the calendar event for {pt}; holds already created: {done}"
+                    )));
+                }
+            };
+            if status.success() {
+                created.push(pt.to_string());
+            } else {
                 eprintln!("warning: failed to create event for {}", pt);
                 not_written.push(pt.to_string());
             }
