@@ -417,9 +417,13 @@ fn check_json_text(raw: &str) -> Result<()> {
     Ok(())
 }
 
-/// A non-integer literal must name exactly the f64 it parses to (as decimal
-/// values: `1.50` and `1E2` are fine, `0.1000000000000000000001` is not).
-/// Integer literals parse exactly or overflow to f64, which
+/// A non-integer literal may carry at most 17 significant digits, enough to
+/// name any f64 and no more, so it reads as the same double in every
+/// correctly rounding parser (Python's included) and nothing the writer
+/// meant is dropped. Non-shortest forms such as `0.10000000000000001` (C
+/// `%.17g`, jq 1.6, Postgres `extra_float_digits=3`) are fine;
+/// `0.1000000000000000000001`, and a nonzero literal that underflows to
+/// zero, are not. Integer literals parse exactly or overflow to f64, which
 /// [`check_numbers`] refuses.
 fn check_number_literal(lit: &str) -> Result<()> {
     let n: serde_json::Number =
@@ -439,9 +443,16 @@ fn check_number_literal(lit: &str) -> Result<()> {
             Ok(())
         };
     }
-    if decimal_value(lit) != decimal_value(&shortest(f)) {
+    let digits = decimal_value(lit).map_or(usize::MAX, |(_, d, _)| d.len());
+    if digits > 17 {
         return Err(invalid_json(format!(
-            "number {lit} has more precision than a 64-bit float holds; send it as a string"
+            "number {lit} has {digits} significant digits; a 64-bit float holds 17, \
+             send it as a string"
+        )));
+    }
+    if f == 0.0 && digits > 0 {
+        return Err(invalid_json(format!(
+            "number {lit} underflows to zero; send it as a string"
         )));
     }
     Ok(())
@@ -1510,6 +1521,7 @@ mod tests {
             "1e300",
             "-0",
             "0.1000000000000000000001",
+            "1e-400",
             r#"{"amount":12345678901234567890123}"#,
         ] {
             assert!(canon(raw).is_err(), "{raw} must be rejected");
@@ -1533,6 +1545,12 @@ mod tests {
             ("0.0001", "0.0001"),
             ("1.5e-7", "1.5e-07"),
             ("123456.789", "123456.789"),
+            // Round-tripping but not shortest (C %.17g, jq 1.6, Postgres
+            // extra_float_digits=3): same double, Python's digits.
+            ("0.10000000000000001", "0.1"),
+            ("8.6834497869073662e-7", "8.683449786907366e-07"),
+            ("1.2345678901234567e-300", "1.2345678901234568e-300"),
+            ("123456.78901234567", "123456.78901234567"),
             ("797815578912564.2", "797815578912564.2"),
             ("-221972496954942.62", "-221972496954942.62"),
             ("0.11237863004311455", "0.11237863004311455"),

@@ -39,11 +39,25 @@ Exactly one of:
   One digest must name one payload, so input that different parsers read
   differently is refused, not normalised: duplicate object keys, integers
   beyond 64 bits, non-integers of magnitude 2^53 or more, number literals
-  with more precision than a 64-bit float (`0.1000000000000000000001`), and
-  `-0`. Send such values as strings. `payload_json` over HTTP and MCP is
-  parsed by the transport first, so there only the number-range rules can
-  apply; the strict text rules bind again at `verify`/`consume`, where the
-  executor's `--payload-json` is parsed the same way.
+  with more than 17 significant digits (`0.1000000000000000000001`), a
+  nonzero literal that underflows to zero (`1e-400`), and `-0`. Send such
+  values as strings. Round-tripping literals that are not the shortest form
+  (`0.10000000000000001`, as C `%.17g`, jq 1.6 or Postgres
+  `extra_float_digits=3` print them) are accepted and stored in Python's
+  shortest form (`0.1`). `payload_json` over HTTP and MCP is parsed by the
+  transport first, so there only the number-range rules can apply; the
+  strict text rules bind again at `verify`/`consume`, where the executor's
+  `--payload-json` is parsed the same way.
+
+  **JSON approvals stored before strict canonicalisation shipped** used the old
+  form (ryu float digits, no number limits). Re-canonicalising the
+  executor's JSON can disagree with them: a float of magnitude 2^53 or more
+  (`1e16`) is now refused, so `verify`/`consume --payload-json` exits **1**;
+  an exponent-range float (old `1e-5`, now `1e-05`) or a 17-digit float the
+  old parser rounded differently gives a digest mismatch, exit **5**. For
+  such rows fetch the stored bytes and bind to them instead:
+  `pt approval payload AP-n > p.json` then `pt approval consume AP-n
+  --payload-file p.json`.
 - `--digest H` — 64 lowercase hex; nothing is stored (`payload_stored: false`).
 
 `digest` is always SHA-256 of the stored bytes (or the supplied digest when

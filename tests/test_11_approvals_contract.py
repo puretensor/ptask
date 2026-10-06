@@ -238,6 +238,11 @@ def test_json_payload_refuses_input_parsers_disagree_on(env):
     obj = {"amount": 12.5, "tiny": 1e-05, "big": 18446744073709551615}
     ap = pj(env, *base, json.dumps(obj))
     assert ap["digest"] == sha256_bytes(canonical_json(obj)), "byte-identical to Python json.dumps"
+    # %.17g output (C, jq 1.6, Postgres extra_float_digits=3): not the
+    # shortest form, but the same double Python reads.
+    raw = '{"rate":0.10000000000000001,"x":8.6834497869073662e-7}'
+    ap = pj(env, *base, raw)
+    assert ap["digest"] == sha256_bytes(canonical_json(json.loads(raw)))
 
 
 def test_digest_only_request_is_marked_unstored(env, tmp_path):
