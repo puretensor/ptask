@@ -343,6 +343,12 @@ const STOPWORDS: &[&str] = &[
     "will", "with",
 ];
 
+/// A candidate claiming at least this many captures is an over-merge
+/// suspect, and each claim is checked with [`source_supports`]. Smaller
+/// claims, and a lone capture, are trusted: lexical overlap rejects too
+/// many honest paraphrases to be applied to every 1:1 answer.
+const OVER_MERGE_SOURCES: usize = 3;
+
 /// Does a capture's own text plausibly support a candidate title? At least
 /// half of the title's content words must appear in the capture, with a
 /// shared prefix of 4+ letters counting as a match ("renewal" ~ "renew").
@@ -354,7 +360,8 @@ fn source_supports(capture: &str, title: &str) -> bool {
         analyse_title(s)
             .0
             .into_iter()
-            .filter(|w| !STOPWORDS.contains(&w.as_str()))
+            // One-letter tokens carry no meaning (the `s` of "alan's").
+            .filter(|w| w.chars().count() >= 2 && !STOPWORDS.contains(&w.as_str()))
             .collect()
     };
     let title_words = content(title);
@@ -906,20 +913,23 @@ fn create_candidates<P: LlmProvider + ?Sized>(
     st: &mut RunState,
     ctx: &EventCtx,
 ) -> Result<()> {
-    // Coverage is the model's claim; accept it per source only when that
-    // capture's own text supports the title. The one exception is a lone
-    // capture whose candidate was just *created*: it can only have come from
-    // that capture, and the new task makes it visible. A dedup match is
-    // never taken on the model's word alone — that is how a repeated
-    // "Do everything" silently consumed unrelated work.
+    // Coverage is the model's claim. It is checked against the captures'
+    // own text only for an over-merge — a candidate claiming 3+ sources,
+    // the shape of a catch-all "Do everything" that consumed unrelated work.
+    // A lone capture (its candidate, created or deduped, can only be about
+    // it) and a 1–2 source claim are trusted: a lexical check rejects too
+    // many honest paraphrases ("tell hal to fix the raid" → "Replace failed
+    // disk in storage array") and would quarantine captures whose tasks
+    // exist.
     let Coverage {
         texts: source_texts,
         covered,
     } = coverage;
     let lone = source_texts.len() == 1;
-    let mut cover = |sources: &[usize], title: &str, created: bool| {
+    let mut cover = |sources: &[usize], title: &str| {
+        let trusted = lone || sources.len() < OVER_MERGE_SOURCES;
         for &i in sources {
-            if (lone && created) || source_supports(&source_texts[i], title) {
+            if trusted || source_supports(&source_texts[i], title) {
                 covered[i] = true;
             } else {
                 warn!(
@@ -953,7 +963,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             .any(|(_, t)| title_similar(t, &cand.title))
         {
             st.skipped += 1;
-            cover(&cand.sources, &cand.title, false);
+            cover(&cand.sources, &cand.title);
             info!(target: "ptask::distill", title = %cand.title, "dedup skip (jaccard)");
             continue;
         }
@@ -965,7 +975,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         {
             Ok(true) => {
                 st.skipped += 1;
-                cover(&cand.sources, &cand.title, false);
+                cover(&cand.sources, &cand.title);
                 info!(target: "ptask::distill", title = %cand.title, "dedup skip (temporal)");
                 continue;
             }
@@ -986,7 +996,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
             {
                 let (dup_id, dup_title) = dedup.existing[idx].clone();
                 st.skipped += 1;
-                cover(&cand.sources, &cand.title, false);
+                cover(&cand.sources, &cand.title);
                 info!(
                     target: "ptask::distill",
                     title = %cand.title,
@@ -1055,7 +1065,7 @@ fn create_candidates<P: LlmProvider + ?Sized>(
         }
         dedup.existing.push((created.id, title));
         st.created += 1;
-        cover(&cand.sources, &cand.title, true);
+        cover(&cand.sources, &cand.title);
     }
     Ok(())
 }
@@ -2052,27 +2062,148 @@ mod tests {
         }
     }
 
+    /// Over-merges every batch of 3+ into one catch-all title, but answers
+    /// smaller batches faithfully, one task per capture — how real models
+    /// fail (a lone capture's own consolidation is about it).
+    struct OverMerger;
+    impl LlmProvider for OverMerger {
+        fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+            PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+        }
+        fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+            if items.len() >= 3 {
+                return Ok(vec![Candidate {
+                    title: "Do everything".into(),
+                    priority: 2,
+                    description: String::new(),
+                    sources: (0..items.len()).collect(),
+                }]);
+            }
+            PoisonProvider { poison: "\u{0}" }.consolidate(items)
+        }
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "over-merger-test"
+        }
+    }
+
     /// Regression (round 3, DIST-1c): coverage was the model's word alone, so
     /// a repeated "Do everything" consumed every capture, eight at a time,
-    /// mostly via dedup against the first "Do everything" task. A source is
-    /// now covered only if its own text supports the candidate title; the
-    /// rest go round as singles, where a dedup match must also be related.
+    /// mostly via dedup against the first "Do everything" task. An over-merge
+    /// claim (3+ sources) now covers only captures whose own text supports
+    /// the title; the rest go round in smaller batches and end up covered by
+    /// their own tasks. (Since round 4 a lone capture's own answer is
+    /// trusted, created or deduped, so a model that answered "Do everything"
+    /// even for a single capture is out of scope by design.)
     #[test]
     fn a_catch_all_title_cannot_consume_unrelated_captures() {
         let (_dir, db) = fresh_db();
         let texts = distinct_captures(&db, 10);
-        let provider = CatchAll {
-            title: "Do everything",
-            consolidations: std::cell::Cell::new(0),
-        };
-        let _ = run_native(&db, &provider, 100);
-        let unprocessed = ptask_core::raw_items::unprocessed_count(&db).unwrap();
-        assert!(
-            unprocessed >= 9,
-            "{} unrelated captures consumed by \"Do everything\"",
-            10 - unprocessed
-        );
-        assert!(texts.iter().filter(|t| attempts(&db, t) > 0).count() >= 9);
+        let report = run_native(&db, &OverMerger, 100).unwrap();
+        assert_eq!(report.consumed, 10);
+        assert_eq!(report.failed, 0);
+        for t in &texts {
+            let own: i64 = db
+                .with_conn(|c| {
+                    Ok(
+                        c.query_row("SELECT COUNT(*) FROM tasks WHERE title = ?1", [t], |r| {
+                            r.get(0)
+                        })?,
+                    )
+                })
+                .unwrap();
+            assert_eq!(own, 1, "{t:?} was swallowed by \"Do everything\"");
+        }
+    }
+
+    /// Consolidates each capture 1:1 into the paraphrased title a real model
+    /// gives it.
+    struct Paraphraser;
+    const PARAPHRASES: [(&str, &str); 12] = [
+        ("dentist next week", "Book dentist appointment"),
+        ("gpu quote from alan", "Review Alan's GPU pricing"),
+        (
+            "tell hal to fix the raid",
+            "Replace failed disk in storage array",
+        ),
+        (
+            "car making a noise again",
+            "Take the car to the garage for inspection",
+        ),
+        (
+            "email Alan about the GPU quote",
+            "Email Alan about the GPU quote",
+        ),
+        ("book the flight to Reykjavik", "Book the Reykjavik flight"),
+        ("renew the office lease", "Renew the office lease"),
+        (
+            "call the bank about the mandate",
+            "Call the bank about the mandate",
+        ),
+        ("file the VAT return", "File the VAT return"),
+        (
+            "order replacement fans for the rack",
+            "Order replacement rack fans",
+        ),
+        ("pay the electricity bill", "Pay the electricity bill"),
+        ("send the board pack to Sigrid", "Send board pack to Sigrid"),
+    ];
+    impl LlmProvider for Paraphraser {
+        fn classify_batch(&self, texts: &[String]) -> Result<Vec<Classification>> {
+            PoisonProvider { poison: "\u{0}" }.classify_batch(texts)
+        }
+        fn consolidate(&self, items: &[String]) -> Result<Vec<Candidate>> {
+            Ok(items
+                .iter()
+                .enumerate()
+                .map(|(i, text)| Candidate {
+                    title: PARAPHRASES
+                        .iter()
+                        .find(|(c, _)| c == text)
+                        .map(|(_, t)| t.to_string())
+                        .unwrap_or_else(|| text.clone()),
+                    priority: 2,
+                    description: String::new(),
+                    sources: vec![i],
+                })
+                .collect())
+        }
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn name(&self) -> &'static str {
+            "paraphraser-test"
+        }
+    }
+
+    /// Regression (round 4, DIST-1c): `source_supports` rejected 4 of 12
+    /// realistic 1:1 paraphrases ("dentist next week" → "Book dentist
+    /// appointment"; "alan's" even split off an `s` word), so captures
+    /// whose tasks existed were charged toward quarantine. The check now
+    /// applies only to over-merge claims (3+ sources); a lone capture or a
+    /// 1–2 source claim is trusted.
+    #[test]
+    fn realistic_paraphrases_are_covered_without_charges_or_duplicates() {
+        let (_dir, db) = fresh_db();
+        let captures: Vec<&str> = PARAPHRASES.iter().map(|(c, _)| *c).collect();
+        seed_inbox(&db, &captures);
+        let report = run_native(&db, &Paraphraser, 100).unwrap();
+        assert_eq!(report.created, 12, "{report:?}");
+        assert_eq!(report.consumed, 12);
+        assert_eq!(report.failed, 0);
+        assert!(captures.iter().all(|c| attempts(&db, c) == 0));
+        let tasks: i64 = db
+            .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(tasks, 12, "no duplicate tasks");
+        // A re-run over the same captures (re-ingest) dedups, never charges.
+        for c in &captures[..4] {
+            ptask_core::raw_items::insert(&db, c, "test", "test://reingest").unwrap();
+        }
+        let report = run_native(&db, &Paraphraser, 100).unwrap();
+        assert_eq!((report.created, report.consumed, report.failed), (0, 4, 0));
     }
 
     /// Normal consolidation still covers: several captures about one thing,
