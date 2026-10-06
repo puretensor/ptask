@@ -141,6 +141,11 @@ three failed attempts, so empty provider output cannot block newer captures
 indefinitely. Noise in a failed chunk is reclassified during bisection and
 counted as consumed only once.
 
+Each capture is capped at 4,000 characters in the prompt (`MAX_ITEM_CHARS`),
+with a visible `[… N chars truncated]` marker, so one very long email cannot
+exceed the model context and end up quarantined. The stored `raw_items.text`
+is never truncated.
+
 The isolated row is charged one `raw_items.distill_attempts`, with the reason
 in `raw_items.distill_error`. After 3 charges it is **quarantined**: no longer
 served by `fetch_unprocessed`, so it cannot sit at the head of the

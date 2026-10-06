@@ -52,9 +52,15 @@ fn default_priority() -> i64 {
 ///      `-`, then any run of three or more dashes collapses to `~`;
 ///   4. the word `untrusted` (any case) is defanged, so even a dash-free
 ///      "END UNTRUSTED ITEMS" cannot pose as the marker.
+/// Characters of one capture handed to the model. A batch is at most `CHUNK`
+/// (25) items, so this keeps a full classify prompt near 100k characters
+/// (~25k tokens) instead of letting one long email blow the context window.
+pub const MAX_ITEM_CHARS: usize = 4_000;
+
 fn fence_item(text: &str) -> String {
-    let mut folded: Vec<char> = Vec::with_capacity(text.len());
-    for ch in text.chars() {
+    let total = text.chars().count();
+    let mut folded: Vec<char> = Vec::with_capacity(text.len().min(MAX_ITEM_CHARS * 4));
+    for ch in text.chars().take(MAX_ITEM_CHARS) {
         if is_invisible(ch) {
             continue;
         }
@@ -97,6 +103,10 @@ fn fence_item(text: &str) -> String {
         }
         out.push(folded[i]);
         i += 1;
+    }
+    if total > MAX_ITEM_CHARS {
+        // Visible to the model, so it knows the commitment may continue.
+        out.push_str(&format!(" [… {} chars truncated]", total - MAX_ITEM_CHARS));
     }
     out
 }
@@ -844,11 +854,7 @@ mod tests {
                 ch
             );
             assert!(!ch.is_control(), "control {ch:?} survived in {line:?}");
-            assert!(
-                !is_invisible(ch),
-                "invisible {:?} survived in {line:?}",
-                ch
-            );
+            assert!(!is_invisible(ch), "invisible {:?} survived in {line:?}", ch);
         }
         let dashes: String = line
             .chars()
@@ -1043,6 +1049,40 @@ mod tests {
             OpenAiCompatProvider::with_base_url(url, "nemotron-lightning".into()).unwrap();
         let out = provider.classify_batch(&["I will ship it".into()]).unwrap();
         assert!(out[0].keep);
+    }
+
+    /// Regression (DIST-4): nothing bounded a single capture, so one huge
+    /// email exceeded the model context on every call, failed in isolation
+    /// three times and was quarantined instead of distilled.
+    #[test]
+    fn an_oversized_capture_is_truncated_with_a_marker() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let url = mock_openai_server(
+            r#"{"choices":[{"message":{"content":"[{\"idx\":0,\"keep\":true}]"}}]}"#,
+            move |request| tx.send(request.len()).unwrap(),
+        );
+        let provider = OpenAiCompatProvider::with_base_url(url, "m".into()).unwrap();
+        let huge = format!(
+            "Pay the invoice by Friday. {}",
+            "lorem ipsum ".repeat(50_000)
+        );
+        provider.classify_batch(&[huge.clone()]).unwrap();
+        let request_len = rx.recv().unwrap();
+        assert!(
+            request_len < MAX_ITEM_CHARS + 8_000,
+            "a {}-char capture produced a {request_len}-byte request",
+            huge.len()
+        );
+
+        let fenced = fence_item(&huge);
+        assert!(fenced.starts_with("Pay the invoice by Friday."));
+        assert!(
+            fenced.ends_with("chars truncated]"),
+            "{}",
+            &fenced[fenced.len() - 60..]
+        );
+        assert!(fenced.chars().count() <= MAX_ITEM_CHARS + 40);
+        assert_eq!(fence_item("short"), "short");
     }
 
     #[test]
