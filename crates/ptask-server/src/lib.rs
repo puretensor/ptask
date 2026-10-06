@@ -202,17 +202,36 @@ pub async fn serve(db: Db, addr: SocketAddr, mut config: Config) -> Result<()> {
             config.tg_forwarders,
             config.tg_approval_buttons,
         );
-    let app = router(state);
     info!(target: "ptask::server", %addr, "starting pt serve");
     let listener = TcpListener::bind(addr).await?;
+    run(listener, state, shutdown_signal(), WEBHOOK_DRAIN_TIMEOUT).await?;
+    info!(target: "ptask::server", "pt serve stopped");
+    Ok(())
+}
+
+/// How long graceful shutdown waits for queued outbound webhooks.
+const WEBHOOK_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Serve `state` on `listener` until `shutdown` resolves, then finish the
+/// in-flight requests and give queued outbound webhooks `webhook_drain` to
+/// go out (delivery is a background task the runtime would otherwise drop).
+async fn run(
+    listener: TcpListener,
+    state: AppState,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    webhook_drain: std::time::Duration,
+) -> Result<()> {
+    let outbound = state.outbound.clone();
+    let app = router(state);
     // Peer addresses key the dashboard's failed-auth throttle.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(shutdown)
     .await?;
-    info!(target: "ptask::server", "pt serve stopped");
+    // No request can enqueue any more; deliver what is queued, bounded.
+    outbound.drain(webhook_drain).await;
     Ok(())
 }
 
@@ -1481,6 +1500,59 @@ mod tests {
         while log.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+    }
+
+    /// SRV-6: delivery was a detached task, so events still queued when
+    /// `pt serve` got SIGTERM were dropped with the runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn graceful_shutdown_drains_queued_webhooks() {
+        let (url, log) = recording_hook().await;
+        let state = AppState::new(
+            open_test_db(),
+            Default::default(),
+            WebhookConfig {
+                outbound_urls: vec![url],
+                ..Default::default()
+            },
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(run(
+            listener,
+            state,
+            async {
+                let _ = stopped.await;
+            },
+            std::time::Duration::from_secs(10),
+        ));
+        let commands: Vec<serde_json::Value> = (0..3)
+            .map(|i| {
+                serde_json::json!({
+                    "type": "task_create", "uuid": format!("drain-{i}"),
+                    "args": {"text": format!("drained task {i}")},
+                })
+            })
+            .collect();
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/sync"))
+            .header("content-type", "application/json")
+            .body(
+                serde_json::to_vec(&serde_json::json!({"sync_token": "*", "commands": commands}))
+                    .unwrap(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "{}", resp.status());
+        drop(resp);
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        assert_eq!(
+            log.lock().unwrap().len(),
+            3,
+            "shutdown returned before the queued webhooks went out"
+        );
     }
 
     /// SRV-5: each request delivered on its own task, so a later request's

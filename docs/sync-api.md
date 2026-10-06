@@ -198,7 +198,10 @@ Body:
 `ts` is the event's commit time (its `pt_event_log.ts`, operator timezone)
 and `event_id` its journal id, not the delivery time. One worker per server
 delivers every event, one at a time and in commit order, to each URL in
-turn; no retries, 10s timeout per POST.
+turn; no retries, 10s timeout per POST. On graceful shutdown (SIGTERM /
+SIGINT) the server finishes in-flight requests and then gives the queued
+events up to 15s to go out; whatever is left after that is dropped (and
+logged).
 
 ## Metrics
 
