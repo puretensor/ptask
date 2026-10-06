@@ -107,7 +107,9 @@ the pings), the authenticated `client_id` is in `$PTASK_TG_FORWARDERS`
 (default `nexus`) **and** `from_id` equals `$PTASK_ACCOUNTABILITY_CHAT_ID`.
 Otherwise 403 and no state change. `decided_via=telegram`,
 `decided_by=operator@telegram`. Idempotent per `callback_id`. The
-`ptdone:` / `ptsnooze:` / `ptdismiss:` verbs also require a forwarder token.
+`ptdone:` / `ptsnooze:` / `ptdismiss:` verbs are journaled as `telegram` (the
+operator's tap) only from a forwarder; any other write client is journaled as
+`telegram via <client_id>`.
 
 MCP exposes `approval_request`, `approval_list`, `approval_status`,
 `approval_withdraw`. No MCP tool can decide.

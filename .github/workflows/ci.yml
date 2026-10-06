@@ -23,6 +23,17 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # A job skipped by `if:` reports success, so without this a fork PR would
+  # show green CI with nothing run. GitHub-hosted: it never touches tensor-core.
+  fork-pr:
+    name: fork PR (CI not run)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - run: |
+          echo "::error::CI does not run fork pull requests on the self-hosted runner. A maintainer can push this branch into the repository to test it."
+          exit 1
+
   actionlint:
     name: actionlint
     runs-on: [self-hosted, tensor-core]

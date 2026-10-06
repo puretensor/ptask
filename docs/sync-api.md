@@ -20,13 +20,20 @@
 ## Auth
 
 Loopback `pt serve` binds keep the original local-dev mode and accept requests
-without application credentials. Because the machine APIs and the always-
+without application credentials until a token is configured: `PTASK_API_TOKEN`,
+`PTASK_METRICS_TOKEN`, or any unrevoked named token (`pt token create`) closes
+anonymous access. Even then, an anonymous request is served only when its
+`Host` names the server itself (IP literal, `localhost`, the machine's short
+hostname, `*.ts.net`, `PTASK_DASH_ALLOWED_HOSTS`), because a DNS-rebinding
+page carries no credential either. Because the machine APIs and the always-
 mounted dashboard use separate auth schemes, non-loopback binds fail closed
-unless both `PTASK_API_TOKEN` and `PTASK_DASH_PASS` are set.
+unless machine-API auth (`PTASK_API_TOKEN` or a named token) and
+`PTASK_DASH_PASS` are both set, and a non-loopback listener never serves
+anonymous callers, even after its last named token is revoked.
 `PTASK_ALLOW_UNAUTHENTICATED=1` is an explicit test-only override for isolated
 deployments.
 
-`PTASK_API_TOKEN` gates `POST /sync`, `POST /capture`,
+Machine-API auth (the env token or a named token) gates `POST /sync`, `POST /capture`,
 `POST /capture/resolve`, `POST /email`, `POST /tg/callback`, and the read APIs
 (`GET /next`, `GET /detail/{uuid}`, `GET /resolve`, `GET /list`,
 `GET /metrics`). The `/mcp` mount separately requires a non-revoked named
@@ -194,9 +201,11 @@ The Triage Cockpit's API also lives in `pt serve`. HTTP **Basic** auth
 (`PTASK_DASH_USER`/`PTASK_DASH_PASS`; open when no password configured —
 local/dev only). Same shapes as the sidecar v0.6.0 contract. While no password
 is configured, these routes (and `GET /`) answer only to the server's own names
-— IP literals, single-label names, `*.ts.net`, `PTASK_DASH_ALLOWED_HOSTS` and the
-host of `PTASK_DASH_URL` — and refuse any other `Host` with 421, so a
-DNS-rebinding page cannot drive them.
+— IP literals, `localhost`, the machine's short hostname, `*.ts.net`,
+`PTASK_DASH_ALLOWED_HOSTS` (`.suffix` entries match the suffix) and the host of
+`PTASK_DASH_URL` — and refuse any other `Host` with 421. Together with the
+Host check on anonymous machine-API access (see Auth), a DNS-rebinding page
+cannot drive the server.
 
 The Python sidecar in `dashboard/` (the live tailnet cockpit) is a different
 process with a different posture: no login at all since PT-2201, the same Host
@@ -221,9 +230,10 @@ proxy forwards only the path it is given, never the query string.
 ## POST /tg/callback (v2.2.0)
 
 Executes a Telegram inline-button tap forwarded by nexus (the bot's single
-`getUpdates` owner). Requires `write` scope **and** a client named in
-`PTASK_TG_FORWARDERS` (default `nexus`); any other token gets 403, because every
-verb is journaled as the operator's tap.
+`getUpdates` owner). Requires `write` scope. Only a client named in
+`PTASK_TG_FORWARDERS` (default `nexus`) acts as the operator's tap; any other
+write client's task tap is journaled as `telegram via <client_id>`, and its
+approval taps get 403.
 
 ```json
 {"data": "ptdone:<task-uuid>", "callback_id": "<telegram callback id>"}
@@ -231,7 +241,7 @@ verb is journaled as the operator's tap.
 
 Verbs: `ptdone` | `ptsnooze` (3 days) | `ptdismiss`. Idempotent per
 `callback_id` (journal uuid `tg-cb:<id>`); duplicate taps return
-`{"ok":true,"duplicate":true}`. Actions land in the journal as
+`{"ok":true,"duplicate":true}`. Forwarded actions land in the journal as
 `actor=telegram`, `source=tg-callback`. Approval verbs (`ptapprove:AP-n`,
 `ptreject:AP-n`) are refused with 403 unless `PTASK_TG_APPROVAL_BUTTONS=1`; see
 `docs/approvals.md`.

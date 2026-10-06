@@ -434,7 +434,9 @@ a workflow of its own that targets `[self-hosted, tensor-core]`.
 
 - `ci.yml` skips every job for pull requests whose head branch is not in this
   repository. That keeps ordinary fork PRs off the runner. It cannot stop a
-  fork that rewrites the workflow.
+  fork that rewrites the workflow. Skipped jobs report success, so a
+  GitHub-hosted `fork PR (CI not run)` job fails on such PRs to keep them from
+  looking tested.
 - The control that does stop it is the repository setting **Settings →
   Actions → General → Approval for running fork pull request workflows →
   Require approval for all external contributors**. Keep it set, and read the
