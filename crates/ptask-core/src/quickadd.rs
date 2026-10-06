@@ -194,13 +194,15 @@ pub fn parse_at(input: &str, now: Zoned) -> Result<QuickAdd> {
 
         // Recurrence: `every X` / `every! X`. Greedy consumption up to next
         // explicit marker. Optional trailing " at <time>" sets the time-of-day
-        // for the first (and subsequent) occurrence.
+        // for the first (and subsequent) occurrence. A rule whose first
+        // occurrence can't be computed (`every 9999999 days` overflows the
+        // calendar) stays title text rather than failing the whole add.
         if (tok.eq_ignore_ascii_case("every") || tok.eq_ignore_ascii_case("every!"))
             && let Some((rec, time_of_day, consumed, phrase)) =
                 try_recurrence_match(&raw[..scan_end], idx, &now)
+            && let Ok(deadline) = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())
         {
             if !explicit_deadline {
-                let deadline = first_recurrence_deadline(&rec, &now, time_of_day.as_ref())?;
                 out.deadline_phrase = Some(phrase);
                 out.deadline = Some(dates::format_iso(&deadline));
             }
@@ -790,6 +792,18 @@ mod tests {
         assert_eq!(q.recurrence.unwrap().original_input, "every monday");
         assert!(q.due.as_deref().unwrap().starts_with("2026-06-01"));
         assert!(q.deadline.as_deref().unwrap().starts_with("2026-05-18"));
+    }
+
+    #[test]
+    fn out_of_range_recurrence_stays_title_text() {
+        // PARSE-16: a rule whose first occurrence overflows the calendar
+        // (`every 9999999 days`) failed the whole add instead of falling
+        // back to literal text like any other unusable phrase.
+        let q = parse_at("Water plants every 9999999 days @home", anchor()).unwrap();
+        assert_eq!(q.title, "Water plants every 9999999 days");
+        assert!(q.recurrence.is_none());
+        assert!(q.deadline.is_none());
+        assert_eq!(q.labels, vec!["home"]);
     }
 
     #[test]
