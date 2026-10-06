@@ -83,6 +83,21 @@ class ReadmeDefaultsTests(unittest.TestCase):
         )
 
 
+class SystemdUnitTests(unittest.TestCase):
+    def test_spawned_pt_writers_leave_checkpoints_to_litestream(self):
+        # The unit loads .dashboard.env, not the .env every other pt writer
+        # loads, so the pt processes the sidecar spawns never saw
+        # PTASK_WAL_AUTOCHECKPOINT=0 and checkpointed on SQLite's default,
+        # racing Litestream. The unit sets it; .dashboard.env (read after)
+        # may still override it.
+        unit = (Path(server.__file__).parent / "ptask-dashboard.service").read_text()
+        lines = [l.strip() for l in unit.splitlines()]
+        setting = "Environment=PTASK_WAL_AUTOCHECKPOINT=0"
+        self.assertIn(setting, lines)
+        env_file = next(i for i, l in enumerate(lines) if l.startswith("EnvironmentFile="))
+        self.assertLess(lines.index(setting), env_file)
+
+
 class DeadlineTests(unittest.TestCase):
     def test_date_only_deadline_due_today_is_not_overdue(self):
         today = server._operator_today()

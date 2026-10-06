@@ -350,6 +350,12 @@ config — see `scripts/litestream/litestream.yml`.
    LITESTREAM_SECRET_ACCESS_KEY=...
    ```
 
+Every process that writes the DB must open it with
+`PTASK_WAL_AUTOCHECKPOINT=0` (a per-connection pragma, not stored in the
+file): the `scripts/systemd` units get it from `~/puretensor-tasks/.env`, and
+`dashboard/ptask-dashboard.service` sets it for the `pt` writers the sidecar
+spawns.
+
 ### One-time SQLite tunings
 
 ```bash
