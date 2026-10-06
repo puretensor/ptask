@@ -18,7 +18,8 @@
 //!
 //! Transitions (time at the current level, from `level_changed_at`):
 //!
-//!   0 → 1  task age ≥ 2 days
+//!   0 → 1  task age ≥ 2 days (age of the current occurrence: completing a
+//!          recurring task or reopening one restarts the ladder at 0)
 //!   1 → 2  ≥ 3 days at level 1
 //!   2 → 3  ≥ 4 days at level 2
 //!   3 → 4  ≥ 2 days at level 3
@@ -94,7 +95,10 @@ pub struct RunReport {
 struct EligibleTask {
     id: String,
     title: String,
-    created_at: String,
+    /// When the current occurrence began: the latest recurrence advance or
+    /// reopen, else `created_at`. Age is measured from here, so a recurring
+    /// task completed on schedule is never "33 days old".
+    occurrence_start: String,
     last_reminded: Option<String>,
     dismissal_count: i64,
     escalation_level: i64,
@@ -148,7 +152,16 @@ pub fn increment_daily_budget(db: &Db, date_utc: &str) -> Result<i64> {
 fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
     let conn = db.get()?;
     let mut stmt = conn.prepare(
-        "SELECT id, title, created_at, last_reminded,
+        "SELECT id, title,
+                COALESCE((SELECT i.ts FROM interactions i
+                           WHERE i.task_id = tasks.id
+                             AND (i.action = 'recurrence_advance'
+                                  OR (i.action = 'status_change'
+                                      AND i.details LIKE 'Reopened%'))
+                             AND julianday(i.ts) IS NOT NULL
+                           ORDER BY julianday(i.ts) DESC LIMIT 1),
+                         created_at),
+                last_reminded,
                 COALESCE(dismissal_count, 0), COALESCE(escalation_level, 0),
                 level_changed_at
          FROM tasks
@@ -172,7 +185,7 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
         Ok(EligibleTask {
             id: r.get(0)?,
             title: r.get(1)?,
-            created_at: r.get(2)?,
+            occurrence_start: r.get(2)?,
             last_reminded: r.get(3)?,
             dismissal_count: r.get(4)?,
             escalation_level: r.get(5)?,
@@ -183,7 +196,7 @@ fn fetch_eligible(db: &Db, now_iso: &str) -> Result<Vec<EligibleTask>> {
 }
 
 fn task_age_days(task: &EligibleTask, now: &Zoned) -> i64 {
-    let Some(created) = parse_iso_to_utc(&task.created_at) else {
+    let Some(created) = parse_iso_to_utc(&task.occurrence_start) else {
         return 0;
     };
     let delta = now.timestamp().as_second() - created.timestamp().as_second();
@@ -919,7 +932,7 @@ mod tests {
             EligibleTask {
                 id: "x".into(),
                 title: "t".into(),
-                created_at: crate::dates::format_iso(
+                occurrence_start: crate::dates::format_iso(
                     &now.checked_sub(jiff::Span::new().days(age_days)).unwrap(),
                 ),
                 last_reminded: last_offset_secs.map(|s| {
@@ -960,7 +973,7 @@ mod tests {
         let t = EligibleTask {
             id: "x".into(),
             title: "Renew SSL".into(),
-            created_at: "2026-05-01T00:00:00+00:00".into(),
+            occurrence_start: "2026-05-01T00:00:00+00:00".into(),
             last_reminded: None,
             dismissal_count: 2,
             escalation_level: 0,
@@ -1416,6 +1429,131 @@ mod tests {
         assert_eq!(report.dispatched.len(), 1, "level 1 must reach email");
         assert!(report.dispatched[0].email_sent);
         assert!(!report.dispatched[0].telegram_sent);
+    }
+
+    /// 12:00 UTC `days` after today: after any wall-clock write the task API
+    /// makes (mark_done/reopen stamp the real now), and outside quiet hours.
+    fn noon_utc_days_from_today(days: i64) -> Zoned {
+        jiff::Zoned::now()
+            .with_time_zone(jiff::tz::TimeZone::UTC)
+            .date()
+            .checked_add(jiff::Span::new().days(days))
+            .unwrap()
+            .at(12, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .unwrap()
+    }
+
+    fn telegram_cfg() -> DispatchCfg {
+        DispatchCfg {
+            telegram_token: Some("test".into()),
+            telegram_chat_id: Some(1),
+            ..Default::default()
+        }
+    }
+
+    /// Regression (PARSE-10): advancing a recurring task never reset its
+    /// escalation, and age came from `created_at`, so a daily task completed
+    /// on schedule every day still climbed to level 5 ("Day 33").
+    #[tokio::test]
+    async fn an_on_schedule_recurring_task_restarts_the_ladder_each_occurrence() {
+        let (_dir, db) = fresh_db();
+        let tomorrow = noon_utc_days_from_today(1);
+        let mut new = NewTask::minimal("water the plants");
+        new.deadline = Some(crate::dates::format_iso(&tomorrow));
+        let task = create_with_extensions(
+            &db,
+            new,
+            Extensions {
+                recurrence: Some(crate::recurrence::parse("every day").unwrap()),
+                ..Default::default()
+            },
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let ago = |days: i64| {
+            crate::dates::format_iso(&tomorrow.checked_sub(jiff::Span::new().days(days)).unwrap())
+        };
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET created_at=?1, escalation_level=4,
+                                  level_changed_at=?2, last_reminded=?2
+                  WHERE id=?3",
+                params![ago(30), ago(8), &task.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let outcome = crate::tasks::mark_done(&db, &task, &EventCtx::test()).unwrap();
+        assert!(matches!(
+            outcome,
+            crate::tasks::DoneOutcome::Advanced { .. }
+        ));
+        assert_eq!(
+            level_and_updated_at(&db, &task.id).0,
+            0,
+            "advance resets the ladder"
+        );
+
+        let report = run_check_at(&db, &telegram_cfg(), &SendOk, &tomorrow)
+            .await
+            .unwrap();
+        assert!(
+            report.dispatched.is_empty(),
+            "a just-completed occurrence is not overdue: {:?}",
+            report.dispatched
+        );
+
+        // Left alone for three days, the new occurrence starts at level 1
+        // and counts its age from the advance, not from creation.
+        let later = noon_utc_days_from_today(3);
+        let dispatch = RecordTelegram::default();
+        let report = run_check_at(&db, &telegram_cfg(), &dispatch, &later)
+            .await
+            .unwrap();
+        assert_eq!(report.dispatched.len(), 1);
+        assert_eq!(report.dispatched[0].level, 1);
+        assert!(
+            report.dispatched[0].message.contains("Day 2")
+                || report.dispatched[0].message.contains("Day 3"),
+            "{}",
+            report.dispatched[0].message
+        );
+    }
+
+    /// Regression (PARSE-10): a task reopened after reaching level 5 kept
+    /// `escalation_level = 5` and was excluded from the ladder forever.
+    #[tokio::test]
+    async fn a_task_reopened_after_level_five_rejoins_the_ladder() {
+        let (_dir, db) = fresh_db();
+        let task = create_with_extensions(
+            &db,
+            NewTask::minimal("renew the domain"),
+            Extensions::default(),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let anchor = noon_utc_days_from_today(3);
+        let long_ago =
+            crate::dates::format_iso(&anchor.checked_sub(jiff::Span::new().days(40)).unwrap());
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET created_at=?1, escalation_level=5, level_changed_at=?1,
+                                  last_reminded=?1, status='done', status_v2='done'
+                  WHERE id=?2",
+                params![long_ago, &task.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        crate::tasks::reopen(&db, &task.id, &EventCtx::test()).unwrap();
+        assert_eq!(level_and_updated_at(&db, &task.id).0, 0);
+        let report = run_check_at(&db, &telegram_cfg(), &SendOk, &anchor)
+            .await
+            .unwrap();
+        assert_eq!(report.eligible, 1, "reopened task is eligible again");
+        assert_eq!(report.dispatched.len(), 1);
+        assert_eq!(report.dispatched[0].level, 1, "the ladder restarts");
     }
 
     /// Records every Telegram body it is asked to send.

@@ -232,6 +232,12 @@ It walks the 6-level escalation state machine, gates on the 22:00 — 08:00 UTC
 quiet window, respects a daily Telegram budget of 3, and enforces a 4-hour
 cooldown per task between reminders.
 
+Task age is measured from the start of the current occurrence. Completing a
+recurring task (which advances it to its next occurrence) or reopening a
+done/dismissed task resets its escalation level, level timestamp and reminder
+cooldown, so an on-schedule daily task never climbs the ladder and a task
+reopened after the level-5 final notice is reminded again from level 1.
+
 A level whose channels are all unconfigured falls back to the configured
 channel: on a Telegram-only install the level-5 final notice goes to Telegram
 (budgeted like any Telegram nudge); on an email-only install levels 1-2 go to
