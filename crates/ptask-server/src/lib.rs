@@ -1936,6 +1936,35 @@ mod tests {
         assert_eq!(body, "01234");
     }
 
+    /// operations.md promises it: an idle keep-alive connection is closed by
+    /// the header-read timer once it sends no next request.
+    #[tokio::test]
+    async fn idle_keep_alive_connection_is_reaped_by_the_header_timer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let app = Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_router(
+            listener,
+            app,
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_secs(10),
+            std::future::pending(),
+        ));
+        let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+        conn.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            conn.read_to_end(&mut buf),
+        )
+        .await;
+        assert!(closed.is_ok(), "an idle keep-alive connection stayed open");
+        assert!(String::from_utf8_lossy(&buf).starts_with("HTTP/1.1 200"));
+    }
+
     /// SRV-6: delivery was a detached task, so events still queued when
     /// `pt serve` got SIGTERM were dropped with the runtime.
     /// SRV-6 round 2: graceful shutdown waited for every connection, and an
