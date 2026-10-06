@@ -596,14 +596,25 @@ def test_tg_approval_taps_refused_while_buttons_are_off(server_no_buttons):
     assert call_api(base, "GET", f"/api/approvals/{a['id']}", t["scraper"])[1]["status"] == "pending"
 
 
-def test_tg_task_taps_only_from_a_forwarder(server, env):
+def tap_actor(env: dict, callback_id: str) -> str:
+    with sqlite3.connect(env["PTASK_DB"]) as db:
+        row = db.execute("SELECT actor FROM pt_event_log WHERE uuid = ?",
+                         (f"tg-cb:{callback_id}",)).fetchone()
+    assert row, f"no journal entry for {callback_id}"
+    return row[0]
+
+
+def test_tg_task_taps_are_the_operators_only_from_a_forwarder(server, env):
     base, t = server
     run(env, "add", "tap target")
+    run(env, "add", "second target")
+    # An agent's write token may still act, but as itself, never as the operator.
     body = {"data": "ptdismiss:PT-1", "callback_id": "cb-agent"}
-    assert call_api(base, "POST", "/tg/callback", t["hal"], body)[0] == 403, "an agent token is not Telegram"
-    assert pj(env, "show", "PT-1")["status"] != "dismissed"
-    body["callback_id"] = "cb-nexus"
+    assert call_api(base, "POST", "/tg/callback", t["hal"], body)[0] == 200
+    assert tap_actor(env, "cb-agent") == "telegram via hal"
+    body = {"data": "ptdismiss:PT-2", "callback_id": "cb-nexus"}
     assert call_api(base, "POST", "/tg/callback", t["nexus"], body)[0] == 200
+    assert tap_actor(env, "cb-nexus") == "telegram"
 
 
 # --------------------------------------------------------------------------- MCP

@@ -62,12 +62,7 @@ fn callback_blocking(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    if !state.tg_forwarders.iter().any(|n| n == &identity.client_id) {
-        return err(
-            StatusCode::FORBIDDEN,
-            "telegram taps are accepted only from a configured forwarder",
-        );
-    }
+    let from_forwarder = state.tg_forwarders.iter().any(|n| n == &identity.client_id);
     let Some((verb, rest)) = req.data.split_once(':') else {
         return err(StatusCode::BAD_REQUEST, "malformed callback data");
     };
@@ -104,9 +99,20 @@ fn callback_blocking(
             .into_response();
     }
 
-    // The operator tapped the button; Telegram is the acting surface.
+    // A configured forwarder relays the operator's tap, so Telegram is the
+    // acting surface. Any other write client is journaled as itself: holding a
+    // write token must not let a caller pass its action off as the operator's.
+    let actor = if from_forwarder {
+        "telegram".to_string()
+    } else {
+        tracing::warn!(
+            client = %identity.client_id,
+            "telegram tap from a client outside PTASK_TG_FORWARDERS; journaled as that client"
+        );
+        format!("telegram via {}", identity.client_id)
+    };
     let ctx = EventCtx {
-        actor: "telegram".into(),
+        actor,
         source: "tg-callback".into(),
         event_uuid: Some(event_uuid),
     };
