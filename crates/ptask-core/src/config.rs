@@ -20,6 +20,13 @@ pub struct Config {
     /// default "shell"). The dashboard sidecar sets PTASK_ACTOR=dashboard
     /// on its pt subprocesses; HAL sessions can set PTASK_ACTOR=hal.
     pub actor: String,
+    /// Identity for `pt mcp` over stdio: `$PTASK_MCP_ACTOR`, else
+    /// `$PTASK_ACTOR`, else "mcp". Not "shell": an MCP client must not share
+    /// the operator's CLI identity, or the operator's decision on its
+    /// approval request is refused as the requester deciding. The MCP
+    /// variable wins so an operator shell that exports PTASK_ACTOR does not
+    /// leak its identity into an MCP server it launches.
+    pub mcp_actor: String,
     pub auth: AuthConfig,
     pub notify: DispatchCfg,
     pub webhooks: WebhookConfig,
@@ -132,6 +139,10 @@ pub struct DispatchCfg {
     pub smtp_port: u16,
     pub smtp_user: Option<String>,
     pub smtp_pass: Option<String>,
+    /// From mailbox (`PTASK_SMTP_FROM` / `SMTP_FROM`), e.g.
+    /// `HAL <hal@puretensor.ai>`. Falls back to `HAL <smtp_user>`, which only
+    /// works when the SMTP login is itself an address.
+    pub smtp_from: Option<String>,
     pub notify_email: Option<String>,
     /// Always CC'd on every outbound email per CLAUDE.md.
     pub cc_email: Option<String>,
@@ -175,6 +186,9 @@ impl Config {
         Config {
             db_path: env_db_path(),
             actor: env_nonempty("PTASK_ACTOR").unwrap_or_else(|| "shell".into()),
+            mcp_actor: env_nonempty("PTASK_MCP_ACTOR")
+                .or_else(|| env_nonempty("PTASK_ACTOR"))
+                .unwrap_or_else(|| "mcp".into()),
             auth: AuthConfig {
                 api_token: env_nonempty("PTASK_API_TOKEN"),
                 metrics_token: env_nonempty("PTASK_METRICS_TOKEN"),
@@ -196,6 +210,7 @@ impl Config {
                     .unwrap_or(587),
                 smtp_user: env_first(&["PTASK_SMTP_USER", "SMTP_USER"]),
                 smtp_pass: env_first(&["PTASK_SMTP_PASS", "SMTP_PASS"]),
+                smtp_from: env_first(&["PTASK_SMTP_FROM", "SMTP_FROM"]),
                 notify_email: env_first(&["PTASK_NOTIFY_EMAIL", "NOTIFY_EMAIL"]),
                 cc_email: env_first(&["PTASK_NOTIFY_CC", "PTASK_OPS_EMAIL"])
                     .or_else(|| Some("ops@puretensor.ai".to_string())),
@@ -437,6 +452,42 @@ mod tests {
             std::env::remove_var("PTASK_GIT_CLOSE_REPOS");
         }
         assert!(Config::from_env().webhooks.git_close_repos.is_empty());
+    }
+
+    #[test]
+    fn mcp_default_actor_is_not_the_cli_default() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        unsafe {
+            std::env::remove_var("PTASK_ACTOR");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(
+            (cfg.actor.as_str(), cfg.mcp_actor.as_str()),
+            ("shell", "mcp")
+        );
+        unsafe {
+            std::env::set_var("PTASK_ACTOR", "hal");
+        }
+        let cfg = Config::from_env();
+        assert_eq!((cfg.actor.as_str(), cfg.mcp_actor.as_str()), ("hal", "hal"));
+        // An operator shell that exports PTASK_ACTOR=shell must not hand
+        // that identity to the MCP server: PTASK_MCP_ACTOR wins for pt mcp.
+        unsafe {
+            std::env::set_var("PTASK_ACTOR", "shell");
+            std::env::set_var("PTASK_MCP_ACTOR", "agent7");
+        }
+        let cfg = Config::from_env();
+        assert_eq!(
+            (cfg.actor.as_str(), cfg.mcp_actor.as_str()),
+            ("shell", "agent7")
+        );
+        unsafe {
+            std::env::remove_var("PTASK_ACTOR");
+            std::env::remove_var("PTASK_MCP_ACTOR");
+        }
     }
 
     #[test]

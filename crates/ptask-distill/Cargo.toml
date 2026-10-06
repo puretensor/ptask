@@ -16,6 +16,8 @@ reqwest = { workspace = true, features = ["blocking"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+# O_DIRECTORY for the run lock (flock on the DB directory).
+libc = "0.2"
 
 # Native ML. Enable with `--features native-ml` (or via ptask-cli's
 # forwarding feature) to build the candle embedding stack: ~170 extra crates

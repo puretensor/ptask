@@ -8,6 +8,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
+/// Untrusted text for a span: ratatui drops control characters but passes
+/// bidi controls and invisible/format characters straight to the terminal,
+/// so every task, goal, view and status string goes through the shared
+/// sanitiser (line breaks fold to a visible mark; spans are one line).
+fn safe(s: &str) -> String {
+    ptask_core::text::one_line(s).into_owned()
+}
+
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let filter_bar_h: u16 = if app.filter_input.is_some() { 1 } else { 0 };
@@ -58,7 +66,7 @@ fn render_prompt_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) 
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(p.buf().to_string()),
+        Span::raw(safe(p.buf())),
         Span::styled("_", Style::default().fg(Color::Magenta)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -73,7 +81,7 @@ fn render_filter_bar(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) 
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(buf.to_string()),
+        Span::raw(safe(buf)),
         Span::styled("_", Style::default().fg(Color::Cyan)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
@@ -91,17 +99,17 @@ fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     let pt = task.pt_id.as_deref().unwrap_or("------");
     lines.push(Line::from(vec![
         Span::styled(
-            pt,
+            safe(pt),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::raw(&task.title),
+        Span::raw(safe(&task.title)),
     ]));
     lines.push(Line::from(vec![
         Span::styled("status   ", Style::default().fg(Color::DarkGray)),
-        Span::raw(&task.status),
+        Span::raw(safe(&task.status)),
     ]));
     lines.push(Line::from(vec![
         Span::styled("priority ", Style::default().fg(Color::DarkGray)),
@@ -114,12 +122,12 @@ fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
     if let Some(d) = &task.deadline {
         lines.push(Line::from(vec![
             Span::styled("deadline ", Style::default().fg(Color::DarkGray)),
-            Span::raw(d.clone()),
+            Span::raw(safe(d)),
         ]));
     }
     lines.push(Line::from(vec![
         Span::styled("source   ", Style::default().fg(Color::DarkGray)),
-        Span::raw(&task.source_type),
+        Span::raw(safe(&task.source_type)),
     ]));
     lines.push(Line::from(vec![
         Span::styled("uuid     ", Style::default().fg(Color::DarkGray)),
@@ -130,13 +138,13 @@ fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         if !detail.labels.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled("labels   ", Style::default().fg(Color::DarkGray)),
-                Span::raw(detail.labels.join(", ")),
+                Span::raw(safe(&detail.labels.join(", "))),
             ]));
         }
         if let Some(p) = &detail.project {
             lines.push(Line::from(vec![
                 Span::styled("project  ", Style::default().fg(Color::DarkGray)),
-                Span::raw(p.clone()),
+                Span::raw(safe(p)),
             ]));
         }
         if let Some(d) = detail.duration_min {
@@ -152,11 +160,11 @@ fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         ) {
             lines.push(Line::from(vec![
                 Span::styled("recurs   ", Style::default().fg(Color::DarkGray)),
-                Span::raw(format!("{} [{}]", input, mode)),
+                Span::raw(safe(&format!("{} [{}]", input, mode))),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("next     ", Style::default().fg(Color::DarkGray)),
-                Span::raw(next.clone()),
+                Span::raw(safe(next)),
             ]));
         }
         // depends_on = this task's prerequisites (it is blocked BY them);
@@ -182,7 +190,7 @@ fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             Style::default().fg(Color::DarkGray),
         )));
         for paragraph in task.description.split('\n') {
-            lines.push(Line::from(paragraph.to_string()));
+            lines.push(Line::from(safe(paragraph)));
         }
     }
     if !task.ai_reasoning.is_empty() {
@@ -192,7 +200,7 @@ fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             Style::default().fg(Color::DarkGray),
         )));
         for paragraph in task.ai_reasoning.split('\n') {
-            lines.push(Line::from(paragraph.to_string()));
+            lines.push(Line::from(safe(paragraph)));
         }
     }
 
@@ -214,7 +222,7 @@ fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         ),
         Span::raw(format!("v{}  ", ptask_core::VERSION)),
         Span::styled(
-            app.view.label(),
+            safe(&app.view.label()),
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
@@ -245,15 +253,15 @@ fn render_list(frame: &mut Frame, area: ratatui::layout::Rect, app: &mut App) {
             };
             let line = Line::from(vec![
                 Span::styled(format!("[{:8}] ", label), Style::default().fg(prio_color)),
-                Span::styled(format!("{:7} ", pt), Style::default().fg(Color::Cyan)),
-                Span::raw(t.title.clone()),
+                Span::styled(format!("{:7} ", safe(pt)), Style::default().fg(Color::Cyan)),
+                Span::raw(safe(&t.title)),
             ]);
             ListItem::new(line)
         })
         .collect();
     let total = app.tasks.len();
     let visible = app.visible().len();
-    let view = app.view.label();
+    let view = safe(&app.view.label());
     let title = match app.list_state.selected() {
         Some(i) if visible > 0 => {
             if visible == total {
@@ -302,7 +310,7 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         keybind("gv"),
         Span::raw(" view  "),
         Span::raw(" | "),
-        Span::raw(app.status_msg.clone()),
+        Span::raw(safe(&app.status_msg)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }

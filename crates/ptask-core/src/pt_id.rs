@@ -36,7 +36,7 @@ pub fn lookup_uuid(conn: &rusqlite::Connection, pt_id: &str) -> Result<String> {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(other),
         })?;
-    uuid.ok_or_else(|| Error::PtIdNotFound(pt_id.to_string()))
+    uuid.ok_or_else(|| Error::PtIdNotFound(crate::text::one_line(pt_id).into_owned()))
 }
 
 /// Resolve a `tasks.id` UUID to its PT-N, if any.

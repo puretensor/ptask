@@ -261,6 +261,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-n+[Override row limit]:LIMIT:_default' \
 '--limit=[Override row limit]:LIMIT:_default' \
+'-s+[Filter by status (or \`all\`), as in \`pt list\`]:STATUS:_default' \
+'--status=[Filter by status (or \`all\`), as in \`pt list\`]:STATUS:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
@@ -746,11 +748,13 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'-y[Skip the confirmation prompt]' \
+'--yes[Skip the confirmation prompt]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+':query -- PT-N, bare integer, uuid, or a title substring (open tasks only):_default' \
 && ret=0
 ;;
 (version)
@@ -1162,6 +1166,7 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--any-status[Operator inspection\: print the bytes whatever the status (pending, rejected, expired, consumed). Needs an operator TTY; refused under CLAUDECODE. Not for executors]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
 '-h[Print help]' \
@@ -1240,6 +1245,7 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--force[Approve even though the payload preview holds terminal control, bidi or invisible characters]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
 '-h[Print help]' \
@@ -1509,6 +1515,7 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--force[Approve even though the payload preview holds terminal control, bidi or invisible characters (inspect it with \`pt approval payload AP-n | cat -v\` first)]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
 '-h[Print help]' \
@@ -1523,6 +1530,7 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--force[Approve even though the payload preview holds terminal control, bidi or invisible characters (inspect it with \`pt approval payload AP-n | cat -v\` first)]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
 '-h[Print help]' \
@@ -2115,7 +2123,7 @@ _pt__subcmd__approval_commands() {
 'request:Request operator approval for an exact payload' \
 'list:List approvals (default\: pending, oldest first)' \
 'show:Show one approval, including journal events' \
-'payload:Write the stored payload bytes to stdout' \
+'payload:Write the approved payload bytes to stdout (exit 3/4/6 unless the approval is in force; see verify)' \
 'withdraw:Withdraw a pending request (requester only)' \
 'verify:Check that an approval is approved and the payload still matches' \
 'consume:Verify and latch the approval as consumed (exactly once)' \
@@ -2147,7 +2155,7 @@ _pt__subcmd__approval__subcmd__help_commands() {
 'request:Request operator approval for an exact payload' \
 'list:List approvals (default\: pending, oldest first)' \
 'show:Show one approval, including journal events' \
-'payload:Write the stored payload bytes to stdout' \
+'payload:Write the approved payload bytes to stdout (exit 3/4/6 unless the approval is in force; see verify)' \
 'withdraw:Withdraw a pending request (requester only)' \
 'verify:Check that an approval is approved and the payload still matches' \
 'consume:Verify and latch the approval as consumed (exactly once)' \
@@ -2530,7 +2538,7 @@ _pt__subcmd__help__subcmd__approval_commands() {
 'request:Request operator approval for an exact payload' \
 'list:List approvals (default\: pending, oldest first)' \
 'show:Show one approval, including journal events' \
-'payload:Write the stored payload bytes to stdout' \
+'payload:Write the approved payload bytes to stdout (exit 3/4/6 unless the approval is in force; see verify)' \
 'withdraw:Withdraw a pending request (requester only)' \
 'verify:Check that an approval is approved and the payload still matches' \
 'consume:Verify and latch the approval as consumed (exactly once)' \
@@ -2800,7 +2808,7 @@ _pt__subcmd__help__subcmd__remote_commands() {
 'start:\`pt remote start <query>\` — mark in progress on the canonical host' \
 'snooze:\`pt remote snooze <query> <until>\` — snooze on the canonical host' \
 'depend:\`pt remote depend <query> --on <target> \[--clear\]\`' \
-'rm:\`pt remote rm <query>\` — permanent delete (tombstoned)' \
+'rm:\`pt remote rm <query>\` — permanent delete (tombstoned). Asks first; refuses without --yes when there is no TTY to ask on' \
 'version:\`pt remote version\` — compare this client'\''s version against the canonical server'\''s \`GET /version\`. Exits non-zero on skew' \
     )
     _describe -t commands 'pt help remote commands' commands "$@"
@@ -3061,7 +3069,7 @@ _pt__subcmd__remote_commands() {
 'start:\`pt remote start <query>\` — mark in progress on the canonical host' \
 'snooze:\`pt remote snooze <query> <until>\` — snooze on the canonical host' \
 'depend:\`pt remote depend <query> --on <target> \[--clear\]\`' \
-'rm:\`pt remote rm <query>\` — permanent delete (tombstoned)' \
+'rm:\`pt remote rm <query>\` — permanent delete (tombstoned). Asks first; refuses without --yes when there is no TTY to ask on' \
 'version:\`pt remote version\` — compare this client'\''s version against the canonical server'\''s \`GET /version\`. Exits non-zero on skew' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -3107,7 +3115,7 @@ _pt__subcmd__remote__subcmd__help_commands() {
 'start:\`pt remote start <query>\` — mark in progress on the canonical host' \
 'snooze:\`pt remote snooze <query> <until>\` — snooze on the canonical host' \
 'depend:\`pt remote depend <query> --on <target> \[--clear\]\`' \
-'rm:\`pt remote rm <query>\` — permanent delete (tombstoned)' \
+'rm:\`pt remote rm <query>\` — permanent delete (tombstoned). Asks first; refuses without --yes when there is no TTY to ask on' \
 'version:\`pt remote version\` — compare this client'\''s version against the canonical server'\''s \`GET /version\`. Exits non-zero on skew' \
 'help:Print this message or the help of the given subcommand(s)' \
     )

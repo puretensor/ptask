@@ -7,6 +7,8 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub enum Event {
     Key(KeyEvent),
+    /// A bracketed paste: the pasted text in one piece, never keystrokes.
+    Paste(String),
     /// Terminal resize — the next draw uses the new dimensions automatically;
     /// no state to capture here.
     Resize,
@@ -22,6 +24,7 @@ pub fn poll_event(timeout: Duration) -> Result<Option<Event>> {
     let raw = event::read()?;
     Ok(match raw {
         event::Event::Key(k) if k.kind == event::KeyEventKind::Press => Some(Event::Key(k)),
+        event::Event::Paste(text) => Some(Event::Paste(text)),
         event::Event::Resize(_, _) => Some(Event::Resize),
         _ => Some(Event::Tick),
     })

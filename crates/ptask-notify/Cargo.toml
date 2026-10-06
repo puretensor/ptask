@@ -15,7 +15,8 @@ reqwest = { workspace = true }
 lettre = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# Bounds the whole SMTP send (lettre only times out the connect).
+tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
