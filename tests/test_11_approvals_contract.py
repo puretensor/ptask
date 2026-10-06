@@ -278,6 +278,13 @@ def test_rerequest_same_payload_while_pending_is_idempotent(env, tmp_path):
     assert [x["id"] for x in pj(env, "approval", "ls")] == [a["id"]]
 
 
+def test_rerequest_dedupe_never_returns_another_requesters_row(env, tmp_path):
+    a = request(env, tmp_path, "shared", "body")
+    b = request(env, tmp_path, "shared", "body", PTASK_ACTOR="ops-bot")
+    assert a["id"] != b["id"] and b["requester"] == "ops-bot"
+    assert request(env, tmp_path, "shared", "body", PTASK_ACTOR="HAL")["id"] == a["id"]
+
+
 def test_ls_defaults_to_pending_oldest_first(env, tmp_path):
     a = request(env, tmp_path, "one", "1")
     b = request(env, tmp_path, "two", "2")

@@ -37,8 +37,11 @@ Exactly one of:
 - `--digest H` — 64 lowercase hex; nothing is stored (`payload_stored: false`).
 
 `digest` is always SHA-256 of the stored bytes (or the supplied digest when
-nothing is stored). Re-requesting the same digest while a row is still
-pending is idempotent (partial unique index on `digest WHERE status='pending'`).
+nothing is stored). The same requester re-requesting the same digest while
+their row is still pending gets that row back (partial unique index on
+`(lower(requester), digest) WHERE status='pending'`). A different requester
+asking for the same payload gets a fresh `AP-n` of their own: dedupe never
+hands one actor another actor's approval.
 
 `preview` is rendered by pTask **from the stored payload**, never from the
 requester's prose:
@@ -122,7 +125,7 @@ client to tell them apart.
 
 ## Notify
 
-A **new** request (not an idempotent re-request) best-effort pings the
+A **new** request (not the same requester's idempotent re-request) best-effort pings the
 operator Telegram chat: `AP-n`, kind, title, requester, a bounded HTML-escaped
 excerpt of `preview`, the requester note labelled as such, a digest prefix,
 and an inline **URL** button to `$PTASK_DASH_URL/#approvals` (omitted if

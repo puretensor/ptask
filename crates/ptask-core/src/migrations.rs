@@ -17,6 +17,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v020_scopes_the_pending_digest_dedupe_to_the_requester() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = rusqlite::Connection::open(dir.path().join("t.db")).unwrap();
+        run(&mut conn).unwrap();
+        let insert = |id: &str, seq: i64, requester: &str| {
+            conn.execute(
+                "INSERT INTO approvals (id, seq, kind, title, digest, requester, status, created_at)
+                 VALUES (?1, ?2, 'other', 't', printf('%.64c', 'a'), ?3, 'pending',
+                         '2026-09-01T00:00:00Z')",
+                rusqlite::params![id, seq, requester],
+            )
+        };
+        insert("a1", 1, "hal").unwrap();
+        insert("a2", 2, "ops-bot").unwrap();
+        assert!(
+            insert("a3", 3, "HAL").is_err(),
+            "same requester, same digest"
+        );
+    }
+
+    #[test]
     fn v019_adds_a_null_recurrence_anchor_and_drops_the_unused_indexes() {
         let dir = tempfile::tempdir().unwrap();
         let mut conn = rusqlite::Connection::open(dir.path().join("t.db")).unwrap();
@@ -101,7 +122,7 @@ mod tests {
         let objects: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name IN (
-                    'idx_approvals_pending_digest', 'idx_approvals_status_seq',
+                    'idx_approvals_pending_requester_digest', 'idx_approvals_status_seq',
                     'approvals_immutable_payload', 'approvals_lock_after_decision',
                     'idx_pt_event_log_type_ts')",
                 [],

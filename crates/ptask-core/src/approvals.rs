@@ -244,7 +244,7 @@ impl Approval {
 }
 
 /// Outcome of [`request`]: `created` is false on an idempotent re-request
-/// of a still-pending digest.
+/// of a still-pending digest by the same requester.
 #[derive(Debug, Clone)]
 pub struct RequestOutcome {
     pub approval: Approval,
@@ -464,12 +464,18 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Approval> {
     })
 }
 
-fn get_pending_by_digest(db: &Db, digest: &str) -> Result<Option<Approval>> {
+/// The requester's own pending row for `digest`. Dedupe is per requester
+/// (V020): another actor's request for the same payload is theirs, not
+/// this caller's.
+fn get_pending_by_digest(db: &Db, requester: &str, digest: &str) -> Result<Option<Approval>> {
     let conn = db.get()?;
     let found = conn
         .query_row(
-            &format!("{SELECT_SQL} WHERE a.digest = ?1 AND a.status = 'pending'"),
-            [digest],
+            &format!(
+                "{SELECT_SQL} WHERE a.digest = ?1 AND lower(a.requester) = lower(?2)
+                   AND a.status = 'pending'"
+            ),
+            params![digest, requester],
             map_row,
         )
         .optional()?;
@@ -630,8 +636,8 @@ fn resolve_payload(src: &PayloadSource) -> Result<ResolvedPayload> {
     }
 }
 
-/// Insert a new approval, or return the existing pending row with the same
-/// digest (idempotent re-request).
+/// Insert a new approval, or return the caller's own pending row with the
+/// same digest (idempotent re-request).
 pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOutcome> {
     validate_kind(&input.kind)?;
     let title = input.title.trim();
@@ -682,7 +688,7 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
     // the caller would get back a request the operator can no longer
     // decide, and the partial unique index would refuse a fresh one.
     expire(db, &EventCtx::system("approvals"))?;
-    if let Some(existing) = get_pending_by_digest(db, &digest)? {
+    if let Some(existing) = get_pending_by_digest(db, requester, &digest)? {
         return Ok(RequestOutcome {
             approval: existing,
             created: false,
@@ -746,13 +752,15 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
                 created: true,
             })
         }
-        Err(e) if is_unique_constraint(&e) => match get_pending_by_digest(db, &digest)? {
-            Some(approval) => Ok(RequestOutcome {
-                approval,
-                created: false,
-            }),
-            None => Err(e),
-        },
+        Err(e) if is_unique_constraint(&e) => {
+            match get_pending_by_digest(db, requester, &digest)? {
+                Some(approval) => Ok(RequestOutcome {
+                    approval,
+                    created: false,
+                }),
+                None => Err(e),
+            }
+        }
         Err(e) => Err(e),
     }
 }
@@ -1172,6 +1180,27 @@ mod tests {
         assert!(a.created && !b.created);
         assert_eq!(a.approval.ap_id(), b.approval.ap_id());
         assert_eq!(a.approval.digest, sha256_hex(b"hello"));
+    }
+
+    #[test]
+    fn digest_dedupe_is_scoped_to_the_requester() {
+        let (_d, db) = fresh();
+        let input = RequestInput {
+            kind: "spend".into(),
+            title: "Pay ACME".into(),
+            request_note: None,
+            payload: file_src(b"pay 400 to ACME"),
+            task_pt_id: None,
+            expires_in: None,
+        };
+        let hal = request(&db, input.clone(), &ctx("hal")).unwrap();
+        let other = request(&db, input.clone(), &ctx("ops-bot")).unwrap();
+        assert!(other.created, "another requester must not get hal's row");
+        assert_ne!(hal.approval.ap_id(), other.approval.ap_id());
+        assert_eq!(other.approval.requester, "ops-bot");
+        let again = request(&db, input, &ctx("HAL")).unwrap();
+        assert!(!again.created);
+        assert_eq!(again.approval.ap_id(), hal.approval.ap_id());
     }
 
     fn expiring(expires_in: &str) -> RequestInput {
