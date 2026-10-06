@@ -271,7 +271,11 @@ fn get_in_conn(conn: &rusqlite::Connection, id: &str) -> Result<Goal> {
     } else {
         load_by_uuid_conn(conn, id.trim())?
     };
-    found.ok_or_else(|| Error::Goal(GoalError::NotFound(id.trim().to_string())))
+    found.ok_or_else(|| {
+        Error::Goal(GoalError::NotFound(
+            crate::text::one_line(id.trim()).into_owned(),
+        ))
+    })
 }
 
 /// Resolve `G-n` or the row uuid.
@@ -899,8 +903,11 @@ pub fn task_context(db: &Db, task: &Task) -> Result<TaskContext> {
 pub fn context_markdown(db: &Db, task: &Task) -> Result<String> {
     let ctx = task_context(db, task)?;
     let mut md = String::new();
+    // Titles and whys fill single-line markdown slots: a newline in one
+    // would forge a heading, a Why entry or a blocker line.
+    let line = |s: &str| crate::text::one_line(s).into_owned();
     md.push_str("# ");
-    md.push_str(&ctx.title);
+    md.push_str(&line(&ctx.title));
     md.push('\n');
     if !ctx.description.trim().is_empty() {
         md.push('\n');
@@ -912,10 +919,10 @@ pub fn context_markdown(db: &Db, task: &Task) -> Result<String> {
         for g in &ctx.why_chain {
             match g.why.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 Some(why) => {
-                    md.push_str(&format!("- **{}**: {}\n", g.title, why));
+                    md.push_str(&format!("- **{}**: {}\n", line(&g.title), line(why)));
                 }
                 None => {
-                    md.push_str(&format!("- **{}**\n", g.title));
+                    md.push_str(&format!("- **{}**\n", line(&g.title)));
                 }
             }
         }
@@ -923,7 +930,7 @@ pub fn context_markdown(db: &Db, task: &Task) -> Result<String> {
     if !ctx.blockers.is_empty() {
         md.push_str("\n## Blockers\n\n");
         for b in &ctx.blockers {
-            md.push_str(&format!("- {}: {}\n", b.pt_id, b.title));
+            md.push_str(&format!("- {}: {}\n", b.pt_id, line(&b.title)));
         }
     }
     Ok(md)

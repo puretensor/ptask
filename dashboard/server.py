@@ -744,7 +744,20 @@ def pt_json(args: list[str]) -> tuple[bool, object, str]:
         return False, None, "invalid json from pt"
 
 
-def pt_decide(verb: str, ap_id: str, note: str | None) -> tuple[bool, str]:
+# `pt approve` exits 7 when the payload preview holds control, bidi or
+# invisible characters and --force was not given. The sidecar never forces:
+# the operator inspects the bytes and approves from the CLI.
+PT_EXIT_PAYLOAD_FLAGGED = 7
+
+_PT_ERROR_PREFIX = re.compile(r"^\s*[\u2716\u2717]\s*ERROR\s+")
+
+
+def _pt_message(text: str) -> str:
+    """pt's error text without the terminal decoration (`  ✖ ERROR   `)."""
+    return _PT_ERROR_PREFIX.sub("", text.strip()).strip()
+
+
+def pt_decide(verb: str, ap_id: str, note: str | None) -> tuple[bool, str, int | None]:
     args = [verb, ap_id, "--via", "dashboard"]
     if note is not None:
         # `--note=` keeps a note that starts with "-" from being read as a flag.
@@ -756,9 +769,11 @@ def pt_decide(verb: str, ap_id: str, note: str | None) -> tuple[bool, str]:
             env=_pt_dashboard_env(actor=actor),
         )
         ok = out.returncode == 0
-        return ok, (out.stdout + out.stderr).strip()
+        if ok:
+            return True, (out.stdout + out.stderr).strip(), 0
+        return False, _pt_message(out.stderr or out.stdout) or "pt failed", out.returncode
     except Exception as e:  # noqa: BLE001
-        return False, f"exec error: {e}"
+        return False, f"exec error: {e}", None
 
 
 # ------------------------------------------------------------------------ voice
@@ -1362,11 +1377,18 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(note, str) or len(note) > APPROVAL_NOTE_MAX:
                     return self._json({"error": "note must be a string (max 2000)"}, 400)
                 note_arg = note
-            ok, msg = pt_decide(verb, ap_id, note_arg)
+            ok, msg, rc = pt_decide(verb, ap_id, note_arg)
             if ok:
                 return self._json({"ok": True, "message": msg})
-            if msg.startswith("exec error:"):
+            if rc is None:
                 return self._json({"ok": False, "message": msg}, 500)
+            if rc == PT_EXIT_PAYLOAD_FLAGGED:
+                return self._json({
+                    "ok": False,
+                    "code": "payload_flagged",
+                    "message": f"{msg}. The cockpit cannot force this: approve from the "
+                               f"CLI with `pt approve {ap_id} --force` after inspecting.",
+                }, 409)
             return self._json({"ok": False, "message": msg}, 409)
 
         m = re.match(r"^/api/tasks/([^/]+)/done$", u.path)

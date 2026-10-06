@@ -80,7 +80,7 @@ pub struct SetParentArgs {
 
 fn emit_goal(goal: &Goal, json: bool, text: impl FnOnce()) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&goal.to_json())?);
+        crate::print_json(&goal.to_json())?;
     } else {
         text();
     }
@@ -114,7 +114,7 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
             let items = goals::list(db, a.all)?;
             if json {
                 let v: Vec<serde_json::Value> = items.iter().map(GoalListItem::to_json).collect();
-                println!("{}", serde_json::to_string_pretty(&v)?);
+                crate::print_json(&v)?;
                 return Ok(());
             }
             if items.is_empty() {
@@ -130,10 +130,13 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
                     .map(|w| format!("  {w}"))
                     .unwrap_or_default();
                 println!(
-                    "{indent}{}  {}  {}{why}",
-                    item.goal.g_id(),
-                    item.goal.title,
-                    item.goal.status
+                    "{indent}{}",
+                    ui::one_line(&format!(
+                        "{}  {}  {}{why}",
+                        item.goal.g_id(),
+                        item.goal.title,
+                        item.goal.status
+                    ))
                 );
             }
             Ok(())
@@ -141,7 +144,7 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
         GoalCommand::Show(a) => {
             let shown = goals::show(db, &a.id)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&shown.to_json())?);
+                crate::print_json(&shown.to_json())?;
                 return Ok(());
             }
             print_human_show(&shown);
@@ -150,14 +153,11 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
         GoalCommand::Link(a) => {
             let task = goals::link(db, &a.task, &a.goal, &ctx)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
-                        "pt_id": task.pt_id,
-                        "goal": a.goal,
-                    }))?
-                );
+                crate::print_json(&serde_json::json!({
+                    "ok": true,
+                    "pt_id": task.pt_id,
+                    "goal": a.goal,
+                }))?;
                 return Ok(());
             }
             println!(
@@ -175,13 +175,10 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
         GoalCommand::Unlink(a) => {
             let task = goals::unlink(db, &a.task, &ctx)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
-                        "pt_id": task.pt_id,
-                    }))?
-                );
+                crate::print_json(&serde_json::json!({
+                    "ok": true,
+                    "pt_id": task.pt_id,
+                }))?;
                 return Ok(());
             }
             println!(
@@ -214,7 +211,7 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
             let items = goals::orphans(db)?;
             if json {
                 let v: Vec<serde_json::Value> = items.iter().map(GoalTask::to_json).collect();
-                println!("{}", serde_json::to_string_pretty(&v)?);
+                crate::print_json(&v)?;
                 return Ok(());
             }
             if items.is_empty() {
@@ -241,14 +238,14 @@ pub fn run(db: &Db, cmd: GoalCommand, ctx: EventCtx, json: bool) -> Result<()> {
 fn print_human_show(shown: &GoalShow) {
     let g = &shown.goal;
     print_goal_line(g, "");
-    let mut pairs: Vec<(&str, String)> = vec![("status", g.status.clone())];
+    let mut pairs: Vec<(&str, ui::Cell)> = vec![("status", g.status.as_str().into())];
     if let Some(p) = &g.parent {
-        pairs.push(("parent", p.clone()));
+        pairs.push(("parent", p.into()));
     }
     if let Some(w) = &g.why {
-        pairs.push(("why", w.clone()));
+        pairs.push(("why", w.into()));
     }
-    pairs.push(("uuid", ui::dim(&g.uuid, ui::Ink::Slate)));
+    pairs.push(("uuid", ui::painted(ui::dim(&g.uuid, ui::Ink::Slate))));
     for l in ui::kv(&pairs, 12) {
         println!("    {}", l.trim_start());
     }
@@ -256,21 +253,25 @@ fn print_human_show(shown: &GoalShow) {
         println!();
         println!("{}", ui::section("chain", ui::Ink::Steel, "nearest first"));
         for a in &shown.chain {
-            println!("  {}  {}", a.g_id(), a.title);
+            println!("  {}  {}", a.g_id(), ui::one_line(&a.title));
         }
     }
     if !shown.children.is_empty() {
         println!();
         println!("{}", ui::section("children", ui::Ink::Cyan, ""));
         for c in &shown.children {
-            println!("  {}  {}", c.g_id(), c.title);
+            println!("  {}  {}", c.g_id(), ui::one_line(&c.title));
         }
     }
     if !shown.tasks.is_empty() {
         println!();
         println!("{}", ui::section("tasks", ui::Ink::Paper, "effective goal"));
         for t in &shown.tasks {
-            println!("  {}  {}", t.pt_id.as_deref().unwrap_or(&t.id), t.title);
+            println!(
+                "  {}  {}",
+                t.pt_id.as_deref().unwrap_or(&t.id),
+                ui::one_line(&t.title)
+            );
         }
     }
     println!();
