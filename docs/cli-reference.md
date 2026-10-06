@@ -191,7 +191,8 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 | `pt done <q1> <q2> …` | done now accepts multiple tasks |
 
 Globals (v2.0.0): `--json` on task-facing verbs emits machine-readable
-output; `--idempotency-key <k>` keys the mutation's event so retries are
+output; `--idempotency-key <k>` (not starting with `capture`, which the capture
+lane reserves) keys the mutation's event so retries are
 safe: a retry of the same command on the same task prints `replayed` and
 exits 0 without re-applying (a retried `add` returns the task it created);
 a key already used for a different command, different arguments, another

@@ -138,6 +138,17 @@ pub struct LoggedEvent {
     pub command: Option<CommandFingerprint>,
 }
 
+/// True for a client-supplied idempotency key in the namespace the capture
+/// fast lane reserves: its `task.created` events are keyed
+/// `capture:<raw_items id>` and that key marks a task as capture-created
+/// (what /capture/resolve may close). Case-insensitive, so no spelling of
+/// the prefix is accepted from a client.
+pub fn is_reserved_client_key(key: &str) -> bool {
+    key.as_bytes()
+        .get(..7)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"capture"))
+}
+
 /// Record an attributed event. Returns the new `pt_event_log.id`.
 pub fn record(
     db: &Db,

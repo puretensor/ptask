@@ -1039,6 +1039,13 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     set_cli_globals(cli.json, cli.idempotency_key.clone());
+    if let Some(key) = cli.idempotency_key.as_deref()
+        && ptask_core::event_log::is_reserved_client_key(key)
+    {
+        // The capture lane's keys mark capture-created tasks (what
+        // /capture/resolve may close); a client key must not forge one.
+        anyhow::bail!("--idempotency-key: the capture prefix is reserved for the capture lane");
+    }
     if cli.idempotency_key.is_some() {
         // A key on a verb that cannot replay would mint twice or hit the
         // journal's unique index on retry: refuse it up front.
