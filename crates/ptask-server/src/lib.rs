@@ -290,10 +290,10 @@ async fn serve_router(
             accepted = listener.accept() => match accepted {
                 Ok(conn) => conn,
                 Err(e) => {
-                    // EMFILE and friends: back off instead of spinning, as
-                    // axum::serve does.
                     tracing::warn!(target: "ptask::server", error = %e, "accept failed");
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if accept_error_needs_backoff(&e) {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
                     continue;
                 }
             },
@@ -329,6 +329,22 @@ async fn serve_router(
         );
     }
     Ok(())
+}
+
+/// Whether a failed `accept()` should pause the loop. Out of descriptors
+/// or memory (EMFILE, ENFILE, ENOMEM, ENOBUFS), retrying at once just spins,
+/// so back off 1s as axum::serve does. A per-connection error (the peer
+/// reset or aborted before we accepted) affects only that peer: carry on.
+fn accept_error_needs_backoff(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    !matches!(
+        e.kind(),
+        ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+    )
 }
 
 async fn shutdown_signal() {
@@ -1836,6 +1852,28 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while log.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[test]
+    fn only_resource_exhaustion_accept_errors_back_off() {
+        use std::io::{Error, ErrorKind};
+        // One peer resetting or aborting before accept() is that peer's
+        // problem; sleeping 1s on it stalled every other client.
+        for kind in [
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionRefused,
+            ErrorKind::Interrupted,
+        ] {
+            assert!(!accept_error_needs_backoff(&Error::from(kind)), "{kind:?}");
+        }
+        // EMFILE / ENFILE / ENOMEM / ENOBUFS: retrying at once just spins.
+        for errno in [24, 23, 12, 105] {
+            assert!(
+                accept_error_needs_backoff(&Error::from_raw_os_error(errno)),
+                "errno {errno}"
+            );
         }
     }
 
