@@ -186,13 +186,16 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 | `pt snooze <query> <until…>` | park until a date (natural language ok); auto-wakes to todo via the hourly scoring run |
 | `pt depend <query> --on <target> [--clear]` | dependency edges in `task_links`; `pt next` hides tasks with unmet deps; **`pt done` refuses (exit non-zero, names the open blockers) while any prerequisite is still open** — dismissed prerequisites count as satisfied; no `--on` shows current edges |
 | `pt review [--stale-days N]` | interactive sweep of stale tasks (TTY: k/d/x/s/q; non-TTY prints the list) |
-| `pt search <query…> [-n N]` | FTS5 full-text over titles + descriptions |
+| `pt search <query…> [-n N]` | FTS5 full-text over titles + descriptions; free text: every word must match, punctuation and AND/OR/NOT are literal (`follow-up`, `c++`, `PT-2201` just work), a trailing `*` matches a prefix |
 | `pt bulk '<filter>' --set-priority P \| --done \| --dismiss [--dry-run]` | one action across every DSL match |
 | `pt done <q1> <q2> …` | done now accepts multiple tasks |
 
 Globals (v2.0.0): `--json` on task-facing verbs emits machine-readable
 output; `--idempotency-key <k>` keys the mutation's event so retries are
-safe. Since v3.25.0 the human output renders through the shared PureTensor
+safe: a retry of the same command on the same task prints `replayed` and
+exits 0 without re-applying (a retried `add` returns the task it created);
+a key already used for a different command or task is an error. Over
+`/sync`, command uuids are scoped to the authenticated client. Since v3.25.0 the human output renders through the shared PureTensor
 terminal theme (the `fleet-upgrade` look: gradient headline rules, box-ruled
 severity-banded tables, semantic pills — green done, amber needs a human, red
 critical). Colour is on only when stdout is a TTY; `--color always|never`,
@@ -208,7 +211,7 @@ not-yet-retired consumers).
 | Verb | Use |
 |---|---|
 | `pt log <query> [-n N]` | attributed event history for a task: when, who (actor), via which surface, what |
-| `pt undo` | reverse the most recent eligible mutation within the last 50 task events (done/dismiss → reopen, create → delete); any later event on that task protects it, including claims, promotions and prior reversals. Selection and reversal are atomic; the reversal is itself attributed. |
+| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor: `$PTASK_ACTOR`, default `shell`) within your last 50 task events (done/dismiss → reopen, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, or that parents another task, is never deleted. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
 | `pt token create <client_id> [--scope read\|capture\|write\|admin]` | mint a named scoped API token (plain value shown ONCE; only the sha256 is stored) |
 | `pt token list` | client, scope, active/revoked, created/last-used |
 | `pt token revoke <client_id>` | revoke all active tokens for a client |

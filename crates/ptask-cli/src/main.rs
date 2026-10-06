@@ -145,8 +145,12 @@ enum Command {
     Bulk(BulkArgs),
     /// Show a task's attributed event history (who did what, via which surface).
     Log(LogArgs),
-    /// Reverse the most recent undoable mutation (done/dismiss/create).
-    Undo,
+    /// Reverse your own most recent undoable mutation (done/dismiss/create).
+    ///
+    /// done/dismiss → reopen; create → delete. Only the caller's own events
+    /// ($PTASK_ACTOR) are candidates. Undoing a create deletes the task
+    /// permanently, so it asks first and, without a TTY, refuses unless --yes.
+    Undo(UndoArgs),
     /// Manage named scoped API tokens (create/list/revoke).
     #[command(subcommand)]
     Token(TokenCommand),
@@ -255,7 +259,8 @@ struct WhyArgs {
 
 #[derive(clap::Args, Debug)]
 struct SearchArgs {
-    /// FTS5 query (words, phrases, AND/OR/NOT).
+    /// Words to find (FTS5): every word must match; punctuation and
+    /// AND/OR/NOT are plain text; a trailing * matches a prefix.
     query: Vec<String>,
     #[arg(short = 'n', long = "limit", default_value_t = 20)]
     limit: usize,
@@ -711,6 +716,13 @@ struct RmArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct UndoArgs {
+    /// Skip the confirmation when the undo would delete a task.
+    #[arg(short = 'y', long = "yes")]
+    yes: bool,
+}
+
+#[derive(clap::Args, Debug)]
 struct GenCompletionsArgs {
     /// Target shell.
     #[arg(value_enum)]
@@ -785,6 +797,111 @@ fn already_applied(db: &Db, ctx: &ptask_core::event_log::EventCtx) -> Result<boo
     })
 }
 
+/// What a keyed command acts on, for the replay check.
+enum KeyTarget {
+    Task(String),
+    Goal(String),
+    Untargeted,
+}
+
+/// The journal event types a keyed single-target command writes, and what
+/// it targets. `None` for commands without a single keyed event (reads,
+/// multi-task verbs, which key each task as `key:<task uuid>`).
+fn keyed_replay_spec(cmd: &Command) -> Option<(&'static [&'static str], KeyTarget)> {
+    use KeyTarget::{Goal, Task, Untargeted};
+    use goals::GoalCommand as G;
+    const UPDATED: &[&str] = &["task.updated"];
+    Some(match cmd {
+        Command::Add(_) => (&["task.created"], Untargeted),
+        Command::Done(a) if a.queries.len() == 1 => (
+            &["task.completed", "task.recurrence_advanced"],
+            Task(a.queries[0].clone()),
+        ),
+        Command::Priority(a) => (UPDATED, Task(a.query.clone())),
+        Command::Edit(a) => (UPDATED, Task(a.query.clone())),
+        Command::Reopen(a) => (UPDATED, Task(a.query.clone())),
+        Command::Dismiss(a) => (UPDATED, Task(a.query.clone())),
+        Command::Start(a) => (UPDATED, Task(a.query.clone())),
+        Command::Snooze(a) => (UPDATED, Task(a.query.clone())),
+        Command::Depend(a) => (UPDATED, Task(a.query.clone())),
+        Command::Kind(a) => (UPDATED, Task(a.query.clone())),
+        Command::Promote(a) => (&["task.promoted"], Task(a.query.clone())),
+        Command::Rm(a) => (&["task.deleted"], Task(a.query.clone())),
+        Command::Goal(G::Add(_)) => (&["goal.created"], Untargeted),
+        Command::Goal(G::Link(a)) => (&["task.goal_linked"], Task(a.task.clone())),
+        Command::Goal(G::Unlink(a)) => (&["task.goal_unlinked"], Task(a.task.clone())),
+        Command::Goal(G::Done(a) | G::Abandon(a)) => (&["goal.updated"], Goal(a.id.clone())),
+        Command::Goal(G::SetParent(a)) => (&["goal.updated"], Goal(a.id.clone())),
+        _ => return None,
+    })
+}
+
+/// True when `key` already journaled this very command: report it as
+/// replayed. Errors when the key was used for another command or task —
+/// the old check only asked whether the key existed, so a reused key
+/// printed "replayed" and silently skipped the new command.
+fn replay_keyed(db: &Db, key: &str, cmd: &Command) -> Result<bool> {
+    let Some((types, target)) = keyed_replay_spec(cmd) else {
+        return Ok(false);
+    };
+    let Some(event) = ptask_core::event_log::get_by_uuid(db, key)? else {
+        return Ok(false);
+    };
+    // The target as it resolves now; a deleted task (replayed rm) no longer
+    // does, and the event type alone decides.
+    let target_uuid = match &target {
+        KeyTarget::Task(q) => tasks::resolve_for_lookup(db, q, true).ok().map(|t| t.id),
+        KeyTarget::Goal(id) => ptask_core::goals::get(db, id).ok().map(|g| g.uuid),
+        KeyTarget::Untargeted => None,
+    };
+    ptask_core::event_log::verify_replay(key, &event, target_uuid.as_deref(), types)
+        .map_err(anyhow::Error::msg)?;
+
+    let subject = event.task_uuid.as_deref().unwrap_or_default();
+    if event.event_type.starts_with("goal.") {
+        let goal = ptask_core::goals::get(db, subject).map_err(anyhow::Error::msg)?;
+        if json_mode() {
+            println!("{}", serde_json::to_string_pretty(&goal.to_json())?);
+        } else {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Ok,
+                    "replayed",
+                    &goal.g_id(),
+                    &goal.title,
+                    "idempotency key already applied"
+                )
+            );
+        }
+        return Ok(true);
+    }
+    let task = tasks::resolve_for_lookup(db, subject, true).ok();
+    let mut out = match &task {
+        Some(t) => serde_json::to_value(t)?,
+        None => serde_json::json!({ "id": subject }),
+    };
+    out["outcome"] = serde_json::json!("replayed");
+    emit(&out, || {
+        let handle = task
+            .as_ref()
+            .and_then(|t| t.pt_id.clone())
+            .unwrap_or_else(|| short_id(subject).to_string());
+        let title = task.as_ref().map(|t| t.title.as_str()).unwrap_or("");
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Ok,
+                "replayed",
+                &handle,
+                title,
+                "idempotency key already applied"
+            )
+        );
+    })?;
+    Ok(true)
+}
+
 /// `pt remote list` filter with `-p` folded in as a DSL `pN` term.
 fn remote_list_filter(filter: Option<&str>, priority: Option<i64>) -> Option<String> {
     match (filter, priority) {
@@ -848,6 +965,14 @@ fn run() -> Result<()> {
                 None => Db::open_default().context("opening default db")?,
             };
 
+            // A retried keyed mutation reports success without re-applying;
+            // a key reused for a different command or task is an error.
+            if let (Some(key), Some(cmd)) = (cli_idempotency_key(), other.as_ref())
+                && replay_keyed(&db, &key, cmd)?
+            {
+                return Ok(());
+            }
+
             match other {
                 Some(Command::Add(a)) => cmd_add(&db, a),
                 Some(Command::List(a)) => cmd_list(&db, a),
@@ -884,7 +1009,7 @@ fn run() -> Result<()> {
                 Some(Command::Why(a)) => cmd_why(&db, a),
                 Some(Command::Bulk(a)) => cmd_bulk(&db, a),
                 Some(Command::Log(a)) => cmd_log(&db, a),
-                Some(Command::Undo) => cmd_undo(&db),
+                Some(Command::Undo(a)) => cmd_undo(&db, a),
                 Some(Command::Token(c)) => cmd_token(&db, c),
                 Some(Command::Approval(c)) => cmd_approval(&db, c),
                 Some(Command::Goal(c)) => goals::run(&db, c, cli_ctx(), json_mode()),
@@ -2437,24 +2562,27 @@ fn cmd_search(db: &Db, a: SearchArgs) -> Result<()> {
     if q.trim().is_empty() {
         anyhow::bail!("search needs a query");
     }
-    let conn = db.get()?;
-    let mut stmt = conn.prepare(
-        "SELECT t.id, t.pt_id, t.title, t.status_v2, t.priority
-         FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
-         WHERE tasks_fts MATCH ?1
-         ORDER BY rank LIMIT ?2",
-    )?;
-    let rows: Vec<serde_json::Value> = stmt
-        .query_map((&q, a.limit as i64), |r| {
-            Ok(serde_json::json!({
-                "task_uuid": r.get::<_, String>(0)?,
-                "pt_id": r.get::<_, Option<String>>(1)?,
-                "title": r.get::<_, String>(2)?,
-                "status": r.get::<_, String>(3)?,
-                "priority": r.get::<_, i64>(4)?,
-            }))
-        })?
-        .collect::<std::result::Result<_, _>>()?;
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    if let Some(fts) = tasks::fts_match_query(&q) {
+        let conn = db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.pt_id, t.title, t.status_v2, t.priority
+             FROM tasks_fts f JOIN tasks t ON t.rowid = f.rowid
+             WHERE tasks_fts MATCH ?1
+             ORDER BY rank LIMIT ?2",
+        )?;
+        rows = stmt
+            .query_map((&fts, a.limit as i64), |r| {
+                Ok(serde_json::json!({
+                    "task_uuid": r.get::<_, String>(0)?,
+                    "pt_id": r.get::<_, Option<String>>(1)?,
+                    "title": r.get::<_, String>(2)?,
+                    "status": r.get::<_, String>(3)?,
+                    "priority": r.get::<_, i64>(4)?,
+                }))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+    }
     emit(&rows, || {
         print_lines(ui::headline(
             "ptask · search",
@@ -2820,22 +2948,66 @@ fn summarize_payload(payload: &str) -> String {
     parts.join(" ")
 }
 
-fn cmd_undo(db: &Db) -> Result<()> {
-    let out = tasks::undo_last(db, &cli_ctx()).map_err(anyhow::Error::msg)?;
+fn cmd_undo(db: &Db, a: UndoArgs) -> Result<()> {
+    let ctx = cli_ctx();
+    let plan = tasks::undo_plan(db, &ctx).map_err(anyhow::Error::msg)?;
+    let handle = plan
+        .pt_id
+        .clone()
+        .unwrap_or_else(|| short_id(&plan.task_uuid).to_string());
+    if plan.action == tasks::UndoAction::DeleteCreated && !a.yes {
+        // Same gate as `pt rm`: undoing a create is a permanent delete, and
+        // with no TTY to confirm, refuse rather than delete silently.
+        if json_mode() || !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "refusing to undo the creation of {handle} without --yes: it would be deleted permanently (no TTY to confirm)"
+            );
+        }
+        use std::io::Write;
+        print!(
+            "{}",
+            ui::prompt(
+                &format!(
+                    "undo the creation of {handle} \"{}\"? It will be deleted permanently.",
+                    plan.title
+                ),
+                "[y/N]"
+            )
+        );
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).ok();
+        if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            anyhow::bail!("aborted: {handle} not deleted");
+        }
+    }
+    let out = tasks::undo_planned(db, &ctx, &plan).map_err(anyhow::Error::msg)?;
     emit(
         &serde_json::json!({
             "description": out.description,
-            "reversed_event_id": out.reversed_event_id
+            "reversed_event_id": out.reversed_event_id,
+            "task_uuid": out.task_uuid,
+            "pt_id": out.pt_id,
+            "title": out.title,
+            "action": out.action.verb(),
+            "was": out.action.reversed(),
         }),
         || {
             println!(
                 "{}",
-                ui::section(
-                    "undo",
-                    ui::Ink::Green,
+                ui::outcome(
+                    if out.action == tasks::UndoAction::DeleteCreated {
+                        ui::Status::Bad
+                    } else {
+                        ui::Status::Changed
+                    },
+                    out.action.verb(),
+                    &handle,
+                    &out.title,
                     &format!(
-                        "{} · reversed event #{}",
-                        out.description, out.reversed_event_id
+                        "undo · was {} · reversed event #{}",
+                        out.action.reversed(),
+                        out.reversed_event_id
                     )
                 )
             )
@@ -3590,6 +3762,42 @@ mod tests {
             task.title
         );
         assert_eq!(ptask_core::event_log::current_cursor(&db).unwrap(), cursor);
+    }
+
+    #[test]
+    fn search_takes_free_text_without_fts_syntax_errors() {
+        // Regression (CORE-6): the query went straight to `MATCH`, so
+        // `pt search follow-up` failed with "no such column: up", and
+        // quotes, PT-ids, c++, ?, %, bare AND/NOT and * all errored.
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("search.db")).unwrap();
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("schedule the follow-up call"),
+            &ptask_core::event_log::EventCtx::test(),
+        )
+        .unwrap();
+        for query in [
+            "follow-up",
+            "\"don't\"",
+            "PT-2201",
+            "c++",
+            "what?",
+            "100%",
+            "NOT",
+            "AND",
+            "*",
+            "foll*",
+        ] {
+            super::cmd_search(
+                &db,
+                super::SearchArgs {
+                    query: vec![query.into()],
+                    limit: 20,
+                },
+            )
+            .unwrap_or_else(|e| panic!("{query:?}: {e:#}"));
+        }
     }
 
     #[test]

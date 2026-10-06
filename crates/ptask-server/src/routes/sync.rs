@@ -96,9 +96,73 @@ fn sync_read_error(stage: &str, e: ptask_core::Error) -> axum::response::Respons
 }
 
 /// Attribution for one /sync command: the authenticated client identity +
-/// the command uuid as the idempotency key.
+/// the command uuid, scoped to that client, as the idempotency key.
 fn sync_ctx(actor: &str, cmd_uuid: &str) -> EventCtx {
-    EventCtx::sync(actor, cmd_uuid)
+    EventCtx::sync(actor, sync_event_uuid(actor, cmd_uuid))
+}
+
+/// The journal key for a client's command uuid. Client uuids shared one
+/// namespace with every other client and with server-derived keys
+/// (`capture:<id>`, `tg-cb:<id>`, `git:…:close`), so two clients that
+/// picked the same uuid had the second command swallowed as a "replay".
+fn sync_event_uuid(actor: &str, cmd_uuid: &str) -> String {
+    format!("sync:{actor}:{cmd_uuid}")
+}
+
+/// The journal event types each command kind writes; a prior event under the
+/// command's key is a replay only if it is one of these.
+fn command_event_types(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "task_create" => &["task.created"],
+        "task_done" => &["task.completed", "task.recurrence_advanced"],
+        "task_priority" | "task_edit" | "task_reopen" | "task_retext" | "task_dismiss"
+        | "task_start" | "task_snooze" | "task_depend" => &["task.updated"],
+        "task_delete" => &["task.deleted"],
+        _ => &[],
+    }
+}
+
+/// What the journal already holds for this command's key.
+enum Prior {
+    None,
+    /// Already executed: the event it recorded.
+    Replay(event_log::LoggedEvent),
+    /// The key was used for a different command or task.
+    Conflict(String),
+}
+
+fn prior_command(state: &AppState, cmd: &Command, actor: &str) -> ptask_core::Result<Prior> {
+    let event = match event_log::get_by_uuid(&state.db, &sync_event_uuid(actor, &cmd.uuid))? {
+        Some(event) => Some(event),
+        // Commands journaled before keys were scoped carry the raw uuid;
+        // only the same client's count as its replay.
+        None => event_log::get_by_uuid(&state.db, &cmd.uuid)?
+            .filter(|event| event.actor.as_deref() == Some(actor)),
+    };
+    let Some(event) = event else {
+        return Ok(Prior::None);
+    };
+    // The task the command names, when it still resolves (a replayed
+    // task_delete names a task that is gone: the event type decides).
+    let target = match (
+        cmd.args.get("task_uuid").and_then(Value::as_str),
+        cmd.args.get("pt_id").and_then(Value::as_str),
+    ) {
+        (Some(uuid), _) => Some(uuid.to_string()),
+        (None, Some(pt)) => tasks::resolve(&state.db, pt).ok().map(|t| t.id),
+        (None, None) => None,
+    };
+    Ok(
+        match event_log::verify_replay(
+            &cmd.uuid,
+            &event,
+            target.as_deref(),
+            command_event_types(&cmd.kind),
+        ) {
+            Ok(()) => Prior::Replay(event),
+            Err(e) => Prior::Conflict(e.to_string()),
+        },
+    )
 }
 
 /// What one command did, decided entirely inside the blocking pool so the
@@ -121,18 +185,19 @@ fn apply_one(state: &AppState, cmd: &Command, actor: &str) -> CommandOutcome {
     // A failed idempotency lookup must NOT fall through to apply: if the
     // command was already executed, re-applying double-creates. Surface
     // the error and let the client retry the whole command instead.
-    let prior = match event_log::get_by_uuid(&state.db, &cmd.uuid) {
-        Ok(p) => p,
+    match prior_command(state, cmd, actor) {
+        Ok(Prior::None) => {}
+        Ok(Prior::Replay(event)) => {
+            return CommandOutcome::Replayed(replay_temp_mapping(cmd, &event));
+        }
+        Ok(Prior::Conflict(e)) => return CommandOutcome::Failed(e),
         Err(e) => {
             warn!(target: "ptask::sync", error = %e, uuid = %cmd.uuid, "idempotency lookup failed");
             return CommandOutcome::LookupFailed(format!("idempotency lookup failed: {e}"));
         }
-    };
-    if let Some(event) = prior {
-        return CommandOutcome::Replayed(replay_temp_mapping(cmd, &event));
     }
     // The mutation itself records the event row in its own transaction
-    // (atomic, keyed on cmd.uuid) — no post-hoc event_log::record here.
+    // (atomic, keyed on the scoped command uuid) — no post-hoc record here.
     match apply_command(state, cmd, actor) {
         Ok((task_uuid, payload)) => {
             let temp = match (cmd.temp_id.as_ref(), task_uuid.as_ref()) {
@@ -145,7 +210,13 @@ fn apply_one(state: &AppState, cmd: &Command, actor: &str) -> CommandOutcome {
                 payload,
             }
         }
-        Err(e) => CommandOutcome::Failed(format!("{}", e)),
+        // A concurrent request with the same command uuid can pass the
+        // lookup too and commit first; this attempt then rolled back on
+        // UNIQUE(pt_event_log.uuid). It was applied: answer as the replay.
+        Err(e) => match prior_command(state, cmd, actor) {
+            Ok(Prior::Replay(event)) => CommandOutcome::Replayed(replay_temp_mapping(cmd, &event)),
+            _ => CommandOutcome::Failed(format!("{}", e)),
+        },
     }
 }
 
@@ -727,6 +798,127 @@ mod tests {
             args: serde_json::json!({"task_uuid": task.id}),
         };
         assert!(apply_command(&state, &cmd, "test").is_err());
+    }
+
+    fn create_cmd(uuid: &str, temp_id: &str, text: &str) -> Command {
+        Command {
+            kind: "task_create".into(),
+            uuid: uuid.into(),
+            temp_id: Some(temp_id.into()),
+            args: serde_json::json!({ "text": text }),
+        }
+    }
+
+    fn outcome_ok(outcome: &CommandOutcome) -> Result<Option<(String, String)>, String> {
+        match outcome {
+            CommandOutcome::Applied { temp, .. } | CommandOutcome::Replayed(temp) => {
+                Ok(temp.clone())
+            }
+            CommandOutcome::Failed(e) | CommandOutcome::LookupFailed(e) => Err(e.clone()),
+        }
+    }
+
+    fn task_count(state: &AppState) -> i64 {
+        state
+            .db
+            .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?))
+            .unwrap()
+    }
+
+    #[test]
+    fn concurrent_requests_with_one_command_uuid_both_answer_ok() {
+        // Regression (SRV-8): both requests passed the idempotency lookup,
+        // the loser's insert hit UNIQUE(pt_event_log.uuid) and it answered
+        // {"error": "sqlite: UNIQUE constraint failed"} with no temp_id
+        // mapping, although the command had been applied.
+        let (_dir, state) = test_state();
+        // Hold the write lock so both requests read "not applied yet" and
+        // queue on it, then release them together.
+        let mut writer = rusqlite::Connection::open(state.db.path()).unwrap();
+        let tx = writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "UPDATE pt_counters SET value = value WHERE name='pt_id'",
+            [],
+        )
+        .unwrap();
+        let racers: Vec<_> = (0..2)
+            .map(|_| {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    apply_one(&state, &create_cmd("same-cmd", "tmp-1", "race me"), "hal")
+                })
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(300));
+        tx.commit().unwrap();
+        let mappings: Vec<_> = racers
+            .into_iter()
+            .map(|h| outcome_ok(&h.join().unwrap()).expect("both answer ok"))
+            .collect();
+        assert_eq!(task_count(&state), 1);
+        assert!(mappings[0].is_some(), "temp_id mapping missing");
+        assert_eq!(mappings[0], mappings[1], "both map tmp-1 to the one task");
+    }
+
+    #[test]
+    fn a_command_uuid_reused_for_another_command_is_an_error() {
+        // Regression (CORE-7): replay only checked that the uuid existed, so
+        // any reused uuid answered "ok" whatever the command or task.
+        let (_dir, state) = test_state();
+        let created = apply_one(&state, &create_cmd("c-1", "t-1", "write report"), "hal");
+        let (_, task_uuid) = outcome_ok(&created).unwrap().unwrap();
+        let done = Command {
+            kind: "task_done".into(),
+            uuid: "c-1".into(),
+            temp_id: None,
+            args: serde_json::json!({ "task_uuid": task_uuid }),
+        };
+        assert!(outcome_ok(&apply_one(&state, &done, "hal")).is_err());
+        assert_eq!(task_by_uuid(&state.db, &task_uuid).unwrap().status, "todo");
+
+        // The same command replayed is still a replay, with its mapping.
+        let again = apply_one(&state, &create_cmd("c-1", "t-1", "write report"), "hal");
+        assert_eq!(
+            outcome_ok(&again).unwrap(),
+            Some(("t-1".to_string(), task_uuid))
+        );
+        assert_eq!(task_count(&state), 1);
+    }
+
+    #[test]
+    fn command_uuids_are_scoped_to_their_client() {
+        // Two clients that pick the same uuid are different commands; the
+        // second used to be swallowed as the first one's replay. A client
+        // uuid also cannot collide with server-derived keys (tg-cb:...).
+        let (_dir, state) = test_state();
+        for client in ["hal", "puresentinel"] {
+            let out = apply_one(&state, &create_cmd("retry-1", "t", client), client);
+            assert!(matches!(out, CommandOutcome::Applied { .. }), "{client}");
+        }
+        assert_eq!(task_count(&state), 2);
+
+        // A command journaled under the raw uuid before keys were scoped
+        // still replays for the client that sent it, and only for it.
+        let legacy = tasks::create(
+            &state.db,
+            tasks::NewTask::minimal("legacy"),
+            &EventCtx::sync("hal", "pre-scope"),
+        )
+        .unwrap();
+        let replay = apply_one(&state, &create_cmd("pre-scope", "t", "legacy"), "hal");
+        assert_eq!(
+            outcome_ok(&replay).unwrap(),
+            Some(("t".to_string(), legacy.id))
+        );
+        let other = apply_one(
+            &state,
+            &create_cmd("pre-scope", "t", "theirs"),
+            "puresentinel",
+        );
+        assert!(matches!(other, CommandOutcome::Applied { .. }));
+        assert_eq!(task_count(&state), 4);
     }
 
     #[tokio::test]

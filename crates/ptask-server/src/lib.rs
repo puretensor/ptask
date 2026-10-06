@@ -2101,8 +2101,9 @@ Don't forget the sourdough.\r\n";
 
         let (actor, payload): (String, String) = db
             .with_conn(|c| {
+                // The command uuid is journaled scoped to its client.
                 Ok(c.query_row(
-                    "SELECT actor, payload FROM pt_event_log WHERE uuid='cmd-hal-1'",
+                    "SELECT actor, payload FROM pt_event_log WHERE uuid='sync:hal:cmd-hal-1'",
                     [],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?)
