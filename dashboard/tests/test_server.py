@@ -1228,3 +1228,40 @@ class ConfigEndpointTests(unittest.TestCase):
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.dirname(__file__)))
     unittest.main()
+
+
+class VoiceBedrockHaiku55Tests(unittest.TestCase):
+    """Haiku 5.5 rejects temperature (400) and may lead with a thinking block."""
+
+    def _run(self, model, content):
+        seen = {}
+
+        def fake_run(cmd, **_kw):
+            body_path = cmd[cmd.index("--body") + 1][len("fileb://"):]
+            with open(body_path) as f:
+                seen["body"] = json.load(f)
+            with open(cmd[-1], "w") as f:
+                json.dump({"content": content}, f)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(server, "VOICE_MODEL", model), \
+                mock.patch.object(server.subprocess, "run", fake_run):
+            out = server._bedrock_extract("buy milk", "2026-10-07")
+        return seen["body"], out
+
+    def test_default_voice_model_is_haiku55(self):
+        if not os.environ.get("PTASK_VOICE_MODEL"):
+            self.assertEqual(server.VOICE_MODEL, "us.anthropic.claude-haiku-5-5")
+
+    def test_haiku55_gets_no_temperature_and_text_is_read_by_type(self):
+        body, out = self._run("us.anthropic.claude-haiku-5-5", [
+            {"type": "thinking", "thinking": ""},
+            {"type": "text", "text": '{"title": "Buy milk"}'},
+        ])
+        self.assertNotIn("temperature", body)
+        self.assertEqual(out.get("title"), "Buy milk")
+
+    def test_legacy_model_keeps_temperature(self):
+        body, _ = self._run("us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                            [{"type": "text", "text": '{"title": "x"}'}])
+        self.assertEqual(body["temperature"], 0)

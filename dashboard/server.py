@@ -212,7 +212,7 @@ MAX_AUDIO_BYTES = 12 * 1024 * 1024  # voice clips (webm/opus) — separate, larg
 # nemotron_v3 reasoning parser returns content: null (~/AGENTS.md § Seat triage).
 AWS_BIN = os.environ.get("PTASK_AWS_BIN", "/usr/local/bin/aws")
 STT_URL = os.environ.get("PTASK_STT_URL", "http://127.0.0.1:9000/transcribe")
-VOICE_MODEL = os.environ.get("PTASK_VOICE_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+VOICE_MODEL = os.environ.get("PTASK_VOICE_MODEL", "us.anthropic.claude-haiku-5-5")
 VOICE_REGION = os.environ.get("PTASK_VOICE_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
 VOICE_FALLBACK_URL = os.environ.get("PTASK_VOICE_FALLBACK_URL", "http://127.0.0.1:8600/v1/chat/completions")
 VOICE_FALLBACK_MODEL = os.environ.get("PTASK_VOICE_FALLBACK_MODEL", "nemotron-lightning")
@@ -910,14 +910,27 @@ def voice_transcribe(audio: bytes, suffix: str) -> str:
             pass
 
 
+_NO_SAMPLING_RE = re.compile(
+    r"claude-(haiku|sonnet|opus)-5|fable|mythos|application-inference-profile", re.I)
+
+
+def _accepts_sampling(model_id: str) -> bool:
+    """Claude 5.x (Haiku 5.5 included) 400s on temperature; profile ARNs hide
+    the family, so they are treated as no-sampling too."""
+    return not _NO_SAMPLING_RE.search(model_id or "")
+
+
 def _bedrock_extract(transcript: str, today: str) -> dict:
     """Cloud field extraction via AWS Bedrock Claude (keyless, IAM via ~/.aws)."""
-    body = json.dumps({
+    req = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 600, "temperature": 0,
+        "max_tokens": 600,
         "system": voice_system_prompt(today),
         "messages": [{"role": "user", "content": transcript}],
-    })
+    }
+    if _accepts_sampling(VOICE_MODEL):
+        req["temperature"] = 0
+    body = json.dumps(req)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as bf:
         bf.write(body)
         bpath = bf.name
@@ -932,7 +945,10 @@ def _bedrock_extract(transcript: str, today: str) -> dict:
             raise RuntimeError((r.stderr or r.stdout).strip()[:200] or "bedrock invoke failed")
         with open(opath) as f:
             payload = json.load(f)
-        return _extract_json(payload["content"][0]["text"])
+        # Claude 5.x may lead with a thinking block; read the text block by type.
+        text = "".join(b.get("text", "") for b in payload.get("content", [])
+                       if isinstance(b, dict) and b.get("type") == "text")
+        return _extract_json(text)
     finally:
         for p in (bpath, opath):
             try:
