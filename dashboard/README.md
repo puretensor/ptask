@@ -133,7 +133,7 @@ transaction.
 |--------|------|-------|
 | GET | `/healthz` | systemd/tunnel probe |
 | GET | `/api/config` | public dashboard title, domains, default domain, and version |
-| GET | `/api/stats` | counts, throughput, overdue, due≤7d |
+| GET | `/api/stats` | counts, throughput, overdue, due≤7d; `flux.by_window.<w>.by_actor` (v0.24) |
 | GET | `/api/tasks?status=&limit=` | tasks + scoring fields + `project` + `labels` (v0.12) |
 | GET | `/api/critical?limit=` | top pending by `priority_score` |
 | GET | `/api/timeline` | pending tasks with a deadline |
@@ -273,6 +273,11 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.24.0** (pt 3.46.0) — Flux by actor. The flux range picker lists, under the
+  windows, who opened (+created, reopened) and who closed (−done, dismissed)
+  work in the selected window, with each actor's net; a positive net (the
+  backlog grew) is flagged. `/api/stats` carries it as
+  `flux.by_window.<w>.by_actor`, read from the journal like `pt flux`.
 - **v0.22.0** — The Host header must name the sidecar (IP literal, `localhost`, the
   machine's short hostname, `*.ts.net`, or `PTASK_DASH_ALLOWED_HOSTS`), else 421: since v0.21.0 a
   DNS-rebinding page could read every task and pass the Origin check, which only

@@ -3623,6 +3623,13 @@ Don't forget the sourdough.\r\n";
         assert_eq!(w7["added_human"], 2); // unchanged
         assert_eq!(w7["added_robot"], 2); // distilled + incident
         assert_eq!(w7["done"], 1);
+        // Who opened them, from the journal: all five creates are the test
+        // actor's (the backdated rows keep their journal time).
+        let by_actor = w24["by_actor"].as_array().unwrap();
+        assert_eq!(by_actor.len(), 1, "{w24:#}");
+        assert_eq!(by_actor[0]["actor"], "test");
+        assert_eq!(by_actor[0]["created"], 5);
+        assert_eq!(by_actor[0]["net"], 5);
     }
 
     /// The Recently Added rail's contract: order=created returns newest-first

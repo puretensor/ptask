@@ -135,7 +135,7 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
-VERSION = "0.22.0"
+VERSION = "0.24.0"
 
 
 def _allowed_host_entry(entry: str) -> str:
@@ -454,6 +454,36 @@ def q_tasks(status="pending", limit=500, order=None):
         con.close()
 
 
+def q_flux_by_actor(con, modifier: str) -> list[dict]:
+    """Who opened and who closed work in the window, from the journal (the
+    same counts as `pt flux`): created, done, dismissed, reopened and net per
+    actor, largest net first. A positive net grew the backlog."""
+    try:
+        rows = con.execute(
+            "SELECT COALESCE(actor, 'unknown') who, "
+            "SUM(event_type = 'task.created'), SUM(event_type = 'task.completed'), "
+            "SUM(event_type = 'task.updated' AND json_valid(payload) "
+            "    AND json_extract(payload, '$.status') = 'dismissed'), "
+            "SUM(event_type = 'task.updated' AND json_valid(payload) "
+            "    AND json_extract(payload, '$.status') = 'pending') "
+            "FROM pt_event_log WHERE task_uuid IS NOT NULL "
+            "AND julianday(ts) >= julianday('now', ?) "
+            "AND event_type IN ('task.created', 'task.completed', 'task.updated') "
+            "GROUP BY who", (modifier,)).fetchall()
+    except sqlite3.Error:
+        # A DB without the journal (a bare fixture) has no flux to split.
+        return []
+    out = []
+    for who, created, done, dismissed, reopened in rows:
+        created, done, dismissed, reopened = (int(x or 0) for x in (created, done, dismissed, reopened))
+        if created + done + dismissed + reopened == 0:
+            continue
+        out.append({"actor": who, "created": created, "done": done, "dismissed": dismissed,
+                    "reopened": reopened, "net": created + reopened - done - dismissed})
+    out.sort(key=lambda a: (-a["net"], a["actor"]))
+    return out
+
+
 def q_stats():
     con = connect()
     try:
@@ -492,6 +522,7 @@ def q_stats():
                 "added_human": added_human,
                 "added_robot": added_robot,
                 "done": done,
+                "by_actor": q_flux_by_actor(con, modifier),
             }
         # Deadlines due within 7 days (overdue included) and overdue, from
         # one scan of the pending deadlines.

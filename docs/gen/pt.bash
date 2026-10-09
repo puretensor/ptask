@@ -67,6 +67,9 @@ _pt() {
             pt,export)
                 cmd="pt__subcmd__export"
                 ;;
+            pt,flux)
+                cmd="pt__subcmd__flux"
+                ;;
             pt,gen-completions)
                 cmd="pt__subcmd__gen__subcmd__completions"
                 ;;
@@ -342,6 +345,9 @@ _pt() {
                 ;;
             pt__subcmd__help,export)
                 cmd="pt__subcmd__help__subcmd__export"
+                ;;
+            pt__subcmd__help,flux)
+                cmd="pt__subcmd__help__subcmd__flux"
                 ;;
             pt__subcmd__help,gen-completions)
                 cmd="pt__subcmd__help__subcmd__gen__subcmd__completions"
@@ -719,7 +725,7 @@ _pt() {
 
     case "${cmd}" in
         pt)
-            opts="-h -V --db --json --idempotency-key --color --no-color --help --version add list done priority edit reopen show context dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token approval goal approve reject backfill gen-manpage gen-completions help"
+            opts="-h -V --db --json --idempotency-key --color --no-color --help --version add list done priority edit reopen show context dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log flux undo token approval goal approve reject backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1834,6 +1840,36 @@ _pt() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        pt__subcmd__flux)
+            opts="-h --since --db --json --idempotency-key --color --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --since)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         pt__subcmd__gen__subcmd__completions)
             opts="-h --db --json --idempotency-key --color --no-color --help bash zsh fish"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
@@ -2309,7 +2345,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help)
-            opts="add list done priority edit reopen show context dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token approval goal approve reject backfill gen-manpage gen-completions help"
+            opts="add list done priority edit reopen show context dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log flux undo token approval goal approve reject backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2701,6 +2737,20 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help__subcmd__export)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__flux)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

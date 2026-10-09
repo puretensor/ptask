@@ -6,7 +6,7 @@ a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 20 tools (`task_next / task_list / task_add /
+Two transports, one handler, 21 tools (`task_flux / task_next / task_list / task_add /
 task_show / task_done / task_dismiss / task_edit / task_claim / task_promote /
 task_depend / task_capture / task_search / task_digest` plus
 `approval_request / approval_list / approval_status / approval_withdraw` —
@@ -88,6 +88,11 @@ commit; a scoring failure does not roll back a successful edit.
   refuses a terminal task so a resurrection is always a deliberate `reopen`.
 - **task_add(discovered_from)** — records a `discovered_from` link in
   `task_links`; mirrors HAL's spawn_task provenance pattern.
+- **task_flux** (v3.46.0) — who opened and who closed work over a window
+  (`minutes`, default 24h): created, done, dismissed, reopened and net per
+  actor. Check your own row before reporting a closing pass: a pass must not
+  open more tasks than it closes (net > 0 means it did). `task_digest`
+  carries the same split for its window as `flux_by_actor`.
 - **task_digest** — deterministic session priming (recent done/dismissed,
   created count, ready queue). Deliberately NOT an LLM summary: the consumer
   is a model; structured facts beat a second model's paraphrase and can't

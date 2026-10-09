@@ -675,6 +675,46 @@ class StatsFluxTests(unittest.TestCase):
         self.assertEqual(w7["done"], 2)            # t5 still older than 7d
 
 
+class FluxByActorTests(unittest.TestCase):
+    """The flux popover's per-actor split, from the journal (as `pt flux`)."""
+
+    def test_by_actor_counts_created_closed_and_reopened_per_actor_in_window(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute(
+                "CREATE TABLE pt_event_log (id INTEGER PRIMARY KEY, uuid TEXT, task_uuid TEXT,"
+                " event_type TEXT, payload TEXT, ts TEXT, actor TEXT)")
+            rows = [
+                ("t1", "task.created", "{}", "-5 minutes", "hal"),
+                ("t2", "task.created", "{}", "-5 minutes", "hal"),
+                ("t3", "task.created", "{}", "-5 minutes", "hal"),
+                ("t1", "task.completed", "{}", "-4 minutes", "hal"),
+                ("t2", "task.completed", "{}", "-3 minutes", "shell"),
+                ("t3", "task.updated", '{"status":"dismissed"}', "-2 minutes", "shell"),
+                ("t3", "task.updated", '{"status":"pending"}', "-1 minutes", "shell"),
+                ("t3", "task.updated", '{"priority":4}', "-1 minutes", "shell"),
+                ("t9", "task.created", "{}", "-3 days", "grok"),        # outside 24h
+                (None, "goal.created", "{}", "-1 minutes", "hal"),      # not a task event
+            ]
+            for i, (tid, kind, payload, age, actor) in enumerate(rows):
+                con.execute(
+                    "INSERT INTO pt_event_log (uuid, task_uuid, event_type, payload, ts, actor)"
+                    " VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%f', 'now', ?) || '+00:00', ?)",
+                    (f"e{i}", tid, kind, payload, age, actor))
+            con.commit()
+            got = server.q_flux_by_actor(con, "-1 day")
+            con.close()
+        self.assertEqual(got, [
+            {"actor": "hal", "created": 3, "done": 1, "dismissed": 0, "reopened": 0, "net": 2},
+            {"actor": "shell", "created": 0, "done": 1, "dismissed": 1, "reopened": 1, "net": -1},
+        ])
+
+    def test_a_db_without_the_journal_has_no_split(self):
+        con = sqlite3.connect(":memory:")
+        self.assertEqual(server.q_flux_by_actor(con, "-1 day"), [])
+        con.close()
+
+
 class TaskOrderTests(unittest.TestCase):
     def test_order_created_returns_newest_first_across_statuses(self):
         old_db = server.DB_PATH

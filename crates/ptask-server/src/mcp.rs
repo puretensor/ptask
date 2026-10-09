@@ -187,6 +187,13 @@ pub struct SearchArg {
 }
 
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct FluxArg {
+    /// Window in minutes (default 1440 = 24h; max 129600 = 90d).
+    #[serde(default)]
+    pub minutes: Option<i64>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 pub struct DigestArg {
     /// Lookback window in days (default 7).
     #[serde(default)]
@@ -504,6 +511,22 @@ impl PtaskMcp {
             ptask_core::tasks::edit_atomic(&db, &t.id, edit, &ctx).map_err(domain_err)?;
             rescore_db(&db);
             json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id}))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Who opened and who closed work over a window (default 24h): created, done, dismissed, reopened and net per actor, from the journal. net = created + reopened - done - dismissed. Before reporting a closing pass, check your own row: a closing pass must not open more tasks than it closes (net > 0)."
+    )]
+    async fn task_flux(
+        &self,
+        Parameters(FluxArg { minutes }): Parameters<FluxArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        on_blocking(move || {
+            let r =
+                ptask_core::flux::by_actor(&db, minutes.unwrap_or(24 * 60)).map_err(domain_err)?;
+            json_ok(&r)
         })
         .await
     }
@@ -1337,5 +1360,34 @@ mod tests {
         })
         .unwrap();
         let _ = result;
+    }
+
+    #[tokio::test]
+    async fn task_flux_shows_an_agent_its_own_net() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let hal = PtaskMcp::new(db.clone(), "hal".into());
+        for t in ["one finding", "another finding"] {
+            ptask_core::tasks::create(
+                &db,
+                ptask_core::NewTask::minimal(t),
+                &EventCtx::local("hal"),
+            )
+            .unwrap();
+        }
+        let r = hal
+            .task_flux(Parameters(FluxArg { minutes: Some(60) }))
+            .await
+            .unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(v.pointer("/content/0/text").unwrap().as_str().unwrap()).unwrap();
+        assert_eq!(body["actors"][0]["actor"], "hal");
+        assert_eq!(body["actors"][0]["net"], 2);
+        assert!(
+            hal.task_flux(Parameters(FluxArg { minutes: Some(0) }))
+                .await
+                .is_err()
+        );
     }
 }

@@ -67,6 +67,9 @@ const FLUX_WINDOWS: [(&str, &str); 5] = [
     ("7d", "-7 days"),
 ];
 
+/// The same windows in minutes, for the per-actor split (`ptask_core::flux`).
+const FLUX_WINDOW_MINUTES: [i64; 5] = [30, 60, 6 * 60, 24 * 60, 7 * 24 * 60];
+
 /// /api/tasks sort orders. Whitelisted keys only — the value is spliced into
 /// SQL, so nothing user-supplied may pass through unmapped. Mirrors the
 /// sidecar's TASK_ORDERS.
@@ -529,6 +532,17 @@ fn api_stats_blocking(state: AppState, headers: HeaderMap) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
+    // Who opened and who closed work, per window (the same split as `pt
+    // flux`); read before the stats connection so the two don't nest.
+    let by_actor: std::collections::HashMap<&str, serde_json::Value> = FLUX_WINDOWS
+        .iter()
+        .zip(FLUX_WINDOW_MINUTES)
+        .filter_map(|((label, _), minutes)| {
+            ptask_core::flux::by_actor(&state.db, minutes)
+                .ok()
+                .map(|r| (*label, serde_json::json!(r.actors)))
+        })
+        .collect();
     let out = state.db.with_conn(|c| {
         let mut by_pri = serde_json::Map::new();
         let mut stmt = c.prepare(
@@ -607,6 +621,7 @@ fn api_stats_blocking(state: AppState, headers: HeaderMap) -> Response {
                     "added_human": added_human,
                     "added_robot": added_robot,
                     "done": done,
+                    "by_actor": by_actor.get(label),
                 }),
             );
         }

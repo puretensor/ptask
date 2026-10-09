@@ -597,6 +597,14 @@ button.chip{font-family:var(--font);cursor:pointer}
 .pmi .pnm{flex:1;white-space:nowrap}
 .pmi .pk{color:var(--accent-t);font-weight:800}
 .pmi.cur{cursor:default}
+/* flux popover: who opened / closed work in the selected window (pt flux) */
+.pmsep{height:1px;background:var(--border);margin:5px 4px}
+.pmh{padding:4px 10px 2px;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.pma{display:flex;align-items:center;gap:9px;padding:4px 10px;font-size:11px;color:var(--muted)}
+.pma .who{flex:1;color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:130px}
+.pma .net{font-weight:800;min-width:30px;text-align:right}
+.pma .net.up{color:var(--p4t)}
+.pma .net.down{color:var(--live)}
 .modal{position:fixed;inset:0;z-index:97;display:flex;align-items:center;justify-content:center;
   background:rgba(0,0,0,.55);padding:20px;overflow-y:auto}
 .modal-card{background:var(--bg2);border:var(--card-border);border-radius:14px;
@@ -1468,7 +1476,7 @@ function openFluxMenu(ev,el){
     return `<button class="pmi${cur?' cur':''}" role="menuitem"${cur?' aria-current="true"':''} data-act="pick-flux" data-w="${w}">`+
       `<span class="pnm">${FLUX_NAMES[w]||w}</span>`+
       `<span class="pk">${fd?`+${fd.added}/−${fd.done}`:''}${cur?' ✓':''}</span></button>`;
-  }).join('');
+  }).join('')+fluxActorsHtml(bw[_fluxWin]);
   pm.hidden=false;
   const r=el.getBoundingClientRect(), m=6;
   let left=r.left, top=r.bottom+4;
@@ -1478,6 +1486,21 @@ function openFluxMenu(ev,el){
   if(top<m) top=m;
   pm.style.left=left+'px'; pm.style.top=top+'px';
   const f=pm.querySelector('.pmi:not(.cur)')||pm.querySelector('.pmi'); if(f) f.focus({preventScroll:true});
+}
+/* Who opened (+created, reopened) and closed (−done, dismissed) work in the
+   selected window, from the journal. A positive net grew the backlog: the
+   closing-pass rule says a pass must not open more than it closes. */
+function fluxActorsHtml(fd){
+  const rows=(fd&&Array.isArray(fd.by_actor))?fd.by_actor.slice(0,6):[];
+  if(!rows.length) return '';
+  return `<div class="pmsep" role="separator"></div>`+
+    `<div class="pmh" role="presentation" title="per actor, from the journal: + created and reopened, − done and dismissed (the chip above counts done only); the last figure is the net open-task change">by actor · ${esc(FLUX_NAMES[_fluxWin]||_fluxWin)}</div>`+
+    rows.map(a=>{
+      const opened=(a.created||0)+(a.reopened||0), closed=(a.done||0)+(a.dismissed||0), net=a.net||0;
+      return `<div class="pma" role="presentation"><span class="who">${esc(a.actor)}</span>`+
+        `<span>+${opened}/−${closed}</span>`+
+        `<span class="net ${net>0?'up':'down'}" title="net open-task change">${net>0?'+':''}${net}</span></div>`;
+    }).join('');
 }
 function pickFlux(w){
   const changed=w&&w!==_fluxWin;
