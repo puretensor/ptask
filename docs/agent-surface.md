@@ -93,13 +93,17 @@ commit; a scoring failure does not roll back a successful edit.
   when open tasks, or tasks closed in the last 14 days, have a similar title
   (lexical, deterministic; see `pt add` in the CLI reference). With
   `skip_if_duplicate: true` it creates nothing when one scores at least 0.75
-  (stricter than the 0.6 reporting threshold: related work is mentioned, not
-  refused) and replies `created: false` with the candidates: the agent works or notes the
+  with the same identifier-like words (stricter than the 0.6 reporting
+  threshold: related work, and titles that differ only in a number, date,
+  hash or host, are mentioned, not refused) and replies `ok: false`,
+  `created: false`, `skipped: true` with the candidates: the agent works or notes the
   existing task instead of filing a second copy. `task_duplicates(id)` lists
   candidates for an existing task. `task_merge(duplicate, into, reason?)`
   folds one into the other: dismissed as `duplicate_of`, dependents moved to
-  the target (so nothing unblocks), prerequisites and labels carried, the
-  higher priority kept. `task_show` returns `duplicate_of` and `merged_in`.
+  the target (so nothing unblocks), prerequisites, labels, recurrence, goal,
+  provenance and subtasks carried, the higher priority kept. A done target
+  with open dependents on the duplicate is refused. `task_show` returns
+  `duplicate_of` and `merged_in` from the `task_links` row.
 - **task_digest** — deterministic session priming (recent done/dismissed,
   created count, ready queue). Deliberately NOT an LLM summary: the consumer
   is a model; structured facts beat a second model's paraphrase and can't

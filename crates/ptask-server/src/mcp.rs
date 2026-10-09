@@ -139,9 +139,11 @@ pub struct AddArg {
     #[serde(default)]
     pub deliverable: Option<String>,
     /// When a near-certain duplicate exists (an open task, or one closed in
-    /// the last 14 days, scoring at least 0.75), create nothing and return
-    /// the candidates instead. Without it, or below that score, the task is
-    /// created and any candidates come back as possible_duplicates.
+    /// the last 14 days, scoring at least 0.75 with the same identifier-like
+    /// words), create nothing and return the candidates instead (`ok` is
+    /// false, `created` is false, `skipped` is true). Without it, or below
+    /// that score, the task is created and any candidates come back as
+    /// possible_duplicates.
     #[serde(default)]
     pub skip_if_duplicate: bool,
 }
@@ -361,7 +363,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Create a task. Quick-add tokens parse inline (p4, @label, #project, ~30m, due:/deadline phrases). Pass discovered_from to link provenance. The reply lists possible_duplicates (open, or closed in the last 14 days, with a similar title): if one is the same work, work or note that task and task_merge the new one into it. Pass skip_if_duplicate=true to create nothing when a near-certain duplicate (score >= 0.75) exists (the reply then has created=false)."
+        description = "Create a task. Quick-add tokens parse inline (p4, @label, #project, ~30m, due:/deadline phrases). Pass discovered_from to link provenance. The reply lists possible_duplicates (open, or closed in the last 14 days, with a similar title): if one is the same work, work or note that task and task_merge the new one into it. Pass skip_if_duplicate=true to create nothing when a near-certain duplicate (score >= 0.75 and the same identifier-like words) exists (the reply then has ok=false, created=false, skipped=true)."
     )]
     async fn task_add(
         &self,
@@ -397,9 +399,10 @@ impl PtaskMcp {
                 5,
             )
             .map_err(domain_err)?;
-            if skip_if_duplicate && ptask_core::dupes::refuses(&dupes) {
+            if skip_if_duplicate && ptask_core::dupes::refuses(&new.title, &dupes) {
                 return json_ok(&serde_json::json!({
-                    "ok": true, "created": false, "possible_duplicates": dupes,
+                    "ok": false, "created": false, "skipped": true,
+                    "possible_duplicates": dupes,
                 }));
             }
             // The link commits with the task (or neither does): a link
@@ -570,7 +573,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Merge a duplicate into the task it duplicates, in one step: the duplicate is dismissed as duplicate_of, every task that depended on it now depends on the target (so nothing is silently unblocked), its prerequisites and labels carry over, and the target keeps the higher priority. Use instead of dismissing a duplicate by hand. The duplicate must be open; a dependency cycle refuses the merge."
+        description = "Merge a duplicate into the task it duplicates, in one step: the duplicate is dismissed as duplicate_of, every task that depended on it now depends on the target (so nothing is silently unblocked), its prerequisites, labels, recurrence, goal, discovered_from links and subtasks carry over, and the target keeps the higher priority. Use instead of dismissing a duplicate by hand. The duplicate must be open; a dismissed target, a done target that would unblock open dependents, or a dependency cycle refuses the merge."
     )]
     async fn task_merge(
         &self,
@@ -1437,7 +1440,7 @@ mod tests {
         let db = Db::open(dir.path().join("mcp.db")).unwrap();
         let first = ptask_core::tasks::create(
             &db,
-            ptask_core::NewTask::minimal("Reindex pgvector on Fox-n0"),
+            ptask_core::NewTask::minimal("Reindex the search index on lab-1"),
             &EventCtx::test(),
         )
         .unwrap();
@@ -1456,7 +1459,7 @@ mod tests {
                 skip_if_duplicate: skip,
             }))
         };
-        let skipped = text(add("pgvector reindex on Fox-n0", true).await.unwrap());
+        let skipped = text(add("search index reindex on lab-1", true).await.unwrap());
         assert_eq!(skipped["created"], false);
         assert_eq!(
             skipped["possible_duplicates"][0]["pt_id"],
@@ -1468,7 +1471,7 @@ mod tests {
         };
         assert_eq!(count(&db), 1, "skip_if_duplicate created nothing");
 
-        let created = text(add("pgvector reindex on Fox-n0", false).await.unwrap());
+        let created = text(add("search index reindex on lab-1", false).await.unwrap());
         let new_pt = created["pt_id"].as_str().unwrap().to_string();
         assert_eq!(created["possible_duplicates"].as_array().unwrap().len(), 1);
         let listed = text(
@@ -1499,7 +1502,7 @@ mod tests {
         assert_eq!(shown["status"], "dismissed");
         assert_eq!(shown["duplicate_of"], first.pt_id.clone().unwrap());
         // A plain unrelated add has no possible_duplicates key.
-        let other = text(add("Renew the Windsor lease", false).await.unwrap());
+        let other = text(add("Renew the office lease", false).await.unwrap());
         assert!(other.get("possible_duplicates").is_none());
     }
 }

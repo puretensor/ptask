@@ -13,11 +13,15 @@
 //!   `pt add` / MCP `task_add` report candidates; `--unique` /
 //!   `skip_if_duplicate` refuse to create one.
 //! - [`merge`] closes one task into another in one transaction: the
-//!   duplicate is dismissed with `duplicate_of`, every task that depended on
+//!   duplicate is dismissed with a `task_links.kind='duplicate_of'` row
+//!   (the schema's merge relation since V012), every task that depended on
 //!   it now depends on the canonical one (dismissing a prerequisite
 //!   satisfies it, so without the move its dependents would unblock), its
-//!   own prerequisites and labels carry over, and the canonical task takes
-//!   the higher priority and, when it has none, the duplicate's deadline.
+//!   own prerequisites, labels, recurrence, goal, `discovered_from` links
+//!   and subtasks carry over, and the canonical task takes the higher
+//!   priority and, when it has none, the duplicate's deadline. A merge
+//!   into a closed target that would unblock open dependents is refused.
+//!   `pt undo` of a merge reverses those moves.
 
 use crate::error::{Error, Result};
 use crate::event_log::EventCtx;
@@ -31,14 +35,33 @@ use std::collections::{BTreeSet, HashMap};
 pub const DEFAULT_THRESHOLD: f64 = 0.6;
 
 /// Similarity at or above which `--unique` / `skip_if_duplicate` refuse to
-/// file a task. Stricter than reporting: related work ("segment the VLANs"
-/// vs "submit the assessment" for the same certification) shares words and
-/// deserves a mention, not a refusal.
+/// file a task. Stricter than reporting: related work ("prepare the report"
+/// vs "submit the assessment") shares words and deserves a mention, not a
+/// refusal. Identifier-like words (numbers, dates, hashes, hosts) that
+/// differ also keep a high-scoring pair report-only: "phase 2" is not
+/// "phase 3".
 pub const REFUSE_THRESHOLD: f64 = 0.75;
 
-/// True when `cands` holds one close enough to refuse a filing.
-pub fn refuses(cands: &[Candidate]) -> bool {
-    cands.iter().any(|c| c.score >= REFUSE_THRESHOLD)
+/// True when `cands` holds one close enough to refuse a filing of `title`:
+/// score at least [`REFUSE_THRESHOLD`] and the same identifier-like words.
+pub fn refuses(title: &str, cands: &[Candidate]) -> bool {
+    let ids = identifier_tokens(title);
+    cands
+        .iter()
+        .any(|c| c.score >= REFUSE_THRESHOLD && identifier_tokens(&c.title) == ids)
+}
+
+/// Tokens that distinguish otherwise-similar titles: any alphanumeric run
+/// that contains a digit. "phase 2" vs "phase 3", "web-01" vs "web-02",
+/// differing dates and hashes all disagree here; a rewording of the same
+/// title does not.
+fn identifier_tokens(title: &str) -> BTreeSet<String> {
+    title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && w.chars().any(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Closed tasks this recent still count as candidates.
@@ -52,8 +75,8 @@ const STOPWORDS: &[&str] = &[
 ];
 
 /// Normalised identity words of a title: lowercase alphanumeric runs of two
-/// or more characters, stopwords and `PT-N` references dropped, a plural
-/// `s` folded.
+/// or more characters (a lone digit is kept: "phase 2" ≠ "phase 3"),
+/// stopwords and `PT-N` references dropped, a plural `s` folded.
 pub fn tokens(title: &str) -> BTreeSet<String> {
     let lower = title.to_lowercase();
     let words: Vec<&str> = lower
@@ -74,7 +97,8 @@ pub fn tokens(title: &str) -> BTreeSet<String> {
             continue;
         }
         i += 1;
-        if w.chars().count() < 2 || STOPWORDS.contains(&w) {
+        let numeric = w.chars().all(|c| c.is_ascii_digit());
+        if (!numeric && w.chars().count() < 2) || STOPWORDS.contains(&w) {
             continue;
         }
         // Plural `s` only: not "ss" (access), "us" (plus, status), "is" (basis).
@@ -135,8 +159,8 @@ struct Row {
 }
 
 /// Open tasks plus, with `recent_closed`, tasks done or dismissed in the
-/// last [`RECENT_CLOSED_DAYS`] days. A task already merged away (dismissed
-/// with `duplicate_of`) is never a candidate: its canonical task is.
+/// last [`RECENT_CLOSED_DAYS`] days. A task already merged away (a
+/// `duplicate_of` link) is never a candidate: its canonical task is.
 fn pool(conn: &rusqlite::Connection, recent_closed: bool) -> Result<Vec<Row>> {
     let closed = if recent_closed {
         format!(
@@ -149,9 +173,9 @@ fn pool(conn: &rusqlite::Connection, recent_closed: bool) -> Result<Vec<Row>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT t.id, t.pt_id, t.title, t.status_v2, t.created_at FROM tasks t
           WHERE (t.status_v2 NOT IN ('done','dismissed') {closed})
-            AND NOT (t.status_v2 = 'dismissed' AND EXISTS (
-                SELECT 1 FROM pt_event_log e
-                 WHERE e.task_uuid = t.id AND e.event_type = 'task.merged'))"
+            AND NOT EXISTS (
+                SELECT 1 FROM task_links l
+                 WHERE l.from_uuid = t.id AND l.kind = 'duplicate_of')"
     ))?;
     let rows = stmt
         .query_map([], |r| {
@@ -288,6 +312,17 @@ pub struct Merged {
     pub priority_raised: Option<(i64, i64)>,
     /// The duplicate's deadline, when `into` had none and took it.
     pub deadline_set: Option<String>,
+    /// True when `into` had no recurrence rule and took the duplicate's.
+    pub recurrence_copied: bool,
+    /// Goal id copied onto `into` when it had none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_copied: Option<String>,
+    /// `discovered_from` targets copied onto `into`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub discovered_from_added: Vec<String>,
+    /// Subtasks whose parent is now `into`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subtasks_moved: Vec<String>,
 }
 
 struct Side {
@@ -324,6 +359,39 @@ fn handle(s: &Side) -> String {
     s.pt_id.clone().unwrap_or_else(|| s.id.clone())
 }
 
+fn pt_handle(tx: &rusqlite::Transaction<'_>, uuid: &str) -> Result<String> {
+    let pt: Option<String> = tx
+        .query_row("SELECT pt_id FROM tasks WHERE id=?1", [uuid], |r| r.get(0))
+        .optional()?
+        .flatten();
+    Ok(pt.unwrap_or_else(|| uuid.to_string()))
+}
+
+fn resolve_handle(tx: &rusqlite::Transaction<'_>, handle: &str) -> Result<Option<String>> {
+    let by_id: Option<String> = tx
+        .query_row("SELECT id FROM tasks WHERE id=?1", [handle], |r| r.get(0))
+        .optional()?;
+    if by_id.is_some() {
+        return Ok(by_id);
+    }
+    Ok(tx
+        .query_row("SELECT id FROM tasks WHERE pt_id=?1", [handle], |r| {
+            r.get(0)
+        })
+        .optional()?)
+}
+
+fn json_str_list(v: &serde_json::Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Is `target` reachable from `start` along depends_on edges?
 fn reaches(tx: &rusqlite::Transaction<'_>, start: &str, target: &str) -> Result<bool> {
     Ok(tx.query_row(
@@ -349,9 +417,10 @@ fn sub_ctx(ctx: &EventCtx, part: &str) -> EventCtx {
 }
 
 /// Merge `duplicate` into `into` (see the module docs). The duplicate must
-/// be open; `into` may be in any state but dismissed (merging into done
-/// work says "already done"). A dependency move that would close a cycle
-/// refuses the whole merge, changing nothing.
+/// be open; `into` may be done ("already done") but not dismissed, and a
+/// done target is refused when the duplicate still has open dependents
+/// (moving them onto closed work would unblock them). A dependency move
+/// that would close a cycle refuses the whole merge, changing nothing.
 pub fn merge(
     db: &Db,
     duplicate: &str,
@@ -389,6 +458,27 @@ pub fn merge(
             "{} is dismissed: reopen it, or merge the other way",
             handle(&canon)
         )));
+    }
+    if is_closed(&canon.status) {
+        let open_dependents: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT COALESCE(t.pt_id, t.id) FROM task_links l
+                   JOIN tasks t ON t.id = l.from_uuid
+                  WHERE l.to_uuid=?1 AND l.kind='depends_on'
+                    AND t.status_v2 NOT IN ('done','dismissed')
+                  ORDER BY t.pt_id",
+            )?;
+            stmt.query_map([&dup.id], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        if !open_dependents.is_empty() {
+            return Err(Error::Other(format!(
+                "{} is {} and merging would unblock open dependent(s) {}: reopen the target first, or close or move those dependents; nothing was merged",
+                handle(&canon),
+                canon.status,
+                open_dependents.join(", ")
+            )));
+        }
     }
     let now = crate::tasks::iso_now();
 
@@ -430,11 +520,7 @@ pub fn merge(
                 "task_uuid": f, "depends_on_added": canon.id, "depends_on_removed": dup.id,
             }),
         )?;
-        let pt: Option<String> = tx
-            .query_row("SELECT pt_id FROM tasks WHERE id=?1", [f], |r| r.get(0))
-            .optional()?
-            .flatten();
-        dependents_moved.push(pt.unwrap_or_else(|| f.clone()));
+        dependents_moved.push(pt_handle(&tx, f)?);
     }
 
     // Prerequisites: the duplicate's blockers block the work wherever it lives.
@@ -462,11 +548,7 @@ pub fn merge(
             params![canon.id, p, now],
         )?;
         if added == 1 {
-            let pt: Option<String> = tx
-                .query_row("SELECT pt_id FROM tasks WHERE id=?1", [p], |r| r.get(0))
-                .optional()?
-                .flatten();
-            prerequisites_added.push(pt.unwrap_or_else(|| p.clone()));
+            prerequisites_added.push(pt_handle(&tx, p)?);
         }
     }
 
@@ -493,13 +575,27 @@ pub fn merge(
             params![to, canon.id],
         )?;
     }
-    let recurring: bool = tx.query_row(
+    let canon_recurring: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM pt_recurrence WHERE task_uuid=?1)",
         [&canon.id],
         |r| r.get(0),
     )?;
+    let dup_recurring: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pt_recurrence WHERE task_uuid=?1)",
+        [&dup.id],
+        |r| r.get(0),
+    )?;
+    let recurrence_copied = !canon_recurring && dup_recurring;
+    if recurrence_copied {
+        tx.execute(
+            "INSERT INTO pt_recurrence (task_uuid, rrule, mode, original_input, next_occurrence, anchor)
+             SELECT ?1, rrule, mode, original_input, next_occurrence, anchor
+               FROM pt_recurrence WHERE task_uuid=?2",
+            params![canon.id, dup.id],
+        )?;
+    }
     let deadline_set = match (&canon.deadline, &dup.deadline) {
-        (None, Some(d)) if !recurring => Some(d.clone()),
+        (None, Some(d)) if !canon_recurring => Some(d.clone()),
         _ => None,
     };
     if let Some(d) = &deadline_set {
@@ -508,6 +604,89 @@ pub fn merge(
             params![d, canon.id],
         )?;
     }
+
+    let dup_goal: Option<String> = tx
+        .query_row("SELECT goal_id FROM tasks WHERE id=?1", [&dup.id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten();
+    let canon_goal: Option<String> = tx
+        .query_row("SELECT goal_id FROM tasks WHERE id=?1", [&canon.id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten();
+    let mut goal_copied = None;
+    if let (None, Some(g)) = (canon_goal, dup_goal) {
+        tx.execute(
+            "UPDATE tasks SET goal_id=?1 WHERE id=?2",
+            params![g, canon.id],
+        )?;
+        let g_id: Option<String> = tx
+            .query_row("SELECT 'G-' || seq FROM goals WHERE id=?1", [&g], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        goal_copied = Some(g_id.unwrap_or(g));
+    }
+
+    let discovered: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT to_uuid FROM task_links WHERE from_uuid=?1 AND kind='discovered_from'
+             ORDER BY created_at",
+        )?;
+        stmt.query_map([&dup.id], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    let mut discovered_from_added = Vec::new();
+    for to in &discovered {
+        if *to == canon.id {
+            continue;
+        }
+        let added = tx.execute(
+            "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
+             VALUES (?1, ?2, 'discovered_from', ?3)",
+            params![canon.id, to, now],
+        )?;
+        if added == 1 {
+            discovered_from_added.push(pt_handle(&tx, to)?);
+        }
+    }
+
+    let mut children: BTreeSet<String> = BTreeSet::new();
+    {
+        let mut stmt = tx.prepare("SELECT id FROM tasks WHERE parent_uuid=?1")?;
+        for id in stmt.query_map([&dup.id], |r| r.get::<_, String>(0))? {
+            children.insert(id?);
+        }
+    }
+    {
+        let mut stmt =
+            tx.prepare("SELECT from_uuid FROM task_links WHERE to_uuid=?1 AND kind='subtask_of'")?;
+        for id in stmt.query_map([&dup.id], |r| r.get::<_, String>(0))? {
+            children.insert(id?);
+        }
+    }
+    children.remove(&canon.id);
+    let mut subtasks_moved = Vec::new();
+    for child in &children {
+        tx.execute(
+            "UPDATE tasks SET parent_uuid=?1 WHERE id=?2 AND parent_uuid=?3",
+            params![canon.id, child, dup.id],
+        )?;
+        tx.execute(
+            "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='subtask_of'",
+            params![child, dup.id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
+             VALUES (?1, ?2, 'subtask_of', ?3)",
+            params![child, canon.id, now],
+        )?;
+        subtasks_moved.push(pt_handle(&tx, child)?);
+    }
+
     tx.execute(
         "UPDATE tasks SET updated_at=?1 WHERE id=?2",
         params![now, canon.id],
@@ -532,10 +711,18 @@ pub fn merge(
             )
         ],
     )?;
-    // A marker on the duplicate the candidate pool and `pt show` read,
-    // journaled before the dismissal so the dismissal stays the duplicate's
-    // latest event: `pt undo` then reopens a mistaken merge like any
-    // dismissal (what moved to `into` stays there).
+    tx.execute(
+        "DELETE FROM task_links WHERE from_uuid=?1 AND kind='duplicate_of'",
+        [&dup.id],
+    )?;
+    tx.execute(
+        "INSERT INTO task_links (from_uuid, to_uuid, kind, created_at)
+         VALUES (?1, ?2, 'duplicate_of', ?3)",
+        params![dup.id, canon.id, now],
+    )?;
+    // Journaled before the dismissal so the dismissal stays the duplicate's
+    // latest event: `pt undo` selects it and [`unmerge_if_needed`] reverses
+    // what moved.
     crate::tasks::record_event_tx(
         &tx,
         &sub_ctx(ctx, "merged"),
@@ -558,6 +745,9 @@ pub fn merge(
         "from": dup.id, "from_pt_id": dup.pt_id, "from_title": dup.title,
         "dependents_moved": dependents_moved, "prerequisites_added": prerequisites_added,
         "labels_added": labels_added,
+        "recurrence_copied": recurrence_copied,
+        "discovered_from_added": discovered_from_added,
+        "subtasks_moved": subtasks_moved,
     });
     if let Some((from, to)) = priority_raised {
         canon_payload["priority"] = serde_json::json!(to);
@@ -565,6 +755,9 @@ pub fn merge(
     }
     if let Some(d) = &deadline_set {
         canon_payload["deadline"] = serde_json::json!(d);
+    }
+    if let Some(g) = &goal_copied {
+        canon_payload["goal_copied"] = serde_json::json!(g);
     }
     if let Some(r) = reason {
         canon_payload["reason"] = serde_json::json!(r);
@@ -585,12 +778,17 @@ pub fn merge(
         labels_added,
         priority_raised,
         deadline_set,
+        recurrence_copied,
+        goal_copied,
+        discovered_from_added,
+        subtasks_moved,
     })
 }
 
-/// Merge relations recorded in the journal, for `pt show` / `task_show`:
-/// the task this one was merged into (if it still stands dismissed), and the
-/// tasks merged into this one.
+/// Merge relations recorded as `task_links.kind='duplicate_of'`, for
+/// `pt show` / `task_show`: the task this one was merged into, and the
+/// tasks merged into this one. Pre-V3.45 merges that wrote only the link
+/// (no journal) show up here too.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct MergeLinks {
     pub duplicate_of: Option<String>,
@@ -601,30 +799,160 @@ pub fn links(db: &Db, task_uuid: &str) -> Result<MergeLinks> {
     let conn = db.get()?;
     let duplicate_of: Option<String> = conn
         .query_row(
-            "SELECT COALESCE(json_extract(e.payload, '$.into_pt_id'), json_extract(e.payload, '$.into'))
-               FROM pt_event_log e JOIN tasks t ON t.id = e.task_uuid
-              WHERE e.task_uuid = ?1 AND e.event_type = 'task.merged'
-                AND t.status_v2 = 'dismissed' AND json_valid(e.payload)
-              ORDER BY e.id DESC LIMIT 1",
+            "SELECT COALESCE(t.pt_id, t.id)
+               FROM task_links l JOIN tasks t ON t.id = l.to_uuid
+              WHERE l.from_uuid = ?1 AND l.kind = 'duplicate_of'
+              LIMIT 1",
             [task_uuid],
             |r| r.get(0),
         )
-        .optional()?
-        .flatten();
+        .optional()?;
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(json_extract(payload, '$.from_pt_id'), json_extract(payload, '$.from'))
-           FROM pt_event_log
-          WHERE task_uuid = ?1 AND event_type = 'task.merged_in' AND json_valid(payload)
-          ORDER BY id",
+        "SELECT COALESCE(t.pt_id, t.id)
+           FROM task_links l JOIN tasks t ON t.id = l.from_uuid
+          WHERE l.to_uuid = ?1 AND l.kind = 'duplicate_of'
+          ORDER BY t.pt_id",
     )?;
     let merged_in = stmt
-        .query_map([task_uuid], |r| r.get::<_, Option<String>>(0))?
-        .filter_map(|r| r.transpose())
+        .query_map([task_uuid], |r| r.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(MergeLinks {
         duplicate_of,
         merged_in,
     })
+}
+
+/// Drop the `duplicate_of` link for `task_uuid` (reopen / unmerge).
+pub(crate) fn clear_duplicate_of(tx: &rusqlite::Connection, task_uuid: &str) -> Result<()> {
+    tx.execute(
+        "DELETE FROM task_links WHERE from_uuid=?1 AND kind='duplicate_of'",
+        [task_uuid],
+    )?;
+    Ok(())
+}
+
+/// Reverse a merge whose duplicate is `duplicate_uuid`, using the
+/// `task.merged_in` payload. No-op when there is no `duplicate_of` link.
+/// Called from undo before the duplicate is reopened.
+pub(crate) fn unmerge_if_needed(
+    tx: &rusqlite::Transaction<'_>,
+    duplicate_uuid: &str,
+    ctx: &EventCtx,
+) -> Result<()> {
+    let canon: Option<String> = tx
+        .query_row(
+            "SELECT to_uuid FROM task_links
+              WHERE from_uuid=?1 AND kind='duplicate_of'",
+            [duplicate_uuid],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(canon) = canon else {
+        return Ok(());
+    };
+    let payload_s: Option<String> = tx
+        .query_row(
+            "SELECT payload FROM pt_event_log
+              WHERE task_uuid=?1 AND event_type='task.merged_in' AND json_valid(payload)
+                AND json_extract(payload, '$.from') = ?2
+              ORDER BY id DESC LIMIT 1",
+            params![canon, duplicate_uuid],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(payload_s) = payload_s {
+        let payload: serde_json::Value = serde_json::from_str(&payload_s).unwrap_or_default();
+        let now = crate::tasks::iso_now();
+        for handle in json_str_list(&payload, "dependents_moved") {
+            let Some(dep) = resolve_handle(tx, &handle)? else {
+                continue;
+            };
+            tx.execute(
+                "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='depends_on'",
+                params![dep, canon],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
+                 VALUES (?1, ?2, 'depends_on', ?3)",
+                params![dep, duplicate_uuid, now],
+            )?;
+            crate::tasks::record_event_tx(
+                tx,
+                &sub_ctx(ctx, &format!("undep:{dep}")),
+                &dep,
+                "task.updated",
+                &serde_json::json!({
+                    "task_uuid": dep, "depends_on_added": duplicate_uuid, "depends_on_removed": canon,
+                }),
+            )?;
+        }
+        for handle in json_str_list(&payload, "prerequisites_added") {
+            let Some(p) = resolve_handle(tx, &handle)? else {
+                continue;
+            };
+            tx.execute(
+                "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='depends_on'",
+                params![canon, p],
+            )?;
+        }
+        for label in json_str_list(&payload, "labels_added") {
+            tx.execute(
+                "DELETE FROM task_labels WHERE task_uuid=?1 AND label=?2",
+                params![canon, label],
+            )?;
+        }
+        if let Some(from) = payload.get("priority_from").and_then(|v| v.as_i64()) {
+            tx.execute(
+                "UPDATE tasks SET priority=?1 WHERE id=?2",
+                params![from, canon],
+            )?;
+        }
+        if let Some(d) = payload.get("deadline").and_then(|v| v.as_str()) {
+            tx.execute(
+                "UPDATE tasks SET deadline=NULL WHERE id=?1 AND deadline=?2",
+                params![canon, d],
+            )?;
+        }
+        if payload.get("recurrence_copied").and_then(|v| v.as_bool()) == Some(true) {
+            tx.execute("DELETE FROM pt_recurrence WHERE task_uuid=?1", [&canon])?;
+        }
+        if payload.get("goal_copied").is_some() {
+            tx.execute("UPDATE tasks SET goal_id=NULL WHERE id=?1", [&canon])?;
+        }
+        for handle in json_str_list(&payload, "discovered_from_added") {
+            let Some(to) = resolve_handle(tx, &handle)? else {
+                continue;
+            };
+            tx.execute(
+                "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='discovered_from'",
+                params![canon, to],
+            )?;
+        }
+        for handle in json_str_list(&payload, "subtasks_moved") {
+            let Some(child) = resolve_handle(tx, &handle)? else {
+                continue;
+            };
+            tx.execute(
+                "UPDATE tasks SET parent_uuid=?1 WHERE id=?2 AND parent_uuid=?3",
+                params![duplicate_uuid, child, canon],
+            )?;
+            tx.execute(
+                "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='subtask_of'",
+                params![child, canon],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
+                 VALUES (?1, ?2, 'subtask_of', ?3)",
+                params![child, duplicate_uuid, now],
+            )?;
+        }
+        tx.execute(
+            "UPDATE tasks SET updated_at=?1 WHERE id=?2",
+            params![now, canon],
+        )?;
+    }
+    clear_duplicate_of(tx, duplicate_uuid)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -655,35 +983,57 @@ mod tests {
 
     #[test]
     fn tokens_drop_noise_and_fold_plurals() {
-        let t: Vec<String> = tokens("Fix the Ceph OSDs on fox-n1 (PT-42) again")
+        let t: Vec<String> = tokens("Fix the object store disks on rack-7 (PT-42) again")
             .into_iter()
             .collect();
-        assert_eq!(t, ["ceph", "fix", "fox", "n1", "osd"]);
+        assert_eq!(t, ["7", "disk", "fix", "object", "rack", "store"]);
         assert!(tokens("a b").is_empty());
         assert_eq!(tokens("process access").len(), 2, "no folding of -ss");
-        let t: Vec<String> = tokens("Cyber Essentials Plus status analysis")
-            .into_iter()
-            .collect();
-        assert_eq!(t, ["analysis", "cyber", "essential", "plus", "status"]);
+        let t: Vec<String> = tokens("Campus plus status analysis").into_iter().collect();
+        assert_eq!(t, ["analysis", "campus", "plus", "status"]);
+        assert!(tokens("phase 2").contains("2"), "lone digits are identity");
     }
 
     #[test]
     fn similarity_needs_two_shared_words() {
         let s = |a: &str, b: &str| similarity(&tokens(a), &tokens(b));
-        assert!(s("LinkedIn outreach", "LinkedIn outreach again") >= 0.99);
-        assert!(s("Iceland BARNACLE", "BARNACLE Iceland filing") >= DEFAULT_THRESHOLD);
-        assert!(s("Fix DNS", "Fix DNS cache on fox-n1") < DEFAULT_THRESHOLD);
+        assert!(s("Vendor outreach", "Vendor outreach again") >= 0.99);
+        assert!(s("North depot filing", "Depot north filing") >= DEFAULT_THRESHOLD);
+        assert!(s("Fix DNS", "Fix DNS cache on rack-7") < DEFAULT_THRESHOLD);
         assert_eq!(s("Renew passport", "Renew TLS cert"), 0.0);
         assert_eq!(s("", ""), 0.0);
     }
 
     #[test]
+    fn refuses_rewordings_but_not_identifier_differences() {
+        let cand = |title: &str, score: f64| Candidate {
+            task_uuid: "u".into(),
+            pt_id: Some("PT-1".into()),
+            title: title.into(),
+            status: "todo".into(),
+            score,
+        };
+        assert!(refuses(
+            "Phase 2 of the storage migration program",
+            &[cand("Storage migration program: phase 2", 0.9)]
+        ));
+        assert!(!refuses(
+            "Storage migration program: phase 3",
+            &[cand("Storage migration program: phase 2", 1.0)]
+        ));
+        assert!(!refuses(
+            "Replace the failed disk in web-02 slot 4",
+            &[cand("Replace the failed disk in web-01 slot 4", 0.86)]
+        ));
+    }
+
+    #[test]
     fn similar_sees_open_and_recently_closed_but_not_merged_away() {
         let (_d, db) = fresh();
-        let open = add(&db, "Voice clone pipeline for Bretalon");
-        let done = add(&db, "Bretalon voice clone pipeline");
+        let open = add(&db, "Voice clone pipeline for the narrator");
+        let done = add(&db, "Narrator voice clone pipeline");
         tasks::mark_done(&db, &done, &EventCtx::test()).unwrap();
-        let other = add(&db, "Renew the Windsor lease");
+        let other = add(&db, "Renew the office lease");
         let got = similar(&db, "voice clone pipeline", None, DEFAULT_THRESHOLD, 10).unwrap();
         let ids: Vec<&str> = got.iter().map(|c| c.task_uuid.as_str()).collect();
         assert_eq!(ids, [open.id.as_str(), done.id.as_str()], "{got:#?}");
@@ -697,7 +1047,7 @@ mod tests {
             1
         );
         // A merged-away duplicate is not offered; its canonical task is.
-        let dup = add(&db, "Voice clone pipeline (Bretalon)");
+        let dup = add(&db, "Voice clone pipeline (narrator)");
         merge(&db, &dup.id, &open.id, None, &EventCtx::test()).unwrap();
         let got = similar(&db, "voice clone pipeline", None, DEFAULT_THRESHOLD, 10).unwrap();
         assert!(!got.iter().any(|c| c.task_uuid == dup.id), "{got:#?}");
@@ -706,8 +1056,8 @@ mod tests {
     #[test]
     fn pairs_lists_open_lookalikes_newest_as_b() {
         let (_d, db) = fresh();
-        let a = add(&db, "Loki retention program");
-        let b = add(&db, "Loki retention program: phase 2");
+        let a = add(&db, "Nightly export job");
+        let b = add(&db, "Nightly export job: phase 2");
         add(&db, "Unrelated work item");
         let p = pairs(&db, DEFAULT_THRESHOLD, 10).unwrap();
         assert_eq!(p.len(), 1);
@@ -721,8 +1071,8 @@ mod tests {
     fn indexed_pairs_match_a_brute_force_scan() {
         let (_d, db) = fresh();
         let vocab = [
-            "ceph", "osd", "fox", "tensor", "pgvector", "reindex", "bedrock", "key", "loki",
-            "voice", "clone", "backup", "drill", "vlan", "grafana",
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar",
         ];
         // Deterministic pseudo-random titles of 2..=5 words.
         let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
@@ -761,10 +1111,10 @@ mod tests {
     fn merge_moves_dependents_prerequisites_labels_and_priority() {
         let (_d, db) = fresh();
         let ctx = EventCtx::test();
-        let canon = add(&db, "BARNACLE Iceland filing");
-        let dup = add(&db, "Iceland BARNACLE");
-        let waiter = add(&db, "file the annual return");
-        let blocker = add(&db, "get the kennitala");
+        let canon = add(&db, "Archive the old build logs");
+        let dup = add(&db, "Old build logs archive");
+        let waiter = add(&db, "publish the archive report");
+        let blocker = add(&db, "order replacement tapes");
         tasks::add_dependency(&db, &waiter.id, &dup.id, &ctx).unwrap();
         tasks::add_dependency(&db, &dup.id, &blocker.id, &ctx).unwrap();
         tasks::update_priority(&db, &dup.id, 4, &ctx).unwrap();
@@ -803,9 +1153,11 @@ mod tests {
             links(&db, &canon.id).unwrap().merged_in,
             [dup.pt_id.clone().unwrap()]
         );
-        // Reopening the duplicate drops the "duplicate of" reading.
+        // Reopening the duplicate drops every merge marker, including the
+        // target's merged_in list (the link is the source of truth).
         tasks::reopen(&db, &dup.id, &ctx).unwrap();
         assert_eq!(links(&db, &dup.id).unwrap().duplicate_of, None);
+        assert!(links(&db, &canon.id).unwrap().merged_in.is_empty());
     }
 
     #[test]

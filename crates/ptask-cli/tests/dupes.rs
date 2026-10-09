@@ -7,8 +7,8 @@ use common::Pt;
 #[test]
 fn add_reports_likely_duplicates_and_unique_refuses_them() {
     let pt = Pt::new();
-    pt.ok(&["add", "--raw", "LinkedIn outreach to Gulf family offices"]); // PT-1
-    let out = pt.json(&["add", "--raw", "Gulf family offices LinkedIn outreach"]); // PT-2
+    pt.ok(&["add", "--raw", "Vendor outreach to north-region partners"]); // PT-1
+    let out = pt.json(&["add", "--raw", "North-region partners vendor outreach"]); // PT-2
     let d = out["possible_duplicates"].as_array().unwrap();
     assert_eq!(d.len(), 1, "{out:#}");
     assert_eq!(d[0]["pt_id"], "PT-1");
@@ -18,13 +18,13 @@ fn add_reports_likely_duplicates_and_unique_refuses_them() {
         "--no-color",
         "add",
         "--raw",
-        "LinkedIn outreach (Gulf family offices)",
+        "Vendor outreach (north-region partners)",
     ]);
     assert!(human.contains("duplicate?"), "{human}");
     assert!(human.contains("pt merge PT-3 --into PT-1"), "{human}");
 
     // An unrelated task carries no field at all.
-    let clean = pt.json(&["add", "--raw", "Renew the Windsor lease"]);
+    let clean = pt.json(&["add", "--raw", "Renew the office lease"]);
     assert!(clean.get("possible_duplicates").is_none(), "{clean:#}");
 
     // --unique: nothing is created, the candidates are listed, exit 1.
@@ -33,7 +33,7 @@ fn add_reports_likely_duplicates_and_unique_refuses_them() {
         "add",
         "--unique",
         "--raw",
-        "Outreach on LinkedIn: Gulf family offices",
+        "Outreach to vendors: north-region partners",
     ]);
     assert!(!refused.status.success());
     let body: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
@@ -44,7 +44,7 @@ fn add_reports_likely_duplicates_and_unique_refuses_them() {
         "add",
         "--unique",
         "--raw",
-        "Cyber Essentials Plus VLAN segmentation",
+        "Alpha widget certification network prep",
     ]);
     assert!(pt.exists("PT-5"));
     // Related work is reported, not refused: --unique refuses only a
@@ -53,7 +53,7 @@ fn add_reports_likely_duplicates_and_unique_refuses_them() {
         "add",
         "--unique",
         "--raw",
-        "Submit Cyber Essentials Plus assessment",
+        "Submit alpha widget certification",
     ]);
     assert_eq!(related["pt_id"], "PT-6");
     assert_eq!(related["possible_duplicates"][0]["pt_id"], "PT-5");
@@ -63,9 +63,9 @@ fn add_reports_likely_duplicates_and_unique_refuses_them() {
 #[test]
 fn recently_closed_work_counts_as_a_duplicate() {
     let pt = Pt::new();
-    pt.ok(&["add", "--raw", "Rotate the Bedrock API key"]);
+    pt.ok(&["add", "--raw", "Rotate the service API key"]);
     pt.ok(&["done", "PT-1"]);
-    let out = pt.json(&["add", "--raw", "Bedrock API key rotation"]);
+    let out = pt.json(&["add", "--raw", "Service API key rotation"]);
     assert_eq!(out["possible_duplicates"][0]["pt_id"], "PT-1");
     assert_eq!(out["possible_duplicates"][0]["status"], "done");
 }
@@ -73,9 +73,9 @@ fn recently_closed_work_counts_as_a_duplicate() {
 #[test]
 fn dupes_lists_pairs_and_candidates_for_one_task() {
     let pt = Pt::new();
-    pt.ok(&["add", "--raw", "Voice clone trio: Bretalon narrator"]); // PT-1
-    pt.ok(&["add", "--raw", "Bretalon narrator voice clone"]); // PT-2
-    pt.ok(&["add", "--raw", "Unrelated: patch fox-n1 BIOS"]); // PT-3
+    pt.ok(&["add", "--raw", "Voice clone trio: narrator track"]); // PT-1
+    pt.ok(&["add", "--raw", "Narrator track voice clone"]); // PT-2
+    pt.ok(&["add", "--raw", "Unrelated: patch the lab BIOS"]); // PT-3
     let pairs = pt.json(&["dupes"]);
     let pairs = pairs.as_array().unwrap();
     assert_eq!(pairs.len(), 1, "{pairs:#?}");
@@ -94,16 +94,16 @@ fn dupes_lists_pairs_and_candidates_for_one_task() {
 #[test]
 fn merge_keeps_dependents_blocked_and_carries_the_work_over() {
     let pt = Pt::new();
-    pt.ok(&["add", "--raw", "BARNACLE Iceland filing"]); // PT-1 canonical
+    pt.ok(&["add", "--raw", "Archive the old build logs"]); // PT-1 canonical
     pt.ok(&[
         "add",
         "--raw",
         "-p",
         "urgent",
-        "Iceland BARNACLE @domain:mgmt",
+        "Old build logs archive @domain:mgmt",
     ]); // PT-2 duplicate
-    pt.ok(&["add", "--raw", "File the annual return"]); // PT-3 waits on the duplicate
-    pt.ok(&["add", "--raw", "Get the kennitala"]); // PT-4 blocks the duplicate
+    pt.ok(&["add", "--raw", "Publish the archive report"]); // PT-3 waits on the duplicate
+    pt.ok(&["add", "--raw", "Order replacement tapes"]); // PT-4 blocks the duplicate
     pt.ok(&["edit", "PT-2", "--label", "domain:mgmt"]);
     pt.ok(&["depend", "PT-3", "--on", "PT-2"]);
     pt.ok(&["depend", "PT-2", "--on", "PT-4"]);
@@ -152,7 +152,7 @@ fn merge_keeps_dependents_blocked_and_carries_the_work_over() {
             .success()
     );
     // A merged-away task is not offered as a duplicate again.
-    let again = pt.json(&["add", "--raw", "Iceland BARNACLE filing, again"]);
+    let again = pt.json(&["add", "--raw", "Old build logs archive, again"]);
     let d: Vec<&str> = again["possible_duplicates"]
         .as_array()
         .unwrap()
@@ -165,8 +165,8 @@ fn merge_keeps_dependents_blocked_and_carries_the_work_over() {
 #[test]
 fn a_keyed_merge_replays_and_undo_reopens_the_duplicate() {
     let pt = Pt::new();
-    pt.ok(&["add", "--raw", "Loki retention program"]);
-    pt.ok(&["add", "--raw", "Loki retention program, phase 2"]);
+    pt.ok(&["add", "--raw", "Nightly export job"]);
+    pt.ok(&["add", "--raw", "Nightly export job, phase 2"]);
     pt.ok(&[
         "--idempotency-key",
         "m-1",

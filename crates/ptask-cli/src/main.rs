@@ -89,8 +89,8 @@ enum Command {
     #[command(alias = "dups")]
     Dupes(DupesArgs),
     /// Merge a duplicate into the task it duplicates: dismiss it as
-    /// `duplicate_of`, move its dependents, prerequisites and labels, keep
-    /// the higher priority.
+    /// `duplicate_of`, move its dependents, prerequisites, labels,
+    /// recurrence, goal, provenance and subtasks, keep the higher priority.
     Merge(MergeArgs),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
@@ -155,7 +155,8 @@ enum Command {
     Log(LogArgs),
     /// Reverse your own most recent undoable mutation (done/dismiss/create).
     ///
-    /// done/dismiss → reopen; create → delete. Only the caller's own events
+    /// done/dismiss → reopen (a merge is fully reversed); create → delete.
+    /// Only the caller's own events
     /// ($PTASK_ACTOR) are candidates. Undoing a create deletes the task
     /// permanently, so it asks first and, without a TTY, refuses unless --yes.
     Undo(UndoArgs),
@@ -630,8 +631,9 @@ struct AddArgs {
     #[arg(long = "deliverable")]
     deliverable: Option<String>,
     /// Refuse to create the task when a near-certain duplicate exists (an
-    /// open task, or one closed in the last 14 days, scoring at least 0.75);
-    /// the candidates are listed and the command exits 1.
+    /// open task, or one closed in the last 14 days, scoring at least 0.75
+    /// with the same identifier-like words); the candidates are listed and
+    /// the command exits 1.
     #[arg(long)]
     unique: bool,
 }
@@ -653,7 +655,8 @@ struct DupesArgs {
 struct MergeArgs {
     /// The duplicate (open): PT-N, bare integer, uuid, or title substring.
     duplicate: String,
-    /// The task it duplicates (any status but dismissed).
+    /// The task it duplicates (open, or done with no open dependents on
+    /// the duplicate). Dismissed targets are refused.
     #[arg(long = "into")]
     into: String,
     /// Why, journaled on both tasks.
@@ -1289,7 +1292,7 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         ptask_core::dupes::DEFAULT_THRESHOLD,
         5,
     )?;
-    if a.unique && ptask_core::dupes::refuses(&possible_duplicates) {
+    if a.unique && ptask_core::dupes::refuses(&new.title, &possible_duplicates) {
         if json_mode() {
             crate::print_json(&serde_json::json!({
                 "created": false, "possible_duplicates": possible_duplicates,
@@ -1393,7 +1396,13 @@ fn print_duplicates(cands: &[ptask_core::dupes::Candidate], new_pt: Option<&str>
             )
         );
     }
-    if let (Some(new_pt), Some(first)) = (new_pt, cands.first().and_then(|c| c.pt_id.as_deref())) {
+    if let (Some(new_pt), Some(first)) = (
+        new_pt,
+        cands
+            .iter()
+            .find(|c| !matches!(c.status.as_str(), "done" | "dismissed"))
+            .and_then(|c| c.pt_id.as_deref()),
+    ) {
         println!(
             "{}",
             ui::note(&format!("same work? pt merge {new_pt} --into {first}"))
@@ -1518,6 +1527,21 @@ fn cmd_merge(db: &Db, a: MergeArgs) -> Result<()> {
         }
         if let Some(d) = &m.deadline_set {
             moved.push(format!("deadline {d}"));
+        }
+        if m.recurrence_copied {
+            moved.push("recurrence".into());
+        }
+        if let Some(g) = &m.goal_copied {
+            moved.push(format!("goal {g}"));
+        }
+        if !m.discovered_from_added.is_empty() {
+            moved.push(format!(
+                "discovered_from {}",
+                m.discovered_from_added.join(", ")
+            ));
+        }
+        if !m.subtasks_moved.is_empty() {
+            moved.push(format!("subtasks {}", m.subtasks_moved.join(", ")));
         }
         if !moved.is_empty() {
             println!(

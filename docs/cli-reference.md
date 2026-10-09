@@ -25,14 +25,14 @@ Create a task. The free-text title runs through the quick-add parser
 | `--deadline <ISO>` | `2026-05-21` or `2026-05-21T10:00:00+01:00` |
 | `--reason` | persisted as `ai_reasoning` |
 | `--raw` | skip quick-add parsing |
-| `--unique` | refuse to create when a near-certain duplicate exists (score ≥ 0.75; reporting starts at 0.6, refusing is stricter); lists the candidates and exits 1 (`--json`: `{"created": false, "possible_duplicates": [...]}` on stdout) |
+| `--unique` | refuse to create when a near-certain duplicate exists (score ≥ 0.75 and the same identifier-like words — numbers, dates, hashes, hosts; reporting starts at 0.6, refusing is stricter); lists the candidates and exits 1 (`--json`: `{"created": false, "possible_duplicates": [...]}` on stdout) |
 
 Every add reports likely duplicates (v3.45.0): open tasks, and tasks done or
 dismissed in the last 14 days, whose title shares at least two identity words
 and scores at least 0.6 (a Dice coefficient over lowercase title words,
 stopwords and `PT-N` references dropped, plurals folded). The task is still
 created; the human output adds a `duplicate?` line per candidate and the
-`pt merge` command, and `--json` adds `possible_duplicates`
+`pt merge` command (only into an open candidate), and `--json` adds `possible_duplicates`
 (`pt_id`, `title`, `status`, `score`). A task already merged away is never a
 candidate; its canonical task is. Local and deterministic: no model, no
 network.
@@ -116,21 +116,25 @@ task (open or closed in the last 14 days). `--json` honoured.
 
 Close a duplicate into the task it duplicates, in one transaction:
 
-- the duplicate is dismissed (`task.updated`, `duplicate_of`; a
-  `task.merged` marker), so `pt show` reads "duplicate of PT-N (merged)"
-  and the target lists it under "merged in" (`--json`: `duplicate_of`,
-  `merged_in`);
+- the duplicate is dismissed (`task.updated`) with a `task_links` row of
+  kind `duplicate_of` (the schema's merge relation since V012), so `pt show`
+  reads "duplicate of PT-N (merged)" and the target lists it under "merged
+  in" (`--json`: `duplicate_of`, `merged_in`). Reopen and undo remove the
+  row, so a later plain dismissal is not a merge;
 - every task that depended on the duplicate now depends on the target.
   Dismissing a prerequisite satisfies it, so without the move its dependents
   would silently unblock;
-- the duplicate's own prerequisites and labels carry over, the target takes
-  the higher priority, and takes the duplicate's deadline when it has none
-  (and does not recur);
+- the duplicate's own prerequisites, labels, recurrence, goal,
+  `discovered_from` links and subtasks carry over; the target takes the
+  higher priority, and takes the duplicate's deadline when it has none
+  (and did not already recur);
 - a move that would close a dependency cycle refuses the whole merge.
 
 The duplicate must be open; the target may be done (it was already done)
-but not dismissed. `pt undo` reopens a mistaken merge's duplicate; what moved
-to the target stays there. Honours `--idempotency-key`.
+but not dismissed, and a done target is refused when the duplicate still
+has open dependents (moving them onto closed work would unblock them).
+`pt undo` of a merge reopens the duplicate and moves back what the merge
+carried. Honours `--idempotency-key`.
 
 ### `pt dismiss <query>`
 
@@ -261,7 +265,7 @@ not-yet-retired consumers).
 | Verb | Use |
 |---|---|
 | `pt log <query> [-n N]` | attributed event history for a task: when, who (actor), via which surface, what |
-| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor, `$PTASK_ACTOR`, default `shell`, through the CLI/TUI surface: a task a `pt mcp` server added under your actor is not yours) within your last 50 task events (done/dismiss → reopen, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, that parents another task, or that an approval references, is never deleted: when your most recent undoable change is such a create, undo refuses and names it rather than reaching further back. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
+| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor, `$PTASK_ACTOR`, default `shell`, through the CLI/TUI surface: a task a `pt mcp` server added under your actor is not yours) within your last 50 task events (done/dismiss → reopen, a merge fully reversed, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, that parents another task, or that an approval references, is never deleted: when your most recent undoable change is such a create, undo refuses and names it rather than reaching further back. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
 | `pt token create <client_id> [--scope read\|capture\|write\|admin]` | mint a named scoped API token (plain value shown ONCE; only the sha256 is stored) |
 | `pt token list` | client, scope, active/revoked, created/last-used |
 | `pt token revoke <client_id>` | revoke all active tokens for a client |
