@@ -6,9 +6,9 @@ a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 23 tools (`task_next / task_list / task_add /
+Two transports, one handler, 25 tools (`task_next / task_list / task_add /
 task_show / task_done / task_dismiss / task_note / task_edit / task_claim /
-task_heartbeat / task_release / task_promote /
+task_heartbeat / task_release / task_promote / task_duplicates / task_merge /
 task_depend / task_capture / task_search / task_digest` plus
 `approval_request / approval_list / approval_status / approval_withdraw` —
 agents request, they never decide; see [`approvals.md`](approvals.md) — plus
@@ -130,6 +130,21 @@ commit; a scoring failure does not roll back a successful edit.
   refuses a terminal task so a resurrection is always a deliberate `reopen`.
 - **task_add(discovered_from)** — records a `discovered_from` link in
   `task_links`; mirrors HAL's spawn_task provenance pattern.
+- **Duplicates (v3.45.0).** `task_add` replies with `possible_duplicates`
+  when open tasks, or tasks closed in the last 14 days, have a similar title
+  (lexical, deterministic; see `pt add` in the CLI reference). With
+  `skip_if_duplicate: true` it creates nothing when one scores at least 0.75
+  with the same identifier-like words (stricter than the 0.6 reporting
+  threshold: related work, and titles that differ only in a number, date,
+  hash or host, are mentioned, not refused) and replies `ok: false`,
+  `created: false`, `skipped: true` with the candidates: the agent works or notes the
+  existing task instead of filing a second copy. `task_duplicates(id)` lists
+  candidates for an existing task. `task_merge(duplicate, into, reason?)`
+  folds one into the other: dismissed as `duplicate_of`, dependents moved to
+  the target (so nothing unblocks), prerequisites, labels, recurrence, goal,
+  provenance and subtasks carried, the higher priority kept. A done target
+  with open dependents on the duplicate is refused. `task_show` returns
+  `duplicate_of` and `merged_in` from the `task_links` row.
 - **task_digest** — deterministic session priming (recent done/dismissed,
   created count, ready queue). Deliberately NOT an LLM summary: the consumer
   is a model; structured facts beat a second model's paraphrase and can't

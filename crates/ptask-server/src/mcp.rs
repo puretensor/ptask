@@ -197,6 +197,25 @@ pub struct AddArg {
     /// the kind's deliverable.
     #[serde(default)]
     pub deliverable: Option<String>,
+    /// When a near-certain duplicate exists (an open task, or one closed in
+    /// the last 14 days, scoring at least 0.75 with the same identifier-like
+    /// words), create nothing and return the candidates instead (`ok` is
+    /// false, `created` is false, `skipped` is true). Without it, or below
+    /// that score, the task is created and any candidates come back as
+    /// possible_duplicates.
+    #[serde(default)]
+    pub skip_if_duplicate: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct MergeArg {
+    /// The duplicate (open): PT-N, bare number, task uuid, or title substring.
+    pub duplicate: String,
+    /// The task it duplicates.
+    pub into: String,
+    /// Why (journaled on both tasks).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -403,7 +422,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Create a task. Quick-add tokens parse inline (p4, @label, #project, ~30m, due:/deadline phrases). Pass discovered_from to link provenance."
+        description = "Create a task. Quick-add tokens parse inline (p4, @label, #project, ~30m, due:/deadline phrases). Pass discovered_from to link provenance. The reply lists possible_duplicates (open, or closed in the last 14 days, with a similar title): if one is the same work, work or note that task and task_merge the new one into it. Pass skip_if_duplicate=true to create nothing when a near-certain duplicate (score >= 0.75 and the same identifier-like words) exists (the reply then has ok=false, created=false, skipped=true)."
     )]
     async fn task_add(
         &self,
@@ -413,6 +432,7 @@ impl PtaskMcp {
             discovered_from,
             kind,
             deliverable,
+            skip_if_duplicate,
         }): Parameters<AddArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
@@ -430,13 +450,31 @@ impl PtaskMcp {
                 .transpose()
                 .map_err(domain_err)?
                 .map(|parent| parent.id);
+            let dupes = ptask_core::dupes::similar(
+                &db,
+                &new.title,
+                None,
+                ptask_core::dupes::DEFAULT_THRESHOLD,
+                5,
+            )
+            .map_err(domain_err)?;
+            if skip_if_duplicate && ptask_core::dupes::refuses(&new.title, &dupes) {
+                return json_ok(&serde_json::json!({
+                    "ok": false, "created": false, "skipped": true,
+                    "possible_duplicates": dupes,
+                }));
+            }
             // The link commits with the task (or neither does): a link
             // written afterwards could fail for an already-created task, and
             // the agent's retry would duplicate it.
             let t = ptask_core::tasks::create_with_extensions(&db, new, ext, &ctx)
                 .map_err(domain_err)?;
             rescore_db(&db);
-            json_ok(&task_json(&t))
+            let mut v = task_json(&t);
+            if !dupes.is_empty() {
+                v["possible_duplicates"] = serde_json::json!(dupes);
+            }
+            json_ok(&v)
         })
         .await
     }
@@ -466,6 +504,9 @@ impl PtaskMcp {
                 ptask_core::notes::list(&db, &t.id, ptask_core::notes::MAX_NOTES_LISTED)
                     .map_err(domain_err)?
             );
+            let links = ptask_core::dupes::links(&db, &t.id).map_err(domain_err)?;
+            v["duplicate_of"] = serde_json::json!(links.duplicate_of);
+            v["merged_in"] = serde_json::json!(links.merged_in);
             // Open prerequisites: non-empty means task_done will be refused.
             let blockers = ptask_core::tasks::open_blockers(&db, &t.id).map_err(domain_err)?;
             v["blocked_by"] = serde_json::json!(blockers);
@@ -576,6 +617,57 @@ impl PtaskMcp {
             ptask_core::tasks::edit_atomic(&db, &t.id, edit, &ctx).map_err(domain_err)?;
             rescore_db(&db);
             json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id}))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Likely duplicates of a task: open tasks, or tasks closed in the last 14 days, with a similar title (lexical; best first). Read-only."
+    )]
+    async fn task_duplicates(
+        &self,
+        Parameters(IdArg { id }): Parameters<IdArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, true).map_err(domain_err)?;
+            let dupes = ptask_core::dupes::similar(
+                &db,
+                &t.title,
+                Some(&t.id),
+                ptask_core::dupes::DEFAULT_THRESHOLD,
+                10,
+            )
+            .map_err(domain_err)?;
+            json_ok(&serde_json::json!({"pt_id": t.pt_id, "possible_duplicates": dupes}))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Merge a duplicate into the task it duplicates, in one step: the duplicate is dismissed as duplicate_of, every task that depended on it now depends on the target (so nothing is silently unblocked), its prerequisites, labels, recurrence, goal, discovered_from links and subtasks carry over, and the target keeps the higher priority. Use instead of dismissing a duplicate by hand. The duplicate must be open; a dismissed target, a done target that would unblock open dependents, or a dependency cycle refuses the merge."
+    )]
+    async fn task_merge(
+        &self,
+        Parameters(MergeArg {
+            duplicate,
+            into,
+            reason,
+        }): Parameters<MergeArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let dup = ptask_core::tasks::resolve_for_lookup(&db, &duplicate, false)
+                .map_err(domain_err)?;
+            let target =
+                ptask_core::tasks::resolve_for_lookup(&db, &into, true).map_err(domain_err)?;
+            let m = ptask_core::dupes::merge(&db, &dup.id, &target.id, reason.as_deref(), &ctx)
+                .map_err(domain_err)?;
+            rescore_db(&db);
+            let mut v = serde_json::to_value(&m).map_err(domain_err)?;
+            v["ok"] = serde_json::json!(true);
+            json_ok(&v)
         })
         .await
     }
@@ -1131,6 +1223,7 @@ mod tests {
                 discovered_from: Some("PT-999999".into()),
                 kind: None,
                 deliverable: None,
+                skip_if_duplicate: false,
             }))
             .await;
 
@@ -1341,6 +1434,7 @@ mod tests {
                 discovered_from: parent.pt_id.clone(),
                 kind: None,
                 deliverable: None,
+                skip_if_duplicate: false,
             }))
             .await;
 
@@ -1388,6 +1482,7 @@ mod tests {
                 discovered_from: parent.pt_id.clone(),
                 kind: None,
                 deliverable: None,
+                skip_if_duplicate: false,
             }))
         };
 
@@ -1672,5 +1767,77 @@ mod tests {
         }))
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_add_reports_and_can_skip_duplicates_and_task_merge_folds_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let first = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("Reindex the search index on lab-1"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "hal".into());
+        let text = |r: CallToolResult| -> serde_json::Value {
+            let v = serde_json::to_value(&r).unwrap();
+            serde_json::from_str(v.pointer("/content/0/text").unwrap().as_str().unwrap()).unwrap()
+        };
+        let add = |t: &str, skip: bool| {
+            mcp.task_add(Parameters(AddArg {
+                text: t.into(),
+                reason: None,
+                discovered_from: None,
+                kind: None,
+                deliverable: None,
+                skip_if_duplicate: skip,
+            }))
+        };
+        let skipped = text(add("search index reindex on lab-1", true).await.unwrap());
+        assert_eq!(skipped["created"], false);
+        assert_eq!(
+            skipped["possible_duplicates"][0]["pt_id"],
+            first.pt_id.clone().unwrap()
+        );
+        let count = |db: &Db| -> i64 {
+            db.with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?))
+                .unwrap()
+        };
+        assert_eq!(count(&db), 1, "skip_if_duplicate created nothing");
+
+        let created = text(add("search index reindex on lab-1", false).await.unwrap());
+        let new_pt = created["pt_id"].as_str().unwrap().to_string();
+        assert_eq!(created["possible_duplicates"].as_array().unwrap().len(), 1);
+        let listed = text(
+            mcp.task_duplicates(Parameters(IdArg { id: new_pt.clone() }))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            listed["possible_duplicates"][0]["pt_id"],
+            first.pt_id.clone().unwrap()
+        );
+
+        let merged = text(
+            mcp.task_merge(Parameters(MergeArg {
+                duplicate: new_pt.clone(),
+                into: first.pt_id.clone().unwrap(),
+                reason: Some("filed twice".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(merged["ok"], true);
+        let shown = text(
+            mcp.task_show(Parameters(IdArg { id: new_pt }))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(shown["status"], "dismissed");
+        assert_eq!(shown["duplicate_of"], first.pt_id.clone().unwrap());
+        // A plain unrelated add has no possible_duplicates key.
+        let other = text(add("Renew the office lease", false).await.unwrap());
+        assert!(other.get("possible_duplicates").is_none());
     }
 }

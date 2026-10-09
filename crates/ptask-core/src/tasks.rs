@@ -1402,6 +1402,7 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
             format!("Reopened → pending (was {})", status)
         ],
     )?;
+    crate::dupes::clear_duplicate_of(tx, task_uuid)?;
     record_event_tx(
         tx,
         ctx,
@@ -1669,6 +1670,9 @@ fn apply_undo(
 ) -> Result<UndoOutcome> {
     let description = match plan.action {
         UndoAction::ReopenCompleted | UndoAction::ReopenDismissed => {
+            if plan.action == UndoAction::ReopenDismissed {
+                crate::dupes::unmerge_if_needed(tx, &plan.task_uuid, ctx)?;
+            }
             reopen_in_conn(tx, &plan.task_uuid, ctx)?;
             format!(
                 "reopened {} (was {})",
