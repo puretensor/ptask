@@ -527,3 +527,24 @@ fn close_and_continue_json_is_always_the_documented_object() {
         );
     }
 }
+
+// --- follow-up (HAL, at the merge onto #122's fingerprints) ------------------
+
+/// #122 renders a keyed `done` without its note field so 3.42.2 keys still
+/// replay. `--claim-next` changes what the command does (it claims a task),
+/// so under one key `done PT-1` and `done PT-1 --claim-next` are different
+/// commands: the second must be refused, not replayed as the first.
+#[test]
+fn a_key_used_by_a_plain_done_is_not_replayed_by_done_claim_next() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Close the ticket"]); // PT-1
+    pt.ok(&["add", "--raw", "Pick this up next"]); // PT-2
+    pt.ok(&["--idempotency-key", "sweep-9", "done", "PT-1"]);
+    let out = pt.run(&["--idempotency-key", "sweep-9", "done", "PT-1", "--claim-next"]);
+    assert!(
+        !out.status.success(),
+        "a keyed done --claim-next replayed a plain keyed done under the same key: {}",
+        text(&out.stdout)
+    );
+    assert_eq!(status_of(&pt, "PT-2"), "todo", "nothing may be claimed");
+}
