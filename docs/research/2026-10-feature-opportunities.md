@@ -41,7 +41,7 @@ who holds what, and whether a new task is really new.
 | 1 | **Closure evidence and task notes**: `pt note`, `--note` on done/dismiss, carried into show/context/digest/export/cockpit; automated closers record their own evidence | Closure runs reported "pTask has no comment surface, so evidence is attached here before closure"; PT-1393 was closed by a dashboard click with no verification and read green for 16 days ("a task's status field is a claim, not evidence"); agents wrote evidence into descriptions, overwriting the original ask | Taskwarrior `annotate`, Beads `bd close -r`, GitHub/Linear comments; Anthropic's long-running-agent harness names agents marking work complete without testing | High: every close by every surface | Excellent: notes are journal events, so no migration, attribution and append-only come free | **Built** (3.43.0, puretensor/ptask#122) |
 | 2 | **Claim ownership, release and leases**: `claimed_by`, `task_release`, optional lease TTL with heartbeat, an expiry sweep that ships off | Closure reports twice: "claims are released by closure or recorded as parked because pTask has no unclaim operation"; the docs admit a crashed agent's claim stays `in_progress` until someone notices; the reaper skips claimed tasks, so nothing recovers them | Beads `--claim` + `heartbeat` + `reclaim`; Linear agent sessions go stale after 30 min; Marcus treats any tool call as a heartbeat; arXiv 2606.19616 measures duplicate work without leases | High for parallel agent sweeps | Good: one small migration; the sweep changes state, so it is off by default | **Built** (3.44.0, puretensor/ptask#123) |
 | 3 | **Duplicate check at filing time and merge**: `task_add` / `pt add` report likely open duplicates; `pt merge` closes one into another, carrying labels, dependents and notes | Backlog scans repeatedly listed hand- and agent-filed duplicates (several pairs and a trio in one pass); the operator rule that a closing pass must not open more than it closes, after a `+13 / −4` half hour | Beads `bd duplicates` / `bd duplicate --of`; GitHub `--duplicate-of`; Linear Triage Intelligence suggests duplicates at creation | High: attacks backlog inflation at the source | Good: lexical similarity over FTS, no model needed; merge is an attributed dismiss plus link moves | **Built** (3.45.0, puretensor/ptask#124) |
-| 4 | Per-actor flow metrics: created vs closed per client, cycle-time p50/p90, untouched share | The `+13 / −4` flux chip shows counts but not *who* | Linear Insights; agent-backlog write-ups (342 opened vs 218 closed in a week) | Medium | Cheap (SQL over the journal) | Next candidate |
+| 4 | Per-actor flow metrics: created vs closed per client, cycle-time p50/p90, untouched share | The `+13 / −4` flux chip shows counts but not *who* | Linear Insights; agent-backlog write-ups (342 opened vs 218 closed in a week) | Medium | Cheap (SQL over the journal) | **Built** (3.46.0, puretensor/ptask#125): `pt flux`, MCP `task_flux`, the digest and the cockpit's flux picker, per actor |
 | 5 | Acceptance criteria and gated done (checklist; agents must tick all plus a note) | Same false-green lesson as #1 | Backlog.md `--ac` / definition of done; Beads `bd lint` | Medium | Needs an operator policy decision; #1 delivers the evidence half | Deferred |
 | 6 | Close-and-continue: `task_done` returns newly unblocked tasks, optional claim-next | Agent sweeps round-trip `task_next` after every close | Beads `--suggest-next` / `--claim-next` | Low to medium | Cheap | Deferred |
 | 7 | External gates (CI run, PR merged) as DAG nodes | Blocked work polled by hand | Beads `bd gate` | Medium | Needs a poller calling GitHub/Gitea: a new outbound dependency | Not now |
@@ -65,7 +65,12 @@ gates: puretensor/ptask#122 (notes and closure evidence), puretensor/ptask#123
 (claim ownership, heartbeat leases, release and reclaim; the timed reclaim is
 off unless `PTASK_CLAIM_RECLAIM=1`) and puretensor/ptask#124 (duplicate check
 at filing time, `pt dupes`, `pt merge`; refusing to file needs a 0.75 score,
-reporting starts at 0.6).
+reporting starts at 0.6). Opportunity #4, per-actor flux, was cheap and
+answers the operator's own closing-pass rule, so it followed as
+puretensor/ptask#125. The rest stay deferred for the reasons in the table:
+each needs an operator policy decision (#5), adds an outbound dependency
+(#7), puts a credential in a URL (#8), or has no repeated evidence behind it
+(#9); #6 is small enough to fold into a later agent-surface change.
 
 ## Sources
 
