@@ -84,6 +84,14 @@ enum Command {
     Dismiss(DismissArgs),
     /// Delete a task permanently (hard delete + tombstone).
     Rm(RmArgs),
+    /// Likely duplicates: of one task, or pairs among all open tasks
+    /// (lexical title similarity; read-only).
+    #[command(alias = "dups")]
+    Dupes(DupesArgs),
+    /// Merge a duplicate into the task it duplicates: dismiss it as
+    /// `duplicate_of`, move its dependents, prerequisites and labels, keep
+    /// the higher priority.
+    Merge(MergeArgs),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
     /// Advisory day plan: fit the ready queue into calendar free/busy (dry-run
@@ -621,6 +629,36 @@ struct AddArgs {
     /// Defaults to the kind's deliverable when --kind is given.
     #[arg(long = "deliverable")]
     deliverable: Option<String>,
+    /// Refuse to create the task when a near-certain duplicate exists (an
+    /// open task, or one closed in the last 14 days, scoring at least 0.75);
+    /// the candidates are listed and the command exits 1.
+    #[arg(long)]
+    unique: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct DupesArgs {
+    /// A task to find duplicates of; omit to list likely duplicate pairs
+    /// among all open tasks.
+    query: Option<String>,
+    /// Similarity threshold, 0..=1 (Dice over normalised title words).
+    #[arg(long, default_value_t = ptask_core::dupes::DEFAULT_THRESHOLD)]
+    threshold: f64,
+    /// Max rows.
+    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(clap::Args, Debug)]
+struct MergeArgs {
+    /// The duplicate (open): PT-N, bare integer, uuid, or title substring.
+    duplicate: String,
+    /// The task it duplicates (any status but dismissed).
+    #[arg(long = "into")]
+    into: String,
+    /// Why, journaled on both tasks.
+    #[arg(short = 'm', long = "reason")]
+    reason: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -895,6 +933,7 @@ fn keyed_replay_spec(cmd: &Command) -> Option<(&'static [&'static str], KeyTarge
         Command::Kind(a) => (UPDATED, Task(a.query.clone())),
         Command::Promote(a) => (&["task.promoted"], Task(a.query.clone())),
         Command::Rm(a) => (&["task.deleted"], Task(a.query.clone())),
+        Command::Merge(a) => (UPDATED, Task(a.duplicate.clone())),
         Command::Goal(G::Add(_)) => (&["goal.created"], Untargeted),
         Command::Goal(G::Link(a)) => (&["task.goal_linked"], Task(a.task.clone())),
         Command::Goal(G::Unlink(a)) => (&["task.goal_unlinked"], Task(a.task.clone())),
@@ -1129,6 +1168,8 @@ fn run() -> Result<()> {
                 Some(Command::Context(a)) => cmd_context(&db, a),
                 Some(Command::Dismiss(a)) => cmd_dismiss(&db, a),
                 Some(Command::Rm(a)) => cmd_rm(&db, a),
+                Some(Command::Dupes(a)) => cmd_dupes(&db, a),
+                Some(Command::Merge(a)) => cmd_merge(&db, a),
                 Some(Command::Next(a)) => cmd_next(&db, a),
                 Some(Command::Plan(a)) => cmd_plan(&db, a),
                 Some(Command::View(c)) => cmd_view(&db, c),
@@ -1239,6 +1280,30 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
     (ext.kind, ext.deliverable) =
         tasks::kind_and_deliverable(a.kind.as_deref(), a.deliverable.as_deref())?;
 
+    // Likely duplicates of what is about to be filed: reported on every add,
+    // and with --unique a reason not to file it at all.
+    let possible_duplicates = ptask_core::dupes::similar(
+        db,
+        &new.title,
+        None,
+        ptask_core::dupes::DEFAULT_THRESHOLD,
+        5,
+    )?;
+    if a.unique && ptask_core::dupes::refuses(&possible_duplicates) {
+        if json_mode() {
+            crate::print_json(&serde_json::json!({
+                "created": false, "possible_duplicates": possible_duplicates,
+            }))?;
+        } else {
+            print_duplicates(&possible_duplicates, None);
+        }
+        anyhow::bail!(
+            "not created: {} likely duplicate(s) of {:?}; work the existing task, or drop --unique",
+            possible_duplicates.len(),
+            ui::one_line(&new.title)
+        );
+    }
+
     let task = tasks::create_with_extensions(db, new, ext, &cli_ctx())?;
 
     // The quick-add derivations (labels, project, duration) live on `q`, not on
@@ -1253,6 +1318,8 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         duration_min: Option<i64>,
         reminder: Option<String>,
         recurrence: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        possible_duplicates: Vec<ptask_core::dupes::Candidate>,
     }
     let out = AddOutput {
         task,
@@ -1261,6 +1328,7 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         duration_min: q.duration_min,
         reminder: q.reminder.clone(),
         recurrence: q.recurrence.as_ref().map(|r| r.original_input.clone()),
+        possible_duplicates,
     };
 
     emit(&out, || {
@@ -1303,6 +1371,160 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         pairs.push(("uuid", ui::painted(ui::dim(&t.id, ui::Ink::Slate))));
         for l in ui::kv(&pairs, 14) {
             println!("    {}", l.trim_start());
+        }
+        if !out.possible_duplicates.is_empty() {
+            print_duplicates(&out.possible_duplicates, t.pt_id.as_deref());
+        }
+    })
+}
+
+/// The "possible duplicate" warning block: one line per candidate, and the
+/// merge command when the new task already exists.
+fn print_duplicates(cands: &[ptask_core::dupes::Candidate], new_pt: Option<&str>) {
+    for c in cands {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Warn,
+                "duplicate?",
+                c.pt_id.as_deref().unwrap_or_else(|| short_id(&c.task_uuid)),
+                &c.title,
+                &format!("{:.2} · {}", c.score, c.status)
+            )
+        );
+    }
+    if let (Some(new_pt), Some(first)) = (new_pt, cands.first().and_then(|c| c.pt_id.as_deref())) {
+        println!(
+            "{}",
+            ui::note(&format!("same work? pt merge {new_pt} --into {first}"))
+        );
+    }
+}
+
+fn cmd_dupes(db: &Db, a: DupesArgs) -> Result<()> {
+    if !(0.0..=1.0).contains(&a.threshold) {
+        anyhow::bail!("--threshold must be within 0..=1");
+    }
+    if let Some(q) = a.query.as_deref() {
+        let task = tasks::resolve_for_lookup(db, q, true).map_err(anyhow::Error::msg)?;
+        let cands =
+            ptask_core::dupes::similar(db, &task.title, Some(&task.id), a.threshold, a.limit)?;
+        if json_mode() {
+            return crate::print_json(&cands);
+        }
+        print_lines(ui::headline(
+            &format!("ptask · dupes {}", task.pt_id.as_deref().unwrap_or("")),
+            None,
+            &ui::clip(&task.title, 60),
+        ));
+        if cands.is_empty() {
+            println!("{}", ui::empty("no likely duplicates"));
+            return Ok(());
+        }
+        print_duplicates(&cands, task.pt_id.as_deref());
+        return Ok(());
+    }
+    let pairs = ptask_core::dupes::pairs(db, a.threshold, a.limit)?;
+    if json_mode() {
+        return crate::print_json(&pairs);
+    }
+    print_lines(ui::headline(
+        "ptask · dupes",
+        None,
+        &format!("open tasks · similarity ≥ {:.2}", a.threshold),
+    ));
+    if pairs.is_empty() {
+        println!("{}", ui::empty("no likely duplicates"));
+        return Ok(());
+    }
+    for p in &pairs {
+        let a_id =
+            p.a.pt_id
+                .as_deref()
+                .unwrap_or_else(|| short_id(&p.a.task_uuid));
+        let b_id =
+            p.b.pt_id
+                .as_deref()
+                .unwrap_or_else(|| short_id(&p.b.task_uuid));
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Warn,
+                &format!("{:.2}", p.score),
+                a_id,
+                &p.a.title,
+                ""
+            )
+        );
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Warn,
+                "",
+                b_id,
+                &p.b.title,
+                &format!("pt merge {b_id} --into {a_id}")
+            )
+        );
+    }
+    println!(
+        "{}",
+        ui::footer(pairs.len(), "pair", "pt merge PT-B --into PT-A")
+    );
+    Ok(())
+}
+
+fn cmd_merge(db: &Db, a: MergeArgs) -> Result<()> {
+    let dup = tasks::resolve_for_lookup(db, &a.duplicate, false).map_err(anyhow::Error::msg)?;
+    let into = tasks::resolve_for_lookup(db, &a.into, true).map_err(anyhow::Error::msg)?;
+    let m = ptask_core::dupes::merge(db, &dup.id, &into.id, a.reason.as_deref(), &cli_ctx())
+        .map_err(anyhow::Error::msg)?;
+    if let Err(e) = ptask_core::scoring::run_once(db, false) {
+        eprintln!(
+            "{}",
+            ui::section(
+                "warning",
+                ui::Ink::Amber,
+                &format!("merged but rescore failed: {e}")
+            )
+        );
+    }
+    emit(&m, || {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Mute,
+                "merged",
+                &m.duplicate,
+                &dup.title,
+                &format!("→ duplicate of {}", m.into)
+            )
+        );
+        let mut moved = Vec::new();
+        if !m.dependents_moved.is_empty() {
+            moved.push(format!("dependents {}", m.dependents_moved.join(", ")));
+        }
+        if !m.prerequisites_added.is_empty() {
+            moved.push(format!(
+                "prerequisites {}",
+                m.prerequisites_added.join(", ")
+            ));
+        }
+        if !m.labels_added.is_empty() {
+            moved.push(format!("labels {}", m.labels_added.join(", ")));
+        }
+        if let Some((from, to)) = m.priority_raised {
+            moved.push(format!("priority {from} → {to}"));
+        }
+        if let Some(d) = &m.deadline_set {
+            moved.push(format!("deadline {d}"));
+        }
+        if !moved.is_empty() {
+            println!(
+                "    {} {}",
+                ui::dim("carried to", ui::Ink::Slate),
+                moved.join(" · ")
+            );
         }
     })
 }
@@ -1663,10 +1885,28 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         let mut v = serde_json::to_value(&t)?;
         v["goal_chain"] = ptask_core::goals::chain_json(&eg.chain);
         v["goal_source"] = serde_json::json!(eg.source.as_str());
+        let links = ptask_core::dupes::links(db, &t.id)?;
+        v["duplicate_of"] = serde_json::json!(links.duplicate_of);
+        v["merged_in"] = serde_json::json!(links.merged_in);
         crate::print_json(&v)?;
         return Ok(());
     }
     print_lines(render_show(&t, Some(&d), &blocked, &eg.chain));
+    let links = ptask_core::dupes::links(db, &t.id)?;
+    if let Some(of) = &links.duplicate_of {
+        println!();
+        println!(
+            "{}",
+            ui::section("duplicate", ui::Ink::Slate, &format!("of {of} (merged)"))
+        );
+    }
+    if !links.merged_in.is_empty() {
+        println!();
+        println!(
+            "{}",
+            ui::section("merged in", ui::Ink::Slate, &links.merged_in.join(", "))
+        );
+    }
     Ok(())
 }
 

@@ -13,6 +13,7 @@ pub mod convert;
 pub mod dag;
 pub mod dates;
 pub mod digest;
+pub mod dupes;
 pub mod error;
 pub mod event_log;
 pub mod filter;

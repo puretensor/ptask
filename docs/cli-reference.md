@@ -25,6 +25,17 @@ Create a task. The free-text title runs through the quick-add parser
 | `--deadline <ISO>` | `2026-05-21` or `2026-05-21T10:00:00+01:00` |
 | `--reason` | persisted as `ai_reasoning` |
 | `--raw` | skip quick-add parsing |
+| `--unique` | refuse to create when a near-certain duplicate exists (score ≥ 0.75; reporting starts at 0.6, refusing is stricter); lists the candidates and exits 1 (`--json`: `{"created": false, "possible_duplicates": [...]}` on stdout) |
+
+Every add reports likely duplicates (v3.45.0): open tasks, and tasks done or
+dismissed in the last 14 days, whose title shares at least two identity words
+and scores at least 0.6 (a Dice coefficient over lowercase title words,
+stopwords and `PT-N` references dropped, plurals folded). The task is still
+created; the human output adds a `duplicate?` line per candidate and the
+`pt merge` command, and `--json` adds `possible_duplicates`
+(`pt_id`, `title`, `status`, `score`). A task already merged away is never a
+candidate; its canonical task is. Local and deterministic: no model, no
+network.
 
 ### `pt list [filter] [...]` (alias `pt ls`)
 
@@ -93,6 +104,33 @@ pt goal orphans           # open tasks with no effective goal
 All honour `--json`. Tree order is parent before children, siblings by seq.
 `set-parent` refuses self and cycles. Walks are cycle-safe (stop on a
 repeated node, depth cap 16). Full model: [goals.md](goals.md).
+
+### `pt dupes [query] [--threshold 0.6] [-n 20]` (alias `dups`, v3.45.0)
+
+Read-only. Without a query: pairs of open tasks that look like the same work,
+best first, the older task as `a` and the newer as `b`, each with the
+`pt merge B --into A` to fold it. With a query: likely duplicates of that one
+task (open or closed in the last 14 days). `--json` honoured.
+
+### `pt merge <duplicate> --into <task> [-m REASON]` (v3.45.0)
+
+Close a duplicate into the task it duplicates, in one transaction:
+
+- the duplicate is dismissed (`task.updated`, `duplicate_of`; a
+  `task.merged` marker), so `pt show` reads "duplicate of PT-N (merged)"
+  and the target lists it under "merged in" (`--json`: `duplicate_of`,
+  `merged_in`);
+- every task that depended on the duplicate now depends on the target.
+  Dismissing a prerequisite satisfies it, so without the move its dependents
+  would silently unblock;
+- the duplicate's own prerequisites and labels carry over, the target takes
+  the higher priority, and takes the duplicate's deadline when it has none
+  (and does not recur);
+- a move that would close a dependency cycle refuses the whole merge.
+
+The duplicate must be open; the target may be done (it was already done)
+but not dismissed. `pt undo` reopens a mistaken merge's duplicate; what moved
+to the target stays there. Honours `--idempotency-key`.
 
 ### `pt dismiss <query>`
 

@@ -113,7 +113,7 @@ pub fn create(db: &Db, new: NewTask, ctx: &EventCtx) -> Result<Task> {
 /// Generate an idempotency uuid for a locally-initiated mutation (CLI, TUI,
 /// bot). Remote-initiated mutations supply the client's command uuid instead
 /// so `/sync` replays stay idempotent.
-fn local_event_uuid() -> String {
+pub(crate) fn local_event_uuid() -> String {
     format!("local:{}", Uuid::new_v4())
 }
 
@@ -122,7 +122,7 @@ fn local_event_uuid() -> String {
 /// without an event row is invisible to the fleet, and a mutation without
 /// an actor is invisible to the audit trail; `ctx` is how the compiler
 /// forces every writer to identify itself.
-fn record_event_tx(
+pub(crate) fn record_event_tx(
     tx: &rusqlite::Connection,
     ctx: &EventCtx,
     task_uuid: &str,
@@ -2490,7 +2490,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 
 /// ISO-8601 UTC timestamp matching the existing Python format
 /// (e.g. `2026-05-13T17:34:56.789012+00:00`).
-fn iso_now() -> String {
+pub(crate) fn iso_now() -> String {
     let now: Zoned = Zoned::now().with_time_zone(jiff::tz::TimeZone::UTC);
     let base = now.strftime("%Y-%m-%dT%H:%M:%S").to_string();
     let micros = now.subsec_nanosecond().div_euclid(1_000);
