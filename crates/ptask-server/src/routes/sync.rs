@@ -728,7 +728,11 @@ fn apply_command(
                 Some(task.id.clone()),
                 EventPayload {
                     event_type: "task.deleted".into(),
-                    payload: serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id }),
+                    payload: serde_json::json!({
+                        "task_uuid": task.id,
+                        "pt_id": task.pt_id,
+                        "status": task.status,
+                    }),
                 },
             ))
         }
