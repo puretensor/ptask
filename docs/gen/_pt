@@ -78,6 +78,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (done)
 _arguments "${_arguments_options[@]}" : \
+'-m+[Closure evidence journaled with the completion (what was done, how it was verified). With several tasks, each gets the same note]:NOTE:_default' \
+'--note=[Closure evidence journaled with the completion (what was done, how it was verified). With several tasks, each gets the same note]:NOTE:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
@@ -157,6 +159,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (dismiss)
 _arguments "${_arguments_options[@]}" : \
+'-m+[Why it is not being done, journaled with the dismissal]:NOTE:_default' \
+'--note=[Why it is not being done, journaled with the dismissal]:NOTE:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
@@ -165,6 +169,19 @@ _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
+(note)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), task uuid, or title substring (open tasks; a done or dismissed task by PT-N or uuid):_default' \
+'*::text -- The note; words are joined with spaces. `-` reads it from stdin:_default' \
 && ret=0
 ;;
 (rm)
@@ -636,6 +653,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (done)
 _arguments "${_arguments_options[@]}" : \
+'-m+[Closure evidence journaled with the completion]:NOTE:_default' \
+'--note=[Closure evidence journaled with the completion]:NOTE:_default' \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
@@ -720,6 +739,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (dismiss)
 _arguments "${_arguments_options[@]}" : \
+'-m+[Why it is not being done, journaled with the dismissal]:NOTE:_default' \
+'--note=[Why it is not being done, journaled with the dismissal]:NOTE:_default' \
 '--url=[]:URL:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
@@ -729,6 +750,20 @@ _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
+&& ret=0
+;;
+(note)
+_arguments "${_arguments_options[@]}" : \
+'--url=[]:URL:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N (e.g. PT-42), bare integer (42), or title substring (open tasks; a done or dismissed task by PT-N):_default' \
+'*::text -- The note; words are joined with spaces. `-` reads it from stdin:_default' \
 && ret=0
 ;;
 (start)
@@ -848,6 +883,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(note)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (start)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -916,6 +955,61 @@ _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
 ':query -- PT-N, bare integer, or title substring:_default' \
+&& ret=0
+;;
+(claim)
+_arguments "${_arguments_options[@]}" : \
+'--lease=[Lease length (30m, 2h, 1d; max 1d). Without one the claim never expires on its own]:LEASE:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N, bare integer, uuid, or title substring (open tasks):_default' \
+&& ret=0
+;;
+(heartbeat)
+_arguments "${_arguments_options[@]}" : \
+'--claim=[Claim instance token returned by \`pt claim\` or \`pt start\`]:TOKEN:_default' \
+'--lease=[New lease length from now (30m, 2h, 1d; max 1d)]:LEASE:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N, bare integer, uuid, or title substring:_default' \
+&& ret=0
+;;
+(release)
+_arguments "${_arguments_options[@]}" : \
+'--claim=[Claim instance token returned by \`pt claim\` or \`pt start\`. Without one, \`--force\` is required (and so is releasing an unowned in-progress task)]:TOKEN:_default' \
+'-m+[Why it is being handed back, journaled with the release]:REASON:_default' \
+'--reason=[Why it is being handed back, journaled with the release]:REASON:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--force[Release a claim another actor holds, an unowned in-progress task, or a claim whose token you do not have (the operator'\''s override)]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query -- PT-N, bare integer, uuid, or title substring:_default' \
+&& ret=0
+;;
+(reclaim)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--apply[Return the expired claims to todo (default\: list them only)]' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
 && ret=0
 ;;
 (snooze)
@@ -998,6 +1092,8 @@ _arguments "${_arguments_options[@]}" : \
 (bulk)
 _arguments "${_arguments_options[@]}" : \
 '--set-priority=[Set priority on every match]:SET_PRIORITY:_default' \
+'(--set-priority)-m+[Note journaled with each completion or dismissal (--done / --dismiss)]:NOTE:_default' \
+'(--set-priority)--note=[Note journaled with each completion or dismissal (--done / --dismiss)]:NOTE:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
@@ -1651,6 +1747,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(note)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (rm)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1827,6 +1927,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(note)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (start)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -1860,6 +1964,22 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (start)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(claim)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(heartbeat)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(release)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reclaim)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -2080,6 +2200,7 @@ _pt_commands() {
 'show:Show one task'\''s full row + side-table detail' \
 'context:Markdown worker brief\: title, why-chain, blockers' \
 'dismiss:Dismiss a task (soft close, status → dismissed; reversible via reopen)' \
+'note:Append a note to a task\: findings, evidence, a handover. Attributed and append-only; \`pt show\` and \`pt context\` carry the trail' \
 'rm:Delete a task permanently (hard delete + tombstone)' \
 'dupes:Likely duplicates\: of one task, or pairs among all open tasks (lexical title similarity; read-only)' \
 'merge:Merge a duplicate into the task it duplicates\: dismiss it as \`duplicate_of\`, move its dependents, prerequisites, labels, recurrence, goal, provenance and subtasks, keep the higher priority' \
@@ -2101,6 +2222,10 @@ _pt_commands() {
 'promote:Promote an investigation to implementation\: kind scout → ship on the SAME row (never close + reopen a duplicate)' \
 'kind:Set a task'\''s kind (scout|ship) and optional deliverable' \
 'start:Mark a task in progress (you'\''re actively working it)' \
+'claim:Claim a task for work (todo/backlog/triage → in_progress, owned by you), optionally with a lease that \`pt heartbeat\` keeps alive' \
+'heartbeat:Renew your claim'\''s lease; fails (exit 1) when the claim is no longer yours, which means stop working on it. Requires \`--claim\` with the token \`pt claim\` / \`pt start\` returned' \
+'release:Hand a claimed task back (in_progress → todo) without closing it. \`--claim TOKEN\` names the instance; without a token, \`--force\`' \
+'reclaim:Return tasks whose claim lease ran out to todo (dry run unless --apply)' \
 'snooze:Snooze a task until a date — it leaves \`pt next\` and reminders, then wakes to todo automatically' \
 'reap:Reap stale machine-generated tasks (incident >7d idle, distilled >30d idle) — soft-dismiss, reversible via \`pt reopen\`' \
 'depend:Manage dependency edges\: PT-A depends on PT-B' \
@@ -2322,6 +2447,11 @@ _pt__subcmd__bulk_commands() {
     local commands; commands=()
     _describe -t commands 'pt bulk commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__claim_commands] )) ||
+_pt__subcmd__claim_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt claim commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__context_commands] )) ||
 _pt__subcmd__context_commands() {
     local commands; commands=()
@@ -2509,6 +2639,11 @@ _pt__subcmd__goal__subcmd__unlink_commands() {
     local commands; commands=()
     _describe -t commands 'pt goal unlink commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__heartbeat_commands] )) ||
+_pt__subcmd__heartbeat_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt heartbeat commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help_commands] )) ||
 _pt__subcmd__help_commands() {
     local commands; commands=(
@@ -2521,6 +2656,7 @@ _pt__subcmd__help_commands() {
 'show:Show one task'\''s full row + side-table detail' \
 'context:Markdown worker brief\: title, why-chain, blockers' \
 'dismiss:Dismiss a task (soft close, status → dismissed; reversible via reopen)' \
+'note:Append a note to a task\: findings, evidence, a handover. Attributed and append-only; \`pt show\` and \`pt context\` carry the trail' \
 'rm:Delete a task permanently (hard delete + tombstone)' \
 'dupes:Likely duplicates\: of one task, or pairs among all open tasks (lexical title similarity; read-only)' \
 'merge:Merge a duplicate into the task it duplicates\: dismiss it as \`duplicate_of\`, move its dependents, prerequisites, labels, recurrence, goal, provenance and subtasks, keep the higher priority' \
@@ -2542,6 +2678,10 @@ _pt__subcmd__help_commands() {
 'promote:Promote an investigation to implementation\: kind scout → ship on the SAME row (never close + reopen a duplicate)' \
 'kind:Set a task'\''s kind (scout|ship) and optional deliverable' \
 'start:Mark a task in progress (you'\''re actively working it)' \
+'claim:Claim a task for work (todo/backlog/triage → in_progress, owned by you), optionally with a lease that \`pt heartbeat\` keeps alive' \
+'heartbeat:Renew your claim'\''s lease; fails (exit 1) when the claim is no longer yours, which means stop working on it. Requires \`--claim\` with the token \`pt claim\` / \`pt start\` returned' \
+'release:Hand a claimed task back (in_progress → todo) without closing it. \`--claim TOKEN\` names the instance; without a token, \`--force\`' \
+'reclaim:Return tasks whose claim lease ran out to todo (dry run unless --apply)' \
 'snooze:Snooze a task until a date — it leaves \`pt next\` and reminders, then wakes to todo automatically' \
 'reap:Reap stale machine-generated tasks (incident >7d idle, distilled >30d idle) — soft-dismiss, reversible via \`pt reopen\`' \
 'depend:Manage dependency edges\: PT-A depends on PT-B' \
@@ -2671,6 +2811,11 @@ _pt__subcmd__help__subcmd__bulk_commands() {
     local commands; commands=()
     _describe -t commands 'pt help bulk commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__claim_commands] )) ||
+_pt__subcmd__help__subcmd__claim_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help claim commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__context_commands] )) ||
 _pt__subcmd__help__subcmd__context_commands() {
     local commands; commands=()
@@ -2791,6 +2936,11 @@ _pt__subcmd__help__subcmd__goal__subcmd__unlink_commands() {
     local commands; commands=()
     _describe -t commands 'pt help goal unlink commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__heartbeat_commands] )) ||
+_pt__subcmd__help__subcmd__heartbeat_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help heartbeat commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__help_commands] )) ||
 _pt__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
@@ -2826,6 +2976,11 @@ _pt__subcmd__help__subcmd__next_commands() {
     local commands; commands=()
     _describe -t commands 'pt help next commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__note_commands] )) ||
+_pt__subcmd__help__subcmd__note_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help note commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__plan_commands] )) ||
 _pt__subcmd__help__subcmd__plan_commands() {
     local commands; commands=()
@@ -2846,10 +3001,20 @@ _pt__subcmd__help__subcmd__reap_commands() {
     local commands; commands=()
     _describe -t commands 'pt help reap commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__help__subcmd__reclaim_commands] )) ||
+_pt__subcmd__help__subcmd__reclaim_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help reclaim commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__help__subcmd__reject_commands] )) ||
 _pt__subcmd__help__subcmd__reject_commands() {
     local commands; commands=()
     _describe -t commands 'pt help reject commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__release_commands] )) ||
+_pt__subcmd__help__subcmd__release_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help release commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__remote_commands] )) ||
 _pt__subcmd__help__subcmd__remote_commands() {
@@ -2863,6 +3028,7 @@ _pt__subcmd__help__subcmd__remote_commands() {
 'show:\`pt remote show <query>\` — print one task'\''s full row + detail (read-only)' \
 'next:\`pt remote next \[-n N\]\` — DAG-ready tasks from the canonical host' \
 'dismiss:\`pt remote dismiss <query>\` — soft-close a task (reversible via reopen)' \
+'note:\`pt remote note <query> <text…>\` — append a note on the canonical host' \
 'start:\`pt remote start <query>\` — mark in progress on the canonical host' \
 'snooze:\`pt remote snooze <query> <until>\` — snooze on the canonical host' \
 'depend:\`pt remote depend <query> --on <target> \[--clear\]\`' \
@@ -2905,6 +3071,11 @@ _pt__subcmd__help__subcmd__remote__subcmd__list_commands() {
 _pt__subcmd__help__subcmd__remote__subcmd__next_commands() {
     local commands; commands=()
     _describe -t commands 'pt help remote next commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__note_commands] )) ||
+_pt__subcmd__help__subcmd__remote__subcmd__note_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help remote note commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__remote__subcmd__priority_commands] )) ||
 _pt__subcmd__help__subcmd__remote__subcmd__priority_commands() {
@@ -3092,6 +3263,11 @@ _pt__subcmd__next_commands() {
     local commands; commands=()
     _describe -t commands 'pt next commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__note_commands] )) ||
+_pt__subcmd__note_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt note commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__plan_commands] )) ||
 _pt__subcmd__plan_commands() {
     local commands; commands=()
@@ -3112,10 +3288,20 @@ _pt__subcmd__reap_commands() {
     local commands; commands=()
     _describe -t commands 'pt reap commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__reclaim_commands] )) ||
+_pt__subcmd__reclaim_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt reclaim commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__reject_commands] )) ||
 _pt__subcmd__reject_commands() {
     local commands; commands=()
     _describe -t commands 'pt reject commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__release_commands] )) ||
+_pt__subcmd__release_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt release commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__remote_commands] )) ||
 _pt__subcmd__remote_commands() {
@@ -3129,6 +3315,7 @@ _pt__subcmd__remote_commands() {
 'show:\`pt remote show <query>\` — print one task'\''s full row + detail (read-only)' \
 'next:\`pt remote next \[-n N\]\` — DAG-ready tasks from the canonical host' \
 'dismiss:\`pt remote dismiss <query>\` — soft-close a task (reversible via reopen)' \
+'note:\`pt remote note <query> <text…>\` — append a note on the canonical host' \
 'start:\`pt remote start <query>\` — mark in progress on the canonical host' \
 'snooze:\`pt remote snooze <query> <until>\` — snooze on the canonical host' \
 'depend:\`pt remote depend <query> --on <target> \[--clear\]\`' \
@@ -3175,6 +3362,7 @@ _pt__subcmd__remote__subcmd__help_commands() {
 'show:\`pt remote show <query>\` — print one task'\''s full row + detail (read-only)' \
 'next:\`pt remote next \[-n N\]\` — DAG-ready tasks from the canonical host' \
 'dismiss:\`pt remote dismiss <query>\` — soft-close a task (reversible via reopen)' \
+'note:\`pt remote note <query> <text…>\` — append a note on the canonical host' \
 'start:\`pt remote start <query>\` — mark in progress on the canonical host' \
 'snooze:\`pt remote snooze <query> <until>\` — snooze on the canonical host' \
 'depend:\`pt remote depend <query> --on <target> \[--clear\]\`' \
@@ -3224,6 +3412,11 @@ _pt__subcmd__remote__subcmd__help__subcmd__next_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote help next commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__note_commands] )) ||
+_pt__subcmd__remote__subcmd__help__subcmd__note_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote help note commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__remote__subcmd__help__subcmd__priority_commands] )) ||
 _pt__subcmd__remote__subcmd__help__subcmd__priority_commands() {
     local commands; commands=()
@@ -3268,6 +3461,11 @@ _pt__subcmd__remote__subcmd__list_commands() {
 _pt__subcmd__remote__subcmd__next_commands() {
     local commands; commands=()
     _describe -t commands 'pt remote next commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__remote__subcmd__note_commands] )) ||
+_pt__subcmd__remote__subcmd__note_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt remote note commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__remote__subcmd__priority_commands] )) ||
 _pt__subcmd__remote__subcmd__priority_commands() {

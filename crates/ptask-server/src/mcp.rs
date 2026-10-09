@@ -82,12 +82,71 @@ pub struct DoneArg {
     /// task_done never advances a recurring task twice. "" = it had none.
     #[serde(default)]
     pub expected_deadline: Option<String>,
+    /// Closure evidence: what was done and how it was verified (commit, PR,
+    /// test run, readback). Journaled with the completion, attributed to you.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DismissArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// Why it is not being done (duplicate of PT-N, superseded, obsolete).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct NoteArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring
+    /// (a done or dismissed task by PT-N or uuid).
+    pub id: String,
+    /// The note: findings, evidence, a handover for the next worker.
+    pub text: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct IdArg {
     /// Task handle: PT-N, bare number, task uuid, or a title substring.
     pub id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ClaimArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// Lease in minutes (1..=1440). Keep it alive with task_heartbeat; when
+    /// it runs out the operator's reclaim returns the task to todo. Omit for
+    /// a claim that never expires on its own.
+    #[serde(default)]
+    pub lease_minutes: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct HeartbeatArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// Claim instance token returned by task_claim. Required: a heartbeat
+    /// without one, or with a stale one, fails with "claim lost".
+    #[serde(default)]
+    pub claim_token: Option<String>,
+    /// New lease from now, in minutes (1..=1440; default 30).
+    #[serde(default)]
+    pub lease_minutes: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReleaseArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// Claim instance token returned by task_claim. Required: there is no
+    /// force over MCP, so a missing or stale token is refused.
+    #[serde(default)]
+    pub claim_token: Option<String>,
+    /// Why you are handing it back (blocked on X, out of scope, ...).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -420,7 +479,9 @@ impl PtaskMcp {
         .await
     }
 
-    #[tool(description = "Full detail for one task: fields + attributed journal history.")]
+    #[tool(
+        description = "Full detail for one task: fields, attributed journal history, and notes (findings and closure evidence, oldest first)."
+    )]
     async fn task_show(
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
@@ -439,25 +500,32 @@ impl PtaskMcp {
                 .collect::<Vec<_>>();
             let mut v = with_goals(&db, &t, task_json(&t))?;
             v["history"] = serde_json::json!(hist);
-            // Open prerequisites: non-empty means task_done will be refused.
-            let blockers = ptask_core::tasks::open_blockers(&db, &t.id).map_err(domain_err)?;
-            v["blocked_by"] = serde_json::json!(blockers);
+            v["notes"] = serde_json::json!(
+                ptask_core::notes::list(&db, &t.id, ptask_core::notes::MAX_NOTES_LISTED)
+                    .map_err(domain_err)?
+            );
             let links = ptask_core::dupes::links(&db, &t.id).map_err(domain_err)?;
             v["duplicate_of"] = serde_json::json!(links.duplicate_of);
             v["merged_in"] = serde_json::json!(links.merged_in);
+            // Open prerequisites: non-empty means task_done will be refused.
+            let blockers = ptask_core::tasks::open_blockers(&db, &t.id).map_err(domain_err)?;
+            v["blocked_by"] = serde_json::json!(blockers);
+            v["claim"] =
+                serde_json::json!(ptask_core::claims::get(&db, &t.id).map_err(domain_err)?);
             json_ok(&v)
         })
         .await
     }
 
     #[tool(
-        description = "Mark a task done. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline."
+        description = "Mark a task done. Pass note with the verification evidence (commit, PR, test run, readback): it is journaled with the completion, so the close is not a bare claim. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline."
     )]
     async fn task_done(
         &self,
         Parameters(DoneArg {
             id,
             expected_deadline,
+            note,
         }): Parameters<DoneArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
@@ -466,7 +534,8 @@ impl PtaskMcp {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
             let t = ptask_core::tasks::expect_deadline(t, expected_deadline.as_deref())
                 .map_err(domain_err)?;
-            let outcome = ptask_core::tasks::mark_done(&db, &t, &ctx).map_err(domain_err)?;
+            let outcome = ptask_core::tasks::mark_done_noted(&db, &t, note.as_deref(), &ctx)
+                .map_err(domain_err)?;
             rescore_db(&db);
             match outcome {
                 ptask_core::tasks::DoneOutcome::Completed => json_ok(&serde_json::json!({
@@ -485,16 +554,19 @@ impl PtaskMcp {
         .await
     }
 
-    #[tool(description = "Dismiss a task (won't-do; distill won't resurrect it).")]
+    #[tool(
+        description = "Dismiss a task (won't-do; distill won't resurrect it). Pass note with the reason (duplicate of PT-N, superseded, obsolete)."
+    )]
     async fn task_dismiss(
         &self,
-        Parameters(IdArg { id }): Parameters<IdArg>,
+        Parameters(DismissArg { id, note }): Parameters<DismissArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
         let ctx = self.ctx();
         on_blocking(move || {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
-            ptask_core::tasks::dismiss(&db, &t.id, &ctx).map_err(domain_err)?;
+            ptask_core::tasks::dismiss_noted(&db, &t.id, note.as_deref(), &ctx)
+                .map_err(domain_err)?;
             rescore_db(&db);
             json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "status": "dismissed"}))
         })
@@ -601,21 +673,103 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Atomically claim a task before working on it (todo/backlog/triage → in_progress). Errors if already claimed — the check-and-set is one SQL statement, so two agents can't both win."
+        description = "Append a note to a task: findings, partial progress, evidence, a handover for the next worker. Append-only and attributed to you; task_show and the worker brief carry the trail. Works on done/dismissed tasks too (by PT-N or uuid), e.g. evidence that arrives after the close."
     )]
-    async fn task_claim(
+    async fn task_note(
         &self,
-        Parameters(IdArg { id }): Parameters<IdArg>,
+        Parameters(NoteArg { id, text }): Parameters<NoteArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
         let ctx = self.ctx();
-        let actor = self.actor.clone();
         on_blocking(move || {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
-            ptask_core::tasks::claim(&db, &t.id, &ctx).map_err(domain_err)?;
-            let mut v = serde_json::json!({"ok": true, "pt_id": t.pt_id, "claimed_by": actor});
+            let note = ptask_core::notes::add(&db, &t.id, &text, &ctx).map_err(domain_err)?;
+            json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "note": note}))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Atomically claim a task before working on it (todo/backlog/triage → in_progress, held by you). Errors if already claimed, naming the holder — the check-and-set is one SQL statement, so two agents can't both win. Returns claim_token: pass it to task_heartbeat and task_release. Pass lease_minutes for work that should come back if you die: renew it with task_heartbeat; an expired lease is free to claim, or can be reclaimed to todo."
+    )]
+    async fn task_claim(
+        &self,
+        Parameters(ClaimArg { id, lease_minutes }): Parameters<ClaimArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            let claim =
+                ptask_core::claims::claim(&db, &t.id, lease_minutes, &ctx).map_err(domain_err)?;
+            let mut v = serde_json::json!({
+                "ok": true, "pt_id": t.pt_id, "claimed_by": claim.by,
+                "claim_expires_at": claim.expires_at,
+                "claim_token": claim.token,
+            });
             v = with_goals(&db, &t, v)?;
             json_ok(&v)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Renew your claim's lease (default 30 minutes from now). Pass claim_token from task_claim. Errors with \"claim lost\" when that instance is no longer current (released, reclaimed, closed, retaken): stop working on it and do not close it; re-claim if it is still yours to do."
+    )]
+    async fn task_heartbeat(
+        &self,
+        Parameters(HeartbeatArg {
+            id,
+            claim_token,
+            lease_minutes,
+        }): Parameters<HeartbeatArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, true).map_err(domain_err)?;
+            let claim = ptask_core::claims::heartbeat(
+                &db,
+                &t.id,
+                lease_minutes.unwrap_or(30),
+                claim_token.as_deref().unwrap_or(""),
+                &ctx,
+            )
+            .map_err(domain_err)?;
+            json_ok(&serde_json::json!({
+                "ok": true, "pt_id": t.pt_id, "claimed_by": claim.by,
+                "claim_expires_at": claim.expires_at,
+            }))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Hand back a task you claimed (in_progress → todo) without closing it: you are stopping, blocked, or it is not yours to do. Pass claim_token from task_claim. Only your own claim instance; the operator releases others' from the CLI. There is no force over MCP."
+    )]
+    async fn task_release(
+        &self,
+        Parameters(ReleaseArg {
+            id,
+            claim_token,
+            reason,
+        }): Parameters<ReleaseArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            ptask_core::claims::release(
+                &db,
+                &t.id,
+                false,
+                reason.as_deref(),
+                claim_token.as_deref(),
+                &ctx,
+            )
+            .map_err(domain_err)?;
+            rescore_db(&db);
+            json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "status": "todo"}))
         })
         .await
     }
@@ -1161,6 +1315,7 @@ mod tests {
             mcp.task_done(Parameters(DoneArg {
                 id: t.pt_id.clone().unwrap(),
                 expected_deadline: Some("2099-01-01".into()),
+                note: None,
             }))
         };
         done().await.unwrap();
@@ -1187,6 +1342,7 @@ mod tests {
             mcp.task_done(Parameters(DoneArg {
                 id,
                 expected_deadline: None,
+                note: None,
             }))
         };
         done(t.pt_id.clone().unwrap()).await.unwrap();
@@ -1235,6 +1391,7 @@ mod tests {
             .task_done(Parameters(DoneArg {
                 id: t.pt_id.clone().unwrap(),
                 expected_deadline: None,
+                note: None,
             }))
             .await
             .unwrap();
@@ -1432,6 +1589,184 @@ mod tests {
         })
         .unwrap();
         let _ = result;
+    }
+
+    #[tokio::test]
+    async fn notes_and_closure_evidence_round_trip_over_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("upgrade sglang"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let other = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("upgrade sglang (dup)"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "hal".into());
+        let pt = t.pt_id.clone().unwrap();
+        mcp.task_note(Parameters(NoteArg {
+            id: pt.clone(),
+            text: "0.5.4 builds; TP4 smoke ok".into(),
+        }))
+        .await
+        .unwrap();
+        // A blank note is refused and the task stays open.
+        assert!(
+            mcp.task_done(Parameters(DoneArg {
+                id: pt.clone(),
+                expected_deadline: None,
+                note: Some("  ".into()),
+            }))
+            .await
+            .is_err()
+        );
+        mcp.task_done(Parameters(DoneArg {
+            id: pt.clone(),
+            expected_deadline: None,
+            note: Some("deployed; 256k ctx verified".into()),
+        }))
+        .await
+        .unwrap();
+        mcp.task_dismiss(Parameters(DismissArg {
+            id: other.pt_id.clone().unwrap(),
+            note: Some(format!("duplicate of {pt}")),
+        }))
+        .await
+        .unwrap();
+        let notes = ptask_core::notes::list(&db, &t.id, 50).unwrap();
+        let got: Vec<(&str, &str, Option<&str>)> = notes
+            .iter()
+            .map(|n| (n.kind.as_str(), n.text.as_str(), n.actor.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("note", "0.5.4 builds; TP4 smoke ok", Some("hal")),
+                ("done", "deployed; 256k ctx verified", Some("hal")),
+            ]
+        );
+        // task_show carries the trail.
+        let shown = mcp
+            .task_show(Parameters(IdArg { id: pt.clone() }))
+            .await
+            .unwrap();
+        let payload = serde_json::to_value(&shown).unwrap();
+        let text = payload
+            .pointer("/content/0/text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(v["notes"].as_array().unwrap().len(), 2, "{v:#}");
+        let dup = ptask_core::notes::list(&db, &other.id, 50).unwrap();
+        assert_eq!(dup[0].kind, "dismissed");
+        // Evidence after the close: a done task by PT-N.
+        mcp.task_note(Parameters(NoteArg {
+            id: pt,
+            text: "24h later: no regressions".into(),
+        }))
+        .await
+        .unwrap();
+        assert_eq!(ptask_core::notes::list(&db, &t.id, 50).unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn claims_have_holders_leases_heartbeats_and_releases_over_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("rebuild the index"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let pt = t.pt_id.clone().unwrap();
+        let hal = PtaskMcp::new(db.clone(), "hal".into());
+        let grok = PtaskMcp::new(db.clone(), "grok".into());
+        let text = |r: CallToolResult| -> serde_json::Value {
+            let v = serde_json::to_value(&r).unwrap();
+            serde_json::from_str(v.pointer("/content/0/text").unwrap().as_str().unwrap()).unwrap()
+        };
+        let claimed = text(
+            hal.task_claim(Parameters(ClaimArg {
+                id: pt.clone(),
+                lease_minutes: Some(15),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(claimed["claimed_by"], "hal");
+        assert!(claimed["claim_expires_at"].is_string());
+        let token = claimed["claim_token"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .expect("task_claim returns claim_token")
+            .to_string();
+        let err = grok
+            .task_claim(Parameters(ClaimArg {
+                id: pt.clone(),
+                lease_minutes: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("already claimed by hal"), "{err:?}");
+        let err = grok
+            .task_heartbeat(Parameters(HeartbeatArg {
+                id: pt.clone(),
+                claim_token: Some(token.clone()),
+                lease_minutes: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.message.starts_with("claim lost"), "{err:?}");
+        hal.task_heartbeat(Parameters(HeartbeatArg {
+            id: pt.clone(),
+            claim_token: Some(token.clone()),
+            lease_minutes: Some(60),
+        }))
+        .await
+        .unwrap();
+        // Another agent cannot release it over MCP (no force here).
+        assert!(
+            grok.task_release(Parameters(ReleaseArg {
+                id: pt.clone(),
+                claim_token: Some(token.clone()),
+                reason: None,
+            }))
+            .await
+            .is_err()
+        );
+        let shown = text(
+            hal.task_show(Parameters(IdArg { id: pt.clone() }))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(shown["claim"]["by"], "hal");
+        hal.task_release(Parameters(ReleaseArg {
+            id: pt.clone(),
+            claim_token: Some(token),
+            reason: Some("blocked on disk".into()),
+        }))
+        .await
+        .unwrap();
+        let shown = text(
+            hal.task_show(Parameters(IdArg { id: pt.clone() }))
+                .await
+                .unwrap(),
+        );
+        assert!(shown["claim"].is_null());
+        assert_eq!(shown["status"], "todo");
+        grok.task_claim(Parameters(ClaimArg {
+            id: pt,
+            lease_minutes: None,
+        }))
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

@@ -465,6 +465,19 @@ network, no LLM call. Reads `tasks` + `interactions`, writes
 composite = 0.30·urgency + 0.20·dependency + 0.20·neglect + 0.30·manual
 ```
 
+### Expired claims (v3.44.0)
+
+An agent that claims with a lease and dies stops heartbeating; its task stays
+`in_progress` with an expired lease (`pt_claims_expired` on `/metrics`,
+`expired_claims` in the digest, `pt reclaim` lists them). Returning them to
+todo changes state, so it is manual by default: `pt reclaim --apply`. To let
+the hourly scoring run do it, add `PTASK_CLAIM_RECLAIM=1` to
+`~/puretensor-tasks/.env` (the `ptask-scoring.service` EnvironmentFile); each
+pass then reclaims before it scores and prints how many it returned.
+Claims without a lease are never reclaimed. V021 adds the claim columns and a
+trigger: rolling back past 3.44.0 needs the pre-upgrade backup (see
+"Rolling back a release").
+
 ### Cutover from `puretensor-tasks-scoring.timer`
 
 The legacy system-mode timer at `/etc/systemd/system/puretensor-tasks-scoring.timer`

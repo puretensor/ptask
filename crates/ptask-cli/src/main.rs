@@ -82,6 +82,10 @@ enum Command {
     Context(ContextArgs),
     /// Dismiss a task (soft close, status → dismissed; reversible via reopen).
     Dismiss(DismissArgs),
+    /// Append a note to a task: findings, evidence, a handover. Attributed
+    /// and append-only; `pt show` and `pt context` carry the trail.
+    #[command(alias = "annotate")]
+    Note(NoteArgs),
     /// Delete a task permanently (hard delete + tombstone).
     Rm(RmArgs),
     /// Likely duplicates: of one task, or pairs among all open tasks
@@ -135,6 +139,18 @@ enum Command {
     Kind(KindArgs),
     /// Mark a task in progress (you're actively working it).
     Start(StartArgs),
+    /// Claim a task for work (todo/backlog/triage → in_progress, owned by
+    /// you), optionally with a lease that `pt heartbeat` keeps alive.
+    Claim(ClaimArgs),
+    /// Renew your claim's lease; fails (exit 1) when the claim is no longer
+    /// yours, which means stop working on it. Requires `--claim` with the
+    /// token `pt claim` / `pt start` returned.
+    Heartbeat(HeartbeatArgs),
+    /// Hand a claimed task back (in_progress → todo) without closing it.
+    /// `--claim TOKEN` names the instance; without a token, `--force`.
+    Release(ReleaseArgs),
+    /// Return tasks whose claim lease ran out to todo (dry run unless --apply).
+    Reclaim(ReclaimArgs),
     /// Snooze a task until a date — it leaves `pt next` and reminders,
     /// then wakes to todo automatically.
     Snooze(SnoozeArgs),
@@ -224,6 +240,53 @@ struct StartArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct ClaimArgs {
+    /// PT-N, bare integer, uuid, or title substring (open tasks).
+    query: String,
+    /// Lease length (30m, 2h, 1d; max 1d). Without one the claim never
+    /// expires on its own.
+    #[arg(long)]
+    lease: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct HeartbeatArgs {
+    /// PT-N, bare integer, uuid, or title substring.
+    query: String,
+    /// Claim instance token returned by `pt claim` or `pt start`.
+    #[arg(long = "claim", value_name = "TOKEN")]
+    claim: String,
+    /// New lease length from now (30m, 2h, 1d; max 1d).
+    #[arg(long, default_value = "30m")]
+    lease: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReleaseArgs {
+    /// PT-N, bare integer, uuid, or title substring.
+    query: String,
+    /// Claim instance token returned by `pt claim` or `pt start`.
+    /// Without one, `--force` is required (and so is releasing an unowned
+    /// in-progress task).
+    #[arg(long = "claim", value_name = "TOKEN")]
+    claim: Option<String>,
+    /// Release a claim another actor holds, an unowned in-progress task,
+    /// or a claim whose token you do not have (the operator's override).
+    #[arg(long)]
+    force: bool,
+    /// Why it is being handed back, journaled with the release.
+    #[arg(short = 'm', long = "reason")]
+    reason: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReclaimArgs {
+    /// Return the expired claims to todo (default: list them only).
+    #[arg(long)]
+    apply: bool,
+}
+
+#[derive(clap::Args, Debug)]
 struct SnoozeArgs {
     /// PT-N, bare integer, or title substring.
     query: String,
@@ -289,6 +352,9 @@ struct BulkArgs {
     /// Dismiss every match.
     #[arg(long = "dismiss", conflicts_with_all = ["set_priority", "done"])]
     dismiss: bool,
+    /// Note journaled with each completion or dismissal (--done / --dismiss).
+    #[arg(short = 'm', long = "note", conflicts_with = "set_priority")]
+    note: Option<String>,
     /// Preview without applying.
     #[arg(long = "dry-run")]
     dry_run: bool,
@@ -345,7 +411,7 @@ enum RemoteCommand {
     #[command(alias = "ls")]
     List(RemoteListArgs),
     /// `pt remote done <query>` — mark a task done by PT-N or title substring.
-    Done(RemoteDoneArgs),
+    Done(RemoteCloseArgs),
     /// `pt remote priority <query> <level>` — set priority on the canonical host.
     #[command(alias = "pri")]
     Priority(RemotePriorityArgs),
@@ -360,6 +426,8 @@ enum RemoteCommand {
     Next(RemoteNextArgs),
     /// `pt remote dismiss <query>` — soft-close a task (reversible via reopen).
     Dismiss(RemoteDismissArgs),
+    /// `pt remote note <query> <text…>` — append a note on the canonical host.
+    Note(RemoteNoteArgs),
     /// `pt remote start <query>` — mark in progress on the canonical host.
     Start(RemoteDoneArgs),
     /// `pt remote snooze <query> <until>` — snooze on the canonical host.
@@ -434,6 +502,29 @@ struct RemoteDoneArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct RemoteCloseArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring.
+    query: String,
+    /// Closure evidence journaled with the completion.
+    #[arg(short = 'm', long = "note")]
+    note: Option<String>,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct RemoteNoteArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), or title substring (open tasks;
+    /// a done or dismissed task by PT-N).
+    query: String,
+    /// The note; words are joined with spaces. `-` reads it from stdin.
+    #[arg(required = true)]
+    text: Vec<String>,
+    #[arg(long = "url", env = "PTASK_SYNC_URL")]
+    url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
 struct RemoteRmArgs {
     /// PT-N, bare integer, uuid, or a title substring (open tasks only).
     query: String,
@@ -494,6 +585,9 @@ struct RemoteReopenArgs {
 struct RemoteDismissArgs {
     /// PT-N (e.g. PT-42), bare integer (42), or title substring.
     query: String,
+    /// Why it is not being done, journaled with the dismissal.
+    #[arg(short = 'm', long = "note")]
+    note: Option<String>,
     #[arg(long = "url", env = "PTASK_SYNC_URL")]
     url: Option<String>,
 }
@@ -705,6 +799,10 @@ struct DoneArgs {
     /// One or more tasks: PT-N (e.g. PT-42), bare integer, or title substring.
     #[arg(required = true)]
     queries: Vec<String>,
+    /// Closure evidence journaled with the completion (what was done, how
+    /// it was verified). With several tasks, each gets the same note.
+    #[arg(short = 'm', long = "note")]
+    note: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -761,6 +859,19 @@ struct ContextArgs {
 struct DismissArgs {
     /// PT-N (e.g. PT-42), bare integer (42), or title substring.
     query: String,
+    /// Why it is not being done, journaled with the dismissal.
+    #[arg(short = 'm', long = "note")]
+    note: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct NoteArgs {
+    /// PT-N (e.g. PT-42), bare integer (42), task uuid, or title substring
+    /// (open tasks; a done or dismissed task by PT-N or uuid).
+    query: String,
+    /// The note; words are joined with spaces. `-` reads it from stdin.
+    #[arg(required = true)]
+    text: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -800,6 +911,9 @@ static CLI_JSON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static CLI_IDEMPOTENCY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 static CLI_COMMAND: std::sync::OnceLock<ptask_core::event_log::CommandFingerprint> =
     std::sync::OnceLock::new();
+/// Stdin consumed by `pt note -` / `pt remote note -`, so a keyed fingerprint
+/// can hash the payload once and `note_text` does not re-read EOF.
+static STDIN_NOTE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn set_cli_globals(json: bool, idempotency_key: Option<String>) {
     let _ = CLI_JSON.set(json);
@@ -859,8 +973,54 @@ fn command_name(cmd: &Command) -> String {
 /// A keyed command's fingerprint: its parsed arguments, rendered by the
 /// derived Debug impl (fixed field order), so a retry of the same command
 /// matches and a different command under the same key does not.
-fn command_fingerprint(cmd: &Command) -> ptask_core::event_log::CommandFingerprint {
-    ptask_core::event_log::CommandFingerprint::new(&command_name(cmd), &format!("{cmd:?}"))
+///
+/// Optional fields at their default (`note: None`) are omitted so a key
+/// journaled before that field existed still matches. A lone `-` for a
+/// note is replaced by the stdin payload, so the key covers the text.
+fn command_fingerprint(cmd: &Command) -> Result<ptask_core::event_log::CommandFingerprint> {
+    Ok(ptask_core::event_log::CommandFingerprint::new(
+        &command_name(cmd),
+        &fingerprint_args(cmd)?,
+    ))
+}
+
+fn is_stdin_note(text: &[String]) -> bool {
+    matches!(text, [s] if s == "-")
+}
+
+fn fingerprint_args(cmd: &Command) -> Result<String> {
+    Ok(match cmd {
+        Command::Note(a) if is_stdin_note(&a.text) => format!(
+            "Note(NoteArgs {{ query: {:?}, text: {:?} }})",
+            a.query,
+            vec![stdin_note_text()?]
+        ),
+        Command::Remote(RemoteCommand::Note(a)) if is_stdin_note(&a.text) => format!(
+            "Remote(Note(RemoteNoteArgs {{ query: {:?}, text: {:?}, url: {:?} }}))",
+            a.query,
+            vec![stdin_note_text()?],
+            a.url
+        ),
+        Command::Done(a) if a.note.is_none() => {
+            format!("Done(DoneArgs {{ queries: {:?} }})", a.queries)
+        }
+        Command::Dismiss(a) if a.note.is_none() => {
+            format!("Dismiss(DismissArgs {{ query: {:?} }})", a.query)
+        }
+        Command::Bulk(a) if a.note.is_none() => format!(
+            "Bulk(BulkArgs {{ filter: {:?}, set_priority: {:?}, done: {:?}, dismiss: {:?}, dry_run: {:?} }})",
+            a.filter, a.set_priority, a.done, a.dismiss, a.dry_run
+        ),
+        Command::Remote(RemoteCommand::Done(a)) if a.note.is_none() => format!(
+            "Remote(Done(RemoteCloseArgs {{ query: {:?}, url: {:?} }}))",
+            a.query, a.url
+        ),
+        Command::Remote(RemoteCommand::Dismiss(a)) if a.note.is_none() => format!(
+            "Remote(Dismiss(RemoteDismissArgs {{ query: {:?}, url: {:?} }}))",
+            a.query, a.url
+        ),
+        other => format!("{other:?}"),
+    })
 }
 
 /// Commands whose retry under `--idempotency-key` is replay-safe: the keyed
@@ -930,7 +1090,10 @@ fn keyed_replay_spec(cmd: &Command) -> Option<(&'static [&'static str], KeyTarge
         Command::Edit(a) => (UPDATED, Task(a.query.clone())),
         Command::Reopen(a) => (UPDATED, Task(a.query.clone())),
         Command::Dismiss(a) => (UPDATED, Task(a.query.clone())),
+        Command::Note(a) => (&["task.noted"], Task(a.query.clone())),
         Command::Start(a) => (UPDATED, Task(a.query.clone())),
+        Command::Claim(a) => (&["task.claimed"], Task(a.query.clone())),
+        Command::Release(a) => (&["task.released"], Task(a.query.clone())),
         Command::Snooze(a) => (UPDATED, Task(a.query.clone())),
         Command::Depend(a) => (UPDATED, Task(a.query.clone())),
         Command::Kind(a) => (UPDATED, Task(a.query.clone())),
@@ -1094,7 +1257,7 @@ fn run() -> Result<()> {
         // journal's unique index on retry: refuse it up front.
         match &cli.command {
             Some(cmd) if honours_idempotency_key(cmd) => {
-                let _ = CLI_COMMAND.set(command_fingerprint(cmd));
+                let _ = CLI_COMMAND.set(command_fingerprint(cmd)?);
             }
             other => anyhow::bail!(
                 "--idempotency-key is not supported by `pt {}`: a retry would not be \
@@ -1170,6 +1333,7 @@ fn run() -> Result<()> {
                 Some(Command::Show(a)) => cmd_show(&db, a),
                 Some(Command::Context(a)) => cmd_context(&db, a),
                 Some(Command::Dismiss(a)) => cmd_dismiss(&db, a),
+                Some(Command::Note(a)) => cmd_note(&db, a),
                 Some(Command::Rm(a)) => cmd_rm(&db, a),
                 Some(Command::Dupes(a)) => cmd_dupes(&db, a),
                 Some(Command::Merge(a)) => cmd_merge(&db, a),
@@ -1188,6 +1352,10 @@ fn run() -> Result<()> {
                 Some(Command::Accountability(c)) => cmd_accountability(db, c),
                 Some(Command::Scoring(c)) => cmd_scoring(&db, c),
                 Some(Command::Start(a)) => cmd_start(&db, a),
+                Some(Command::Claim(a)) => cmd_claim(&db, a),
+                Some(Command::Heartbeat(a)) => cmd_heartbeat(&db, a),
+                Some(Command::Release(a)) => cmd_release(&db, a),
+                Some(Command::Reclaim(a)) => cmd_reclaim(&db, a),
                 Some(Command::Promote(a)) => cmd_promote(&db, a),
                 Some(Command::Kind(a)) => cmd_kind(&db, a),
                 Some(Command::Snooze(a)) => cmd_snooze(&db, a),
@@ -1641,7 +1809,7 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
             }));
             continue;
         }
-        let outcome = match tasks::mark_done(db, &task, &ctx) {
+        let outcome = match tasks::mark_done_noted(db, &task, a.note.as_deref(), &ctx) {
             Ok(o) => o,
             Err(e) => {
                 failed += 1;
@@ -1652,9 +1820,14 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
         match &outcome {
             tasks::DoneOutcome::Completed => {
                 if !json_mode() {
+                    let detail = if a.note.is_some() {
+                        "evidence noted"
+                    } else {
+                        ""
+                    };
                     println!(
                         "{}",
-                        ui::outcome(ui::Status::Ok, "done", &pt, &task.title, "")
+                        ui::outcome(ui::Status::Ok, "done", &pt, &task.title, detail)
                     );
                 }
                 results.push(serde_json::json!({
@@ -1909,6 +2082,8 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         let mut v = serde_json::to_value(&t)?;
         v["goal_chain"] = ptask_core::goals::chain_json(&eg.chain);
         v["goal_source"] = serde_json::json!(eg.source.as_str());
+        v["notes"] = serde_json::to_value(&d.notes)?;
+        v["claim"] = serde_json::to_value(&d.claim)?;
         let links = ptask_core::dupes::links(db, &t.id)?;
         v["duplicate_of"] = serde_json::json!(links.duplicate_of);
         v["merged_in"] = serde_json::json!(links.merged_in);
@@ -1952,6 +2127,7 @@ fn cmd_context(db: &Db, a: ContextArgs) -> Result<()> {
                 "pt_id": b.pt_id,
                 "title": b.title,
             })).collect::<Vec<_>>(),
+            "notes": ptask_core::notes::list(db, &t.id, ptask_core::notes::MAX_NOTES_LISTED)?,
             "markdown": ptask_core::goals::context_markdown(db, &t)?,
         });
         crate::print_json(&v)?;
@@ -2022,6 +2198,22 @@ fn render_show(
         if let Some(r) = &d.recurrence_input {
             pairs.push(("recurs", r.into()));
         }
+        if let Some(c) = &d.claim {
+            let lease = lease_phrase(c.expires_at.as_deref());
+            let since =
+                c.at.as_deref()
+                    .map(|a| format!(" · since {}", a.get(..16).unwrap_or(a).replace('T', " ")))
+                    .unwrap_or_default();
+            let text = format!("{}{since} · {lease}", c.by);
+            pairs.push((
+                "claimed by",
+                if c.expired {
+                    ui::painted(ui::paint(&text, ui::Ink::Amber))
+                } else {
+                    text.into()
+                },
+            ));
+        }
     }
     pairs.push(("source", (&t.source_type).into()));
     pairs.push(("uuid", ui::painted(ui::dim(&t.id, ui::Ink::Slate))));
@@ -2047,7 +2239,7 @@ fn render_show(
     }
     if !t.description.is_empty() {
         out.push(String::new());
-        out.push(ui::section("notes", ui::Ink::Cyan, ""));
+        out.push(ui::section("description", ui::Ink::Cyan, ""));
         for l in t.description.lines() {
             if l.trim().is_empty() {
                 out.push(String::new());
@@ -2058,12 +2250,43 @@ fn render_show(
             }
         }
     }
+    if let Some(d) = d
+        && !d.notes.is_empty()
+    {
+        out.push(String::new());
+        out.push(ui::section(
+            "notes",
+            ui::Ink::Cyan,
+            &format!("{} · oldest first · pt note PT-N \"…\"", d.notes.len()),
+        ));
+        for n in &d.notes {
+            let when = n.ts.get(..16).unwrap_or(&n.ts).replace('T', " ");
+            let kind = match n.kind.as_str() {
+                "note" => String::new(),
+                k => format!(" · {k}"),
+            };
+            out.push(format!(
+                "  {} {}{}",
+                ui::paint(&when, ui::Ink::Slate),
+                ui::paint(n.actor.as_deref().unwrap_or("-"), ui::Ink::Cyan),
+                ui::paint(&kind, ui::Ink::Amber),
+            ));
+            for l in n.text.lines() {
+                if l.trim().is_empty() {
+                    continue;
+                }
+                for w in ui::wrap(l, ui::term_width().saturating_sub(6), "") {
+                    out.push(format!("    {}", ui::paint(&w, ui::Ink::Steel)));
+                }
+            }
+        }
+    }
     out
 }
 
 fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    tasks::dismiss(db, &task.id, &cli_ctx())?;
+    tasks::dismiss_noted(db, &task.id, a.note.as_deref(), &cli_ctx())?;
     emit(
         &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "dismissed"}),
         || {
@@ -2075,6 +2298,56 @@ fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {
                     task.pt_id.as_deref().unwrap_or(""),
                     &task.title,
                     ""
+                )
+            )
+        },
+    )
+}
+
+/// The note text from `pt note` / `pt remote note`: the words joined, or
+/// stdin for a lone `-` (evidence is often a command's output).
+fn note_text(words: &[String]) -> Result<String> {
+    if is_stdin_note(words) {
+        return stdin_note_text();
+    }
+    Ok(words.join(" "))
+}
+
+fn stdin_note_text() -> Result<String> {
+    if let Some(text) = STDIN_NOTE.get() {
+        return Ok(text.clone());
+    }
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .take((ptask_core::notes::MAX_NOTE_CHARS * 4 + 1) as u64)
+        .read_to_string(&mut buf)
+        .context("reading the note from stdin")?;
+    let _ = STDIN_NOTE.set(buf.clone());
+    Ok(buf)
+}
+
+fn cmd_note(db: &Db, a: NoteArgs) -> Result<()> {
+    let text = note_text(&a.text)?;
+    // A uuid too (the cockpit drawer and machine callers address by uuid);
+    // a substring still reaches open tasks only.
+    let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
+    let note =
+        ptask_core::notes::add(db, &task.id, &text, &cli_ctx()).map_err(anyhow::Error::msg)?;
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id, "title": task.title,
+            "note": note,
+        }),
+        || {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Ok,
+                    "noted",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    &format!("{} chars", note.text.chars().count())
                 )
             )
         },
@@ -2600,12 +2873,38 @@ fn cmd_export(db: &Db, a: ExportArgs) -> Result<()> {
         &["task_uuid", "label"],
         "task_labels.jsonl",
     )?;
+    // Notes and closure evidence (journal events carrying a note), so the
+    // diffable projection keeps the why of each close, not only its status.
+    let nn = dump(
+        "SELECT id, task_uuid, ts, actor, json_extract(payload, '$.source'),
+                event_type, json_extract(payload, '$.note')
+         FROM pt_event_log
+         WHERE task_uuid IS NOT NULL
+           AND task_uuid IN (SELECT id FROM tasks)
+           AND event_type IN ('task.noted', 'task.completed',
+                              'task.recurrence_advanced', 'task.updated')
+           AND json_valid(payload) AND json_type(payload, '$.note') = 'text'
+         ORDER BY id",
+        &[
+            "id",
+            "task_uuid",
+            "ts",
+            "actor",
+            "source",
+            "event_type",
+            "note",
+        ],
+        "task_notes.jsonl",
+    )?;
     println!(
         "{}",
         ui::section(
             "exported",
             ui::Ink::Green,
-            &format!("{nt} tasks · {nl} links · {nb} labels → {}", out.display())
+            &format!(
+                "{nt} tasks · {nl} links · {nb} labels · {nn} notes → {}",
+                out.display()
+            )
         )
     );
     if a.git {
@@ -2613,7 +2912,10 @@ fn cmd_export(db: &Db, a: ExportArgs) -> Result<()> {
             run_git_checked(&out, &["init", "-q"])?;
         }
         run_git_checked(&out, &["add", "-A"])?;
-        let msg = format!("pt export: {} tasks, {} links, {} labels", nt, nl, nb);
+        let msg = format!(
+            "pt export: {} tasks, {} links, {} labels, {} notes",
+            nt, nl, nb, nn
+        );
         if git_has_staged_changes(&out)? {
             run_git_checked(&out, &["commit", "-q", "-m", &msg])?;
             println!("{}", ui::note(&format!("committed: {msg}")));
@@ -2882,22 +3184,184 @@ fn accountability_verdict(
 
 fn cmd_start(db: &Db, a: StartArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    tasks::start(db, &task.id, &cli_ctx())?;
+    let claim_token = tasks::start(db, &task.id, &cli_ctx())?;
+    let mut v =
+        serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress"});
+    if let Some(t) = &claim_token {
+        v["claim_token"] = serde_json::json!(t);
+    }
+    emit(&v, || {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Busy,
+                "started",
+                task.pt_id.as_deref().unwrap_or(""),
+                &task.title,
+                "in progress"
+            )
+        )
+    })
+}
+
+/// "in 12m" / "5m ago" for a lease end, against now.
+fn lease_phrase(expires_at: Option<&str>) -> String {
+    let Some(end) = expires_at.and_then(ptask_core::dates::parse_iso_to_utc) else {
+        return "no lease".into();
+    };
+    let secs = end.timestamp().as_second() - ptask_core::jiff::Timestamp::now().as_second();
+    let mins = (secs.abs() + 59) / 60;
+    let span = if mins >= 120 {
+        format!("{}h", mins / 60)
+    } else {
+        format!("{mins}m")
+    };
+    if secs > 0 {
+        format!("lease ends in {span}")
+    } else {
+        format!("lease expired {span} ago")
+    }
+}
+
+fn cmd_claim(db: &Db, a: ClaimArgs) -> Result<()> {
+    let lease = a
+        .lease
+        .as_deref()
+        .map(ptask_core::claims::parse_lease)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
+    let claim =
+        ptask_core::claims::claim(db, &task.id, lease, &cli_ctx()).map_err(anyhow::Error::msg)?;
+    let v = serde_json::json!({
+        "pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress",
+        "claim": claim,
+        "claim_token": claim.token,
+    });
+    emit(&v, || {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Busy,
+                "claimed",
+                task.pt_id.as_deref().unwrap_or(""),
+                &task.title,
+                &format!(
+                    "by {} · {}",
+                    claim.by,
+                    lease_phrase(claim.expires_at.as_deref())
+                )
+            )
+        )
+    })
+}
+
+fn cmd_heartbeat(db: &Db, a: HeartbeatArgs) -> Result<()> {
+    let lease = ptask_core::claims::parse_lease(&a.lease).map_err(anyhow::Error::msg)?;
+    let task = tasks::resolve_for_lookup(db, &a.query, true).map_err(anyhow::Error::msg)?;
+    let claim = ptask_core::claims::heartbeat(db, &task.id, lease, &a.claim, &cli_ctx())
+        .map_err(anyhow::Error::msg)?;
     emit(
-        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress"}),
+        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "claim": claim}),
         || {
             println!(
                 "{}",
                 ui::outcome(
-                    ui::Status::Busy,
-                    "started",
+                    ui::Status::Ok,
+                    "renewed",
                     task.pt_id.as_deref().unwrap_or(""),
                     &task.title,
-                    "in progress"
+                    &lease_phrase(claim.expires_at.as_deref())
                 )
             )
         },
     )
+}
+
+fn cmd_release(db: &Db, a: ReleaseArgs) -> Result<()> {
+    let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
+    let r = ptask_core::claims::release(
+        db,
+        &task.id,
+        a.force,
+        a.reason.as_deref(),
+        a.claim.as_deref(),
+        &cli_ctx(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id, "status": "todo",
+            "released": r,
+        }),
+        || {
+            let detail = match (&r.holder, r.forced) {
+                (Some(h), true) => format!("→ todo · {h}'s claim released (forced)"),
+                (Some(_), false) => "→ todo · claim released".to_string(),
+                (None, _) => "→ todo".to_string(),
+            };
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Changed,
+                    "released",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    &detail
+                )
+            )
+        },
+    )
+}
+
+fn cmd_reclaim(db: &Db, a: ReclaimArgs) -> Result<()> {
+    let report = ptask_core::claims::reclaim_expired(
+        db,
+        !a.apply,
+        &ptask_core::event_log::EventCtx::system("reclaim"),
+    )?;
+    print_reclaim(&report)
+}
+
+fn print_reclaim(report: &ptask_core::claims::ReclaimReport) -> Result<()> {
+    if json_mode() {
+        return crate::print_json(report);
+    }
+    if report.reclaimed.is_empty() {
+        println!(
+            "{}",
+            ui::section("reclaim ok", ui::Ink::Green, "no expired claims")
+        );
+        return Ok(());
+    }
+    let (status, verb) = if report.dry_run {
+        (ui::Status::Warn, "expired")
+    } else {
+        (ui::Status::Changed, "reclaimed")
+    };
+    for c in &report.reclaimed {
+        println!(
+            "{}",
+            ui::outcome(
+                status,
+                verb,
+                c.pt_id.as_deref().unwrap_or(&c.task_uuid),
+                &c.title,
+                &format!(
+                    "held by {} · {}",
+                    c.holder,
+                    lease_phrase(Some(&c.expired_at))
+                )
+            )
+        );
+    }
+    if report.dry_run {
+        println!(
+            "{}",
+            ui::note("dry run — `pt reclaim --apply` returns them to todo")
+        );
+    }
+    Ok(())
 }
 
 fn cmd_promote(db: &Db, a: StartArgs) -> Result<()> {
@@ -3233,7 +3697,7 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
             let applied = if let Some(level) = level {
                 tasks::update_priority(db, &t.id, level, &ctx).map(|_| ())
             } else if a.done {
-                tasks::mark_done(db, t, &ctx).map(|outcome| {
+                tasks::mark_done_noted(db, t, a.note.as_deref(), &ctx).map(|outcome| {
                     if let tasks::DoneOutcome::Advanced { next_deadline } = outcome
                         && !json_mode()
                     {
@@ -3250,7 +3714,7 @@ fn cmd_bulk(db: &Db, a: BulkArgs) -> Result<()> {
                     }
                 })
             } else {
-                tasks::dismiss(db, &t.id, &ctx)
+                tasks::dismiss_noted(db, &t.id, a.note.as_deref(), &ctx)
             };
             if let Err(e) = applied {
                 if pass == 0 && a.done && matches!(e, ptask_core::Error::Blocked(_)) {
@@ -3523,13 +3987,20 @@ fn summarize_payload(payload: &str) -> String {
     let mut parts = Vec::new();
     if let Some(obj) = v.as_object() {
         for (k, val) in obj {
-            if matches!(k.as_str(), "actor" | "source" | "task_uuid" | "pt_id") {
+            if matches!(
+                k.as_str(),
+                "actor" | "source" | "task_uuid" | "pt_id" | "note"
+            ) {
                 continue;
             }
             parts.push(format!("{}={}", k, val));
             if parts.len() >= 3 {
                 break;
             }
+        }
+        // A note is prose, not a field: shown as text (one line), last.
+        if let Some(note) = obj.get("note").and_then(|n| n.as_str()) {
+            parts.push(format!("“{}”", ui::one_line(note)));
         }
     }
     parts.join(" ")
@@ -3807,7 +4278,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
         }
         RemoteCommand::Done(a) => {
             let client = remote_client(a.url.as_deref())?;
-            let task = client.done(&a.query)?;
+            let task = client.done(&a.query, a.note.as_deref())?;
             emit(
                 &remote_outcome(&task, "done", serde_json::json!({})),
                 || {
@@ -3960,7 +4431,7 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
         }
         RemoteCommand::Dismiss(a) => {
             let client = remote_client(a.url.as_deref())?;
-            let task = client.dismiss(&a.query)?;
+            let task = client.dismiss(&a.query, a.note.as_deref())?;
             let out = remote_outcome(
                 &task,
                 "dismiss",
@@ -3978,6 +4449,26 @@ fn cmd_remote(c: RemoteCommand) -> Result<()> {
                     )
                 )
             })
+        }
+        RemoteCommand::Note(a) => {
+            let text = note_text(&a.text)?;
+            let client = remote_client(a.url.as_deref())?;
+            let task = client.note(&a.query, &text)?;
+            emit(
+                &remote_outcome(&task, "note", serde_json::json!({})),
+                || {
+                    println!(
+                        "{}",
+                        ui::outcome(
+                            ui::Status::Ok,
+                            "noted",
+                            task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id)),
+                            &task.title,
+                            "remote"
+                        )
+                    )
+                },
+            )
         }
         RemoteCommand::Start(a) => {
             let client = remote_client(a.url.as_deref())?;
@@ -4205,6 +4696,26 @@ fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
                 print_rank_diff(db)?;
             }
             let now = ptask_core::dates::now_in_operator_tz().map_err(anyhow::Error::msg)?;
+            // Expired claims go back to todo before scoring, so they rank
+            // as open work in this pass. Only when the operator turned it
+            // on: it changes task state on a timer.
+            if ptask_core::Config::from_env().claim_reclaim && !a.dry_run {
+                let r = ptask_core::claims::reclaim_expired(
+                    db,
+                    false,
+                    &ptask_core::event_log::EventCtx::system("reclaim"),
+                )?;
+                if !r.reclaimed.is_empty() {
+                    println!(
+                        "{}",
+                        ui::section(
+                            "reclaimed",
+                            ui::Ink::Amber,
+                            &format!("{} expired claim(s) returned to todo", r.reclaimed.len())
+                        )
+                    );
+                }
+            }
             let report = ptask_core::scoring::run_once_at_mode(db, a.dry_run, &now, !a.v1)?;
             println!(
                 "{}",
@@ -4637,6 +5148,7 @@ mod tests {
                 set_priority: Some("bogus".into()),
                 done: false,
                 dismiss: false,
+                note: None,
                 dry_run: true,
             },
         )

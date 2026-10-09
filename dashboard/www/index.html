@@ -694,6 +694,23 @@ body.review #review-sec{display:block}
 .devt .who{color:var(--accent-t);font-weight:700;min-width:74px}
 .devt .what{color:var(--text)}
 .devt .when{margin-left:auto;color:var(--dim);white-space:nowrap}
+/* notes: the attributed evidence trail (pt note / done --note) */
+.drawer .dnotes{border-top:1px solid var(--border);padding-top:12px;margin-bottom:16px}
+.drawer .dnotes h4{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);margin-bottom:8px}
+.dnote{padding:6px 0;border-bottom:1px dashed var(--border)}
+.dnote .nmeta{display:flex;gap:8px;font-size:11px}
+.dnote .who{color:var(--accent-t);font-weight:700}
+.dnote .kind{color:var(--p4t);font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.06em}
+.dnote .when{margin-left:auto;color:var(--dim);white-space:nowrap}
+.dnote .ntext{font-size:12px;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.45;margin-top:3px}
+.dnote-form{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.dnote-form textarea,.cnote textarea{background:var(--panel);border:var(--card-border);color:var(--text);border-radius:10px;
+  padding:8px 11px;font-family:var(--font);font-size:12px;width:100%;resize:vertical;min-height:54px;line-height:1.45}
+.dnote-form textarea:focus,.cnote textarea:focus{outline:none;border-color:var(--accent);box-shadow:var(--glow)}
+.dnote-form .mbtn{align-self:flex-end}
+.cnote{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+.cnote label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.cnote label .opt{color:var(--dim);font-weight:600;text-transform:none;letter-spacing:0}
 .dclose{position:absolute;top:14px;right:14px;cursor:pointer;background:transparent;border:1px solid var(--border);
   color:var(--muted);border-radius:6px;width:26px;height:26px}
 /* inline SVG control glyphs — emoji rendered platform-dependent and clashed
@@ -993,6 +1010,12 @@ button,[role="button"]{touch-action:manipulation}
   <h3 id="d-title"></h3>
   <div class="dmeta" id="d-meta"></div>
   <div class="ddesc" id="d-desc"></div>
+  <div class="dnotes"><h4>Notes</h4><div id="d-notes"></div>
+    <form class="dnote-form" id="d-note-form">
+      <textarea id="d-note" rows="2" maxlength="4000" aria-label="Add a note" placeholder="Add a note: a finding, evidence, a handover"></textarea>
+      <button type="submit" class="mbtn" id="d-note-add">Add note</button>
+    </form>
+  </div>
   <div class="dhist"><h4>History</h4><div id="d-hist"></div></div>
 </aside>
 <!-- body-level overlays (survive the 15s #lanes/#crit re-render) -->
@@ -1001,6 +1024,10 @@ button,[role="button"]{touch-action:manipulation}
   <div class="modal-card">
     <h3 id="confirm-h">Mark this task done?</h3>
     <p class="modal-body" id="confirm-body"></p>
+    <div class="cnote">
+      <label for="confirm-note">Evidence <span class="opt">(optional) · how was it verified?</span></label>
+      <textarea id="confirm-note" rows="2" maxlength="4000" placeholder="PR, commit, test run, readback"></textarea>
+    </div>
     <div class="modal-actions">
       <button type="button" class="mbtn" id="confirm-cancel">Cancel</button>
       <button type="button" class="mbtn primary" id="confirm-ok"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> Mark done</button>
@@ -1263,9 +1290,10 @@ async function api(p){
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600);}
 
 /* ---- done + quick-add (writes shell out to pt) ---- */
-async function markDone(id){
-  try{const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/done',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-    const j=await r.json(); toast(j.ok?('✓ '+id+' done'):('✗ '+(j.message||'failed'))); if(j.ok) load();
+async function markDone(id,note){
+  const body=note?JSON.stringify({note}):'{}';
+  try{const r=await fetch('/api/tasks/'+encodeURIComponent(id)+'/done',{method:'POST',headers:{'Content-Type':'application/json'},body});
+    const j=await r.json(); toast(j.ok?('✓ '+id+' done'+(note?' · evidence noted':'')):('✗ '+(j.message||j.error||'failed'))); if(j.ok) load();
   }catch(e){toast('✗ '+e.message);}
 }
 async function act(id,verb,body){
@@ -1490,8 +1518,9 @@ function confirmDone(id){
   rememberInvoker(`[data-id="${id}"] .btn-done`);
   _popupOpen=true;
   $('#confirm-body').textContent='“'+(_taskTitle[id]||id)+'”';
+  $('#confirm-note').value='';
   $('#confirm').hidden=false;
-  $('#confirm-ok').onclick=()=>{ closePopups(); markDone(id); };
+  $('#confirm-ok').onclick=()=>{ const note=$('#confirm-note').value.trim(); closePopups(); markDone(id,note); };
   $('#confirm-cancel').onclick=closePopups;
   $('#confirm-ok').focus({preventScroll:true});
 }
@@ -2301,16 +2330,54 @@ async function openDrawer(uuid){
   $('#d-meta').innerHTML=t?`${ptrigger(t)}<span class="age">${t.age_days!=null?Math.round(t.age_days)+'d old':''}</span>${dueChip(t)}<span class="score">${(t.priority_score||0).toFixed(2)}</span>${originTag(t,true)}${domainTag(t)}`:'';
   $('#d-desc').textContent=(t&&(t.description||t.ai_reasoning))||'(no description)';
   $('#d-hist').innerHTML='<span class="age">loading…</span>';
+  $('#d-notes').innerHTML='';
+  if(_drawerUuid!==uuid) $('#d-note').value='';
+  _drawerUuid=uuid;
   dr.classList.add('open');
   $('#drawer-scrim').classList.add('show');
   $('#d-close').focus({preventScroll:true});
   try{
-    const j=await api('/api/tasks/'+encodeURIComponent(uuid)+'/events');
+    const [j, n]=await Promise.all([
+      api('/api/tasks/'+encodeURIComponent(uuid)+'/events'),
+      api('/api/tasks/'+encodeURIComponent(uuid)+'/notes'),
+    ]);
+    $('#d-notes').innerHTML=renderNotes(n.events||[]);
     $('#d-hist').innerHTML=(j.events||[]).slice(0,60).map(e=>
       `<div class="devt"><span class="who">${esc(e.actor||'—')}</span><span class="what">${esc(e.event_type)}</span><span class="when">${esc((e.ts||'').slice(0,16).replace('T',' '))}</span></div>`
     ).join('')||'<span class="age">no history</span>';
   }catch(e){$('#d-hist').innerHTML='<span class="age">history unavailable: '+esc(e.message)+'</span>';}
 }
+/* notes ride in the journal: a task.noted event, or `note` on the event that
+   closed the task. Newest first, like the history beneath. */
+const NOTE_KIND={'task.completed':'done','task.recurrence_advanced':'advanced','task.updated':'dismissed'};
+function renderNotes(events){
+  /* pt serve sends payload as a JSON string, the sidecar as an object */
+  const rows=events.map(e=>{let p=e.payload;
+    if(typeof p==='string'){try{p=JSON.parse(p);}catch(_){p=null;}}
+    p=(p&&typeof p==='object')?p:{};
+    return (typeof p.note==='string')?{e,p}:null;}).filter(Boolean);
+  if(!rows.length) return '<span class="age">no notes yet</span>';
+  return rows.map(({e,p})=>{
+    const kind=e.event_type==='task.noted'?'':(NOTE_KIND[e.event_type]||'');
+    return `<div class="dnote"><div class="nmeta"><span class="who">${esc(e.actor||'—')}</span>`+
+      (kind?`<span class="kind">${esc(kind)}</span>`:'')+
+      `<span class="when">${esc((e.ts||'').slice(0,16).replace('T',' '))}</span></div>`+
+      `<div class="ntext">${esc(p.note)}</div></div>`;
+  }).join('');
+}
+let _drawerUuid=null;
+$('#d-note-form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const uuid=_drawerUuid, ta=$('#d-note'), text=ta.value.trim();
+  if(!uuid||!text) return;
+  const btn=$('#d-note-add'); btn.disabled=true;
+  try{const r=await fetch('/api/tasks/'+encodeURIComponent(uuid)+'/note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+    const j=await r.json();
+    if(j.ok){ ta.value=''; toast('✎ note added'); if(drawerOpen()&&_drawerUuid===uuid) openDrawer(uuid); }
+    else toast('✗ '+(j.message||j.error||'failed'));
+  }catch(err){toast('✗ '+err.message);}
+  finally{btn.disabled=false;}
+});
 function drawerOpen(){ return $('#drawer').classList.contains('open'); }
 function closeDrawer(){ $('#drawer').classList.remove('open'); $('#drawer-scrim').classList.remove('show'); restoreInvoker(); }
 $('#d-close').onclick=closeDrawer;
