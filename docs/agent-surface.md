@@ -69,7 +69,11 @@ commit; a scoring failure does not roll back a successful edit.
   claim. `task_show` returns `notes` (oldest first, the newest 100) and
   `pt context` / the worker brief carries them as a `## Notes` section, so
   the next worker starts from what earlier ones found. `task_digest` gives
-  each recently closed task its closing `note`.
+  each recently closed task its closing `note`. Compact surfaces (digest,
+  the markdown worker brief) truncate a long note to about 300 characters
+  with a marker; `task_show` / `pt context --json`'s `notes` array stay
+  full. A note is transparent to `pt undo`: it is never reversed and never
+  shadows the close it follows.
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
   It is a claim, not a lease: the task stores no owner (the claimer appears

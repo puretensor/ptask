@@ -950,7 +950,7 @@ pub fn context_markdown(db: &Db, task: &Task) -> Result<String> {
             md.push_str(&format!(
                 "- {when} {}{kind}: {}\n",
                 line(who),
-                line(&n.text)
+                crate::notes::preview(&line(&n.text))
             ));
         }
     }

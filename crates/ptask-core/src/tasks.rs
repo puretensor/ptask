@@ -1534,9 +1534,12 @@ const NOTHING_UNDOABLE: &str =
 /// undo must not delete a task HAL created. Any later event on the task,
 /// from ANY actor, protects it — every later mutation, including newly
 /// introduced event types, and reversals already recorded by an earlier
-/// undo or a manual reopen. A created task that another task depends on
-/// (or is depended on by), or that parents another task, is never deleted:
-/// those relations are not journaled under its own uuid.
+/// undo or a manual reopen — except `task.noted`, which is transparent: a
+/// note is never an undo candidate and never supersedes or foreign-protects
+/// an earlier mutation (another actor's note too). A created task that
+/// another task depends on (or is depended on by), or that parents another
+/// task, is never deleted: those relations are not journaled under its own
+/// uuid.
 fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<UndoPlan>> {
     // "Own" is actor AND surface: an MCP server can still run under the
     // operator's actor (PTASK_ACTOR=shell exported into `pt mcp`; the
@@ -1552,6 +1555,7 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
             "SELECT id, task_uuid, event_type, payload FROM pt_event_log
              WHERE task_uuid IS NOT NULL AND actor = ?1
                AND json_extract(payload, '$.source') IN (?2, ?3)
+               AND event_type != 'task.noted'
              ORDER BY id DESC LIMIT 50",
         )?;
         let rows = stmt.query_map(params![ctx.actor, surface_a, surface_b], |r| {
@@ -1562,7 +1566,8 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
 
     for (id, task_uuid, event_type, payload) in candidates {
         let superseded: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2)",
+            "SELECT EXISTS(SELECT 1 FROM pt_event_log
+                           WHERE task_uuid=?1 AND id>?2 AND event_type != 'task.noted')",
             params![task_uuid, id],
             |r| r.get(0),
         )?;
@@ -1572,8 +1577,11 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
             // wrote it, or this is the create of a task that still exists,
             // the newest change is protected: refuse rather than reach
             // further back and undo, or delete, something older instead.
+            // `task.noted` is excluded: a note is not a mutation undo must
+            // protect or skip past.
             let foreign: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
+                   AND event_type != 'task.noted'
                    AND (actor IS NOT ?3
                         OR COALESCE(json_extract(payload, '$.source'), '') NOT IN (?4, ?5)))",
                 params![task_uuid, id, ctx.actor, surface_a, surface_b],

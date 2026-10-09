@@ -50,19 +50,24 @@ Words are joined with spaces; a lone `-` reads the note from stdin (pipe a
 command's output in). Notes are append-only and attributed (actor + surface
 from the journal); at most 16 KiB; blank refused. A substring reaches open
 tasks; a done or dismissed task by `PT-N` or uuid, so evidence that arrives
-after the close still lands. Honours `--idempotency-key`. A note counts as
-touching the task: it bumps `updated_at`, which the neglect score, `pt review
---stale-days` and the reaper read. Notes are not in `pt search` (titles and
-descriptions only).
+after the close still lands. Honours `--idempotency-key` (a keyed `note -`
+fingerprints the stdin text, so a retry with different text is refused). A
+note counts as touching the task: it bumps `updated_at`, which the neglect
+score, `pt review --stale-days` and the reaper read. Notes are not in `pt
+search` (titles and descriptions only). `pt undo` treats `task.noted` as
+transparent: a note is never undone and never shadows the close it follows.
 
 Where the trail shows up: `pt show` (a NOTES section, oldest first; `--json`
 adds `notes`), `pt context` (a `## Notes` section, one line per note, so a
 worker starts from what earlier workers found), `pt log` (the text inline),
 `pt digest` (each recently closed task carries its closing `note`), `pt
-export` (`task_notes.jsonl`), the TUI detail pane, MCP `task_show`, and the
-cockpit's task drawer. Automated closers write their own evidence: a git
-`Closes PT-N` names the push, commit and subject; `/capture/resolve` names the
-resolver and capture key; the reaper says it reaped, why, and how to reopen.
+export` (`task_notes.jsonl`, live tasks only), the TUI detail pane, MCP
+`task_show`, and the cockpit's task drawer. Long notes are truncated to about
+300 characters with a marker in `pt digest` and the `pt context` markdown
+brief; `pt show` and `pt context --json`'s `notes` array keep the full text.
+Automated closers write their own evidence: a git `Closes PT-N` names the
+push, commit and subject; `/capture/resolve` names the resolver and capture
+key; the reaper says it reaped, why, and how to reopen.
 
 ### `pt priority <query> <level>` (alias `pt pri`)
 

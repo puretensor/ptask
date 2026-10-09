@@ -259,6 +259,7 @@ class OpenAccessTests(unittest.TestCase):
                 "/icon-512.png",
                 "/manifest.webmanifest",
                 "/api/tasks/00000000-0000-0000-0000-000000000001/events",
+                "/api/tasks/00000000-0000-0000-0000-000000000001/notes",
             ):
                 status, headers, body = self.request("GET", path)
                 self.assertEqual(status, 200, path)
@@ -672,6 +673,55 @@ class EventHistoryTests(unittest.TestCase):
             finally:
                 server.DB_PATH = old_db
         self.assertEqual([e["uuid"] for e in events], ["second-gmt", "first-bst"])
+
+    def test_q_task_notes_is_not_the_newest_events_window(self):
+        old_db = server.DB_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute(
+                """
+                CREATE TABLE pt_event_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT NOT NULL UNIQUE,
+                    task_uuid TEXT,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    actor TEXT
+                )
+                """
+            )
+            con.execute(
+                """
+                INSERT INTO pt_event_log(uuid, task_uuid, event_type, payload, ts, actor)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("note-1", "PT-1", "task.noted",
+                 '{"note":"restore drill passed"}',
+                 "2026-09-01T09:00:00+00:00", "hal"),
+            )
+            for i in range(70):
+                con.execute(
+                    """
+                    INSERT INTO pt_event_log(uuid, task_uuid, event_type, payload, ts, actor)
+                    VALUES (?, 'PT-1', 'task.updated', '{}', ?, 'shell')
+                    """,
+                    (f"upd-{i}", "2026-09-01T12:00:00+00:00"),
+                )
+            con.commit()
+            con.close()
+            server.DB_PATH = f.name
+            try:
+                notes = server.q_task_notes("PT-1")
+                window = server.q_task_events("PT-1", limit=60)
+            finally:
+                server.DB_PATH = old_db
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["payload"]["note"], "restore drill passed")
+        self.assertFalse(any(
+            (e.get("payload") or {}).get("note") for e in window
+        ))
+
 
 class StatsFluxTests(unittest.TestCase):
     def test_q_stats_reports_windowed_flux_split_by_origin(self):

@@ -27,6 +27,21 @@ pub const MAX_NOTE_CHARS: usize = 16 * 1024;
 /// Most notes one read returns (the newest ones, oldest first).
 pub const MAX_NOTES_LISTED: usize = 100;
 
+/// Character budget for a note on compact surfaces (digest, worker brief).
+/// `pt show` and `pt context --json`'s `notes` array keep the full text.
+pub const NOTE_PREVIEW_CHARS: usize = 300;
+
+/// Truncate a note for the digest and the markdown worker brief: keep the
+/// start, then a marker so the cut is visible. Short notes pass through.
+pub fn preview(text: &str) -> String {
+    let n = text.chars().count();
+    if n <= NOTE_PREVIEW_CHARS {
+        return text.to_string();
+    }
+    let prefix: String = text.chars().take(NOTE_PREVIEW_CHARS).collect();
+    format!("{prefix} [… {} chars truncated]", n - NOTE_PREVIEW_CHARS)
+}
+
 /// Event types that can carry a note in their payload.
 const NOTE_EVENTS: &str =
     "'task.noted', 'task.completed', 'task.recurrence_advanced', 'task.updated'";
@@ -340,5 +355,19 @@ mod tests {
             .map(|n| n.text)
             .collect();
         assert_eq!(got, ["n3", "n4"]);
+    }
+
+    #[test]
+    fn preview_keeps_short_notes_and_marks_a_long_cut() {
+        assert_eq!(preview("short"), "short");
+        let long = "step ok; ".repeat(250);
+        let shown = preview(&long);
+        assert!(shown.chars().count() <= 400, "{}", shown.chars().count());
+        assert!(shown.starts_with(&long[..200]));
+        assert!(
+            shown.contains("chars truncated"),
+            "cut must be marked: {shown:?}"
+        );
+        assert!(!long.starts_with(&shown));
     }
 }

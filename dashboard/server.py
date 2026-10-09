@@ -16,6 +16,9 @@ Endpoints
   GET  /api/critical?limit=     -> top pending by priority_score
   GET  /api/timeline            -> pending tasks that have a deadline
   GET  /api/heatmap             -> priority x age-bucket matrix
+  GET  /api/tasks/<id>/events   -> journal history (newest first; default 60)
+  GET  /api/tasks/<id>/notes    -> notes + closure evidence (SQL; not capped
+                                   by the events window)
   POST /api/tasks/<id>/done {note?} -> shells `pt done [--note=] <id>`
   POST /api/tasks/<id>/note {text} -> shells `pt note <id> -- <text>`
   POST /api/tasks/<id>/dismiss {note?} -> shells `pt dismiss [--note=] <id>`
@@ -575,6 +578,24 @@ def q_heatmap():
     }
 
 
+def _event_dicts(rows):
+    events = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        events.append({
+            "uuid": r["uuid"],
+            "task_uuid": r["task_uuid"],
+            "event_type": r["event_type"],
+            "actor": r["actor"],
+            "ts": r["ts"],
+            "payload": payload,
+        })
+    return events
+
+
 def q_task_events(task_uuid: str, limit: int = 60):
     """Return attributed event history for the detail drawer, newest first.
 
@@ -593,21 +614,33 @@ def q_task_events(task_uuid: str, limit: int = 60):
             """,
             (task_uuid, limit),
         )
-        events = []
-        for r in rows:
-            try:
-                payload = json.loads(r["payload"] or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            events.append({
-                "uuid": r["uuid"],
-                "task_uuid": r["task_uuid"],
-                "event_type": r["event_type"],
-                "actor": r["actor"],
-                "ts": r["ts"],
-                "payload": payload,
-            })
-        return events
+        return _event_dicts(rows)
+    finally:
+        con.close()
+
+
+def q_task_notes(task_uuid: str, limit: int = 100):
+    """Notes and closure evidence for the drawer, newest first.
+
+    SQL over the journal so this sidecar does not shell out to `pt`. A
+    dedicated query, not the newest-N events window: a note older than
+    that window must still show.
+    """
+    con = connect()
+    try:
+        rows = con.execute(
+            """
+            SELECT uuid, task_uuid, event_type, actor, ts, payload
+            FROM pt_event_log
+            WHERE task_uuid=?
+              AND json_valid(payload)
+              AND json_type(payload, '$.note') = 'text'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (task_uuid, limit),
+        )
+        return _event_dicts(rows)
     finally:
         con.close()
 
@@ -1373,6 +1406,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(data)
             if path == "/api/stream":
                 return self._stream()
+            m = re.match(r"^/api/tasks/([^/]+)/notes$", path)
+            if m:
+                task_uuid = m.group(1)
+                if not _ID_RE.match(task_uuid):
+                    return self._json({"error": "bad id"}, 400)
+                limit = parse_limit(qs.get("limit", ["100"])[0], 100, 200)
+                return self._json({"events": q_task_notes(task_uuid, limit=limit)})
             m = re.match(r"^/api/tasks/([^/]+)/events$", path)
             if m:
                 task_uuid = m.group(1)

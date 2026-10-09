@@ -46,7 +46,7 @@ pub fn build(db: &Db, days: i64) -> Result<serde_json::Value> {
                 for (pt_id, title, id) in rows {
                     let mut v = serde_json::json!({ "pt_id": pt_id, "title": title });
                     if let Some(note) = crate::notes::closure_note_in_conn(c, &id)? {
-                        v["note"] = serde_json::json!(note);
+                        v["note"] = serde_json::json!(crate::notes::preview(&note));
                     }
                     out.push(v);
                 }

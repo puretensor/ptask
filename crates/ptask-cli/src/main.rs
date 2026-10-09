@@ -811,6 +811,9 @@ static CLI_JSON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static CLI_IDEMPOTENCY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 static CLI_COMMAND: std::sync::OnceLock<ptask_core::event_log::CommandFingerprint> =
     std::sync::OnceLock::new();
+/// Stdin consumed by `pt note -` / `pt remote note -`, so a keyed fingerprint
+/// can hash the payload once and `note_text` does not re-read EOF.
+static STDIN_NOTE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn set_cli_globals(json: bool, idempotency_key: Option<String>) {
     let _ = CLI_JSON.set(json);
@@ -870,8 +873,54 @@ fn command_name(cmd: &Command) -> String {
 /// A keyed command's fingerprint: its parsed arguments, rendered by the
 /// derived Debug impl (fixed field order), so a retry of the same command
 /// matches and a different command under the same key does not.
-fn command_fingerprint(cmd: &Command) -> ptask_core::event_log::CommandFingerprint {
-    ptask_core::event_log::CommandFingerprint::new(&command_name(cmd), &format!("{cmd:?}"))
+///
+/// Optional fields at their default (`note: None`) are omitted so a key
+/// journaled before that field existed still matches. A lone `-` for a
+/// note is replaced by the stdin payload, so the key covers the text.
+fn command_fingerprint(cmd: &Command) -> Result<ptask_core::event_log::CommandFingerprint> {
+    Ok(ptask_core::event_log::CommandFingerprint::new(
+        &command_name(cmd),
+        &fingerprint_args(cmd)?,
+    ))
+}
+
+fn is_stdin_note(text: &[String]) -> bool {
+    matches!(text, [s] if s == "-")
+}
+
+fn fingerprint_args(cmd: &Command) -> Result<String> {
+    Ok(match cmd {
+        Command::Note(a) if is_stdin_note(&a.text) => format!(
+            "Note(NoteArgs {{ query: {:?}, text: {:?} }})",
+            a.query,
+            vec![stdin_note_text()?]
+        ),
+        Command::Remote(RemoteCommand::Note(a)) if is_stdin_note(&a.text) => format!(
+            "Remote(Note(RemoteNoteArgs {{ query: {:?}, text: {:?}, url: {:?} }}))",
+            a.query,
+            vec![stdin_note_text()?],
+            a.url
+        ),
+        Command::Done(a) if a.note.is_none() => {
+            format!("Done(DoneArgs {{ queries: {:?} }})", a.queries)
+        }
+        Command::Dismiss(a) if a.note.is_none() => {
+            format!("Dismiss(DismissArgs {{ query: {:?} }})", a.query)
+        }
+        Command::Bulk(a) if a.note.is_none() => format!(
+            "Bulk(BulkArgs {{ filter: {:?}, set_priority: {:?}, done: {:?}, dismiss: {:?}, dry_run: {:?} }})",
+            a.filter, a.set_priority, a.done, a.dismiss, a.dry_run
+        ),
+        Command::Remote(RemoteCommand::Done(a)) if a.note.is_none() => format!(
+            "Remote(Done(RemoteCloseArgs {{ query: {:?}, url: {:?} }}))",
+            a.query, a.url
+        ),
+        Command::Remote(RemoteCommand::Dismiss(a)) if a.note.is_none() => format!(
+            "Remote(Dismiss(RemoteDismissArgs {{ query: {:?}, url: {:?} }}))",
+            a.query, a.url
+        ),
+        other => format!("{other:?}"),
+    })
 }
 
 /// Commands whose retry under `--idempotency-key` is replay-safe: the keyed
@@ -1105,7 +1154,7 @@ fn run() -> Result<()> {
         // journal's unique index on retry: refuse it up front.
         match &cli.command {
             Some(cmd) if honours_idempotency_key(cmd) => {
-                let _ = CLI_COMMAND.set(command_fingerprint(cmd));
+                let _ = CLI_COMMAND.set(command_fingerprint(cmd)?);
             }
             other => anyhow::bail!(
                 "--idempotency-key is not supported by `pt {}`: a retry would not be \
@@ -1912,18 +1961,24 @@ fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {
 /// The note text from `pt note` / `pt remote note`: the words joined, or
 /// stdin for a lone `-` (evidence is often a command's output).
 fn note_text(words: &[String]) -> Result<String> {
-    if let [only] = words
-        && only == "-"
-    {
-        use std::io::Read;
-        let mut buf = String::new();
-        std::io::stdin()
-            .take((ptask_core::notes::MAX_NOTE_CHARS * 4 + 1) as u64)
-            .read_to_string(&mut buf)
-            .context("reading the note from stdin")?;
-        return Ok(buf);
+    if is_stdin_note(words) {
+        return stdin_note_text();
     }
     Ok(words.join(" "))
+}
+
+fn stdin_note_text() -> Result<String> {
+    if let Some(text) = STDIN_NOTE.get() {
+        return Ok(text.clone());
+    }
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .take((ptask_core::notes::MAX_NOTE_CHARS * 4 + 1) as u64)
+        .read_to_string(&mut buf)
+        .context("reading the note from stdin")?;
+    let _ = STDIN_NOTE.set(buf.clone());
+    Ok(buf)
 }
 
 fn cmd_note(db: &Db, a: NoteArgs) -> Result<()> {
@@ -2479,6 +2534,7 @@ fn cmd_export(db: &Db, a: ExportArgs) -> Result<()> {
                 event_type, json_extract(payload, '$.note')
          FROM pt_event_log
          WHERE task_uuid IS NOT NULL
+           AND task_uuid IN (SELECT id FROM tasks)
            AND event_type IN ('task.noted', 'task.completed',
                               'task.recurrence_advanced', 'task.updated')
            AND json_valid(payload) AND json_type(payload, '$.note') = 'text'
