@@ -16,7 +16,9 @@ Endpoints
   GET  /api/critical?limit=     -> top pending by priority_score
   GET  /api/timeline            -> pending tasks that have a deadline
   GET  /api/heatmap             -> priority x age-bucket matrix
-  POST /api/tasks/<id>/done     -> shells `pt done <id>`
+  POST /api/tasks/<id>/done {note?} -> shells `pt done [--note=] <id>`
+  POST /api/tasks/<id>/note {text} -> shells `pt note <id> -- <text>`
+  POST /api/tasks/<id>/dismiss {note?} -> shells `pt dismiss [--note=] <id>`
   POST /api/tasks/<id>/priority {level:1..5} -> shells `pt priority <id> <level>`
   POST /api/tasks  {title, description?, priority?, deadline?}
                                 -> shells `pt add [--priority=] [--description=]
@@ -135,7 +137,7 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
-VERSION = "0.22.0"
+VERSION = "0.23.0"
 
 
 def _allowed_host_entry(entry: str) -> str:
@@ -236,6 +238,20 @@ APPROVAL_STATUSES = frozenset({
     "pending", "approved", "rejected", "withdrawn", "expired", "all",
 })
 APPROVAL_NOTE_MAX = 2000
+# Task notes and closure evidence: pt's own cap (ptask_core::notes).
+TASK_NOTE_MAX = 16 * 1024
+
+
+def task_note_arg(body: dict, key: str = "note"):
+    """An optional note from a JSON body: (value, error). Absent or null is
+    no note; a string within the cap is passed on (pt trims and refuses a
+    blank one); anything else is a 400."""
+    note = body.get(key)
+    if note is None:
+        return None, None
+    if not isinstance(note, str) or len(note) > TASK_NOTE_MAX:
+        return None, f"{key} must be a string (max {TASK_NOTE_MAX})"
+    return note, None
 
 
 def parse_bind(bind: str) -> tuple[str, int]:
@@ -1422,7 +1438,11 @@ class Handler(BaseHTTPRequestHandler):
             tid = m.group(1)
             if not _ID_RE.match(tid):
                 return self._json({"error": "bad id"}, 400)
-            ok, msg = pt_exec(["done", "--", tid])
+            note, err = task_note_arg(body)
+            if err:
+                return self._json({"error": err}, 400)
+            args = ["done"] + ([f"--note={note}"] if note is not None else []) + ["--", tid]
+            ok, msg = pt_exec(args)
             if not ok and PT_BLOCKED_MARKER in msg:
                 # pt refused the close: open prerequisites. A conflict the
                 # operator resolves, not a server fault.
@@ -1453,8 +1473,31 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "days must be an integer"}, 400)
                 days = max(1, min(90, days))
                 ok, msg = pt_exec(["snooze", "--", tid, f"{days} days"])
+            elif verb == "dismiss":
+                note, err = task_note_arg(body)
+                if err:
+                    return self._json({"error": err}, 400)
+                ok, msg = pt_exec(
+                    ["dismiss"] + ([f"--note={note}"] if note is not None else []) + ["--", tid])
             else:
                 ok, msg = pt_exec([verb, "--", tid])
+            return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+
+        m = re.match(r"^/api/tasks/([^/]+)/note$", u.path)
+        if m:
+            tid = m.group(1)
+            if not _ID_RE.match(tid):
+                return self._json({"error": "bad id"}, 400)
+            text, err = task_note_arg(body, "text")
+            if err:
+                return self._json({"error": err}, 400)
+            if text is None or not text.strip():
+                return self._json({"error": "text is required"}, 400)
+            # `--` ends option parsing, so a note starting with "-" is text;
+            # a lone "-" would mean stdin to pt, hence the explicit check.
+            if text.strip() == "-":
+                return self._json({"error": "text must not be a lone '-'"}, 400)
+            ok, msg = pt_exec(["note", "--", tid, text])
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         m = re.match(r"^/api/tasks/([^/]+)/edit$", u.path)

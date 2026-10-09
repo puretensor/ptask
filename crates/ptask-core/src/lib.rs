@@ -19,6 +19,7 @@ pub mod filter;
 pub mod goals;
 pub mod magic_words;
 pub mod migrations;
+pub mod notes;
 pub mod ordering;
 pub mod planner;
 pub mod priority;

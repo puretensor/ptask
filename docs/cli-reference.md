@@ -36,9 +36,33 @@ Create a task. The free-text title runs through the quick-add parser
 | `-v`, `--verbose` | show description + UUID |
 | `[filter]` positional | DSL — see [dsl.md](dsl.md) |
 
-### `pt done <query>`
+### `pt done <query> [...] [-m | --note TEXT]`
 
-Mark done by `PT-N`, bare integer `42`, or title substring.
+Mark done by `PT-N`, bare integer `42`, or title substring. `--note` journals
+closure evidence (what was done, how it was verified) inside the completion
+event, attributed like the close itself; with several tasks each gets the
+note. A blank note refuses the close.
+
+### `pt note <query> <text…>` (alias `annotate`, v3.43.0)
+
+Append a note to a task: a finding, partial progress, evidence, a handover.
+Words are joined with spaces; a lone `-` reads the note from stdin (pipe a
+command's output in). Notes are append-only and attributed (actor + surface
+from the journal); at most 16 KiB; blank refused. A substring reaches open
+tasks; a done or dismissed task by `PT-N` or uuid, so evidence that arrives
+after the close still lands. Honours `--idempotency-key`. A note counts as
+touching the task: it bumps `updated_at`, which the neglect score, `pt review
+--stale-days` and the reaper read. Notes are not in `pt search` (titles and
+descriptions only).
+
+Where the trail shows up: `pt show` (a NOTES section, oldest first; `--json`
+adds `notes`), `pt context` (a `## Notes` section, one line per note, so a
+worker starts from what earlier workers found), `pt log` (the text inline),
+`pt digest` (each recently closed task carries its closing `note`), `pt
+export` (`task_notes.jsonl`), the TUI detail pane, MCP `task_show`, and the
+cockpit's task drawer. Automated closers write their own evidence: a git
+`Closes PT-N` names the push, commit and subject; `/capture/resolve` names the
+resolver and capture key; the reaper says it reaped, why, and how to reopen.
 
 ### `pt priority <query> <level>` (alias `pt pri`)
 
@@ -94,10 +118,11 @@ All honour `--json`. Tree order is parent before children, siblings by seq.
 `set-parent` refuses self and cycles. Walks are cycle-safe (stop on a
 repeated node, depth cap 16). Full model: [goals.md](goals.md).
 
-### `pt dismiss <query>`
+### `pt dismiss <query> [-m | --note TEXT]`
 
 Soft-close a task (`status → dismissed`). Reversible with `pt reopen`. Distinct
-from `pt rm`: the row and its history survive.
+from `pt rm`: the row and its history survive. `--note` records why (a
+duplicate of PT-N, superseded, obsolete) in the dismissal event.
 
 ### `pt rm <query> [-y | --yes]`
 
@@ -158,7 +183,7 @@ pt view rm <name>                     # delete
 ```
 pt mcp                    # MCP server over stdio (tools: task_next/list/add/…)
 pt digest [--days 7]      # session-priming JSON: recent done/dismissed + ready queue
-pt export [--git] [--out DIR]   # JSONL projection of the spine (nightly timer)
+pt export [--git] [--out DIR]   # JSONL projection of the spine incl. task_notes.jsonl (nightly timer)
 pt delegate PT-42         # prints the operator-gated claude -p command (never spawns)
 ```
 
@@ -191,7 +216,7 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 | `pt depend <query> --on <target> [--clear]` | dependency edges in `task_links`; `pt next` hides tasks with unmet deps; **`pt done` refuses (exit non-zero, names the open blockers) while any prerequisite is still open** — dismissed prerequisites count as satisfied; `pt start` / claim are not gated (only closing is); no `--on` shows current edges |
 | `pt review [--stale-days N]` | interactive sweep of stale tasks (TTY: k/d/x/s/q; non-TTY prints the list) |
 | `pt search <query…> [-n N]` | FTS5 full-text over titles + descriptions; free text: every word must match, punctuation and AND/OR/NOT are literal (`follow-up`, `c++`, `PT-2201` just work), a trailing `*` matches a prefix |
-| `pt bulk '<filter>' --set-priority P \| --done \| --dismiss [--dry-run]` | one action across every DSL match |
+| `pt bulk '<filter>' --set-priority P \| --done \| --dismiss [-m NOTE] [--dry-run]` | one action across every DSL match; `--note` journals the same note with each completion or dismissal |
 | `pt done <q1> <q2> …` | done now accepts multiple tasks |
 
 Globals (v2.0.0): `--json` on task-facing verbs emits machine-readable
@@ -240,13 +265,14 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 |---|---|
 | `pt remote add "..." [--url ...]` | quick-add on the remote canonical |
 | `pt remote list [-s STATUS -p P -n N]` | server-side `GET /list` (severity order, like local `pt list`); `-p` is folded into the filter |
-| `pt remote done <query>` | server-side `/resolve` + `task_done` |
+| `pt remote done <query> [-m NOTE]` | server-side `/resolve` + `task_done` (with the closure note) |
+| `pt remote note <query> <text…>` | server-side `task_note`; `-` reads stdin |
 | `pt remote priority <query> <level>` (alias `pri`) | server-side `/resolve` + `task_priority` (+ server rescore) |
 | `pt remote edit <query> [--deadline ISO \| --clear-deadline] [--title T] [--desc D]` (alias `update`) | server-side `/resolve` + `task_edit` (deadline) and/or `task_retext` (title/desc) |
 | `pt remote reopen <query>` | server-side `/resolve` (incl. done) + `task_reopen` |
-| `pt remote show <query>` | base row + side-table detail via `GET /detail/{uuid}` (read-only) |
+| `pt remote show <query>` | base row + side-table detail (incl. notes) via `GET /detail/{uuid}` (read-only) |
 | `pt remote next [-n N]` | DAG-ready tasks via `GET /next` (server resolves `depends_on`) |
-| `pt remote dismiss <query>` | server-side `/resolve` + `task_dismiss` (soft close; reversible via reopen) |
+| `pt remote dismiss <query> [-m NOTE]` | server-side `/resolve` + `task_dismiss` (soft close; reversible via reopen) |
 | `pt remote start <query>` | server-side `task_start` |
 | `pt remote snooze <query> <until…>` | server-side `task_snooze` (date parsed locally) |
 | `pt remote depend <query> --on <t> [--clear]` | server-side `task_depend` |

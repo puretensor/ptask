@@ -113,7 +113,7 @@ pub fn create(db: &Db, new: NewTask, ctx: &EventCtx) -> Result<Task> {
 /// Generate an idempotency uuid for a locally-initiated mutation (CLI, TUI,
 /// bot). Remote-initiated mutations supply the client's command uuid instead
 /// so `/sync` replays stay idempotent.
-fn local_event_uuid() -> String {
+pub(crate) fn local_event_uuid() -> String {
     format!("local:{}", Uuid::new_v4())
 }
 
@@ -725,6 +725,20 @@ struct RecurrenceRow {
 /// completion is refused instead of skipping an occurrence. A task that is
 /// already done is refused too; neither refusal writes anything.
 pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
+    mark_done_noted(db, task, None, ctx)
+}
+
+/// [`mark_done`] with closure evidence: `note` (validated by
+/// [`crate::notes::normalize`]; a blank one refuses the close) rides as
+/// `note` in the `task.completed` / `task.recurrence_advanced` payload, so
+/// the evidence and the close commit together.
+pub fn mark_done_noted(
+    db: &Db,
+    task: &Task,
+    note: Option<&str>,
+    ctx: &EventCtx,
+) -> Result<DoneOutcome> {
+    let note = crate::notes::normalize_opt(note)?;
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let now = iso_now();
@@ -916,17 +930,15 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                     format!("Recurring task advanced to {}", next_iso),
                 ],
             )?;
-            record_event_tx(
-                &tx,
-                ctx,
-                &task.id,
-                "task.recurrence_advanced",
-                &serde_json::json!({
-                    "task_uuid": task.id,
-                    "pt_id": task.pt_id,
-                    "next_deadline": next_iso,
-                }),
-            )?;
+            let mut payload = serde_json::json!({
+                "task_uuid": task.id,
+                "pt_id": task.pt_id,
+                "next_deadline": next_iso,
+            });
+            if let Some(n) = &note {
+                payload["note"] = serde_json::json!(n);
+            }
+            record_event_tx(&tx, ctx, &task.id, "task.recurrence_advanced", &payload)?;
             tx.commit()?;
             return Ok(DoneOutcome::Advanced {
                 next_deadline: next_iso,
@@ -957,6 +969,9 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
         params![task.id, now, format!("Completed via {}", ctx.source),],
     )?;
     let mut payload = serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id });
+    if let Some(n) = &note {
+        payload["note"] = serde_json::json!(n);
+    }
     if series_ended {
         // The rule has no further occurrence: drop it, so the closed task
         // no longer reports "recurs" (and a reopen is a plain task).
@@ -1402,6 +1417,13 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
 /// Dismiss (soft close; reversible via reopen). The `task.updated` event
 /// commits in the same transaction, attributed to `ctx`.
 pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
+    dismiss_noted(db, task_uuid, None, ctx)
+}
+
+/// [`dismiss`] with the reason as a note in the dismissal event (a blank
+/// note refuses the dismissal).
+pub fn dismiss_noted(db: &Db, task_uuid: &str, note: Option<&str>, ctx: &EventCtx) -> Result<()> {
+    let note = crate::notes::normalize_opt(note)?;
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let status: Option<String> = tx
@@ -1413,7 +1435,7 @@ pub fn dismiss(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     if status == "dismissed" {
         return Err(crate::Error::Other("task is already dismissed".into()));
     }
-    dismiss_in_tx(&tx, task_uuid, &status, ctx)?;
+    dismiss_in_tx(&tx, task_uuid, &status, note.as_deref(), ctx)?;
     tx.commit()?;
     Ok(())
 }
@@ -1425,6 +1447,7 @@ pub(crate) fn dismiss_in_tx(
     tx: &rusqlite::Transaction<'_>,
     task_uuid: &str,
     status: &str,
+    note: Option<&str>,
     ctx: &EventCtx,
 ) -> Result<()> {
     let now = iso_now();
@@ -1437,13 +1460,11 @@ pub(crate) fn dismiss_in_tx(
          VALUES (?1, 'status_change', ?2, ?3)",
         params![task_uuid, now, format!("Dismissed (was {})", status)],
     )?;
-    record_event_tx(
-        tx,
-        ctx,
-        task_uuid,
-        "task.updated",
-        &serde_json::json!({ "task_uuid": task_uuid, "status": "dismissed" }),
-    )?;
+    let mut payload = serde_json::json!({ "task_uuid": task_uuid, "status": "dismissed" });
+    if let Some(n) = note {
+        payload["note"] = serde_json::json!(n);
+    }
+    record_event_tx(tx, ctx, task_uuid, "task.updated", &payload)?;
     Ok(())
 }
 
@@ -2410,6 +2431,11 @@ pub struct TaskDetail {
     pub recurrence_input: Option<String>,
     pub recurrence_mode: Option<String>,
     pub recurrence_next: Option<String>,
+    /// The task's notes and closure evidence, oldest first (the newest
+    /// [`crate::notes::MAX_NOTES_LISTED`]). Absent from a pre-3.43 server's
+    /// `/detail`, hence the default.
+    #[serde(default)]
+    pub notes: Vec<crate::notes::Note>,
 }
 
 /// Load the side-table state for one task. Returns defaults for missing rows.
@@ -2467,6 +2493,7 @@ pub fn load_detail(db: &Db, task_uuid: &str) -> Result<TaskDetail> {
         recurrence_input: rec.as_ref().map(|r| r.0.clone()),
         recurrence_mode: rec.as_ref().map(|r| r.1.clone()),
         recurrence_next: rec.as_ref().map(|r| r.2.clone()),
+        notes: crate::notes::list_in_conn(&conn, task_uuid, crate::notes::MAX_NOTES_LISTED)?,
     })
 }
 
@@ -2490,7 +2517,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 
 /// ISO-8601 UTC timestamp matching the existing Python format
 /// (e.g. `2026-05-13T17:34:56.789012+00:00`).
-fn iso_now() -> String {
+pub(crate) fn iso_now() -> String {
     let now: Zoned = Zoned::now().with_time_zone(jiff::tz::TimeZone::UTC);
     let base = now.strftime("%Y-%m-%dT%H:%M:%S").to_string();
     let micros = now.subsec_nanosecond().div_euclid(1_000);

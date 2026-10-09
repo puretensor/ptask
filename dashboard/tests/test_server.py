@@ -482,6 +482,63 @@ class DoneBlockedTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertFalse(body["ok"])
 
+class TaskNoteTests(unittest.TestCase):
+    """Notes and closure evidence reach `pt` as data, never as flags."""
+
+    def _post(self, path, payload, result=(True, "ok")):
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port)
+        try:
+            with mock.patch.object(server, "pt_exec", return_value=result) as execute:
+                connection.request("POST", path, body=json.dumps(payload).encode(),
+                                   headers={"Content-Type": "application/json"})
+                response = connection.getresponse()
+                return response.status, json.loads(response.read()), execute
+        finally:
+            connection.close()
+            httpd.shutdown()
+            thread.join(timeout=2)
+            httpd.server_close()
+
+    def test_done_without_note_is_unchanged(self):
+        status, _, execute = self._post("/api/tasks/PT-3/done", {})
+        self.assertEqual(status, 200)
+        execute.assert_called_once_with(["done", "--", "PT-3"])
+
+    def test_done_note_is_a_single_option_argument(self):
+        note = "--yes; PR #7 merged\nCI green"
+        status, _, execute = self._post("/api/tasks/PT-3/done", {"note": note})
+        self.assertEqual(status, 200)
+        execute.assert_called_once_with(["done", f"--note={note}", "--", "PT-3"])
+
+    def test_dismiss_note_is_passed_on(self):
+        status, _, execute = self._post("/api/tasks/PT-4/dismiss", {"note": "duplicate of PT-1"})
+        self.assertEqual(status, 200)
+        execute.assert_called_once_with(["dismiss", "--note=duplicate of PT-1", "--", "PT-4"])
+
+    def test_note_route_passes_text_after_the_separator(self):
+        status, body, execute = self._post("/api/tasks/PT-5/note", {"text": "-rf looked fine"})
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        execute.assert_called_once_with(["note", "--", "PT-5", "-rf looked fine"])
+
+    def test_bad_notes_are_refused_before_pt_runs(self):
+        for path, payload in [
+            ("/api/tasks/PT-5/note", {}),
+            ("/api/tasks/PT-5/note", {"text": "   "}),
+            ("/api/tasks/PT-5/note", {"text": "-"}),
+            ("/api/tasks/PT-5/note", {"text": 7}),
+            ("/api/tasks/PT-5/done", {"note": ["x"]}),
+            ("/api/tasks/PT-5/dismiss", {"note": 1}),
+            ("/api/tasks/not;an;id/note", {"text": "x"}),
+        ]:
+            status, _, execute = self._post(path, payload)
+            self.assertEqual(status, 400, (path, payload))
+            execute.assert_not_called()
+
+
 class OriginTests(unittest.TestCase):
     def test_cross_origin_post_is_rejected_before_mutation(self):
         old_pt_exec = server.pt_exec
