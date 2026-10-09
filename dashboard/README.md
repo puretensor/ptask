@@ -276,7 +276,10 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 - **v0.24.0** (pt 3.46.0) — Flux by actor. The flux range picker lists, under the
   windows, who opened (+created, reopened) and who closed (−done, dismissed)
   work in the selected window, with each actor's net; a positive net (the
-  backlog grew) is flagged. `/api/stats` carries it as
+  backlog grew) is flagged. A cut list keeps the largest |net| so the
+  biggest closers stay visible; per-actor rows are a list (not presentation
+  items inside the menu) and the dismissed-as-closure note is on-screen.
+  `/api/stats` carries it as
   `flux.by_window.<w>.by_actor`, read from the journal like `pt flux`.
 - **v0.22.0** — The Host header must name the sidecar (IP literal, `localhost`, the
   machine's short hostname, `*.ts.net`, or `PTASK_DASH_ALLOWED_HOSTS`), else 421: since v0.21.0 a

@@ -457,19 +457,93 @@ def q_tasks(status="pending", limit=500, order=None):
 def q_flux_by_actor(con, modifier: str) -> list[dict]:
     """Who opened and who closed work in the window, from the journal (the
     same counts as `pt flux`): created, done, dismissed, reopened and net per
-    actor, largest net first. A positive net grew the backlog."""
+    actor, largest net first. A positive net grew the backlog.
+
+    Counts are open↔closed transitions, not payload keys. Deleting an open
+    task is a closure (dismissed); a tombstone without status uses the
+    task's last status-bearing event.
+    """
     try:
         rows = con.execute(
-            "SELECT COALESCE(actor, 'unknown') who, "
-            "SUM(event_type = 'task.created'), SUM(event_type = 'task.completed'), "
-            "SUM(event_type = 'task.updated' AND json_valid(payload) "
-            "    AND json_extract(payload, '$.status') = 'dismissed'), "
-            "SUM(event_type = 'task.updated' AND json_valid(payload) "
-            "    AND json_extract(payload, '$.status') = 'pending') "
-            "FROM pt_event_log WHERE task_uuid IS NOT NULL "
-            "AND julianday(ts) >= julianday('now', ?) "
-            "AND event_type IN ('task.created', 'task.completed', 'task.updated') "
-            "GROUP BY who", (modifier,)).fetchall()
+            """
+            WITH in_window AS (
+              SELECT DISTINCT task_uuid FROM pt_event_log
+               WHERE task_uuid IS NOT NULL
+                 AND julianday(ts) >= julianday('now', ?)
+                 AND event_type IN ('task.created', 'task.completed',
+                                    'task.updated', 'task.deleted')
+            ),
+            ev AS (
+              SELECT id, COALESCE(actor, 'unknown') AS who, task_uuid,
+                     event_type, ts,
+                     CASE
+                       WHEN event_type = 'task.created' THEN 'open'
+                       WHEN event_type = 'task.completed' THEN 'closed_done'
+                       WHEN event_type = 'task.updated' AND json_valid(payload)
+                            AND json_extract(payload, '$.status') = 'done'
+                         THEN 'closed_done'
+                       WHEN event_type = 'task.updated' AND json_valid(payload)
+                            AND json_extract(payload, '$.status') = 'dismissed'
+                         THEN 'closed_dismissed'
+                       WHEN event_type = 'task.updated' AND json_valid(payload)
+                            AND json_extract(payload, '$.status') IS NOT NULL
+                         THEN 'open'
+                       WHEN event_type = 'task.deleted' THEN
+                         CASE
+                           WHEN json_valid(payload)
+                                AND json_extract(payload, '$.status')
+                                    IN ('done', 'dismissed')
+                             THEN 'deleted_closed'
+                           WHEN json_valid(payload)
+                                AND json_extract(payload, '$.status') IS NOT NULL
+                             THEN 'deleted_open'
+                           ELSE 'deleted_unknown'
+                         END
+                       ELSE NULL
+                     END AS kind
+                FROM pt_event_log
+               WHERE task_uuid IN (SELECT task_uuid FROM in_window)
+                 AND event_type IN ('task.created', 'task.completed',
+                                    'task.updated', 'task.deleted')
+            ),
+            seq AS (
+              SELECT who, ts, event_type, kind,
+                     LAG(kind) OVER (
+                       PARTITION BY task_uuid ORDER BY julianday(ts), id
+                     ) AS prev
+                FROM ev
+               WHERE kind IS NOT NULL
+            ),
+            trans AS (
+              SELECT who, ts,
+                     CASE
+                       WHEN event_type = 'task.created' THEN 'created'
+                       WHEN kind = 'open'
+                            AND prev IN ('closed_done', 'closed_dismissed')
+                         THEN 'reopened'
+                       WHEN kind = 'closed_done'
+                            AND (prev IS NULL OR prev = 'open') THEN 'done'
+                       WHEN kind = 'closed_dismissed'
+                            AND (prev IS NULL OR prev = 'open') THEN 'dismissed'
+                       WHEN kind = 'deleted_open' THEN 'dismissed'
+                       WHEN kind = 'deleted_unknown'
+                            AND (prev IS NULL OR prev = 'open') THEN 'dismissed'
+                       ELSE NULL
+                     END AS action
+                FROM seq
+            )
+            SELECT who,
+                   SUM(action = 'created'),
+                   SUM(action = 'done'),
+                   SUM(action = 'dismissed'),
+                   SUM(action = 'reopened')
+              FROM trans
+             WHERE julianday(ts) >= julianday('now', ?)
+               AND action IS NOT NULL
+             GROUP BY who
+            """,
+            (modifier, modifier),
+        ).fetchall()
     except sqlite3.Error:
         # A DB without the journal (a bare fixture) has no flux to split.
         return []

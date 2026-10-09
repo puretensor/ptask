@@ -90,9 +90,11 @@ commit; a scoring failure does not roll back a successful edit.
   `task_links`; mirrors HAL's spawn_task provenance pattern.
 - **task_flux** (v3.46.0) — who opened and who closed work over a window
   (`minutes`, default 24h): created, done, dismissed, reopened and net per
-  actor. Check your own row before reporting a closing pass: a pass must not
+  actor, counting real open↔closed transitions (deleting an open task is a
+  closure). Check your own row before reporting a closing pass: a pass must not
   open more tasks than it closes (net > 0 means it did). `task_digest`
-  carries the same split for its window as `flux_by_actor`.
+  carries the same split for its own window (UTC midnight N days ago) as
+  `flux_by_actor`.
 - **task_digest** — deterministic session priming (recent done/dismissed,
   created count, ready queue). Deliberately NOT an LLM summary: the consumer
   is a model; structured facts beat a second model's paraphrase and can't

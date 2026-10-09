@@ -104,12 +104,15 @@ from `pt rm`: the row and its history survive.
 Who opened and who closed work over a window (`30m`, `6h`, `24h`, `7d`,
 `2w`; max 90d), from the attributed journal: per actor, tasks created, done,
 dismissed and reopened, and `net` = created + reopened − done − dismissed,
-the actor's effect on the open-task count. Largest net first, with a total
-row; a positive net is highlighted. It answers the question the cockpit's
-`+13 / −4` chip raises (who opened the thirteen?) and checks the rule that
-a closing pass must not open more than it closes. Read-only; `--json`
-honoured. The same split is in `pt digest` (`flux_by_actor`, for its
-window), MCP `task_flux`, and the cockpit's flux range picker.
+the actor's effect on the open-task count. Counts are real open↔closed
+transitions (an un-block of an already-open task is not a reopen; a second
+completion of a done task is not a close). Deleting an open task counts as
+a closure. Largest net first, with a total row; a positive net is
+highlighted. It answers the question the cockpit's `+13 / −4` chip raises
+(who opened the thirteen?) and checks the rule that a closing pass must not
+open more than it closes. Read-only; `--json` honoured. The same split is
+in `pt digest` (`flux_by_actor`, covering the digest's own window from UTC
+midnight N days ago), MCP `task_flux`, and the cockpit's flux range picker.
 
 ### `pt rm <query> [-y | --yes]`
 

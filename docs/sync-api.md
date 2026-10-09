@@ -274,7 +274,8 @@ check on every request, and approval decisions gated by
 `PTASK_DASH_DECIDE_TOKEN` (see `dashboard/README.md`).
 
 Reads: `GET /api/stats` (its `flux.by_window.<w>.by_actor` lists created,
-done, dismissed, reopened and net per actor, as `pt flux`, v3.46.0) ·
+done, dismissed, reopened and net per actor, as `pt flux` — real
+open↔closed transitions; deleting an open task is a closure; v3.46.0) ·
 `/api/tasks?status=&limit= · /api/critical?limit= ·
 /api/timeline · /api/heatmap · /api/tasks/{id}/events` (journal history) ·
 `GET /api/stream` (SSE, `event: change` frames with journal deltas).

@@ -1317,12 +1317,21 @@ pub fn delete_task(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
 }
 
 fn delete_task_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
-    // Capture the PT-N before the CASCADE wipes pt_extensions.
-    let pt_id: Option<String> = tx
-        .query_row("SELECT pt_id FROM tasks WHERE id=?1", [task_uuid], |r| {
-            r.get(0)
-        })
+    // Capture the PT-N and status before the CASCADE wipes the row.
+    // Flux counts a delete of an open task as a closure; the status on
+    // the tombstone is what new readers use (old tombstones fall back to
+    // the last status-bearing event).
+    let row: Option<(Option<String>, String)> = tx
+        .query_row(
+            "SELECT pt_id, status FROM tasks WHERE id=?1",
+            [task_uuid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
+    let (pt_id, status) = match row {
+        Some((pt_id, status)) => (pt_id, Some(status)),
+        None => (None, None),
+    };
     // task_links and task_labels (V010) carry no foreign key, so nothing
     // cascades: without these, a deleted task stayed a prerequisite (or a
     // dependent) of live tasks and kept its labels.
@@ -1332,13 +1341,11 @@ fn delete_task_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCt
     )?;
     tx.execute("DELETE FROM task_labels WHERE task_uuid=?1", [task_uuid])?;
     tx.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
-    record_event_tx(
-        tx,
-        ctx,
-        task_uuid,
-        "task.deleted",
-        &serde_json::json!({ "task_uuid": task_uuid, "pt_id": pt_id }),
-    )?;
+    let mut payload = serde_json::json!({ "task_uuid": task_uuid, "pt_id": pt_id });
+    if let Some(status) = status {
+        payload["status"] = serde_json::Value::String(status);
+    }
+    record_event_tx(tx, ctx, task_uuid, "task.deleted", &payload)?;
     Ok(())
 }
 
@@ -3087,6 +3094,7 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
             assert_eq!(v["pt_id"], "PT-1");
             assert_eq!(v["task_uuid"], t.id);
+            assert_eq!(v["status"], "pending");
             let rows: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
             assert_eq!(rows, 0);
             Ok(())

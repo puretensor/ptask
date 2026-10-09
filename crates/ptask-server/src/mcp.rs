@@ -516,7 +516,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Who opened and who closed work over a window (default 24h): created, done, dismissed, reopened and net per actor, from the journal. net = created + reopened - done - dismissed. Before reporting a closing pass, check your own row: a closing pass must not open more tasks than it closes (net > 0)."
+        description = "Who opened and who closed work over a window (default 24h): created, done, dismissed, reopened and net per actor, from the journal. Counts are real open/closed transitions; deleting an open task is a closure. net = created + reopened - done - dismissed. Before reporting a closing pass, check your own row: a closing pass must not open more tasks than it closes (net > 0)."
     )]
     async fn task_flux(
         &self,
