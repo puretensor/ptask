@@ -221,6 +221,37 @@ fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             lines.push(Line::from(safe(paragraph)));
         }
     }
+    // Notes and closure evidence, newest last (the pane scrolls with the
+    // detail block, so the latest sits nearest the description above).
+    if let Some(detail) = &app.peek_detail
+        && !detail.notes.is_empty()
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("notes ({})", detail.notes.len()),
+            Style::default().fg(Color::DarkGray),
+        )));
+        for n in &detail.notes {
+            let when = n.ts.get(..16).unwrap_or(&n.ts).replace('T', " ");
+            let kind = if n.kind == "note" {
+                String::new()
+            } else {
+                format!(" · {}", n.kind)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(when, Style::default().fg(Color::DarkGray)),
+                Span::raw(" "),
+                Span::styled(
+                    safe(n.actor.as_deref().unwrap_or("-")),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(safe(&kind), Style::default().fg(Color::Yellow)),
+            ]));
+            for paragraph in n.text.split('\n') {
+                lines.push(Line::from(format!("  {}", safe(paragraph))));
+            }
+        }
+    }
 
     frame.render_widget(
         Paragraph::new(lines)
