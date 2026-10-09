@@ -664,6 +664,10 @@ struct DoneArgs {
     /// One or more tasks: PT-N (e.g. PT-42), bare integer, or title substring.
     #[arg(required = true)]
     queries: Vec<String>,
+    /// After closing, claim the next ready task (`pt next` order) for
+    /// $PTASK_ACTOR: close and continue in one command.
+    #[arg(long = "claim-next")]
+    claim_next: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1405,15 +1409,32 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
         };
         match &outcome {
             tasks::DoneOutcome::Completed => {
+                // What this close released: dependents that are ready now.
+                let unblocked = ptask_core::dag::unblocked_by(db, &task.id).unwrap_or_default();
                 if !json_mode() {
                     println!(
                         "{}",
                         ui::outcome(ui::Status::Ok, "done", &pt, &task.title, "")
                     );
+                    for u in &unblocked {
+                        println!(
+                            "{}",
+                            ui::outcome(
+                                ui::Status::Changed,
+                                "unblocked",
+                                u.pt_id.as_deref().unwrap_or_else(|| short_id(&u.id)),
+                                &u.title,
+                                "ready"
+                            )
+                        );
+                    }
                 }
                 results.push(serde_json::json!({
                     "pt_id": pt, "task_uuid": task.id, "title": task.title,
-                    "outcome": "completed"
+                    "outcome": "completed",
+                    "unblocked": unblocked.iter().map(|u| serde_json::json!({
+                        "pt_id": u.pt_id, "task_uuid": u.id, "title": u.title,
+                    })).collect::<Vec<_>>(),
                 }));
             }
             tasks::DoneOutcome::Advanced { next_deadline } => {
@@ -1436,8 +1457,40 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
             }
         }
     }
+    // Close and continue: only after every requested close went through
+    // (a failed close is not a cue to start something else).
+    let claimed = if a.claim_next && failed == 0 {
+        // A keyed close already used the key; the claim journals under its own.
+        let ctx = cli_ctx();
+        let ctx = match ctx.event_uuid.clone() {
+            Some(key) => ctx.with_uuid(format!("{key}:claim-next")),
+            None => ctx,
+        };
+        Some(ptask_core::dag::claim_next(db, &ctx).map_err(anyhow::Error::msg)?)
+    } else {
+        None
+    };
     if json_mode() {
-        crate::print_json(&results)?;
+        match &claimed {
+            Some(next) => crate::print_json(&serde_json::json!({
+                "results": results, "claimed_next": next,
+            }))?,
+            None => crate::print_json(&results)?,
+        }
+    } else if let Some(next) = &claimed {
+        match next {
+            Some(n) => println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Busy,
+                    "claimed",
+                    n.pt_id.as_deref().unwrap_or_else(|| short_id(&n.id)),
+                    &n.title,
+                    "next ready · in progress"
+                )
+            ),
+            None => println!("{}", ui::empty("nothing ready to claim next")),
+        }
     }
     if failed > 0 {
         anyhow::bail!("{failed} of {} task(s) not completed", a.queries.len());

@@ -82,6 +82,10 @@ pub struct DoneArg {
     /// task_done never advances a recurring task twice. "" = it had none.
     #[serde(default)]
     pub expected_deadline: Option<String>,
+    /// After the close, claim the next ready task (task_next order) for you
+    /// and return it as claimed_next: close and continue in one call.
+    #[serde(default)]
+    pub claim_next: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -410,13 +414,14 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Mark a task done. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline."
+        description = "Mark a task done. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline. The reply lists unblocked: tasks this close made ready. Pass claim_next=true to also claim the next ready task (task_next order) and get it back as claimed_next (null when nothing is claimable), saving a task_next + task_claim round trip."
     )]
     async fn task_done(
         &self,
         Parameters(DoneArg {
             id,
             expected_deadline,
+            claim_next,
         }): Parameters<DoneArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
@@ -427,19 +432,33 @@ impl PtaskMcp {
                 .map_err(domain_err)?;
             let outcome = ptask_core::tasks::mark_done(&db, &t, &ctx).map_err(domain_err)?;
             rescore_db(&db);
-            match outcome {
-                ptask_core::tasks::DoneOutcome::Completed => json_ok(&serde_json::json!({
+            let mut v = match outcome {
+                ptask_core::tasks::DoneOutcome::Completed => serde_json::json!({
                     "ok": true, "pt_id": t.pt_id, "status": "done"
-                })),
+                }),
                 ptask_core::tasks::DoneOutcome::Advanced { next_deadline } => {
-                    json_ok(&serde_json::json!({
+                    serde_json::json!({
                         "ok": true,
                         "pt_id": t.pt_id,
                         "status": "advanced",
                         "next_deadline": next_deadline,
-                    }))
+                    })
                 }
+            };
+            // The close is committed; what follows only reads (and, asked,
+            // claims). A failure here must not read as a failed close.
+            let unblocked = ptask_core::dag::unblocked_by(&db, &t.id)
+                .map(|ts| ts.iter().map(task_json).collect::<Vec<_>>())
+                .unwrap_or_default();
+            v["unblocked"] = serde_json::json!(unblocked);
+            if claim_next {
+                v["claimed_next"] = match ptask_core::dag::claim_next(&db, &ctx) {
+                    Ok(Some(n)) => with_goals(&db, &n, task_json(&n))?,
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => serde_json::json!({ "error": e.to_string() }),
+                };
             }
+            json_ok(&v)
         })
         .await
     }
@@ -1068,6 +1087,7 @@ mod tests {
             mcp.task_done(Parameters(DoneArg {
                 id: t.pt_id.clone().unwrap(),
                 expected_deadline: Some("2099-01-01".into()),
+                claim_next: false,
             }))
         };
         done().await.unwrap();
@@ -1094,6 +1114,7 @@ mod tests {
             mcp.task_done(Parameters(DoneArg {
                 id,
                 expected_deadline: None,
+                claim_next: false,
             }))
         };
         done(t.pt_id.clone().unwrap()).await.unwrap();
@@ -1142,6 +1163,7 @@ mod tests {
             .task_done(Parameters(DoneArg {
                 id: t.pt_id.clone().unwrap(),
                 expected_deadline: None,
+                claim_next: false,
             }))
             .await
             .unwrap();
@@ -1337,5 +1359,42 @@ mod tests {
         })
         .unwrap();
         let _ = result;
+    }
+
+    #[tokio::test]
+    async fn task_done_reports_unblocked_and_can_claim_the_next_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let ctx = EventCtx::test();
+        let base = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("provision"), &ctx)
+            .unwrap();
+        let next =
+            ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("migrate"), &ctx).unwrap();
+        ptask_core::tasks::add_dependency(&db, &next.id, &base.id, &ctx).unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "hal".into());
+        let r = mcp
+            .task_done(Parameters(DoneArg {
+                id: base.pt_id.clone().unwrap(),
+                expected_deadline: None,
+                claim_next: true,
+            }))
+            .await
+            .unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(v.pointer("/content/0/text").unwrap().as_str().unwrap()).unwrap();
+        assert_eq!(body["status"], "done");
+        assert_eq!(body["unblocked"][0]["pt_id"], next.pt_id.clone().unwrap());
+        assert_eq!(body["claimed_next"]["pt_id"], next.pt_id.clone().unwrap());
+        let status: String = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&next.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "in_progress");
     }
 }

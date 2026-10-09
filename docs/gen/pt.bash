@@ -1733,7 +1733,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__done)
-            opts="-h --db --json --idempotency-key --color --no-color --help <QUERIES>..."
+            opts="-h --claim-next --db --json --idempotency-key --color --no-color --help <QUERIES>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

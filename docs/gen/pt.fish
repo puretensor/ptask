@@ -112,6 +112,7 @@ complete -c pt -n "__fish_pt_using_subcommand done" -l idempotency-key -d 'Idemp
 complete -c pt -n "__fish_pt_using_subcommand done" -l color -d 'Colour: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c pt -n "__fish_pt_using_subcommand done" -l claim-next -d 'After closing, claim the next ready task (`pt next` order) for $PTASK_ACTOR: close and continue in one command'
 complete -c pt -n "__fish_pt_using_subcommand done" -l json -d 'Emit machine-readable JSON instead of human text (task-facing verbs)'
 complete -c pt -n "__fish_pt_using_subcommand done" -l no-color -d 'Plain output — shorthand for `--color never`'
 complete -c pt -n "__fish_pt_using_subcommand done" -s h -l help -d 'Print help'

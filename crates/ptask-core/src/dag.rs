@@ -66,6 +66,47 @@ pub fn next_ready(db: &Db, limit: usize) -> Result<Vec<Task>> {
     Ok(out)
 }
 
+/// Close-and-continue, part one: the dependents of `closed_uuid` that are
+/// ready now, i.e. open (triage/backlog/todo/in_progress) with no
+/// prerequisite left open. Called after a close, it names the work that
+/// close released, in the ready queue's order.
+pub fn unblocked_by(db: &Db, closed_uuid: &str) -> Result<Vec<Task>> {
+    let dependents: std::collections::HashSet<String> = {
+        let conn = db.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT from_uuid FROM task_links WHERE to_uuid = ?1 AND kind = 'depends_on'",
+        )?;
+        stmt.query_map([closed_uuid], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    if dependents.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(next_ready(db, usize::MAX)?
+        .into_iter()
+        .filter(|t| dependents.contains(&t.id))
+        .collect())
+}
+
+/// Close-and-continue, part two: claim the next ready task for `ctx`'s
+/// actor, in `pt next` order, skipping tasks already in progress. When
+/// another claimer wins a candidate between the read and the claim, the
+/// next one is tried; `None` when nothing ready is claimable.
+pub fn claim_next(db: &Db, ctx: &crate::event_log::EventCtx) -> Result<Option<Task>> {
+    for t in next_ready(db, 50)? {
+        if !matches!(t.status.as_str(), "triage" | "backlog" | "todo") {
+            continue;
+        }
+        match crate::tasks::claim(db, &t.id, ctx) {
+            Ok(()) => return Ok(Some(t)),
+            // Lost the race (or it moved on): the next candidate.
+            Err(crate::Error::Other(msg)) if msg.contains("not claimable") => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +286,50 @@ mod tests {
         .unwrap();
         let ready = next_ready(&db, 10).unwrap();
         assert_eq!(ready.len(), 1);
+    }
+
+    #[test]
+    fn a_close_names_what_it_unblocked_and_claim_next_takes_the_top() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("c.db")).unwrap();
+        let ctx = EventCtx::test();
+        let mk = |t: &str| crate::tasks::create(&db, NewTask::minimal(t), &ctx).unwrap();
+        let base = mk("provision the VLAN");
+        let other = mk("second prerequisite");
+        let solo = mk("waits on base only");
+        let both = mk("waits on base and other");
+        crate::tasks::add_dependency(&db, &solo.id, &base.id, &ctx).unwrap();
+        crate::tasks::add_dependency(&db, &both.id, &base.id, &ctx).unwrap();
+        crate::tasks::add_dependency(&db, &both.id, &other.id, &ctx).unwrap();
+        crate::tasks::update_priority(&db, &solo.id, 4, &ctx).unwrap();
+
+        crate::tasks::mark_done(&db, &base, &ctx).unwrap();
+        let freed: Vec<String> = unblocked_by(&db, &base.id)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.title)
+            .collect();
+        assert_eq!(freed, ["waits on base only"], "both still waits on other");
+        assert!(
+            unblocked_by(&db, &solo.id).unwrap().is_empty(),
+            "no dependents"
+        );
+
+        let hal = EventCtx::local("hal");
+        let got = claim_next(&db, &hal).unwrap().unwrap();
+        assert_eq!(
+            got.title, "waits on base only",
+            "highest priority ready first"
+        );
+        // In progress now: the next call skips it and takes the next ready.
+        let got = claim_next(&db, &hal).unwrap().unwrap();
+        assert_eq!(got.title, "second prerequisite");
+        crate::tasks::mark_done(&db, &other, &ctx).unwrap();
+        let got = claim_next(&db, &hal).unwrap().unwrap();
+        assert_eq!(got.title, "waits on base and other");
+        assert!(
+            claim_next(&db, &hal).unwrap().is_none(),
+            "nothing claimable left"
+        );
     }
 }

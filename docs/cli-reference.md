@@ -36,9 +36,15 @@ Create a task. The free-text title runs through the quick-add parser
 | `-v`, `--verbose` | show description + UUID |
 | `[filter]` positional | DSL — see [dsl.md](dsl.md) |
 
-### `pt done <query>`
+### `pt done <query> [...] [--claim-next]`
 
-Mark done by `PT-N`, bare integer `42`, or title substring.
+Mark done by `PT-N`, bare integer `42`, or title substring. Each completion
+lists the tasks it unblocked (dependents with no prerequisite left open; in
+`--json`, `unblocked` per result). `--claim-next` (v3.47.0) then claims the
+next ready task in `pt next` order for `$PTASK_ACTOR`, skipping tasks already
+in progress, and prints it (`--json`: `{"results": [...], "claimed_next":
+task | null}`): close and continue in one command. It claims only when every
+requested close succeeded.
 
 ### `pt priority <query> <level>` (alias `pt pri`)
 

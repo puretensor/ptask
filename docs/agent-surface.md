@@ -54,7 +54,11 @@ leave the task and journal unchanged. A successful combined edit produces one
 commit; a scoring failure does not roll back a successful edit.
 
 - **task_done** — completes a task, or advances a recurring one in place
-  (`status=advanced`, `next_deadline`). Pass `expected_deadline` (the deadline
+  (`status=advanced`, `next_deadline`). The reply lists `unblocked`: the
+  tasks this close made ready. With `claim_next: true` (v3.47.0) it also
+  claims the next ready task (task_next order, skipping in-progress ones) and
+  returns it as `claimed_next` with its goal chain (null when nothing is
+  claimable): close and continue without a task_next + task_claim round trip. Pass `expected_deadline` (the deadline
   you last saw; `""` = none) to make a retry or a duplicate safe: if the task
   has moved on, the call errors and nothing changes, instead of completing the
   next occurrence too. The dashboard's `POST /api/tasks/{id}/done` takes the
