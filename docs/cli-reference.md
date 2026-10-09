@@ -25,6 +25,17 @@ Create a task. The free-text title runs through the quick-add parser
 | `--deadline <ISO>` | `2026-05-21` or `2026-05-21T10:00:00+01:00` |
 | `--reason` | persisted as `ai_reasoning` |
 | `--raw` | skip quick-add parsing |
+| `--unique` | refuse to create when a near-certain duplicate exists (score ≥ 0.75 and the same identifier-like words — numbers, dates, hashes, hosts; reporting starts at 0.6, refusing is stricter); lists the candidates and exits 1 (`--json`: `{"created": false, "possible_duplicates": [...]}` on stdout) |
+
+Every add reports likely duplicates (v3.45.0): open tasks, and tasks done or
+dismissed in the last 14 days, whose title shares at least two identity words
+and scores at least 0.6 (a Dice coefficient over lowercase title words,
+stopwords and `PT-N` references dropped, plurals folded). The task is still
+created; the human output adds a `duplicate?` line per candidate and the
+`pt merge` command (only into an open candidate), and `--json` adds `possible_duplicates`
+(`pt_id`, `title`, `status`, `score`). A task already merged away is never a
+candidate; its canonical task is. Local and deterministic: no model, no
+network.
 
 ### `pt list [filter] [...]` (alias `pt ls`)
 
@@ -36,9 +47,38 @@ Create a task. The free-text title runs through the quick-add parser
 | `-v`, `--verbose` | show description + UUID |
 | `[filter]` positional | DSL — see [dsl.md](dsl.md) |
 
-### `pt done <query>`
+### `pt done <query> [...] [-m | --note TEXT]`
 
-Mark done by `PT-N`, bare integer `42`, or title substring.
+Mark done by `PT-N`, bare integer `42`, or title substring. `--note` journals
+closure evidence (what was done, how it was verified) inside the completion
+event, attributed like the close itself; with several tasks each gets the
+note. A blank note refuses the close.
+
+### `pt note <query> <text…>` (alias `annotate`, v3.43.0)
+
+Append a note to a task: a finding, partial progress, evidence, a handover.
+Words are joined with spaces; a lone `-` reads the note from stdin (pipe a
+command's output in). Notes are append-only and attributed (actor + surface
+from the journal); at most 16 KiB; blank refused. A substring reaches open
+tasks; a done or dismissed task by `PT-N` or uuid, so evidence that arrives
+after the close still lands. Honours `--idempotency-key` (a keyed `note -`
+fingerprints the stdin text, so a retry with different text is refused). A
+note counts as touching the task: it bumps `updated_at`, which the neglect
+score, `pt review --stale-days` and the reaper read. Notes are not in `pt
+search` (titles and descriptions only). `pt undo` treats `task.noted` as
+transparent: a note is never undone and never shadows the close it follows.
+
+Where the trail shows up: `pt show` (a NOTES section, oldest first; `--json`
+adds `notes`), `pt context` (a `## Notes` section, one line per note, so a
+worker starts from what earlier workers found), `pt log` (the text inline),
+`pt digest` (each recently closed task carries its closing `note`), `pt
+export` (`task_notes.jsonl`, live tasks only), the TUI detail pane, MCP
+`task_show`, and the cockpit's task drawer. Long notes are truncated to about
+300 characters with a marker in `pt digest` and the `pt context` markdown
+brief; `pt show` and `pt context --json`'s `notes` array keep the full text.
+Automated closers write their own evidence: a git `Closes PT-N` names the
+push, commit and subject; `/capture/resolve` names the resolver and capture
+key; the reaper says it reaped, why, and how to reopen.
 
 ### `pt priority <query> <level>` (alias `pt pri`)
 
@@ -94,10 +134,42 @@ All honour `--json`. Tree order is parent before children, siblings by seq.
 `set-parent` refuses self and cycles. Walks are cycle-safe (stop on a
 repeated node, depth cap 16). Full model: [goals.md](goals.md).
 
-### `pt dismiss <query>`
+### `pt dupes [query] [--threshold 0.6] [-n 20]` (alias `dups`, v3.45.0)
+
+Read-only. Without a query: pairs of open tasks that look like the same work,
+best first, the older task as `a` and the newer as `b`, each with the
+`pt merge B --into A` to fold it. With a query: likely duplicates of that one
+task (open or closed in the last 14 days). `--json` honoured.
+
+### `pt merge <duplicate> --into <task> [-m REASON]` (v3.45.0)
+
+Close a duplicate into the task it duplicates, in one transaction:
+
+- the duplicate is dismissed (`task.updated`) with a `task_links` row of
+  kind `duplicate_of` (the schema's merge relation since V012), so `pt show`
+  reads "duplicate of PT-N (merged)" and the target lists it under "merged
+  in" (`--json`: `duplicate_of`, `merged_in`). Reopen and undo remove the
+  row, so a later plain dismissal is not a merge;
+- every task that depended on the duplicate now depends on the target.
+  Dismissing a prerequisite satisfies it, so without the move its dependents
+  would silently unblock;
+- the duplicate's own prerequisites, labels, recurrence, goal,
+  `discovered_from` links and subtasks carry over; the target takes the
+  higher priority, and takes the duplicate's deadline when it has none
+  (and did not already recur);
+- a move that would close a dependency cycle refuses the whole merge.
+
+The duplicate must be open; the target may be done (it was already done)
+but not dismissed, and a done target is refused when the duplicate still
+has open dependents (moving them onto closed work would unblock them).
+`pt undo` of a merge reopens the duplicate and moves back what the merge
+carried. Honours `--idempotency-key`.
+
+### `pt dismiss <query> [-m | --note TEXT]`
 
 Soft-close a task (`status → dismissed`). Reversible with `pt reopen`. Distinct
-from `pt rm`: the row and its history survive.
+from `pt rm`: the row and its history survive. `--note` records why (a
+duplicate of PT-N, superseded, obsolete) in the dismissal event.
 
 ### `pt flux [--since 24h]` (v3.46.0)
 
@@ -173,7 +245,7 @@ pt view rm <name>                     # delete
 ```
 pt mcp                    # MCP server over stdio (tools: task_next/list/add/…)
 pt digest [--days 7]      # session-priming JSON: recent done/dismissed + ready queue
-pt export [--git] [--out DIR]   # JSONL projection of the spine (nightly timer)
+pt export [--git] [--out DIR]   # JSONL projection of the spine incl. task_notes.jsonl (nightly timer)
 pt delegate PT-42         # prints the operator-gated claude -p command (never spawns)
 ```
 
@@ -199,14 +271,18 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 
 | Verb | Use |
 |---|---|
-| `pt start <query>` | mark in progress (status_v2 `in_progress`) |
+| `pt start <query>` | mark in progress (status_v2 `in_progress`); the starter becomes the holder unless someone already holds a live claim. An expired lease is taken over and cleared. `--json` includes `claim_token` when this start took the claim |
+| `pt claim <query> [--lease 30m]` (v3.44.0) | atomic claim (todo/backlog/triage → in_progress) held by `$PTASK_ACTOR`; a losing claimer's error names the holder. `--lease` (`30m`, `2h`, `1d`; max 1d) sets an expiry kept alive by `pt heartbeat`; without one the claim never expires on its own. `--json` returns `claim_token` (opaque, new on every claim). An expired lease is free to take over |
+| `pt heartbeat <query> --claim TOKEN [--lease 30m]` | renew the lease of the claim instance `TOKEN` names (`TOKEN` is `claim_token` from `pt claim` / `pt start`). Exits 1 with `claim lost: …` when that instance is no longer current (released, reclaimed, closed, retaken): stop working on it. A heartbeat without `--claim` is refused. Not journaled, so `--idempotency-key` is refused |
+| `pt release <query> [--claim TOKEN] [--force] [-m REASON]` | hand a task back (in_progress → todo) without closing it. `--claim TOKEN` names the instance; without a token, `--force` is required, and so is releasing an unowned in-progress task or someone else's claim (journaled as forced, with the previous holder) |
+| `pt reclaim [--apply]` | list in-progress tasks whose lease ran out (holder, lease end); `--apply` returns them to todo (`task.reclaimed`), re-checking each under the write lock so a late heartbeat wins. `--json` honoured. The hourly `pt scoring run` reclaims too, **only with `PTASK_CLAIM_RECLAIM=1`** |
 | `pt kind <query> <scout\|ship> [--deliverable report\|pr\|none]` | set a task's shape; `pt add --kind scout` declares it at creation |
 | `pt promote <query>` | investigation → implementation: flips `kind` scout→ship (and `report`→`pr`) on the **same row**, so the open count is unchanged. Refuses a terminal task — reopen it first. |
 | `pt snooze <query> <until…>` | park until a date (natural language ok); auto-wakes to todo via the hourly scoring run |
 | `pt depend <query> --on <target> [--clear]` | dependency edges in `task_links`; `pt next` hides tasks with unmet deps; **`pt done` refuses (exit non-zero, names the open blockers) while any prerequisite is still open** — dismissed prerequisites count as satisfied; `pt start` / claim are not gated (only closing is); no `--on` shows current edges |
 | `pt review [--stale-days N]` | interactive sweep of stale tasks (TTY: k/d/x/s/q; non-TTY prints the list) |
 | `pt search <query…> [-n N]` | FTS5 full-text over titles + descriptions; free text: every word must match, punctuation and AND/OR/NOT are literal (`follow-up`, `c++`, `PT-2201` just work), a trailing `*` matches a prefix |
-| `pt bulk '<filter>' --set-priority P \| --done \| --dismiss [--dry-run]` | one action across every DSL match |
+| `pt bulk '<filter>' --set-priority P \| --done \| --dismiss [-m NOTE] [--dry-run]` | one action across every DSL match; `--note` journals the same note with each completion or dismissal |
 | `pt done <q1> <q2> …` | done now accepts multiple tasks |
 
 Globals (v2.0.0): `--json` on task-facing verbs emits machine-readable
@@ -238,7 +314,7 @@ not-yet-retired consumers).
 | Verb | Use |
 |---|---|
 | `pt log <query> [-n N]` | attributed event history for a task: when, who (actor), via which surface, what |
-| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor, `$PTASK_ACTOR`, default `shell`, through the CLI/TUI surface: a task a `pt mcp` server added under your actor is not yours) within your last 50 task events (done/dismiss → reopen, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, that parents another task, or that an approval references, is never deleted: when your most recent undoable change is such a create, undo refuses and names it rather than reaching further back. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
+| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor, `$PTASK_ACTOR`, default `shell`, through the CLI/TUI surface: a task a `pt mcp` server added under your actor is not yours) within your last 50 task events (done/dismiss → reopen, a merge fully reversed, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, that parents another task, or that an approval references, is never deleted: when your most recent undoable change is such a create, undo refuses and names it rather than reaching further back. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
 | `pt token create <client_id> [--scope read\|capture\|write\|admin]` | mint a named scoped API token (plain value shown ONCE; only the sha256 is stored) |
 | `pt token list` | client, scope, active/revoked, created/last-used |
 | `pt token revoke <client_id>` | revoke all active tokens for a client |
@@ -255,13 +331,14 @@ Talks to a canonical `pt serve` over Tailscale; no local DB.
 |---|---|
 | `pt remote add "..." [--url ...]` | quick-add on the remote canonical |
 | `pt remote list [-s STATUS -p P -n N]` | server-side `GET /list` (severity order, like local `pt list`); `-p` is folded into the filter |
-| `pt remote done <query>` | server-side `/resolve` + `task_done` |
+| `pt remote done <query> [-m NOTE]` | server-side `/resolve` + `task_done` (with the closure note) |
+| `pt remote note <query> <text…>` | server-side `task_note`; `-` reads stdin |
 | `pt remote priority <query> <level>` (alias `pri`) | server-side `/resolve` + `task_priority` (+ server rescore) |
 | `pt remote edit <query> [--deadline ISO \| --clear-deadline] [--title T] [--desc D]` (alias `update`) | server-side `/resolve` + `task_edit` (deadline) and/or `task_retext` (title/desc) |
 | `pt remote reopen <query>` | server-side `/resolve` (incl. done) + `task_reopen` |
-| `pt remote show <query>` | base row + side-table detail via `GET /detail/{uuid}` (read-only) |
+| `pt remote show <query>` | base row + side-table detail (incl. notes) via `GET /detail/{uuid}` (read-only) |
 | `pt remote next [-n N]` | DAG-ready tasks via `GET /next` (server resolves `depends_on`) |
-| `pt remote dismiss <query>` | server-side `/resolve` + `task_dismiss` (soft close; reversible via reopen) |
+| `pt remote dismiss <query> [-m NOTE]` | server-side `/resolve` + `task_dismiss` (soft close; reversible via reopen) |
 | `pt remote start <query>` | server-side `task_start` |
 | `pt remote snooze <query> <until…>` | server-side `task_snooze` (date parsed locally) |
 | `pt remote depend <query> --on <t> [--clear]` | server-side `task_depend` |

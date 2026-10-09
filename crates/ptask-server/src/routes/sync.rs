@@ -134,6 +134,7 @@ fn command_event_types(kind: &str) -> &'static [&'static str] {
         "task_priority" | "task_edit" | "task_reopen" | "task_retext" | "task_dismiss"
         | "task_start" | "task_snooze" | "task_depend" => &["task.updated"],
         "task_delete" => &["task.deleted"],
+        "task_note" => &["task.noted"],
         _ => &[],
     }
 }
@@ -512,9 +513,10 @@ fn apply_command(
                     ));
                 }
             };
+            let note = note_arg(&cmd.args, "task_done")?;
             let task = tasks::expect_deadline(resolve_task(state, &cmd.args)?, expected)?;
-            let outcome = tasks::mark_done(&state.db, &task, &sync_ctx(actor, cmd))?;
-            let (event_type, payload) = match outcome {
+            let outcome = tasks::mark_done_noted(&state.db, &task, note, &sync_ctx(actor, cmd))?;
+            let (event_type, mut payload) = match outcome {
                 DoneOutcome::Completed => (
                     "task.completed".to_string(),
                     serde_json::json!({"task_uuid": task.id, "pt_id": task.pt_id}),
@@ -528,6 +530,9 @@ fn apply_command(
                     }),
                 ),
             };
+            if let Some(n) = note {
+                payload["note"] = serde_json::json!(n.trim());
+            }
             Ok((
                 Some(task.id),
                 EventPayload {
@@ -614,19 +619,41 @@ fn apply_command(
             ))
         }
         "task_dismiss" => {
+            let note = note_arg(&cmd.args, "task_dismiss")?;
             let task = resolve_task(state, &cmd.args)?;
-            tasks::dismiss(&state.db, &task.id, &sync_ctx(actor, cmd))?;
+            tasks::dismiss_noted(&state.db, &task.id, note, &sync_ctx(actor, cmd))?;
+            let mut payload = serde_json::json!({ "task_uuid": task.id, "status": "dismissed" });
+            if let Some(n) = note {
+                payload["note"] = serde_json::json!(n.trim());
+            }
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
                     event_type: "task.updated".into(),
-                    payload: serde_json::json!({ "task_uuid": task.id, "status": "dismissed" }),
+                    payload,
+                },
+            ))
+        }
+        "task_note" => {
+            let text = match cmd.args.get("text") {
+                Some(Value::String(s)) => s.as_str(),
+                _ => return Err(anyhow::anyhow!("task_note: args.text must be a string")),
+            };
+            let task = resolve_task(state, &cmd.args)?;
+            let note = ptask_core::notes::add(&state.db, &task.id, text, &sync_ctx(actor, cmd))?;
+            Ok((
+                Some(task.id.clone()),
+                EventPayload {
+                    event_type: "task.noted".into(),
+                    payload: serde_json::json!({
+                        "task_uuid": task.id, "pt_id": task.pt_id, "note": note.text
+                    }),
                 },
             ))
         }
         "task_start" => {
             let task = resolve_task(state, &cmd.args)?;
-            tasks::start(&state.db, &task.id, &sync_ctx(actor, cmd))?;
+            let _ = tasks::start(&state.db, &task.id, &sync_ctx(actor, cmd))?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -710,6 +737,16 @@ fn apply_command(
             ))
         }
         other => Err(anyhow::anyhow!("unsupported command type: {:?}", other)),
+    }
+}
+
+/// The optional `note` arg of a closing command: absent or null is no note,
+/// a string is the evidence (validated by the core), anything else an error.
+fn note_arg<'a>(args: &'a Value, kind: &str) -> Result<Option<&'a str>, anyhow::Error> {
+    match args.get("note") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.as_str())),
+        Some(_) => Err(anyhow::anyhow!("{kind}: args.note must be a string")),
     }
 }
 
@@ -1202,6 +1239,88 @@ mod tests {
             timer_elapsed < HOLD / 2,
             "unrelated runtime work was starved for {timer_elapsed:?} while /sync \
              waited for a connection"
+        );
+    }
+
+    #[test]
+    fn task_note_and_closing_notes_apply_once_and_replay() {
+        let (_dir, state) = test_state();
+        let task = tasks::create(
+            &state.db,
+            tasks::NewTask::minimal("fix dns"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let cmd = |kind: &str, uuid: &str, args: Value| Command {
+            kind: kind.into(),
+            uuid: uuid.into(),
+            temp_id: None,
+            args,
+        };
+        let note = cmd(
+            "task_note",
+            "n-1",
+            serde_json::json!({"task_uuid": task.id, "text": "resolver flapped at 03:10"}),
+        );
+        assert!(outcome_ok(&apply_one(&state, &note, "hal")).is_ok());
+        // The retry replays: still one note.
+        assert!(outcome_ok(&apply_one(&state, &note, "hal")).is_ok());
+        assert_eq!(
+            ptask_core::notes::list(&state.db, &task.id, 50)
+                .unwrap()
+                .len(),
+            1
+        );
+        // The same key for other text is a different command.
+        let reused = cmd(
+            "task_note",
+            "n-1",
+            serde_json::json!({"task_uuid": task.id, "text": "something else"}),
+        );
+        let _ = apply_one(&state, &reused, "hal");
+        assert_eq!(
+            ptask_core::notes::list(&state.db, &task.id, 50)
+                .unwrap()
+                .len(),
+            1
+        );
+        // Malformed args are refused without a write.
+        for bad in [
+            serde_json::json!({"task_uuid": task.id}),
+            serde_json::json!({"task_uuid": task.id, "text": 7}),
+            serde_json::json!({"task_uuid": task.id, "text": "  "}),
+        ] {
+            assert!(
+                outcome_ok(&apply_one(&state, &cmd("task_note", "n-bad", bad), "hal")).is_err()
+            );
+        }
+        assert!(
+            outcome_ok(&apply_one(
+                &state,
+                &cmd(
+                    "task_done",
+                    "d-bad",
+                    serde_json::json!({"task_uuid": task.id, "note": 1})
+                ),
+                "hal"
+            ))
+            .is_err()
+        );
+        let done = cmd(
+            "task_done",
+            "d-1",
+            serde_json::json!({"task_uuid": task.id, "note": "unbound restarted; dig ok"}),
+        );
+        assert!(outcome_ok(&apply_one(&state, &done, "hal")).is_ok());
+        let notes = ptask_core::notes::list(&state.db, &task.id, 50).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(
+            (
+                notes[1].kind.as_str(),
+                notes[1].text.as_str(),
+                notes[1].actor.as_deref()
+            ),
+            ("done", "unbound restarted; dig ok", Some("hal"))
         );
     }
 }

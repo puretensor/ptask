@@ -115,12 +115,13 @@ the environment variable is set on the client node.
 | `type` | `args` | Side effects |
 |---|---|---|
 | `task_create` | `{ text, source_type? }` | runs quick-add parser, inserts to `tasks` + `pt_extensions`, optional `pt_recurrence`. |
-| `task_done` | `{ task_uuid }` or `{ pt_id }`, optional `expected_deadline` | flips status to `done` or advances recurrence in-place, logs an `interaction` row. A done task is refused. With `expected_deadline` (the deadline the client last saw; `""` = none) the command fails, changing nothing, if the task has moved on — so two queued completions of one occurrence never advance a recurring task twice. Omitted, the current occurrence completes as before. |
+| `task_done` | `{ task_uuid }` or `{ pt_id }`, optional `expected_deadline`, optional `note` | flips status to `done` or advances recurrence in-place, logs an `interaction` row. A done task is refused. With `expected_deadline` (the deadline the client last saw; `""` = none) the command fails, changing nothing, if the task has moved on — so two queued completions of one occurrence never advance a recurring task twice. Omitted, the current occurrence completes as before. `note` (v3.43.0, string, at most 16 KiB) is closure evidence journaled in the completion event itself; a blank or non-string note fails the command without closing. |
 | `task_priority` (v1.8.0) | `{ task_uuid \| pt_id, priority }` | sets priority (1..=5), logs a `priority_change` interaction, rescores. |
 | `task_edit` (v1.8.0) | `{ task_uuid \| pt_id, deadline }` | sets the deadline (ISO string) or clears it (JSON `null`); other JSON types or an omitted deadline are rejected without mutation; rescores. |
 | `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). |
 | `task_retext` (v1.9.0) | `{ task_uuid \| pt_id, title?, description? }` | replaces the title and/or description (at least one required). |
-| `task_dismiss` (v1.10.0) | `{ task_uuid \| pt_id }` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. |
+| `task_dismiss` (v1.10.0) | `{ task_uuid \| pt_id }`, optional `note` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. `note` (v3.43.0) is the reason, journaled in the dismissal event. |
+| `task_note` (v3.43.0) | `{ task_uuid \| pt_id, text }` | appends a note (findings, evidence, a handover; at most 16 KiB, blank refused) as a `task.noted` event attributed to the client. Any status: evidence can arrive after the close. `GET /detail/{uuid}` returns the trail as `notes`. |
 | `task_start` (v1.10.0) | `{ task_uuid \| pt_id }` | `status → in_progress`. |
 | `task_snooze` (v1.10.0) | `{ task_uuid \| pt_id, until }` | snoozes until the ISO `until`. |
 | `task_depend` (v1.10.0) | `{ task_uuid \| pt_id, on, clear? }` | adds (or with `clear: true` removes) a `depends_on` edge to the `on` query (PT-N or title); cycles are rejected. |
@@ -254,6 +255,8 @@ scrape time:
 | `pt_distill_last_run_ok` | gauge | — (`1` ok / `0` failed) |
 | `pt_distill_quarantined_captures` | gauge | — |
 | `pt_notifications_last_sent_age_seconds` | gauge | `channel` |
+| `pt_claims_active` | gauge | `holder` (in-progress tasks with a holder, v3.44.0) |
+| `pt_claims_expired` | gauge | — (in-progress tasks whose claim lease ran out, not yet reclaimed) |
 | `pt_webhook_dropped_total` | counter | — (outbound events dropped on a full per-URL backlog) |
 
 ## Dashboard surface (v2.3.0)
@@ -282,7 +285,8 @@ open↔closed transitions; deleting an open task is a closure; v3.46.0) ·
 `GET /` serves the cockpit when `PTASK_DASH_WWW` exists, else the banner.
 
 Writes (attributed `actor=dashboard`): `POST /api/tasks` (create, quick-add
-tokens parse) · `POST /api/tasks/{id}/done|dismiss|reopen` ·
+tokens parse) · `POST /api/tasks/{id}/done|dismiss|reopen` (done and dismiss
+take an optional `{"note": …}`, v3.43.0) · `/{id}/note {text}` (v3.43.0) ·
 `/{id}/snooze {days}` · `/{id}/priority {level}` ·
 `/{id}/edit {title?,description?,priority?,deadline?|null}`.
 `POST /api/voice` and `POST /api/voice/task` proxy to the Python voice shim
