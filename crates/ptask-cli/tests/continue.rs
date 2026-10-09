@@ -201,3 +201,30 @@ fn a_keyed_done_journaled_before_claim_next_replays() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn a_noted_done_fingerprints_as_it_did_before_claim_next() {
+    use ptask_core::event_log::{self, CommandFingerprint};
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Rotate the signing key"]); // PT-1
+    pt.ok(&[
+        "--idempotency-key",
+        "k-note",
+        "done",
+        "PT-1",
+        "-m",
+        "verified",
+    ]);
+    let journaled = event_log::get_by_uuid(&open_db(&pt), "k-note")
+        .unwrap()
+        .expect("the keyed close is journaled under its key")
+        .command;
+    assert_eq!(
+        journaled,
+        Some(CommandFingerprint::new(
+            "Done",
+            r#"Done(DoneArgs { queries: ["PT-1"], note: Some("verified") })"#
+        )),
+        "a keyed `pt done -m` must fingerprint as 3.43 did, with claim_next left out"
+    );
+}

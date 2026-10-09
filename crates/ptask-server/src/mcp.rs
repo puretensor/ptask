@@ -82,10 +82,32 @@ pub struct DoneArg {
     /// task_done never advances a recurring task twice. "" = it had none.
     #[serde(default)]
     pub expected_deadline: Option<String>,
+    /// Closure evidence: what was done and how it was verified (commit, PR,
+    /// test run, readback). Journaled with the completion, attributed to you.
+    #[serde(default)]
+    pub note: Option<String>,
     /// After the close, claim the next ready task (task_next order) for you
     /// and return it as claimed_next: close and continue in one call.
     #[serde(default)]
     pub claim_next: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DismissArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// Why it is not being done (duplicate of PT-N, superseded, obsolete).
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct NoteArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring
+    /// (a done or dismissed task by PT-N or uuid).
+    pub id: String,
+    /// The note: findings, evidence, a handover for the next worker.
+    pub text: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -386,7 +408,9 @@ impl PtaskMcp {
         .await
     }
 
-    #[tool(description = "Full detail for one task: fields + attributed journal history.")]
+    #[tool(
+        description = "Full detail for one task: fields, attributed journal history, and notes (findings and closure evidence, oldest first)."
+    )]
     async fn task_show(
         &self,
         Parameters(IdArg { id }): Parameters<IdArg>,
@@ -405,6 +429,10 @@ impl PtaskMcp {
                 .collect::<Vec<_>>();
             let mut v = with_goals(&db, &t, task_json(&t))?;
             v["history"] = serde_json::json!(hist);
+            v["notes"] = serde_json::json!(
+                ptask_core::notes::list(&db, &t.id, ptask_core::notes::MAX_NOTES_LISTED)
+                    .map_err(domain_err)?
+            );
             // Open prerequisites: non-empty means task_done will be refused.
             let blockers = ptask_core::tasks::open_blockers(&db, &t.id).map_err(domain_err)?;
             v["blocked_by"] = serde_json::json!(blockers);
@@ -414,13 +442,14 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Mark a task done. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline. The reply lists unblocked: tasks this close made ready. Pass claim_next=true to also claim the next ready task (task_next order) and get it back as claimed_next (null when nothing is claimable), saving a task_next + task_claim round trip."
+        description = "Mark a task done. Pass note with the verification evidence (commit, PR, test run, readback): it is journaled with the completion, so the close is not a bare claim. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline. The reply lists unblocked: tasks this close made ready. Pass claim_next=true to also claim the next ready task (task_next order) and get it back as claimed_next (null when nothing is claimable), saving a task_next + task_claim round trip."
     )]
     async fn task_done(
         &self,
         Parameters(DoneArg {
             id,
             expected_deadline,
+            note,
             claim_next,
         }): Parameters<DoneArg>,
     ) -> Result<CallToolResult, McpError> {
@@ -430,7 +459,8 @@ impl PtaskMcp {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
             let t = ptask_core::tasks::expect_deadline(t, expected_deadline.as_deref())
                 .map_err(domain_err)?;
-            let outcome = ptask_core::tasks::mark_done(&db, &t, &ctx).map_err(domain_err)?;
+            let outcome = ptask_core::tasks::mark_done_noted(&db, &t, note.as_deref(), &ctx)
+                .map_err(domain_err)?;
             rescore_db(&db);
             let mut v = match outcome {
                 ptask_core::tasks::DoneOutcome::Completed => serde_json::json!({
@@ -463,16 +493,19 @@ impl PtaskMcp {
         .await
     }
 
-    #[tool(description = "Dismiss a task (won't-do; distill won't resurrect it).")]
+    #[tool(
+        description = "Dismiss a task (won't-do; distill won't resurrect it). Pass note with the reason (duplicate of PT-N, superseded, obsolete)."
+    )]
     async fn task_dismiss(
         &self,
-        Parameters(IdArg { id }): Parameters<IdArg>,
+        Parameters(DismissArg { id, note }): Parameters<DismissArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
         let ctx = self.ctx();
         on_blocking(move || {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
-            ptask_core::tasks::dismiss(&db, &t.id, &ctx).map_err(domain_err)?;
+            ptask_core::tasks::dismiss_noted(&db, &t.id, note.as_deref(), &ctx)
+                .map_err(domain_err)?;
             rescore_db(&db);
             json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "status": "dismissed"}))
         })
@@ -523,6 +556,23 @@ impl PtaskMcp {
             ptask_core::tasks::edit_atomic(&db, &t.id, edit, &ctx).map_err(domain_err)?;
             rescore_db(&db);
             json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id}))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Append a note to a task: findings, partial progress, evidence, a handover for the next worker. Append-only and attributed to you; task_show and the worker brief carry the trail. Works on done/dismissed tasks too (by PT-N or uuid), e.g. evidence that arrives after the close."
+    )]
+    async fn task_note(
+        &self,
+        Parameters(NoteArg { id, text }): Parameters<NoteArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            let note = ptask_core::notes::add(&db, &t.id, &text, &ctx).map_err(domain_err)?;
+            json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "note": note}))
         })
         .await
     }
@@ -1087,6 +1137,7 @@ mod tests {
             mcp.task_done(Parameters(DoneArg {
                 id: t.pt_id.clone().unwrap(),
                 expected_deadline: Some("2099-01-01".into()),
+                note: None,
                 claim_next: false,
             }))
         };
@@ -1114,6 +1165,7 @@ mod tests {
             mcp.task_done(Parameters(DoneArg {
                 id,
                 expected_deadline: None,
+                note: None,
                 claim_next: false,
             }))
         };
@@ -1163,6 +1215,7 @@ mod tests {
             .task_done(Parameters(DoneArg {
                 id: t.pt_id.clone().unwrap(),
                 expected_deadline: None,
+                note: None,
                 claim_next: false,
             }))
             .await
@@ -1376,6 +1429,7 @@ mod tests {
             .task_done(Parameters(DoneArg {
                 id: base.pt_id.clone().unwrap(),
                 expected_deadline: None,
+                note: None,
                 claim_next: true,
             }))
             .await
@@ -1396,5 +1450,91 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn notes_and_closure_evidence_round_trip_over_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("upgrade sglang"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let other = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("upgrade sglang (dup)"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "hal".into());
+        let pt = t.pt_id.clone().unwrap();
+        mcp.task_note(Parameters(NoteArg {
+            id: pt.clone(),
+            text: "0.5.4 builds; TP4 smoke ok".into(),
+        }))
+        .await
+        .unwrap();
+        // A blank note is refused and the task stays open.
+        assert!(
+            mcp.task_done(Parameters(DoneArg {
+                id: pt.clone(),
+                expected_deadline: None,
+                note: Some("  ".into()),
+                claim_next: false,
+            }))
+            .await
+            .is_err()
+        );
+        mcp.task_done(Parameters(DoneArg {
+            id: pt.clone(),
+            expected_deadline: None,
+            note: Some("deployed; 256k ctx verified".into()),
+            claim_next: false,
+        }))
+        .await
+        .unwrap();
+        mcp.task_dismiss(Parameters(DismissArg {
+            id: other.pt_id.clone().unwrap(),
+            note: Some(format!("duplicate of {pt}")),
+        }))
+        .await
+        .unwrap();
+        let notes = ptask_core::notes::list(&db, &t.id, 50).unwrap();
+        let got: Vec<(&str, &str, Option<&str>)> = notes
+            .iter()
+            .map(|n| (n.kind.as_str(), n.text.as_str(), n.actor.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("note", "0.5.4 builds; TP4 smoke ok", Some("hal")),
+                ("done", "deployed; 256k ctx verified", Some("hal")),
+            ]
+        );
+        // task_show carries the trail.
+        let shown = mcp
+            .task_show(Parameters(IdArg { id: pt.clone() }))
+            .await
+            .unwrap();
+        let payload = serde_json::to_value(&shown).unwrap();
+        let text = payload
+            .pointer("/content/0/text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(v["notes"].as_array().unwrap().len(), 2, "{v:#}");
+        let dup = ptask_core::notes::list(&db, &other.id, 50).unwrap();
+        assert_eq!(dup[0].kind, "dismissed");
+        // Evidence after the close: a done task by PT-N.
+        mcp.task_note(Parameters(NoteArg {
+            id: pt,
+            text: "24h later: no regressions".into(),
+        }))
+        .await
+        .unwrap();
+        assert_eq!(ptask_core::notes::list(&db, &t.id, 50).unwrap().len(), 3);
     }
 }
