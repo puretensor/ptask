@@ -11,6 +11,10 @@ OnFailure=ptask-failure-alert@%n.service
 [Service]
 Type=oneshot
 EnvironmentFile=%h/puretensor-tasks/.env
+# After a host reboot the local vLLM seat takes ~10 min to load, and the
+# Persistent timer fires inside that window. Wait up to ~15 min for the
+# provider; never fail here so a real outage still fails closed in pt.
+ExecStartPre=/bin/sh -c 'case "$${LOCAL_LLM_URL:-}" in http*) ;; *) exit 0;; esac; for i in $$(seq 1 90); do curl -sf -m3 "$${LOCAL_LLM_URL%%/}/models" >/dev/null && exit 0; sleep 10; done; echo "local llm not ready after wait; proceeding" >&2; exit 0'
 ExecStart=%h/.cargo/bin/pt distill --batch 300
 Nice=10
 IOSchedulingClass=best-effort
