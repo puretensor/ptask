@@ -1,13 +1,14 @@
 # Agent-native surface (v2.4.0)
 
 pTask is native vocabulary for agents: an MCP server, an atomic task claim
-(a claim, not a lease; see below), provenance links, idempotent capture, and
+with an owner and an optional lease (see below), provenance links, idempotent capture, and
 a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 21 tools (`task_next / task_list / task_add /
-task_show / task_done / task_dismiss / task_note / task_edit / task_claim / task_promote /
+Two transports, one handler, 23 tools (`task_next / task_list / task_add /
+task_show / task_done / task_dismiss / task_note / task_edit / task_claim /
+task_heartbeat / task_release / task_promote /
 task_depend / task_capture / task_search / task_digest` plus
 `approval_request / approval_list / approval_status / approval_withdraw` —
 agents request, they never decide; see [`approvals.md`](approvals.md) — plus
@@ -76,11 +77,38 @@ commit; a scoring failure does not roll back a successful edit.
   shadows the close it follows.
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
-  It is a claim, not a lease: the task stores no owner (the claimer appears
-  only in the `task.claimed` event), there is no expiry and no release verb,
-  and any writer can still `task_done` or `task_dismiss` a claimed task. A
-  crashed agent's claim stays `in_progress` until someone finishes it,
-  snoozes it (it wakes as todo) or dismisses and reopens it.
+  Since v3.44.0 the task records its holder (`claimed_by`, `claimed_at`; a
+  losing claimer's error names the holder) and, with `lease_minutes`
+  (1..=1440), a lease (`claim_expires_at`). Each take returns `claim_token`
+  (opaque, new on every claim): pass it to `task_heartbeat` and
+  `task_release`. `task_show` returns `claim` (`by`, `at`, `expires_at`,
+  `expired`) and does not include the token. A claim without a lease never
+  expires on its own. An expired lease is free to claim (takeover, new
+  token). Any writer can still `task_done` or `task_dismiss` a claimed task;
+  leaving in_progress by any path drops the claim.
+- **task_heartbeat** — renew the lease of the claim instance named by
+  `claim_token` (default 30 minutes from now). Not journaled (it changes no
+  task state). It fails with `claim lost: …` when that instance is no longer
+  current (released, reclaimed, closed, retaken by another session of the
+  same actor): that is the signal to **stop working** and not close the task.
+  A heartbeat without `claim_token` is refused. A lease that ran out but was
+  not reclaimed yet is still that instance's to renew.
+- **task_release** — hand back the claim instance named by `claim_token`
+  (in_progress → todo) without closing it, with an optional `reason`;
+  journaled `task.released`. There is no force over MCP: a missing or stale
+  token, another agent's claim, and an unowned in-progress task are all
+  refused. The operator releases those from the CLI with `pt release --force`.
+- **Recovery.** `pt reclaim` lists in-progress tasks whose lease ran out
+  (`--apply` returns them to todo, journaled `task.reclaimed` with the holder
+  and lease end; each is re-checked under the write lock, so a late
+  heartbeat wins). An expired lease is also free: `task_claim` / `pt claim`
+  and `pt start` take it over (start clears the lease so a later reclaim
+  cannot undo the start). The hourly `pt scoring run` reclaims **only when
+  the operator sets `PTASK_CLAIM_RECLAIM=1`** (off by default: it changes
+  state on a timer). `task_digest` lists `expired_claims`; `/metrics` exports
+  `pt_claims_active{holder}` and `pt_claims_expired`. A claim taken before
+  v3.44.0 has its holder backfilled from its `task.claimed` event and no
+  lease.
 - **task_depend** — `task` depends `on` a prerequisite (`remove=true` drops the
   edge). **A task with open prerequisites cannot be closed** — `task_done`
   (and `pt done`, the dashboard, Telegram, sync, git-webhook auto-close,

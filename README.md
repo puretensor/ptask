@@ -10,7 +10,7 @@
 - **Find fast** — Linear-style `PT-N` IDs, filter DSL (`pt list "(today | overdue) & p1"`), FTS5 full-text search, saved views.
 - **Work in order** — DAG dependencies (`pt depend PT-3 --on PT-1`; `pt next` shows only unblocked tasks, and a task cannot be closed while a prerequisite is open), composite priority scoring with explainability (`pt why PT-42`), recurrence (`every` vs `every!`), snooze.
 - **Stay honest** — closure evidence and notes (`pt done PT-42 -m "PR #7 merged, CI green"`, `pt note PT-42 …`: append-only, attributed, carried into `pt show`, `pt context` worker briefs, the digest, the export and the cockpit drawer; git, recovery and reaper closes record their own evidence), attributed event log (`pt log`: who did what, via which surface), `pt undo`, accountability escalation state machine with Telegram/SMTP/HAL notifications, staleness reaper for machine-generated tasks, operator **approval inbox** (`pt approval` / `pt approve` / `pt reject`: agents request, only the operator decides, executors consume once — [`docs/approvals.md`](docs/approvals.md)), **goal tree** (`pt goal` / `pt context`: every task traces up to the mission — [`docs/goals.md`](docs/goals.md)).
-- **Feed the agents** — MCP server (request/list/status/withdraw for approvals; no decide tool; `goal_list` / `goal_show` / `goal_link`; `goal_chain` on show/next/claim) over streamable-HTTP and stdio, atomic `task_claim` so parallel agents can't collide, `discovered_from` provenance links, deterministic `task_digest` session priming, scoped named API tokens.
+- **Feed the agents** — MCP server (request/list/status/withdraw for approvals; no decide tool; `goal_list` / `goal_show` / `goal_link`; `goal_chain` on show/next/claim) over streamable-HTTP and stdio, atomic `task_claim` so parallel agents can't collide (with a holder, an optional heartbeat lease, `task_release`, and `pt reclaim` for a dead agent's work), `discovered_from` provenance links, deterministic `task_digest` session priming, scoped named API tokens.
 - **Distill the noise** — native Rust distillation turns raw fleet signals into deduplicated tasks (LLM classify/consolidate through a local OpenAI-compatible endpoint by default, or Gemini; semantic + temporal dedup, close-on-recovery). Chunked with per-chunk failure isolation, so one unprocessable capture is quarantined instead of wedging the queue behind it (`pt_distill_quarantined_captures`). `pt distill` is canonical; the legacy Python pipeline is archived for reference only.
 
 ## Quick start
@@ -37,7 +37,7 @@ pt mcp                                            # MCP server over stdio
 | TUI | `pt` / `pt tui` | ratatui |
 | Sync API | `pt serve` | axum; canonical store on one host, clients use `pt remote` |
 | Telegram | `pt bot` | Bot API long-poll |
-| MCP (agents) | `pt mcp` (stdio) or `/mcp` mount on the server | 21 tools; bearer-gated HTTP for HAL, scoped REST tokens for other agents — [`docs/agent-surface.md`](docs/agent-surface.md) |
+| MCP (agents) | `pt mcp` (stdio) or `/mcp` mount on the server | 23 tools; bearer-gated HTTP for HAL, scoped REST tokens for other agents — [`docs/agent-surface.md`](docs/agent-surface.md) |
 | Web | [`dashboard/`](dashboard/) | **PTASK Triage Cockpit** — read-only Python sidecar over the same DB; writes delegate to the `pt` binary |
 
 ## Architecture
@@ -62,7 +62,7 @@ Fleet topology (canonical store, Litestream WAL replication to CephFS, per-node 
 - [`docs/dsl.md`](docs/dsl.md) — the filter DSL
 - [`docs/recurrence.md`](docs/recurrence.md) — recurrence semantics (`every` vs `every!`)
 - [`docs/sync-api.md`](docs/sync-api.md) — HTTP API
-- [`docs/agent-surface.md`](docs/agent-surface.md) — MCP tools, the atomic claim (not a lease), provenance
+- [`docs/agent-surface.md`](docs/agent-surface.md) — MCP tools, the atomic claim (owner, lease, heartbeat, release, reclaim), provenance
 - [`docs/approvals.md`](docs/approvals.md) — operator approval inbox (payload binding, consume, authority, threat model)
 - [`docs/goals.md`](docs/goals.md) — goal tree, inheritance, cycle guard, `pt context`
 - [`docs/architecture.md`](docs/architecture.md) — self-hosted topology and canonical-store election
