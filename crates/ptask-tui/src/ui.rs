@@ -181,6 +181,24 @@ fn render_peek(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 Span::raw(format!("{} downstream", detail.blocks_tasks.len())),
             ]));
         }
+        if let Some(c) = &detail.claim {
+            let lease = match (&c.expires_at, c.expired) {
+                (None, _) => "no lease".to_string(),
+                (Some(_), true) => "lease expired".to_string(),
+                (Some(e), false) => format!("lease to {}", e.get(11..16).unwrap_or(e)),
+            };
+            lines.push(Line::from(vec![
+                Span::styled("claimed  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    safe(&format!("{} · {lease}", c.by)),
+                    Style::default().fg(if c.expired {
+                        Color::Yellow
+                    } else {
+                        Color::Cyan
+                    }),
+                ),
+            ]));
+        }
     }
 
     if !task.description.is_empty() {

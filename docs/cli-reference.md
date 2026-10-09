@@ -184,7 +184,11 @@ HTTP MCP mounts at /mcp in `pt serve` (hal token only) — docs/agent-surface.md
 
 | Verb | Use |
 |---|---|
-| `pt start <query>` | mark in progress (status_v2 `in_progress`) |
+| `pt start <query>` | mark in progress (status_v2 `in_progress`); the starter becomes the holder unless someone already holds it |
+| `pt claim <query> [--lease 30m]` (v3.44.0) | atomic claim (todo/backlog/triage → in_progress) held by `$PTASK_ACTOR`; a losing claimer's error names the holder. `--lease` (`30m`, `2h`, `1d`; max 1d) sets an expiry kept alive by `pt heartbeat`; without one the claim never expires on its own |
+| `pt heartbeat <query> [--lease 30m]` | the holder renews its lease from now. Exits 1 with `claim lost: …` when the claim is no longer yours (released, reclaimed, closed, another holder): stop working on it. Not journaled, so `--idempotency-key` is refused |
+| `pt release <query> [--force] [-m REASON]` | hand a task back (in_progress → todo) without closing it. Your own claim, or an unowned in-progress task; another actor's claim only with `--force` (journaled as forced, with the previous holder) |
+| `pt reclaim [--apply]` | list in-progress tasks whose lease ran out (holder, lease end); `--apply` returns them to todo (`task.reclaimed`), re-checking each under the write lock so a late heartbeat wins. `--json` honoured. The hourly `pt scoring run` reclaims too, **only with `PTASK_CLAIM_RECLAIM=1`** |
 | `pt kind <query> <scout\|ship> [--deliverable report\|pr\|none]` | set a task's shape; `pt add --kind scout` declares it at creation |
 | `pt promote <query>` | investigation → implementation: flips `kind` scout→ship (and `report`→`pr`) on the **same row**, so the open count is unchanged. Refuses a terminal task — reopen it first. |
 | `pt snooze <query> <until…>` | park until a date (natural language ok); auto-wakes to todo via the hourly scoring run |

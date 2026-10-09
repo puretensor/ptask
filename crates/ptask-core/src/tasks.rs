@@ -113,7 +113,7 @@ pub fn create(db: &Db, new: NewTask, ctx: &EventCtx) -> Result<Task> {
 /// Generate an idempotency uuid for a locally-initiated mutation (CLI, TUI,
 /// bot). Remote-initiated mutations supply the client's command uuid instead
 /// so `/sync` replays stay idempotent.
-fn local_event_uuid() -> String {
+pub(crate) fn local_event_uuid() -> String {
     format!("local:{}", Uuid::new_v4())
 }
 
@@ -122,7 +122,7 @@ fn local_event_uuid() -> String {
 /// without an event row is invisible to the fleet, and a mutation without
 /// an actor is invisible to the audit trail; `ctx` is how the compiler
 /// forces every writer to identify itself.
-fn record_event_tx(
+pub(crate) fn record_event_tx(
     tx: &rusqlite::Connection,
     ctx: &EventCtx,
     task_uuid: &str,
@@ -1708,11 +1708,17 @@ pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // Starting work makes the starter the holder, unless someone already
+    // holds it (start is not gated by claims; it does not take one over).
     let changed = tx.execute(
         "UPDATE tasks SET status_v2='in_progress', status='pending',
-                          snoozed_until=NULL, updated_at=?1
+                          snoozed_until=NULL, updated_at=?1,
+                          claimed_by=CASE WHEN status_v2='in_progress' AND claimed_by IS NOT NULL
+                                          THEN claimed_by ELSE ?3 END,
+                          claimed_at=CASE WHEN status_v2='in_progress' AND claimed_by IS NOT NULL
+                                          THEN claimed_at ELSE ?1 END
          WHERE id=?2 AND status_v2 NOT IN ('done','dismissed')",
-        params![now, task_uuid],
+        params![now, task_uuid, ctx.actor],
     )?;
     if changed == 0 {
         return Err(crate::Error::Other(
@@ -1735,32 +1741,10 @@ pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
     Ok(())
 }
 
-/// Atomically claim a task for agent work. The guarded status transition and
-/// its sync-visible event are one transaction, so a successful claim can
-/// never be committed without its audit record.
+/// Atomically claim a task for agent work, with no lease (see
+/// [`crate::claims::claim`] for the owner, the lease and the record).
 pub fn claim(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
-    let now = iso_now();
-    let mut conn = db.get()?;
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let changed = tx.execute(
-        "UPDATE tasks SET status_v2='in_progress', status='pending', updated_at=?1
-         WHERE id=?2 AND status_v2 IN ('triage','backlog','todo')",
-        params![now, task_uuid],
-    )?;
-    if changed == 0 {
-        return Err(crate::Error::Other(
-            "task not found or not claimable".into(),
-        ));
-    }
-    record_event_tx(
-        &tx,
-        ctx,
-        task_uuid,
-        "task.claimed",
-        &serde_json::json!({ "task_uuid": task_uuid, "by": ctx.actor }),
-    )?;
-    tx.commit()?;
-    Ok(())
+    crate::claims::claim(db, task_uuid, None, ctx).map(|_| ())
 }
 
 /// The two shapes a task can have: an investigation whose output is a
@@ -2410,6 +2394,10 @@ pub struct TaskDetail {
     pub recurrence_input: Option<String>,
     pub recurrence_mode: Option<String>,
     pub recurrence_next: Option<String>,
+    /// Who holds the task while it is in progress, and the lease. Absent
+    /// from a pre-3.44 server's `/detail`, hence the default.
+    #[serde(default)]
+    pub claim: Option<crate::claims::Claim>,
 }
 
 /// Load the side-table state for one task. Returns defaults for missing rows.
@@ -2467,6 +2455,7 @@ pub fn load_detail(db: &Db, task_uuid: &str) -> Result<TaskDetail> {
         recurrence_input: rec.as_ref().map(|r| r.0.clone()),
         recurrence_mode: rec.as_ref().map(|r| r.1.clone()),
         recurrence_next: rec.as_ref().map(|r| r.2.clone()),
+        claim: crate::claims::get_in_conn(&conn, task_uuid)?,
     })
 }
 
@@ -2490,7 +2479,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 
 /// ISO-8601 UTC timestamp matching the existing Python format
 /// (e.g. `2026-05-13T17:34:56.789012+00:00`).
-fn iso_now() -> String {
+pub(crate) fn iso_now() -> String {
     let now: Zoned = Zoned::now().with_time_zone(jiff::tz::TimeZone::UTC);
     let base = now.strftime("%Y-%m-%dT%H:%M:%S").to_string();
     let micros = now.subsec_nanosecond().div_euclid(1_000);

@@ -127,6 +127,16 @@ enum Command {
     Kind(KindArgs),
     /// Mark a task in progress (you're actively working it).
     Start(StartArgs),
+    /// Claim a task for work (todo/backlog/triage → in_progress, owned by
+    /// you), optionally with a lease that `pt heartbeat` keeps alive.
+    Claim(ClaimArgs),
+    /// Renew your claim's lease; fails (exit 1) when the claim is no longer
+    /// yours, which means stop working on it.
+    Heartbeat(HeartbeatArgs),
+    /// Hand a claimed task back (in_progress → todo) without closing it.
+    Release(ReleaseArgs),
+    /// Return tasks whose claim lease ran out to todo (dry run unless --apply).
+    Reclaim(ReclaimArgs),
     /// Snooze a task until a date — it leaves `pt next` and reminders,
     /// then wakes to todo automatically.
     Snooze(SnoozeArgs),
@@ -212,6 +222,44 @@ struct AccountabilityRunArgs {
 struct StartArgs {
     /// PT-N, bare integer, or title substring.
     query: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct ClaimArgs {
+    /// PT-N, bare integer, uuid, or title substring (open tasks).
+    query: String,
+    /// Lease length (30m, 2h, 1d; max 1d). Without one the claim never
+    /// expires on its own.
+    #[arg(long)]
+    lease: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct HeartbeatArgs {
+    /// PT-N, bare integer, uuid, or title substring.
+    query: String,
+    /// New lease length from now (30m, 2h, 1d; max 1d).
+    #[arg(long, default_value = "30m")]
+    lease: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReleaseArgs {
+    /// PT-N, bare integer, uuid, or title substring.
+    query: String,
+    /// Release a claim another actor holds (the operator's override).
+    #[arg(long)]
+    force: bool,
+    /// Why it is being handed back, journaled with the release.
+    #[arg(short = 'm', long = "reason")]
+    reason: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReclaimArgs {
+    /// Return the expired claims to todo (default: list them only).
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -890,6 +938,8 @@ fn keyed_replay_spec(cmd: &Command) -> Option<(&'static [&'static str], KeyTarge
         Command::Reopen(a) => (UPDATED, Task(a.query.clone())),
         Command::Dismiss(a) => (UPDATED, Task(a.query.clone())),
         Command::Start(a) => (UPDATED, Task(a.query.clone())),
+        Command::Claim(a) => (&["task.claimed"], Task(a.query.clone())),
+        Command::Release(a) => (&["task.released"], Task(a.query.clone())),
         Command::Snooze(a) => (UPDATED, Task(a.query.clone())),
         Command::Depend(a) => (UPDATED, Task(a.query.clone())),
         Command::Kind(a) => (UPDATED, Task(a.query.clone())),
@@ -1144,6 +1194,10 @@ fn run() -> Result<()> {
                 Some(Command::Accountability(c)) => cmd_accountability(db, c),
                 Some(Command::Scoring(c)) => cmd_scoring(&db, c),
                 Some(Command::Start(a)) => cmd_start(&db, a),
+                Some(Command::Claim(a)) => cmd_claim(&db, a),
+                Some(Command::Heartbeat(a)) => cmd_heartbeat(&db, a),
+                Some(Command::Release(a)) => cmd_release(&db, a),
+                Some(Command::Reclaim(a)) => cmd_reclaim(&db, a),
                 Some(Command::Promote(a)) => cmd_promote(&db, a),
                 Some(Command::Kind(a)) => cmd_kind(&db, a),
                 Some(Command::Snooze(a)) => cmd_snooze(&db, a),
@@ -1663,6 +1717,7 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         let mut v = serde_json::to_value(&t)?;
         v["goal_chain"] = ptask_core::goals::chain_json(&eg.chain);
         v["goal_source"] = serde_json::json!(eg.source.as_str());
+        v["claim"] = serde_json::to_value(&d.claim)?;
         crate::print_json(&v)?;
         return Ok(());
     }
@@ -1757,6 +1812,22 @@ fn render_show(
         }
         if let Some(r) = &d.recurrence_input {
             pairs.push(("recurs", r.into()));
+        }
+        if let Some(c) = &d.claim {
+            let lease = lease_phrase(c.expires_at.as_deref());
+            let since =
+                c.at.as_deref()
+                    .map(|a| format!(" · since {}", a.get(..16).unwrap_or(a).replace('T', " ")))
+                    .unwrap_or_default();
+            let text = format!("{}{since} · {lease}", c.by);
+            pairs.push((
+                "claimed by",
+                if c.expired {
+                    ui::painted(ui::paint(&text, ui::Ink::Amber))
+                } else {
+                    text.into()
+                },
+            ));
         }
     }
     pairs.push(("source", (&t.source_type).into()));
@@ -2634,6 +2705,160 @@ fn cmd_start(db: &Db, a: StartArgs) -> Result<()> {
             )
         },
     )
+}
+
+/// "in 12m" / "5m ago" for a lease end, against now.
+fn lease_phrase(expires_at: Option<&str>) -> String {
+    let Some(end) = expires_at.and_then(ptask_core::dates::parse_iso_to_utc) else {
+        return "no lease".into();
+    };
+    let secs = end.timestamp().as_second() - ptask_core::jiff::Timestamp::now().as_second();
+    let mins = (secs.abs() + 59) / 60;
+    let span = if mins >= 120 {
+        format!("{}h", mins / 60)
+    } else {
+        format!("{mins}m")
+    };
+    if secs > 0 {
+        format!("lease ends in {span}")
+    } else {
+        format!("lease expired {span} ago")
+    }
+}
+
+fn cmd_claim(db: &Db, a: ClaimArgs) -> Result<()> {
+    let lease = a
+        .lease
+        .as_deref()
+        .map(ptask_core::claims::parse_lease)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
+    let claim =
+        ptask_core::claims::claim(db, &task.id, lease, &cli_ctx()).map_err(anyhow::Error::msg)?;
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress",
+            "claim": claim,
+        }),
+        || {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Busy,
+                    "claimed",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    &format!(
+                        "by {} · {}",
+                        claim.by,
+                        lease_phrase(claim.expires_at.as_deref())
+                    )
+                )
+            )
+        },
+    )
+}
+
+fn cmd_heartbeat(db: &Db, a: HeartbeatArgs) -> Result<()> {
+    let lease = ptask_core::claims::parse_lease(&a.lease).map_err(anyhow::Error::msg)?;
+    let task = tasks::resolve_for_lookup(db, &a.query, true).map_err(anyhow::Error::msg)?;
+    let claim = ptask_core::claims::heartbeat(db, &task.id, lease, &cli_ctx())
+        .map_err(anyhow::Error::msg)?;
+    emit(
+        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "claim": claim}),
+        || {
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Ok,
+                    "renewed",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    &lease_phrase(claim.expires_at.as_deref())
+                )
+            )
+        },
+    )
+}
+
+fn cmd_release(db: &Db, a: ReleaseArgs) -> Result<()> {
+    let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
+    let r = ptask_core::claims::release(db, &task.id, a.force, a.reason.as_deref(), &cli_ctx())
+        .map_err(anyhow::Error::msg)?;
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id, "status": "todo",
+            "released": r,
+        }),
+        || {
+            let detail = match (&r.holder, r.forced) {
+                (Some(h), true) => format!("→ todo · {h}'s claim released (forced)"),
+                (Some(_), false) => "→ todo · claim released".to_string(),
+                (None, _) => "→ todo".to_string(),
+            };
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Changed,
+                    "released",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    &detail
+                )
+            )
+        },
+    )
+}
+
+fn cmd_reclaim(db: &Db, a: ReclaimArgs) -> Result<()> {
+    let report = ptask_core::claims::reclaim_expired(
+        db,
+        !a.apply,
+        &ptask_core::event_log::EventCtx::system("reclaim"),
+    )?;
+    print_reclaim(&report)
+}
+
+fn print_reclaim(report: &ptask_core::claims::ReclaimReport) -> Result<()> {
+    if json_mode() {
+        return crate::print_json(report);
+    }
+    if report.reclaimed.is_empty() {
+        println!(
+            "{}",
+            ui::section("reclaim ok", ui::Ink::Green, "no expired claims")
+        );
+        return Ok(());
+    }
+    let (status, verb) = if report.dry_run {
+        (ui::Status::Warn, "expired")
+    } else {
+        (ui::Status::Changed, "reclaimed")
+    };
+    for c in &report.reclaimed {
+        println!(
+            "{}",
+            ui::outcome(
+                status,
+                verb,
+                c.pt_id.as_deref().unwrap_or(&c.task_uuid),
+                &c.title,
+                &format!(
+                    "held by {} · {}",
+                    c.holder,
+                    lease_phrase(Some(&c.expired_at))
+                )
+            )
+        );
+    }
+    if report.dry_run {
+        println!(
+            "{}",
+            ui::note("dry run — `pt reclaim --apply` returns them to todo")
+        );
+    }
+    Ok(())
 }
 
 fn cmd_promote(db: &Db, a: StartArgs) -> Result<()> {
@@ -3941,6 +4166,26 @@ fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
                 print_rank_diff(db)?;
             }
             let now = ptask_core::dates::now_in_operator_tz().map_err(anyhow::Error::msg)?;
+            // Expired claims go back to todo before scoring, so they rank
+            // as open work in this pass. Only when the operator turned it
+            // on: it changes task state on a timer.
+            if ptask_core::Config::from_env().claim_reclaim && !a.dry_run {
+                let r = ptask_core::claims::reclaim_expired(
+                    db,
+                    false,
+                    &ptask_core::event_log::EventCtx::system("reclaim"),
+                )?;
+                if !r.reclaimed.is_empty() {
+                    println!(
+                        "{}",
+                        ui::section(
+                            "reclaimed",
+                            ui::Ink::Amber,
+                            &format!("{} expired claim(s) returned to todo", r.reclaimed.len())
+                        )
+                    );
+                }
+            }
             let report = ptask_core::scoring::run_once_at_mode(db, a.dry_run, &now, !a.v1)?;
             println!(
                 "{}",

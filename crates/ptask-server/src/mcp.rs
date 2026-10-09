@@ -91,6 +91,35 @@ pub struct IdArg {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ClaimArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// Lease in minutes (1..=1440). Keep it alive with task_heartbeat; when
+    /// it runs out the operator's reclaim returns the task to todo. Omit for
+    /// a claim that never expires on its own.
+    #[serde(default)]
+    pub lease_minutes: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct HeartbeatArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// New lease from now, in minutes (1..=1440; default 30).
+    #[serde(default)]
+    pub lease_minutes: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ReleaseArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// Why you are handing it back (blocked on X, out of scope, ...).
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DependArg {
     /// The dependent task (PT-N, number, uuid, or title substring).
     pub task: String,
@@ -404,6 +433,8 @@ impl PtaskMcp {
             // Open prerequisites: non-empty means task_done will be refused.
             let blockers = ptask_core::tasks::open_blockers(&db, &t.id).map_err(domain_err)?;
             v["blocked_by"] = serde_json::json!(blockers);
+            v["claim"] =
+                serde_json::json!(ptask_core::claims::get(&db, &t.id).map_err(domain_err)?);
             json_ok(&v)
         })
         .await
@@ -509,21 +540,65 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Atomically claim a task before working on it (todo/backlog/triage → in_progress). Errors if already claimed — the check-and-set is one SQL statement, so two agents can't both win."
+        description = "Atomically claim a task before working on it (todo/backlog/triage → in_progress, held by you). Errors if already claimed, naming the holder — the check-and-set is one SQL statement, so two agents can't both win. Pass lease_minutes for work that should come back if you die: renew it with task_heartbeat; an expired lease can be reclaimed to todo."
     )]
     async fn task_claim(
         &self,
-        Parameters(IdArg { id }): Parameters<IdArg>,
+        Parameters(ClaimArg { id, lease_minutes }): Parameters<ClaimArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
         let ctx = self.ctx();
-        let actor = self.actor.clone();
         on_blocking(move || {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
-            ptask_core::tasks::claim(&db, &t.id, &ctx).map_err(domain_err)?;
-            let mut v = serde_json::json!({"ok": true, "pt_id": t.pt_id, "claimed_by": actor});
+            let claim =
+                ptask_core::claims::claim(&db, &t.id, lease_minutes, &ctx).map_err(domain_err)?;
+            let mut v = serde_json::json!({
+                "ok": true, "pt_id": t.pt_id, "claimed_by": claim.by,
+                "claim_expires_at": claim.expires_at,
+            });
             v = with_goals(&db, &t, v)?;
             json_ok(&v)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Renew your claim's lease (default 30 minutes from now). Errors with \"claim lost\" when the task is no longer yours (released, reclaimed after the lease ran out, closed): stop working on it and do not close it; re-claim if it is still yours to do."
+    )]
+    async fn task_heartbeat(
+        &self,
+        Parameters(HeartbeatArg { id, lease_minutes }): Parameters<HeartbeatArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, true).map_err(domain_err)?;
+            let claim =
+                ptask_core::claims::heartbeat(&db, &t.id, lease_minutes.unwrap_or(30), &ctx)
+                    .map_err(domain_err)?;
+            json_ok(&serde_json::json!({
+                "ok": true, "pt_id": t.pt_id, "claimed_by": claim.by,
+                "claim_expires_at": claim.expires_at,
+            }))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Hand back a task you claimed (in_progress → todo) without closing it: you are stopping, blocked, or it is not yours to do. Only your own claim; the operator releases others' from the CLI."
+    )]
+    async fn task_release(
+        &self,
+        Parameters(ReleaseArg { id, reason }): Parameters<ReleaseArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            ptask_core::claims::release(&db, &t.id, false, reason.as_deref(), &ctx)
+                .map_err(domain_err)?;
+            rescore_db(&db);
+            json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "status": "todo"}))
         })
         .await
     }
@@ -1337,5 +1412,90 @@ mod tests {
         })
         .unwrap();
         let _ = result;
+    }
+
+    #[tokio::test]
+    async fn claims_have_holders_leases_heartbeats_and_releases_over_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let t = ptask_core::tasks::create(
+            &db,
+            ptask_core::NewTask::minimal("rebuild the index"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        let pt = t.pt_id.clone().unwrap();
+        let hal = PtaskMcp::new(db.clone(), "hal".into());
+        let grok = PtaskMcp::new(db.clone(), "grok".into());
+        let text = |r: CallToolResult| -> serde_json::Value {
+            let v = serde_json::to_value(&r).unwrap();
+            serde_json::from_str(v.pointer("/content/0/text").unwrap().as_str().unwrap()).unwrap()
+        };
+        let claimed = text(
+            hal.task_claim(Parameters(ClaimArg {
+                id: pt.clone(),
+                lease_minutes: Some(15),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(claimed["claimed_by"], "hal");
+        assert!(claimed["claim_expires_at"].is_string());
+        let err = grok
+            .task_claim(Parameters(ClaimArg {
+                id: pt.clone(),
+                lease_minutes: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("already claimed by hal"), "{err:?}");
+        let err = grok
+            .task_heartbeat(Parameters(HeartbeatArg {
+                id: pt.clone(),
+                lease_minutes: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.message.starts_with("claim lost"), "{err:?}");
+        hal.task_heartbeat(Parameters(HeartbeatArg {
+            id: pt.clone(),
+            lease_minutes: Some(60),
+        }))
+        .await
+        .unwrap();
+        // Another agent cannot release it over MCP (no force here).
+        assert!(
+            grok.task_release(Parameters(ReleaseArg {
+                id: pt.clone(),
+                reason: None,
+            }))
+            .await
+            .is_err()
+        );
+        let shown = text(
+            hal.task_show(Parameters(IdArg { id: pt.clone() }))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(shown["claim"]["by"], "hal");
+        hal.task_release(Parameters(ReleaseArg {
+            id: pt.clone(),
+            reason: Some("blocked on disk".into()),
+        }))
+        .await
+        .unwrap();
+        let shown = text(
+            hal.task_show(Parameters(IdArg { id: pt.clone() }))
+                .await
+                .unwrap(),
+        );
+        assert!(shown["claim"].is_null());
+        assert_eq!(shown["status"], "todo");
+        grok.task_claim(Parameters(ClaimArg {
+            id: pt,
+            lease_minutes: None,
+        }))
+        .await
+        .unwrap();
     }
 }

@@ -53,11 +53,23 @@ pub fn build(db: &Db, days: i64) -> Result<serde_json::Value> {
         .iter()
         .map(|t| serde_json::json!({"pt_id": t.pt_id, "title": t.title, "priority": t.priority}))
         .collect::<Vec<_>>();
+    // Work a dead agent left behind: leases that ran out, still in progress.
+    // A session starting up sees them before it claims something new.
+    let expired_claims = crate::claims::expired(db)?
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "pt_id": c.pt_id, "title": c.title,
+                "holder": c.holder, "expired_at": c.expired_at,
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "window_days": days,
         "done": done, "dismissed": dismissed,
         "created_count": created,
         "ready_queue": ready,
+        "expired_claims": expired_claims,
     }))
 }
 
