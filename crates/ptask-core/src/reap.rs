@@ -152,7 +152,17 @@ fn reap_one(db: &Db, c: &Reaped, ctx: &EventCtx) -> Result<bool> {
     let Some(status) = status else {
         return Ok(false);
     };
-    crate::tasks::dismiss_in_tx(&tx, &c.uuid, &status, &ctx)?;
+    // The reason is the evidence: a reaped task says why it went.
+    let ttl = if c.source_type == "incident" {
+        INCIDENT_TTL_DAYS
+    } else {
+        DISTILLED_TTL_DAYS
+    };
+    let note = format!(
+        "reaped: {} task untouched for over {ttl} days (last touched {}); `pt reopen` restores it",
+        c.source_type, c.updated_at
+    );
+    crate::tasks::dismiss_in_tx(&tx, &c.uuid, &status, Some(&note), &ctx)?;
     tx.commit()?;
     Ok(true)
 }
@@ -231,6 +241,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dismissed, 2);
+        // Each reaped task says why it went.
+        let notes = crate::notes::list(&db, &stale_distilled.id, 10).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].kind, "dismissed");
+        assert!(
+            notes[0]
+                .text
+                .starts_with("reaped: distilled task untouched for over 30 days"),
+            "{}",
+            notes[0].text
+        );
         // Reversible: reopen brings one back.
         crate::tasks::reopen(&db, &stale_incident.id, &EventCtx::test()).unwrap();
         let back: String = conn
@@ -276,7 +297,9 @@ mod tests {
 
         for (touch, t) in &cases {
             match *touch {
-                "start" => crate::tasks::start(&db, &t.id, &ctx).unwrap(),
+                "start" => {
+                    crate::tasks::start(&db, &t.id, &ctx).unwrap();
+                }
                 "done" => {
                     crate::tasks::mark_done(&db, t, &ctx).unwrap();
                 }

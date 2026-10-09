@@ -45,6 +45,20 @@ pub struct ResolveResp {
     pub pt_ids: Vec<String>,
 }
 
+/// Closure evidence for a close-on-recovery: who resolved which capture key,
+/// with the resolver's own note when it sent one (bounded; the note cap must
+/// never refuse a recovery close).
+fn recovery_note(key: &str, client: &str, note: Option<&str>) -> String {
+    let key: String = key.chars().take(200).collect();
+    match note.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => {
+            let n: String = n.chars().take(2000).collect();
+            format!("recovered: {client} resolved capture {key}: {n}")
+        }
+        None => format!("recovered: {client} resolved capture {key}"),
+    }
+}
+
 /// POST /capture/resolve — close-on-recovery (v2.6.0). The capturing source
 /// reports the condition cleared; every OPEN task carrying that capture_key
 /// is marked done with provenance. Capture scope: this is the recovery half
@@ -128,7 +142,10 @@ fn resolve_blocking(
             )),
             command: None,
         };
-        match ptask_core::tasks::mark_done(&state.db, &task, &ctx) {
+        // The recovery is the evidence: journal it with the close itself
+        // (task.capture_resolved below stays for existing consumers).
+        let evidence = recovery_note(&key, &identity.client_id, req.note.as_deref());
+        match ptask_core::tasks::mark_done_noted(&state.db, &task, Some(&evidence), &ctx) {
             Ok(_) => {
                 closed += 1;
                 if let Some(pt) = task.pt_id.clone() {
@@ -1054,5 +1071,24 @@ mod tests {
             ..req
         };
         assert_eq!(effective_severity(&req, "telegram"), None);
+    }
+
+    #[test]
+    fn a_recovery_close_always_carries_bounded_evidence() {
+        assert_eq!(
+            recovery_note(
+                "sentinel:disk-db1",
+                "puresentinel",
+                Some("  disk back to 61%  ")
+            ),
+            "recovered: puresentinel resolved capture sentinel:disk-db1: disk back to 61%"
+        );
+        assert_eq!(
+            recovery_note("k", "puresentinel", Some("   ")),
+            "recovered: puresentinel resolved capture k"
+        );
+        let long = recovery_note("k", "c", Some(&"x".repeat(50_000)));
+        assert!(long.chars().count() < ptask_core::notes::MAX_NOTE_CHARS);
+        assert!(ptask_core::notes::normalize(&long).is_ok());
     }
 }
