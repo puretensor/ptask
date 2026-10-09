@@ -89,16 +89,34 @@ pub fn unblocked_by(db: &Db, closed_uuid: &str) -> Result<Vec<Task>> {
 }
 
 /// Close-and-continue, part two: claim the next ready task for `ctx`'s
-/// actor, in `pt next` order, skipping tasks already in progress. When
-/// another claimer wins a candidate between the read and the claim, the
-/// next one is tried; `None` when nothing ready is claimable.
-pub fn claim_next(db: &Db, ctx: &crate::event_log::EventCtx) -> Result<Option<Task>> {
+/// actor, in `pt next` order, skipping tasks already in progress and any
+/// uuid in `skip` (tasks this same call just closed or advanced — a
+/// recurring task that rolled forward is ready again and must not be
+/// claimed back). When another claimer wins a candidate between the read
+/// and the claim, the next one is tried; `None` when nothing ready is
+/// claimable. The returned task is re-read after the claim so callers see
+/// it in progress.
+pub fn claim_next(
+    db: &Db,
+    ctx: &crate::event_log::EventCtx,
+    skip: &[String],
+) -> Result<Option<Task>> {
     for t in next_ready(db, 50)? {
+        if skip.iter().any(|id| id == &t.id) {
+            continue;
+        }
         if !matches!(t.status.as_str(), "triage" | "backlog" | "todo") {
             continue;
         }
         match crate::tasks::claim(db, &t.id, ctx) {
-            Ok(()) => return Ok(Some(t)),
+            Ok(()) => {
+                let claimed =
+                    crate::tasks::resolve_for_lookup(db, &t.id, true).unwrap_or_else(|_| Task {
+                        status: "in_progress".into(),
+                        ..t
+                    });
+                return Ok(Some(claimed));
+            }
             // Lost the race (or it moved on): the next candidate.
             Err(crate::Error::Other(msg)) if msg.contains("not claimable") => continue,
             Err(e) => return Err(e),
@@ -316,20 +334,48 @@ mod tests {
         );
 
         let hal = EventCtx::local("hal");
-        let got = claim_next(&db, &hal).unwrap().unwrap();
+        let none: &[String] = &[];
+        let got = claim_next(&db, &hal, none).unwrap().unwrap();
         assert_eq!(
             got.title, "waits on base only",
             "highest priority ready first"
         );
+        assert_eq!(got.status, "in_progress", "returned after the claim");
         // In progress now: the next call skips it and takes the next ready.
-        let got = claim_next(&db, &hal).unwrap().unwrap();
+        let got = claim_next(&db, &hal, none).unwrap().unwrap();
         assert_eq!(got.title, "second prerequisite");
         crate::tasks::mark_done(&db, &other, &ctx).unwrap();
-        let got = claim_next(&db, &hal).unwrap().unwrap();
+        let got = claim_next(&db, &hal, none).unwrap().unwrap();
         assert_eq!(got.title, "waits on base and other");
         assert!(
-            claim_next(&db, &hal).unwrap().is_none(),
+            claim_next(&db, &hal, none).unwrap().is_none(),
             "nothing claimable left"
         );
+    }
+
+    #[test]
+    fn claim_next_does_not_take_a_task_the_caller_asked_to_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("c.db")).unwrap();
+        let ctx = EventCtx::test();
+        let first = crate::tasks::create(&db, NewTask::minimal("just advanced"), &ctx).unwrap();
+        crate::tasks::update_priority(&db, &first.id, 4, &ctx).unwrap();
+        crate::tasks::create(&db, NewTask::minimal("other ready"), &ctx).unwrap();
+        let hal = EventCtx::local("hal");
+        let got = claim_next(&db, &hal, std::slice::from_ref(&first.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.title, "other ready");
+        assert_eq!(got.status, "in_progress");
+        let status: String = db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT status_v2 FROM tasks WHERE id=?1",
+                    [&first.id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(status, "todo");
     }
 }

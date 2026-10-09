@@ -885,7 +885,9 @@ fn keyed_replay_spec(cmd: &Command) -> Option<(&'static [&'static str], KeyTarge
     const UPDATED: &[&str] = &["task.updated"];
     Some(match cmd {
         Command::Add(_) => (&["task.created"], Untargeted),
-        Command::Done(a) if a.queries.len() == 1 => (
+        // `--claim-next` journals a second event under `K:claim-next`; cmd_done
+        // replays both so the retry still reports which task was claimed.
+        Command::Done(a) if a.queries.len() == 1 && !a.claim_next => (
             &["task.completed", "task.recurrence_advanced"],
             Task(a.queries[0].clone()),
         ),
@@ -1363,10 +1365,59 @@ fn print_lines(lines: Vec<String>) {
     }
 }
 
+/// `--claim-next` after the closes have committed. A claim failure is
+/// reported here so the command still succeeds for the closes.
+enum ClaimedNext {
+    Task(Box<tasks::Task>),
+    Nothing,
+    Error(String),
+}
+
+impl ClaimedNext {
+    fn to_json(&self) -> Result<serde_json::Value> {
+        Ok(match self {
+            Self::Task(t) => serde_json::to_value(t)?,
+            Self::Nothing => serde_json::Value::Null,
+            Self::Error(e) => serde_json::json!({ "error": e }),
+        })
+    }
+}
+
+/// Look up a keyed `K:claim-next` claim, or make one, skipping `skip`
+/// (the tasks this call just closed or advanced).
+fn take_claimed_next(db: &Db, skip: &[String]) -> ClaimedNext {
+    let ctx = cli_ctx();
+    let ctx = match ctx.event_uuid.clone() {
+        Some(key) => ctx.with_uuid(format!("{key}:claim-next")),
+        None => ctx,
+    };
+    if let Some(key) = ctx.event_uuid.as_deref() {
+        match ptask_core::event_log::get_by_uuid(db, key) {
+            Ok(Some(event)) => {
+                return match event.task_uuid.as_deref() {
+                    Some(id) => match tasks::resolve_for_lookup(db, id, true) {
+                        Ok(t) => ClaimedNext::Task(Box::new(t)),
+                        Err(e) => ClaimedNext::Error(e.to_string()),
+                    },
+                    None => ClaimedNext::Nothing,
+                };
+            }
+            Ok(None) => {}
+            Err(e) => return ClaimedNext::Error(e.to_string()),
+        }
+    }
+    match ptask_core::dag::claim_next(db, &ctx, skip) {
+        Ok(Some(t)) => ClaimedNext::Task(Box::new(t)),
+        Ok(None) => ClaimedNext::Nothing,
+        Err(e) => ClaimedNext::Error(e.to_string()),
+    }
+}
+
 fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
     let multi = a.queries.len() > 1;
     let mut results = Vec::new();
     let mut failed = 0usize;
+    let mut skip = Vec::new();
     for query in &a.queries {
         // One task's failure (blocked, not found) no longer abandons the
         // rest of the list half-applied; every failure is reported.
@@ -1397,6 +1448,7 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
                 "pt_id": pt, "task_uuid": task.id, "title": task.title,
                 "outcome": "replayed"
             }));
+            skip.push(task.id.clone());
             continue;
         }
         let outcome = match tasks::mark_done(db, &task, &ctx) {
@@ -1407,6 +1459,7 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
                 continue;
             }
         };
+        skip.push(task.id.clone());
         match &outcome {
             tasks::DoneOutcome::Completed => {
                 // What this close released: dependents that are ready now.
@@ -1458,28 +1511,30 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
         }
     }
     // Close and continue: only after every requested close went through
-    // (a failed close is not a cue to start something else).
-    let claimed = if a.claim_next && failed == 0 {
-        // A keyed close already used the key; the claim journals under its own.
-        let ctx = cli_ctx();
-        let ctx = match ctx.event_uuid.clone() {
-            Some(key) => ctx.with_uuid(format!("{key}:claim-next")),
-            None => ctx,
-        };
-        Some(ptask_core::dag::claim_next(db, &ctx).map_err(anyhow::Error::msg)?)
+    // (a failed close is not a cue to start something else). A claim
+    // failure after that does not fail the close: it lands in
+    // claimed_next.error. `--json --claim-next` is always the object.
+    let claimed = if a.claim_next {
+        Some(if failed == 0 {
+            take_claimed_next(db, &skip)
+        } else {
+            ClaimedNext::Nothing
+        })
     } else {
         None
     };
     if json_mode() {
         match &claimed {
             Some(next) => crate::print_json(&serde_json::json!({
-                "results": results, "claimed_next": next,
+                "results": results, "claimed_next": next.to_json()?,
             }))?,
             None => crate::print_json(&results)?,
         }
-    } else if let Some(next) = &claimed {
+    } else if failed == 0
+        && let Some(next) = &claimed
+    {
         match next {
-            Some(n) => println!(
+            ClaimedNext::Task(n) => println!(
                 "{}",
                 ui::outcome(
                     ui::Status::Busy,
@@ -1489,7 +1544,11 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
                     "next ready · in progress"
                 )
             ),
-            None => println!("{}", ui::empty("nothing ready to claim next")),
+            ClaimedNext::Nothing => println!("{}", ui::empty("nothing ready to claim next")),
+            ClaimedNext::Error(e) => eprintln!(
+                "{}",
+                ui::section("error", ui::Ink::Red, &format!("claim-next: {e}"))
+            ),
         }
     }
     if failed > 0 {

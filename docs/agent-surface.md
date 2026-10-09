@@ -56,9 +56,14 @@ commit; a scoring failure does not roll back a successful edit.
 - **task_done** — completes a task, or advances a recurring one in place
   (`status=advanced`, `next_deadline`). The reply lists `unblocked`: the
   tasks this close made ready. With `claim_next: true` (v3.47.0) it also
-  claims the next ready task (task_next order, skipping in-progress ones) and
-  returns it as `claimed_next` with its goal chain (null when nothing is
-  claimable): close and continue without a task_next + task_claim round trip. Pass `expected_deadline` (the deadline
+  claims the next ready task (task_next order, skipping in-progress ones and
+  the task this call just closed or advanced) and returns it as
+  `claimed_next` after the claim (status `in_progress`, with its goal chain
+  when that lookup succeeds; without the chain if it fails; null when
+  nothing is claimable; `{"error": …}` if the claim itself failed). The
+  close is already committed in every case: a later claim or goal-lookup
+  failure does not read as a failed close. Close and continue without a
+  task_next + task_claim round trip. Pass `expected_deadline` (the deadline
   you last saw; `""` = none) to make a retry or a duplicate safe: if the task
   has moved on, the call errors and nothing changes, instead of completing the
   next occurrence too. The dashboard's `POST /api/tasks/{id}/done` takes the

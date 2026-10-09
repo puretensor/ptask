@@ -42,9 +42,14 @@ Mark done by `PT-N`, bare integer `42`, or title substring. Each completion
 lists the tasks it unblocked (dependents with no prerequisite left open; in
 `--json`, `unblocked` per result). `--claim-next` (v3.47.0) then claims the
 next ready task in `pt next` order for `$PTASK_ACTOR`, skipping tasks already
-in progress, and prints it (`--json`: `{"results": [...], "claimed_next":
-task | null}`): close and continue in one command. It claims only when every
-requested close succeeded.
+in progress and any task this same call just closed or advanced, and prints
+it. `--json --claim-next` is always `{"results": [...], "claimed_next": task
+| null | {"error": ...}}` — on success, on a failed close (`claimed_next` is
+null and the command still fails), and on a keyed replay (the replay reports
+the task the first run claimed and claims nothing). A claim that fails after
+the closes committed still reports those closes; `claimed_next` carries the
+error and the command succeeds. It claims only when every requested close
+succeeded.
 
 ### `pt priority <query> <level>` (alias `pt pri`)
 

@@ -83,7 +83,8 @@ pub struct DoneArg {
     #[serde(default)]
     pub expected_deadline: Option<String>,
     /// After the close, claim the next ready task (task_next order) for you
-    /// and return it as claimed_next: close and continue in one call.
+    /// — never the task this call just closed or advanced — and return it
+    /// as claimed_next: close and continue in one call.
     #[serde(default)]
     pub claim_next: bool,
 }
@@ -414,7 +415,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Mark a task done. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline. The reply lists unblocked: tasks this close made ready. Pass claim_next=true to also claim the next ready task (task_next order) and get it back as claimed_next (null when nothing is claimable), saving a task_next + task_claim round trip."
+        description = "Mark a task done. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline. The reply lists unblocked: tasks this close made ready. Pass claim_next=true to also claim the next ready task (task_next order, never the task this call just closed or advanced) and get it back as claimed_next after the claim (null when nothing is claimable; {error} if the claim failed after the close committed), saving a task_next + task_claim round trip."
     )]
     async fn task_done(
         &self,
@@ -452,11 +453,22 @@ impl PtaskMcp {
                 .unwrap_or_default();
             v["unblocked"] = serde_json::json!(unblocked);
             if claim_next {
-                v["claimed_next"] = match ptask_core::dag::claim_next(&db, &ctx) {
-                    Ok(Some(n)) => with_goals(&db, &n, task_json(&n))?,
-                    Ok(None) => serde_json::Value::Null,
-                    Err(e) => serde_json::json!({ "error": e.to_string() }),
-                };
+                v["claimed_next"] =
+                    match ptask_core::dag::claim_next(&db, &ctx, std::slice::from_ref(&t.id)) {
+                        Ok(Some(n)) => match with_goals(&db, &n, task_json(&n)) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "ptask::mcp",
+                                    error = %e,
+                                    "goal lookup after claim-next failed"
+                                );
+                                task_json(&n)
+                            }
+                        },
+                        Ok(None) => serde_json::Value::Null,
+                        Err(e) => serde_json::json!({ "error": e.to_string() }),
+                    };
             }
             json_ok(&v)
         })
