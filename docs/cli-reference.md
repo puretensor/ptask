@@ -44,7 +44,9 @@ lists the tasks it unblocked (dependents with no prerequisite left open; in
 next ready task in `pt next` order for `$PTASK_ACTOR`, skipping tasks already
 in progress, and prints it (`--json`: `{"results": [...], "claimed_next":
 task | null}`): close and continue in one command. It claims only when every
-requested close succeeded.
+requested close succeeded. Under `--idempotency-key` the claim journals as
+`<key>:claim-next`, so a retry replays the close and reports the task the
+first run claimed (same shape) instead of claiming another.
 
 ### `pt priority <query> <level>` (alias `pt pri`)
 

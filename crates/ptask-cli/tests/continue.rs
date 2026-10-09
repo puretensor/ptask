@@ -77,3 +77,127 @@ fn nothing_ready_says_so() {
     let human = pt.ok(&["--no-color", "done", "PT-1", "--claim-next"]);
     assert!(human.contains("nothing ready to claim next"), "{human}");
 }
+
+fn in_progress(pt: &Pt) -> Vec<String> {
+    pt.json(&["list"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["status"] == "in_progress")
+        .map(|t| t["pt_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_keyed_retry_reports_the_task_it_claimed_and_claims_no_other() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Provision the VLAN"]); // PT-1
+    pt.ok(&["add", "--raw", "Move the cameras"]); // PT-2
+    pt.ok(&["add", "--raw", "Label the patch panel"]); // PT-3
+    let args = ["--idempotency-key", "cc-r", "done", "PT-1", "--claim-next"];
+    let first = pt.json(&args);
+    let claimed = first["claimed_next"]["pt_id"].as_str().unwrap().to_string();
+
+    // The response was lost; the agent retries the same keyed command.
+    let retry = pt.json(&args);
+    assert_eq!(retry["results"][0]["outcome"], "replayed");
+    assert_eq!(
+        retry["claimed_next"]["pt_id"], claimed,
+        "the retry must name the task the first run claimed"
+    );
+    assert_eq!(
+        in_progress(&pt),
+        vec![claimed],
+        "the retry claimed a second task"
+    );
+
+    let human = pt.ok_as("test", &args);
+    assert!(
+        human.contains("replayed") && human.contains("claimed"),
+        "{human}"
+    );
+}
+
+#[test]
+fn a_keyed_multi_task_close_and_continue_retries_cleanly() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Patch fox-n0"]); // PT-1
+    pt.ok(&["add", "--raw", "Patch fox-n1"]); // PT-2
+    pt.ok(&["add", "--raw", "Reboot the pair"]); // PT-3
+    pt.ok(&["add", "--raw", "Write it up"]); // PT-4
+    let args = [
+        "--idempotency-key",
+        "cc-m",
+        "done",
+        "PT-1",
+        "PT-2",
+        "--claim-next",
+    ];
+    let first = pt.json(&args);
+    let claimed = first["claimed_next"]["pt_id"].as_str().unwrap().to_string();
+
+    let retry = pt.run(&[
+        "--json",
+        "--idempotency-key",
+        "cc-m",
+        "done",
+        "PT-1",
+        "PT-2",
+        "--claim-next",
+    ]);
+    assert!(
+        retry.status.success(),
+        "a retry of a keyed multi-task close-and-continue failed: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let retry: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(retry["claimed_next"]["pt_id"], claimed);
+    assert_eq!(in_progress(&pt), vec![claimed]);
+}
+
+// A keyed `pt done` journaled before 3.47.0 (no `claim_next` field) must
+// still replay: the flag at its default is left out of the fingerprint.
+
+const DONE_BEFORE_CLAIM_NEXT: &str = r#"Done(DoneArgs { queries: ["PT-1"] })"#;
+
+fn open_db(pt: &Pt) -> ptask_core::Db {
+    ptask_core::Db::open(pt.dir.path().join("tasks.db")).unwrap()
+}
+
+#[test]
+fn the_done_fingerprint_is_unchanged_without_claim_next() {
+    use ptask_core::event_log::{self, CommandFingerprint};
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Rotate the signing key"]); // PT-1
+    pt.ok(&["--idempotency-key", "k-fp", "done", "PT-1"]);
+    let journaled = event_log::get_by_uuid(&open_db(&pt), "k-fp")
+        .unwrap()
+        .expect("the keyed close is journaled under its key")
+        .command;
+    assert_eq!(
+        journaled,
+        Some(CommandFingerprint::new("Done", DONE_BEFORE_CLAIM_NEXT)),
+        "`pt done` without --claim-next must fingerprint as it did before the flag existed"
+    );
+}
+
+#[test]
+fn a_keyed_done_journaled_before_claim_next_replays() {
+    use ptask_core::event_log::{CommandFingerprint, EventCtx};
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Rotate the signing key"]); // PT-1
+    {
+        let db = open_db(&pt);
+        let task = ptask_core::tasks::resolve(&db, "PT-1").unwrap();
+        let ctx = EventCtx::local("test")
+            .with_uuid("k-legacy")
+            .with_command(CommandFingerprint::new("Done", DONE_BEFORE_CLAIM_NEXT));
+        ptask_core::tasks::mark_done(&db, &task, &ctx).unwrap();
+    }
+    let out = pt.run(&["--idempotency-key", "k-legacy", "done", "PT-1"]);
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("replayed"),
+        "a retry of the same keyed close across the upgrade must replay: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

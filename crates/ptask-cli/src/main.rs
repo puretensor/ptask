@@ -822,8 +822,20 @@ fn command_name(cmd: &Command) -> String {
 /// A keyed command's fingerprint: its parsed arguments, rendered by the
 /// derived Debug impl (fixed field order), so a retry of the same command
 /// matches and a different command under the same key does not.
+///
+/// Optional fields at their default (`claim_next: false`) are omitted so a
+/// key journaled before that field existed still matches.
 fn command_fingerprint(cmd: &Command) -> ptask_core::event_log::CommandFingerprint {
-    ptask_core::event_log::CommandFingerprint::new(&command_name(cmd), &format!("{cmd:?}"))
+    ptask_core::event_log::CommandFingerprint::new(&command_name(cmd), &fingerprint_args(cmd))
+}
+
+fn fingerprint_args(cmd: &Command) -> String {
+    match cmd {
+        Command::Done(a) if !a.claim_next => {
+            format!("Done(DoneArgs {{ queries: {:?} }})", a.queries)
+        }
+        other => format!("{other:?}"),
+    }
 }
 
 /// Commands whose retry under `--idempotency-key` is replay-safe: the keyed
@@ -960,6 +972,18 @@ fn replay_keyed(db: &Db, key: &str, cmd: &Command) -> Result<bool> {
         None => serde_json::json!({ "id": subject }),
     };
     out["outcome"] = serde_json::json!("replayed");
+    // A replayed close-and-continue still answers what it claimed, in the
+    // first run's shape, so an agent that lost the response keeps its task.
+    let claimed = match cmd {
+        Command::Done(a) if a.claim_next => Some(claim_next_once(db)?),
+        _ => None,
+    };
+    if let Some(next) = &claimed
+        && json_mode()
+    {
+        crate::print_json(&serde_json::json!({ "results": [out], "claimed_next": next }))?;
+        return Ok(true);
+    }
     emit(&out, || {
         let handle = task
             .as_ref()
@@ -977,7 +1001,44 @@ fn replay_keyed(db: &Db, key: &str, cmd: &Command) -> Result<bool> {
             )
         );
     })?;
+    if let Some(next) = &claimed {
+        print_claimed_next(next.as_ref());
+    }
     Ok(true)
+}
+
+/// The claim half of `pt done --claim-next`. A keyed close already used the
+/// key, so the claim journals under `<key>:claim-next`; a retry reports the
+/// task that key claimed rather than claiming another (or tripping the
+/// journal's unique index), and makes the claim only if the first run never
+/// got that far.
+fn claim_next_once(db: &Db) -> Result<Option<ptask_core::Task>> {
+    let ctx = cli_ctx();
+    let Some(key) = ctx.event_uuid.clone() else {
+        return ptask_core::dag::claim_next(db, &ctx).map_err(anyhow::Error::msg);
+    };
+    let claim_key = format!("{key}:claim-next");
+    if let Some(event) = ptask_core::event_log::get_by_uuid(db, &claim_key)? {
+        let claimed = event.task_uuid.as_deref().unwrap_or_default();
+        return Ok(tasks::resolve_for_lookup(db, claimed, true).ok());
+    }
+    ptask_core::dag::claim_next(db, &ctx.with_uuid(claim_key)).map_err(anyhow::Error::msg)
+}
+
+fn print_claimed_next(next: Option<&ptask_core::Task>) {
+    match next {
+        Some(n) => println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Busy,
+                "claimed",
+                n.pt_id.as_deref().unwrap_or_else(|| short_id(&n.id)),
+                &n.title,
+                "next ready · in progress"
+            )
+        ),
+        None => println!("{}", ui::empty("nothing ready to claim next")),
+    }
 }
 
 /// `--json` shape for a remote verb that acted on one task: its identity,
@@ -1460,13 +1521,7 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
     // Close and continue: only after every requested close went through
     // (a failed close is not a cue to start something else).
     let claimed = if a.claim_next && failed == 0 {
-        // A keyed close already used the key; the claim journals under its own.
-        let ctx = cli_ctx();
-        let ctx = match ctx.event_uuid.clone() {
-            Some(key) => ctx.with_uuid(format!("{key}:claim-next")),
-            None => ctx,
-        };
-        Some(ptask_core::dag::claim_next(db, &ctx).map_err(anyhow::Error::msg)?)
+        Some(claim_next_once(db)?)
     } else {
         None
     };
@@ -1478,19 +1533,7 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
             None => crate::print_json(&results)?,
         }
     } else if let Some(next) = &claimed {
-        match next {
-            Some(n) => println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Busy,
-                    "claimed",
-                    n.pt_id.as_deref().unwrap_or_else(|| short_id(&n.id)),
-                    &n.title,
-                    "next ready · in progress"
-                )
-            ),
-            None => println!("{}", ui::empty("nothing ready to claim next")),
-        }
+        print_claimed_next(next.as_ref());
     }
     if failed > 0 {
         anyhow::bail!("{failed} of {} task(s) not completed", a.queries.len());
