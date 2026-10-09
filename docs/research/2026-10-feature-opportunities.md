@@ -42,7 +42,7 @@ who holds what, and whether a new task is really new.
 | 2 | **Claim ownership, release and leases**: `claimed_by`, `task_release`, optional lease TTL with heartbeat, an expiry sweep that ships off | Closure reports twice: "claims are released by closure or recorded as parked because pTask has no unclaim operation"; the docs admit a crashed agent's claim stays `in_progress` until someone notices; the reaper skips claimed tasks, so nothing recovers them | Beads `--claim` + `heartbeat` + `reclaim`; Linear agent sessions go stale after 30 min; Marcus treats any tool call as a heartbeat; arXiv 2606.19616 measures duplicate work without leases | High for parallel agent sweeps | Good: one small migration; the sweep changes state, so it is off by default | **Built** (3.44.0, puretensor/ptask#123) |
 | 3 | **Duplicate check at filing time and merge**: `task_add` / `pt add` report likely open duplicates; `pt merge` closes one into another, carrying labels, dependents and notes | Backlog scans repeatedly listed hand- and agent-filed duplicates (several pairs and a trio in one pass); the operator rule that a closing pass must not open more than it closes, after a `+13 / −4` half hour | Beads `bd duplicates` / `bd duplicate --of`; GitHub `--duplicate-of`; Linear Triage Intelligence suggests duplicates at creation | High: attacks backlog inflation at the source | Good: lexical similarity over FTS, no model needed; merge is an attributed dismiss plus link moves | **Built** (3.45.0, puretensor/ptask#124) |
 | 4 | Per-actor flow metrics: created vs closed per client, cycle-time p50/p90, untouched share | The `+13 / −4` flux chip shows counts but not *who* | Linear Insights; agent-backlog write-ups (342 opened vs 218 closed in a week) | Medium | Cheap (SQL over the journal) | **Built** (3.46.0, puretensor/ptask#125): `pt flux`, MCP `task_flux`, the digest and the cockpit's flux picker, per actor |
-| 5 | Acceptance criteria and gated done (checklist; agents must tick all plus a note) | Same false-green lesson as #1 | Backlog.md `--ac` / definition of done; Beads `bd lint` | Medium | Needs an operator policy decision; #1 delivers the evidence half | Deferred |
+| 5 | Acceptance criteria and gated done (checklist; agents must tick all plus a note) | Same false-green lesson as #1 | Backlog.md `--ac` / definition of done; Beads `bd lint` | Medium | Opt-in per task, so no fleet-wide policy is imposed; #1 delivers the evidence half | **Built** (3.48.0, puretensor/ptask#127) |
 | 6 | Close-and-continue: `task_done` returns newly unblocked tasks, optional claim-next | Agent sweeps round-trip `task_next` after every close | Beads `--suggest-next` / `--claim-next` | Low to medium | Cheap | **Built** (3.47.0, puretensor/ptask#126): `pt done` lists what a close unblocked; `--claim-next` / MCP `claim_next` |
 | 7 | External gates (CI run, PR merged) as DAG nodes | Blocked work polled by hand | Beads `bd gate` | Medium | Needs a poller calling GitHub/Gitea: a new outbound dependency | Not now |
 | 8 | ICS feed of deadlines and plan blocks | `pt plan --write` already puts the plan on the calendar | Todoist calendar feed | Low | A token in a subscribable URL is a long-lived credential in calendar apps | Not now |
@@ -67,11 +67,19 @@ off unless `PTASK_CLAIM_RECLAIM=1`) and puretensor/ptask#124 (duplicate check
 at filing time, `pt dupes`, `pt merge`; refusing to file needs a 0.75 score,
 reporting starts at 0.6). Opportunity #4, per-actor flux, was cheap and
 answers the operator's own closing-pass rule, so it followed as
-puretensor/ptask#125. The rest stay deferred for the reasons in the table:
-each needs an operator policy decision (#5), adds an outbound dependency
-(#7), puts a credential in a URL (#8), or has no repeated evidence behind it
-(#9). #6, close-and-continue, was cheap enough to finish the agent loop
-and followed as puretensor/ptask#126.
+puretensor/ptask#125. #6, close-and-continue, was cheap enough to finish the
+agent loop and followed as puretensor/ptask#126. #5, acceptance criteria,
+looked like it needed a fleet-wide policy; making it opt-in per task removes
+that (a task with no criteria closes exactly as before), so it followed as
+puretensor/ptask#127.
+
+The remaining three are stopped on purpose, not for lack of time. #7 needs a
+poller calling GitHub or Gitea, which is the outbound dependency the brief
+rules out; the git webhook already closes tasks on `Closes PT-n`, which covers
+the commonest case. #8 would put a long-lived token in a calendar
+subscription URL, and `pt plan --write` already puts the plan on the
+calendar. #9 has no repeated evidence of need, and its hooks would run code
+that changes state.
 
 ## Sources
 
