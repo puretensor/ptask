@@ -6,8 +6,8 @@ a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 22 tools (`task_next / task_list / task_add /
-task_show / task_done / task_dismiss / task_edit / task_claim / task_promote /
+Two transports, one handler, 23 tools (`task_next / task_list / task_add /
+task_show / task_done / task_dismiss / task_note / task_edit / task_claim / task_promote /
 task_duplicates / task_merge /
 task_depend / task_capture / task_search / task_digest` plus
 `approval_request / approval_list / approval_status / approval_withdraw` —
@@ -61,6 +61,20 @@ commit; a scoring failure does not roll back a successful edit.
   next occurrence too. The dashboard's `POST /api/tasks/{id}/done` takes the
   same optional `{"expected_deadline": …}` body, and `/sync` `task_done` the
   same arg. Completing an already-done task is an error.
+- **task_note** (v3.43.0) — append a note: findings, partial progress, a
+  handover. Append-only, attributed to the caller (actor + `source=mcp`);
+  works on done/dismissed tasks by PT-N or uuid, for evidence that arrives
+  after the close. `task_done` and `task_dismiss` take an optional `note`
+  (closure evidence / the reason) that rides inside the closing event, so the
+  evidence and the close commit together: a close without it is a bare
+  claim. `task_show` returns `notes` (oldest first, the newest 100) and
+  `pt context` / the worker brief carries them as a `## Notes` section, so
+  the next worker starts from what earlier ones found. `task_digest` gives
+  each recently closed task its closing `note`. Compact surfaces (digest,
+  the markdown worker brief) truncate a long note to about 300 characters
+  with a marker; `task_show` / `pt context --json`'s `notes` array stay
+  full. A note is transparent to `pt undo`: it is never reversed and never
+  shadows the close it follows.
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
   It is a claim, not a lease: the task stores no owner (the claimer appears
@@ -138,7 +152,7 @@ adapter above.
 ## Export
 
 `pt export --git` writes `tasks.jsonl` / `task_links.jsonl` /
-`task_labels.jsonl` to `~/puretensor-tasks/export/` and commits in place —
+`task_labels.jsonl` / `task_notes.jsonl` to `~/puretensor-tasks/export/` and commits in place —
 a greppable, diffable projection (the SQLite spine stays canonical).
 `ptask-export.timer` runs it nightly at 04:45 UTC.
 
