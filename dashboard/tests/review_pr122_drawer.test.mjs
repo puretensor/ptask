@@ -162,7 +162,9 @@ function storage() {
   return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
 }
 
-function loadCockpit(base) {
+// `refuse(path)` answers a request with a 404 instead, as a server without
+// that route would.
+function loadCockpit(base, refuse = () => false) {
   const html = readFileSync(join(DASH, "www", "index.html"), "utf8");
   const src = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).at(-1);
   assert.ok(src, "the cockpit's inline script is in index.html");
@@ -190,6 +192,9 @@ function loadCockpit(base) {
     fetch: (p, opts) => {
       if (!live) return new Promise(() => {});
       requests.push(String(p));
+      if (refuse(String(p))) {
+        return Promise.resolve(new Response('{"error":"not found"}', { status: 404 }));
+      }
       return fetch(new URL(String(p), base), opts);
     },
     setTimeout: (fn, ms) => (live ? setTimeout(fn, ms) : 0),
@@ -231,11 +236,11 @@ function loadCockpit(base) {
   };
 }
 
-async function withCockpit(spec, body) {
+async function withCockpit(spec, body, refuse) {
   const dir = mkdtempSync(join(tmpdir(), "ptask-drawer-"));
   const sidecar = await startSidecar(dir, buildDb(dir, spec));
   try {
-    await body(loadCockpit(sidecar.base));
+    await body(loadCockpit(sidecar.base, refuse));
   } finally {
     sidecar.stop();
     rmSync(dir, { recursive: true, force: true });
@@ -266,4 +271,30 @@ test("the drawer shows a note older than the task's newest 60 events", async () 
       `the drawer dropped a note older than the newest 60 events (requests: ${cockpit.requests.join(", ")})`,
     );
   });
+});
+
+// ---- a server without the notes route (pt serve before 3.45.1) -------------
+
+test("the drawer keeps its history and notes when the server has no notes route", async () => {
+  const NOTE = "cert served on lhr";
+  const events = [
+    { task_uuid: TASK, event_type: "task.created", actor: "shell", ts: at(1),
+      payload: { task_uuid: TASK, pt_id: "PT-1", actor: "shell", source: "cli" } },
+    { task_uuid: TASK, event_type: "task.noted", actor: "hal", ts: at(2),
+      payload: { task_uuid: TASK, pt_id: "PT-1", note: NOTE, actor: "hal", source: "mcp" } },
+  ];
+  await withCockpit(
+    { tasks: [taskRow(TASK, "PT-1", "Renew the staging certificate")], events },
+    async (cockpit) => {
+      await cockpit.openDrawer(TASK);
+      const shown = cockpit.rendered();
+      assert.ok(
+        !shown.includes("history unavailable"),
+        `a missing notes route cost the drawer its history: ${shown.match(/history unavailable[^\n]*/)}`,
+      );
+      assert.ok(shown.includes("task.created"), "the history rendered");
+      assert.ok(shown.includes(NOTE), "the notes fell back to the events");
+    },
+    (path) => path.endsWith("/notes"),
+  );
 });

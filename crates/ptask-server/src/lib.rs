@@ -3391,6 +3391,54 @@ Don't forget the sourdough.\r\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_notes_route_serves_the_drawer_trail() {
+        // The cockpit drawer reads GET /api/tasks/{id}/notes; without the
+        // route under `pt serve` the drawer showed "history unavailable".
+        let db = open_test_db();
+        let ctx = EventCtx::test();
+        let t = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("rack fox-n2"), &ctx)
+            .unwrap();
+        ptask_core::notes::add(&db, &t.id, "rails arrived", &ctx).unwrap();
+        ptask_core::tasks::mark_done_noted(&db, &t, Some("racked; IPMI reachable"), &ctx).unwrap();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let get = |uri: String| {
+            app.clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        };
+        let resp = get(format!("/api/tasks/{}/notes", t.id)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let got: Vec<(&str, &str)> = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["event_type"].as_str().unwrap(),
+                    e["payload"]["note"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("task.completed", "racked; IPMI reachable"),
+                ("task.noted", "rails arrived"),
+            ],
+            "newest first, in the events shape the drawer renders"
+        );
+        let missing = get("/api/tasks/no-such-task/notes".into()).await.unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn dashboard_done_reports_advanced_for_a_recurring_task() {
         let db = open_test_db();
         let rec = ptask_core::recurrence::parse("every monday").unwrap();

@@ -278,6 +278,7 @@ check on every request, and approval decisions gated by
 
 Reads: `GET /api/stats · /api/tasks?status=&limit= · /api/critical?limit= ·
 /api/timeline · /api/heatmap · /api/tasks/{id}/events` (journal history) ·
+`GET /api/tasks/{id}/notes` (the drawer's notes trail, newest first) ·
 `GET /api/stream` (SSE, `event: change` frames with journal deltas).
 `GET /` serves the cockpit when `PTASK_DASH_WWW` exists, else the banner.
 
