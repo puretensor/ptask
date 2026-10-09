@@ -102,6 +102,9 @@ pub struct Extensions {
     /// `discovered_from` link is written in the create transaction and named
     /// in the `task.created` payload, so it can't fail after the task exists.
     pub discovered_from: Option<String>,
+    /// Acceptance criteria (the definition of done), journaled in the create
+    /// transaction; see [`crate::criteria`].
+    pub acceptance: Vec<String>,
 }
 
 /// Insert a task with byte-for-byte Python defaults, mint a PT-N, log a
@@ -113,7 +116,7 @@ pub fn create(db: &Db, new: NewTask, ctx: &EventCtx) -> Result<Task> {
 /// Generate an idempotency uuid for a locally-initiated mutation (CLI, TUI,
 /// bot). Remote-initiated mutations supply the client's command uuid instead
 /// so `/sync` replays stay idempotent.
-fn local_event_uuid() -> String {
+pub(crate) fn local_event_uuid() -> String {
     format!("local:{}", Uuid::new_v4())
 }
 
@@ -288,6 +291,10 @@ pub fn create_with_extensions(
         payload["discovered_from"] = serde_json::json!(parent);
     }
     record_event_tx(&tx, ctx, &task.id, "task.created", &payload)?;
+    // The definition of done commits with the task (or neither does).
+    if !ext.acceptance.is_empty() {
+        crate::criteria::add_in_conn(&tx, &task.id, &ext.acceptance, ctx)?;
+    }
 
     tx.commit()?;
     debug!(target: "ptask::tasks", pt_id = %pt_id_str, "created");
@@ -742,6 +749,15 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
             blockers.join(", ")
         )));
     }
+    // Definition-of-done gate: a task given acceptance criteria closes only
+    // when every one is checked (tasks without criteria are unaffected).
+    // Read under the same write lock, so a criterion unchecked between the
+    // read and the flip cannot slip through.
+    let open = crate::criteria::unchecked_in_conn(&tx, &task.id)?;
+    if !open.is_empty() {
+        let handle = task.pt_id.clone().unwrap_or_else(|| task.id.clone());
+        return Err(crate::criteria::blocked_error(&handle, &open));
+    }
 
     // Look up the recurrence rule, if any.
     let rec_row: Option<RecurrenceRow> = tx
@@ -927,6 +943,21 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                     "next_deadline": next_iso,
                 }),
             )?;
+            // Each occurrence meets its criteria afresh.
+            if !crate::criteria::list_in_conn(&tx, &task.id)?.is_empty() {
+                let reset_uuid = match ctx.event_uuid.as_deref() {
+                    Some(key) => format!("{key}:criteria-reset"),
+                    None => local_event_uuid(),
+                };
+                crate::event_log::record_in_conn(
+                    &tx,
+                    &reset_uuid,
+                    Some(&task.id),
+                    "task.criteria_reset",
+                    &serde_json::json!({ "task_uuid": task.id, "next_deadline": next_iso }),
+                    ctx,
+                )?;
+            }
             tx.commit()?;
             return Ok(DoneOutcome::Advanced {
                 next_deadline: next_iso,
@@ -2490,7 +2521,7 @@ fn row_to_task(r: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 
 /// ISO-8601 UTC timestamp matching the existing Python format
 /// (e.g. `2026-05-13T17:34:56.789012+00:00`).
-fn iso_now() -> String {
+pub(crate) fn iso_now() -> String {
     let now: Zoned = Zoned::now().with_time_zone(jiff::tz::TimeZone::UTC);
     let base = now.strftime("%Y-%m-%dT%H:%M:%S").to_string();
     let micros = now.subsec_nanosecond().div_euclid(1_000);

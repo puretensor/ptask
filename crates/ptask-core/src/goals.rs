@@ -933,6 +933,20 @@ pub fn context_markdown(db: &Db, task: &Task) -> Result<String> {
             md.push_str(&format!("- {}: {}\n", b.pt_id, line(&b.title)));
         }
     }
+    // The definition of done: what the worker must make true (and check)
+    // before the task will close.
+    let criteria = crate::criteria::list(db, &task.id)?;
+    if !criteria.is_empty() {
+        md.push_str("\n## Acceptance criteria\n\n");
+        for c in &criteria {
+            md.push_str(&format!(
+                "- [{}] {}. {}\n",
+                if c.done { "x" } else { " " },
+                c.n,
+                line(&c.text)
+            ));
+        }
+    }
     Ok(md)
 }
 

@@ -6,8 +6,8 @@ a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 20 tools (`task_next / task_list / task_add /
-task_show / task_done / task_dismiss / task_edit / task_claim / task_promote /
+Two transports, one handler, 21 tools (`task_next / task_list / task_add /
+task_show / task_done / task_dismiss / task_edit / task_criteria / task_claim / task_promote /
 task_depend / task_capture / task_search / task_digest` plus
 `approval_request / approval_list / approval_status / approval_withdraw` —
 agents request, they never decide; see [`approvals.md`](approvals.md) — plus
@@ -60,6 +60,14 @@ commit; a scoring failure does not roll back a successful edit.
   next occurrence too. The dashboard's `POST /api/tasks/{id}/done` takes the
   same optional `{"expected_deadline": …}` body, and `/sync` `task_done` the
   same arg. Completing an already-done task is an error.
+- **Acceptance criteria (v3.48.0).** `task_add(acceptance: [...])` creates a
+  task with its definition of done; `task_criteria(id, add?, check?,
+  uncheck?, evidence?)` edits it (a bad batch is refused before any of it
+  lands) and returns the list; `task_show` returns `criteria` (`n`, `text`,
+  `done`, `checked_by`, `checked_at`, `evidence`), and the worker brief has
+  them as a checklist. `task_done` refuses while any is unchecked, naming
+  them: check a criterion only when it is true, with the evidence. Tasks
+  without criteria are unaffected.
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
   It is a claim, not a lease: the task stores no owner (the claimer appears

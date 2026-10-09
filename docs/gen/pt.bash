@@ -43,6 +43,9 @@ _pt() {
             pt,context)
                 cmd="pt__subcmd__context"
                 ;;
+            pt,criteria)
+                cmd="pt__subcmd__criteria"
+                ;;
             pt,delegate)
                 cmd="pt__subcmd__delegate"
                 ;;
@@ -232,6 +235,42 @@ _pt() {
             pt__subcmd__approval__subcmd__help,withdraw)
                 cmd="pt__subcmd__approval__subcmd__help__subcmd__withdraw"
                 ;;
+            pt__subcmd__criteria,add)
+                cmd="pt__subcmd__criteria__subcmd__add"
+                ;;
+            pt__subcmd__criteria,check)
+                cmd="pt__subcmd__criteria__subcmd__check"
+                ;;
+            pt__subcmd__criteria,help)
+                cmd="pt__subcmd__criteria__subcmd__help"
+                ;;
+            pt__subcmd__criteria,ls)
+                cmd="pt__subcmd__criteria__subcmd__ls"
+                ;;
+            pt__subcmd__criteria,rm)
+                cmd="pt__subcmd__criteria__subcmd__rm"
+                ;;
+            pt__subcmd__criteria,uncheck)
+                cmd="pt__subcmd__criteria__subcmd__uncheck"
+                ;;
+            pt__subcmd__criteria__subcmd__help,add)
+                cmd="pt__subcmd__criteria__subcmd__help__subcmd__add"
+                ;;
+            pt__subcmd__criteria__subcmd__help,check)
+                cmd="pt__subcmd__criteria__subcmd__help__subcmd__check"
+                ;;
+            pt__subcmd__criteria__subcmd__help,help)
+                cmd="pt__subcmd__criteria__subcmd__help__subcmd__help"
+                ;;
+            pt__subcmd__criteria__subcmd__help,ls)
+                cmd="pt__subcmd__criteria__subcmd__help__subcmd__ls"
+                ;;
+            pt__subcmd__criteria__subcmd__help,rm)
+                cmd="pt__subcmd__criteria__subcmd__help__subcmd__rm"
+                ;;
+            pt__subcmd__criteria__subcmd__help,uncheck)
+                cmd="pt__subcmd__criteria__subcmd__help__subcmd__uncheck"
+                ;;
             pt__subcmd__goal,abandon)
                 cmd="pt__subcmd__goal__subcmd__abandon"
                 ;;
@@ -318,6 +357,9 @@ _pt() {
                 ;;
             pt__subcmd__help,context)
                 cmd="pt__subcmd__help__subcmd__context"
+                ;;
+            pt__subcmd__help,criteria)
+                cmd="pt__subcmd__help__subcmd__criteria"
                 ;;
             pt__subcmd__help,delegate)
                 cmd="pt__subcmd__help__subcmd__delegate"
@@ -462,6 +504,21 @@ _pt() {
                 ;;
             pt__subcmd__help__subcmd__approval,withdraw)
                 cmd="pt__subcmd__help__subcmd__approval__subcmd__withdraw"
+                ;;
+            pt__subcmd__help__subcmd__criteria,add)
+                cmd="pt__subcmd__help__subcmd__criteria__subcmd__add"
+                ;;
+            pt__subcmd__help__subcmd__criteria,check)
+                cmd="pt__subcmd__help__subcmd__criteria__subcmd__check"
+                ;;
+            pt__subcmd__help__subcmd__criteria,ls)
+                cmd="pt__subcmd__help__subcmd__criteria__subcmd__ls"
+                ;;
+            pt__subcmd__help__subcmd__criteria,rm)
+                cmd="pt__subcmd__help__subcmd__criteria__subcmd__rm"
+                ;;
+            pt__subcmd__help__subcmd__criteria,uncheck)
+                cmd="pt__subcmd__help__subcmd__criteria__subcmd__uncheck"
                 ;;
             pt__subcmd__help__subcmd__goal,abandon)
                 cmd="pt__subcmd__help__subcmd__goal__subcmd__abandon"
@@ -719,7 +776,7 @@ _pt() {
 
     case "${cmd}" in
         pt)
-            opts="-h -V --db --json --idempotency-key --color --no-color --help --version add list done priority edit reopen show context dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token approval goal approve reject backfill gen-manpage gen-completions help"
+            opts="-h -V --db --json --idempotency-key --color --no-color --help --version add list done priority edit reopen show context dismiss rm criteria next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token approval goal approve reject backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -839,7 +896,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__add)
-            opts="-p -d -h --priority --description --deadline --reason --raw --kind --deliverable --db --json --idempotency-key --color --no-color --help <TITLE>"
+            opts="-p -d -h --priority --description --deadline --reason --raw --kind --deliverable --ac --db --json --idempotency-key --color --no-color --help <TITLE>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -874,6 +931,10 @@ _pt() {
                     return 0
                     ;;
                 --deliverable)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --ac)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1567,6 +1628,268 @@ _pt() {
         pt__subcmd__context)
             opts="-h --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria)
+            opts="-h --db --json --idempotency-key --color --no-color --help ls add check uncheck rm help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__add)
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY> <TEXT>..."
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__check)
+            opts="-m -h --evidence --db --json --idempotency-key --color --no-color --help <QUERY> <N>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --evidence)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__help)
+            opts="ls add check uncheck rm help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__help__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__help__subcmd__check)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__help__subcmd__ls)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__help__subcmd__rm)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__help__subcmd__uncheck)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__ls)
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__rm)
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY> <N>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --db)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --idempotency-key)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__criteria__subcmd__uncheck)
+            opts="-h --db --json --idempotency-key --color --no-color --help <QUERY> <N>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -2309,7 +2632,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__help)
-            opts="add list done priority edit reopen show context dismiss rm next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token approval goal approve reject backfill gen-manpage gen-completions help"
+            opts="add list done priority edit reopen show context dismiss rm criteria next plan view tui serve bot mcp digest export delegate branch distill accountability scoring remote promote kind start snooze reap depend review search why bulk log undo token approval goal approve reject backfill gen-manpage gen-completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2591,6 +2914,90 @@ _pt() {
         pt__subcmd__help__subcmd__context)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__criteria)
+            opts="ls add check uncheck rm"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__criteria__subcmd__add)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__criteria__subcmd__check)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__criteria__subcmd__ls)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__criteria__subcmd__rm)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        pt__subcmd__help__subcmd__criteria__subcmd__uncheck)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi

@@ -43,6 +43,7 @@ _arguments "${_arguments_options[@]}" : \
 '--reason=[Why this task was created — stored as ai_reasoning]:REASON:_default' \
 '--kind=[Task shape\: scout (investigation) or ship (implementation, default)]:KIND:_default' \
 '--deliverable=[What finishing it produces\: report | pr | none. Defaults to the kind'\''s deliverable when --kind is given]:DELIVERABLE:_default' \
+'*--ac=[An acceptance criterion (repeatable)\: the task closes only once each is checked with \`pt criteria check\`]:CRITERION:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
@@ -179,6 +180,135 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
 && ret=0
+;;
+(criteria)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_pt__subcmd__criteria_commands" \
+"*::: :->criteria" \
+&& ret=0
+
+    case $state in
+    (criteria)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-criteria-command-$line[1]:"
+        case $line[1] in
+            (ls)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query:_default' \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query:_default' \
+'*::text:_default' \
+&& ret=0
+;;
+(check)
+_arguments "${_arguments_options[@]}" : \
+'-m+[]:EVIDENCE:_default' \
+'--evidence=[]:EVIDENCE:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query:_default' \
+':n:_default' \
+&& ret=0
+;;
+(uncheck)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query:_default' \
+':n:_default' \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':query:_default' \
+':n:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__criteria__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-criteria-help-command-$line[1]:"
+        case $line[1] in
+            (ls)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(check)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(uncheck)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
 ;;
 (next)
 _arguments "${_arguments_options[@]}" : \
@@ -1624,6 +1754,42 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(criteria)
+_arguments "${_arguments_options[@]}" : \
+":: :_pt__subcmd__help__subcmd__criteria_commands" \
+"*::: :->criteria" \
+&& ret=0
+
+    case $state in
+    (criteria)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:pt-help-criteria-command-$line[1]:"
+        case $line[1] in
+            (ls)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(check)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(uncheck)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (next)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -2042,6 +2208,7 @@ _pt_commands() {
 'context:Markdown worker brief\: title, why-chain, blockers' \
 'dismiss:Dismiss a task (soft close, status → dismissed; reversible via reopen)' \
 'rm:Delete a task permanently (hard delete + tombstone)' \
+'criteria:Acceptance criteria (definition of done)\: a task with an unchecked criterion cannot be closed' \
 'next:Show ready-to-start tasks (all dependencies done)' \
 'plan:Advisory day plan\: fit the ready queue into calendar free/busy (dry-run unless --write). Reads free slots via gcalendar.py; --write adds tentative events to our own calendar only' \
 'view:Manage saved views' \
@@ -2286,6 +2453,85 @@ _pt__subcmd__context_commands() {
     local commands; commands=()
     _describe -t commands 'pt context commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__criteria_commands] )) ||
+_pt__subcmd__criteria_commands() {
+    local commands; commands=(
+'ls:List a task'\''s acceptance criteria and their state' \
+'add:Add one criterion (the words joined)' \
+'check:Check criterion N, optionally with the evidence that it holds' \
+'uncheck:Uncheck criterion N' \
+'rm:Remove criterion N from the definition of done' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt criteria commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__add_commands] )) ||
+_pt__subcmd__criteria__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__check_commands] )) ||
+_pt__subcmd__criteria__subcmd__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria check commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__help_commands] )) ||
+_pt__subcmd__criteria__subcmd__help_commands() {
+    local commands; commands=(
+'ls:List a task'\''s acceptance criteria and their state' \
+'add:Add one criterion (the words joined)' \
+'check:Check criterion N, optionally with the evidence that it holds' \
+'uncheck:Uncheck criterion N' \
+'rm:Remove criterion N from the definition of done' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pt criteria help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__help__subcmd__add_commands] )) ||
+_pt__subcmd__criteria__subcmd__help__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria help add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__help__subcmd__check_commands] )) ||
+_pt__subcmd__criteria__subcmd__help__subcmd__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria help check commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__help__subcmd__help_commands] )) ||
+_pt__subcmd__criteria__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria help help commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__help__subcmd__ls_commands] )) ||
+_pt__subcmd__criteria__subcmd__help__subcmd__ls_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria help ls commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__help__subcmd__rm_commands] )) ||
+_pt__subcmd__criteria__subcmd__help__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria help rm commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__help__subcmd__uncheck_commands] )) ||
+_pt__subcmd__criteria__subcmd__help__subcmd__uncheck_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria help uncheck commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__ls_commands] )) ||
+_pt__subcmd__criteria__subcmd__ls_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria ls commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__rm_commands] )) ||
+_pt__subcmd__criteria__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria rm commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__criteria__subcmd__uncheck_commands] )) ||
+_pt__subcmd__criteria__subcmd__uncheck_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt criteria uncheck commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__delegate_commands] )) ||
 _pt__subcmd__delegate_commands() {
     local commands; commands=()
@@ -2476,6 +2722,7 @@ _pt__subcmd__help_commands() {
 'context:Markdown worker brief\: title, why-chain, blockers' \
 'dismiss:Dismiss a task (soft close, status → dismissed; reversible via reopen)' \
 'rm:Delete a task permanently (hard delete + tombstone)' \
+'criteria:Acceptance criteria (definition of done)\: a task with an unchecked criterion cannot be closed' \
 'next:Show ready-to-start tasks (all dependencies done)' \
 'plan:Advisory day plan\: fit the ready queue into calendar free/busy (dry-run unless --write). Reads free slots via gcalendar.py; --write adds tentative events to our own calendar only' \
 'view:Manage saved views' \
@@ -2627,6 +2874,42 @@ _pt__subcmd__help__subcmd__bulk_commands() {
 _pt__subcmd__help__subcmd__context_commands() {
     local commands; commands=()
     _describe -t commands 'pt help context commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__criteria_commands] )) ||
+_pt__subcmd__help__subcmd__criteria_commands() {
+    local commands; commands=(
+'ls:List a task'\''s acceptance criteria and their state' \
+'add:Add one criterion (the words joined)' \
+'check:Check criterion N, optionally with the evidence that it holds' \
+'uncheck:Uncheck criterion N' \
+'rm:Remove criterion N from the definition of done' \
+    )
+    _describe -t commands 'pt help criteria commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__criteria__subcmd__add_commands] )) ||
+_pt__subcmd__help__subcmd__criteria__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help criteria add commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__criteria__subcmd__check_commands] )) ||
+_pt__subcmd__help__subcmd__criteria__subcmd__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help criteria check commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__criteria__subcmd__ls_commands] )) ||
+_pt__subcmd__help__subcmd__criteria__subcmd__ls_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help criteria ls commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__criteria__subcmd__rm_commands] )) ||
+_pt__subcmd__help__subcmd__criteria__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help criteria rm commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__criteria__subcmd__uncheck_commands] )) ||
+_pt__subcmd__help__subcmd__criteria__subcmd__uncheck_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help criteria uncheck commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__delegate_commands] )) ||
 _pt__subcmd__help__subcmd__delegate_commands() {

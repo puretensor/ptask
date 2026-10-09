@@ -84,6 +84,10 @@ enum Command {
     Dismiss(DismissArgs),
     /// Delete a task permanently (hard delete + tombstone).
     Rm(RmArgs),
+    /// Acceptance criteria (definition of done): a task with an unchecked
+    /// criterion cannot be closed.
+    #[command(subcommand, alias = "ac")]
+    Criteria(CriteriaCommand),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
     /// Advisory day plan: fit the ready queue into calendar free/busy (dry-run
@@ -621,6 +625,33 @@ struct AddArgs {
     /// Defaults to the kind's deliverable when --kind is given.
     #[arg(long = "deliverable")]
     deliverable: Option<String>,
+    /// An acceptance criterion (repeatable): the task closes only once each
+    /// is checked with `pt criteria check`.
+    #[arg(long = "ac", value_name = "CRITERION")]
+    acceptance: Vec<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum CriteriaCommand {
+    /// List a task's acceptance criteria and their state.
+    Ls { query: String },
+    /// Add one criterion (the words joined).
+    Add {
+        query: String,
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
+    /// Check criterion N, optionally with the evidence that it holds.
+    Check {
+        query: String,
+        n: i64,
+        #[arg(short = 'm', long = "evidence")]
+        evidence: Option<String>,
+    },
+    /// Uncheck criterion N.
+    Uncheck { query: String, n: i64 },
+    /// Remove criterion N from the definition of done.
+    Rm { query: String, n: i64 },
 }
 
 #[derive(clap::Args, Debug)]
@@ -1129,6 +1160,7 @@ fn run() -> Result<()> {
                 Some(Command::Context(a)) => cmd_context(&db, a),
                 Some(Command::Dismiss(a)) => cmd_dismiss(&db, a),
                 Some(Command::Rm(a)) => cmd_rm(&db, a),
+                Some(Command::Criteria(c)) => cmd_criteria(&db, c),
                 Some(Command::Next(a)) => cmd_next(&db, a),
                 Some(Command::Plan(a)) => cmd_plan(&db, a),
                 Some(Command::View(c)) => cmd_view(&db, c),
@@ -1238,6 +1270,7 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
     new.ai_reasoning = a.reason.unwrap_or_default();
     (ext.kind, ext.deliverable) =
         tasks::kind_and_deliverable(a.kind.as_deref(), a.deliverable.as_deref())?;
+    ext.acceptance = a.acceptance.clone();
 
     let task = tasks::create_with_extensions(db, new, ext, &cli_ctx())?;
 
@@ -1663,10 +1696,16 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         let mut v = serde_json::to_value(&t)?;
         v["goal_chain"] = ptask_core::goals::chain_json(&eg.chain);
         v["goal_source"] = serde_json::json!(eg.source.as_str());
+        v["criteria"] = serde_json::to_value(ptask_core::criteria::list(db, &t.id)?)?;
         crate::print_json(&v)?;
         return Ok(());
     }
     print_lines(render_show(&t, Some(&d), &blocked, &eg.chain));
+    let criteria = ptask_core::criteria::list(db, &t.id)?;
+    if !criteria.is_empty() {
+        println!();
+        print_lines(render_criteria(&criteria));
+    }
     Ok(())
 }
 
@@ -1795,6 +1834,100 @@ fn render_show(
         }
     }
     out
+}
+
+/// The criteria block shared by `pt show` and `pt criteria ls`.
+fn render_criteria(criteria: &[ptask_core::criteria::Criterion]) -> Vec<String> {
+    let done = criteria.iter().filter(|c| c.done).count();
+    let mut out = vec![ui::section(
+        "acceptance",
+        if done == criteria.len() {
+            ui::Ink::Green
+        } else {
+            ui::Ink::Amber
+        },
+        &format!(
+            "{done}/{} checked · the task closes when all are",
+            criteria.len()
+        ),
+    )];
+    for c in criteria {
+        let mark = if c.done {
+            ui::paint("[x]", ui::Ink::Green)
+        } else {
+            ui::paint("[ ]", ui::Ink::Amber)
+        };
+        let by = match (&c.checked_by, c.done) {
+            (Some(who), true) => ui::dim(&format!("  · {who}"), ui::Ink::Slate),
+            _ => String::new(),
+        };
+        out.push(format!("  {mark} {}. {}{by}", c.n, ui::one_line(&c.text)));
+        if let Some(e) = &c.evidence {
+            out.push(format!(
+                "        {}",
+                ui::paint(&ui::one_line(e), ui::Ink::Steel)
+            ));
+        }
+    }
+    out
+}
+
+fn cmd_criteria(db: &Db, c: CriteriaCommand) -> Result<()> {
+    let ctx = cli_ctx();
+    let (query, changed) = match &c {
+        CriteriaCommand::Ls { query } => (query.clone(), None),
+        CriteriaCommand::Add { query, .. }
+        | CriteriaCommand::Check { query, .. }
+        | CriteriaCommand::Uncheck { query, .. }
+        | CriteriaCommand::Rm { query, .. } => (query.clone(), Some(())),
+    };
+    // A done task's criteria are history, but still readable (and fixable)
+    // by PT-N or uuid; a substring reaches open tasks.
+    let task = tasks::resolve_for_lookup(db, &query, false).map_err(anyhow::Error::msg)?;
+    let res = match c {
+        CriteriaCommand::Ls { .. } => Ok(()),
+        CriteriaCommand::Add { text, .. } => {
+            ptask_core::criteria::add(db, &task.id, &[text.join(" ")], &ctx).map(|_| ())
+        }
+        CriteriaCommand::Check { n, evidence, .. } => {
+            ptask_core::criteria::check(db, &task.id, n, evidence.as_deref(), &ctx).map(|_| ())
+        }
+        CriteriaCommand::Uncheck { n, .. } => {
+            ptask_core::criteria::uncheck(db, &task.id, n, &ctx).map(|_| ())
+        }
+        CriteriaCommand::Rm { n, .. } => {
+            ptask_core::criteria::remove(db, &task.id, n, &ctx).map(|_| ())
+        }
+    };
+    res.map_err(anyhow::Error::msg)?;
+    let criteria = ptask_core::criteria::list(db, &task.id)?;
+    let open = criteria.iter().filter(|c| !c.done).count();
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id,
+            "criteria": criteria, "unchecked": open,
+        }),
+        || {
+            let pt = task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id));
+            if changed.is_some() {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Changed,
+                        "criteria",
+                        pt,
+                        &task.title,
+                        &format!("{open} unchecked")
+                    )
+                );
+            }
+            if criteria.is_empty() {
+                println!("{}", ui::empty("no acceptance criteria"));
+            } else {
+                print_lines(render_criteria(&criteria));
+            }
+        },
+    )
 }
 
 fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {

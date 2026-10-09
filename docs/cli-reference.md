@@ -25,6 +25,7 @@ Create a task. The free-text title runs through the quick-add parser
 | `--deadline <ISO>` | `2026-05-21` or `2026-05-21T10:00:00+01:00` |
 | `--reason` | persisted as `ai_reasoning` |
 | `--raw` | skip quick-add parsing |
+| `--ac <CRITERION>` | an acceptance criterion (repeatable), created with the task in one transaction; see `pt criteria` |
 
 ### `pt list [filter] [...]` (alias `pt ls`)
 
@@ -93,6 +94,30 @@ pt goal orphans           # open tasks with no effective goal
 All honour `--json`. Tree order is parent before children, siblings by seq.
 `set-parent` refuses self and cycles. Walks are cycle-safe (stop on a
 repeated node, depth cap 16). Full model: [goals.md](goals.md).
+
+### `pt criteria ls|add|check|uncheck|rm <query> …` (alias `ac`, v3.48.0)
+
+A task's acceptance criteria: its definition of done as checkable
+conditions. **A task with an unchecked criterion cannot be closed**, exactly
+as a task with an open prerequisite cannot: `pt done`, `pt bulk --done`,
+MCP `task_done`, `/sync`, the cockpit (409), git `Closes PT-N` and
+`/capture/resolve` all refuse it, naming the open criteria. Tasks without
+criteria close as before, so the gate is opt-in per task.
+
+```
+pt criteria ls PT-7
+pt criteria add PT-7 tests pass on CI      # words joined; numbers are never reused
+pt criteria check PT-7 1 -m "run 3812 green"   # who checked it, and the evidence
+pt criteria uncheck PT-7 1
+pt criteria rm PT-7 2                      # drop it from the definition of done
+```
+
+`pt show` lists them (`[x]` / `[ ]`, who checked, evidence; `--json`:
+`criteria`) and `pt context` adds an `## Acceptance criteria` checklist to
+the worker brief. A recurring task's criteria reset when it advances: each
+occurrence meets them again. Criteria are journal events
+(`task.criterion_added|checked|unchecked|removed`, `task.criteria_reset`),
+so every change is attributed in `pt log`.
 
 ### `pt dismiss <query>`
 

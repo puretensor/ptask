@@ -135,7 +135,7 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
-VERSION = "0.22.0"
+VERSION = "0.25.0"
 
 
 def _allowed_host_entry(entry: str) -> str:
@@ -708,6 +708,9 @@ def build_edit_args(tid: str, body: dict) -> tuple[list[str] | None, str | None]
 # open depends_on prerequisites; pt exits 1 for every error, so the text is
 # the only signal.
 PT_BLOCKED_MARKER = " is blocked by open task(s): "
+# The same class of refusal for a task whose acceptance criteria are not all
+# checked (ptask_core::criteria): a state the operator resolves, not a fault.
+PT_CRITERIA_MARKER = " has unchecked acceptance criteria: "
 
 
 def pt_exec(args: list[str]) -> tuple[bool, str]:
@@ -1423,7 +1426,7 @@ class Handler(BaseHTTPRequestHandler):
             if not _ID_RE.match(tid):
                 return self._json({"error": "bad id"}, 400)
             ok, msg = pt_exec(["done", "--", tid])
-            if not ok and PT_BLOCKED_MARKER in msg:
+            if not ok and (PT_BLOCKED_MARKER in msg or PT_CRITERIA_MARKER in msg):
                 # pt refused the close: open prerequisites. A conflict the
                 # operator resolves, not a server fault.
                 return self._json({"ok": False, "message": msg}, 409)
