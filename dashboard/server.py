@@ -559,23 +559,45 @@ def q_heatmap():
     }
 
 
+# Criteria journal events the drawer folds into the checklist. Always
+# included in q_task_events, even when they fall outside the history window.
+CRITERIA_EVENT_TYPES = (
+    "task.criterion_added",
+    "task.criterion_checked",
+    "task.criterion_unchecked",
+    "task.criterion_removed",
+    "task.criteria_reset",
+)
+
+
 def q_task_events(task_uuid: str, limit: int = 60):
     """Return attributed event history for the detail drawer, newest first.
 
     Ordered by id (commit order), not ts: ts carries the operator-timezone
     offset, so across the autumn fall-back hour the text sorts in reverse.
+    Every acceptance-criteria event is included, even when older than
+    `limit`, so a recurring task's checklist still folds.
     """
     con = connect()
     try:
+        placeholders = ",".join("?" * len(CRITERIA_EVENT_TYPES))
         rows = con.execute(
-            """
+            f"""
             SELECT uuid, task_uuid, event_type, actor, ts, payload
             FROM pt_event_log
             WHERE task_uuid=?
+              AND (
+                event_type IN ({placeholders})
+                OR id IN (
+                  SELECT id FROM pt_event_log
+                   WHERE task_uuid=?
+                   ORDER BY id DESC
+                   LIMIT ?
+                )
+              )
             ORDER BY id DESC
-            LIMIT ?
             """,
-            (task_uuid, limit),
+            (task_uuid, *CRITERIA_EVENT_TYPES, task_uuid, limit),
         )
         events = []
         for r in rows:

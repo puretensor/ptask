@@ -43,5 +43,5 @@ test("a recurring advance resets every check", () => {
 
 test("the drawer has a hidden-until-needed criteria block, text escaped", () => {
   assert.match(shell, /<div class="dcrit" id="d-crit-wrap" hidden>/);
-  assert.match(shell, /\$\{c\.n\}\. \$\{esc\(c\.text\)\}/);
+  assert.match(shell, /\$\{esc\(c\.n\)\}\. \$\{esc\(c\.text\)\}/);
 });

@@ -60,7 +60,9 @@ one journal event; a rejected field leaves the entire edit unapplied.
 Flip a completed or dismissed task back to `pending` (resolve by PT-N for a
 done task — substring resolution only matches active tasks). Logs a
 `status_change` interaction the neglect score reads as a reopen, and rescores
-immediately so the task re-enters `pt next` ordering.
+immediately so the task re-enters `pt next` ordering. Reopening (and undoing
+a close) resets the task's acceptance-criteria checks, so the definition of
+done must be met again.
 
 ### `pt show <query>`
 
@@ -115,9 +117,12 @@ pt criteria rm PT-7 2                      # drop it from the definition of done
 `pt show` lists them (`[x]` / `[ ]`, who checked, evidence; `--json`:
 `criteria`) and `pt context` adds an `## Acceptance criteria` checklist to
 the worker brief. A recurring task's criteria reset when it advances: each
-occurrence meets them again. Criteria are journal events
+occurrence meets them again. Reopening a task, and undoing a close, also
+reset the checks. Criteria are journal events
 (`task.criterion_added|checked|unchecked|removed`, `task.criteria_reset`),
-so every change is attributed in `pt log`.
+so every change is attributed in `pt log`. A git `Closes PT-N` refused by
+the gate is a warn in the `pt serve` log naming the task, and a
+`task.git_close_refused` journal event on it that names the commit.
 
 ### `pt dismiss <query>`
 
@@ -248,7 +253,7 @@ not-yet-retired consumers).
 | Verb | Use |
 |---|---|
 | `pt log <query> [-n N]` | attributed event history for a task: when, who (actor), via which surface, what |
-| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor, `$PTASK_ACTOR`, default `shell`, through the CLI/TUI surface: a task a `pt mcp` server added under your actor is not yours) within your last 50 task events (done/dismiss → reopen, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, that parents another task, or that an approval references, is never deleted: when your most recent undoable change is such a create, undo refuses and names it rather than reaching further back. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
+| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor, `$PTASK_ACTOR`, default `shell`, through the CLI/TUI surface: a task a `pt mcp` server added under your actor is not yours) within your last 50 task events (done/dismiss → reopen, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. Acceptance-criteria journal events (`task.criterion_*`, `task.criteria_reset`) are transparent: they are not undo targets and they do not count as a later change, so `pt add --ac` still undoes the create and a criteria edit after your close does not let undo skip that close. A created task that another task depends on or is depended on by, that parents another task, or that an approval references, is never deleted: when your most recent undoable change is such a create, undo refuses and names it rather than reaching further back. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
 | `pt token create <client_id> [--scope read\|capture\|write\|admin]` | mint a named scoped API token (plain value shown ONCE; only the sha256 is stored) |
 | `pt token list` | client, scope, active/revoked, created/last-used |
 | `pt token revoke <client_id>` | revoke all active tokens for a client |

@@ -118,7 +118,7 @@ the environment variable is set on the client node.
 | `task_done` | `{ task_uuid }` or `{ pt_id }`, optional `expected_deadline` | flips status to `done` or advances recurrence in-place, logs an `interaction` row. A done task is refused. With `expected_deadline` (the deadline the client last saw; `""` = none) the command fails, changing nothing, if the task has moved on — so two queued completions of one occurrence never advance a recurring task twice. Omitted, the current occurrence completes as before. |
 | `task_priority` (v1.8.0) | `{ task_uuid \| pt_id, priority }` | sets priority (1..=5), logs a `priority_change` interaction, rescores. |
 | `task_edit` (v1.8.0) | `{ task_uuid \| pt_id, deadline }` | sets the deadline (ISO string) or clears it (JSON `null`); other JSON types or an omitted deadline are rejected without mutation; rescores. |
-| `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). |
+| `task_reopen` (v1.8.0) | `{ task_uuid \| pt_id }` | flips a done/dismissed task back to `pending` (logs the neglect-score reopen signal). Resets acceptance-criteria checks so the definition of done must be met again. |
 | `task_retext` (v1.9.0) | `{ task_uuid \| pt_id, title?, description? }` | replaces the title and/or description (at least one required). |
 | `task_dismiss` (v1.10.0) | `{ task_uuid \| pt_id }` | soft-closes a task (`status → dismissed`); reversible via `task_reopen`. |
 | `task_start` (v1.10.0) | `{ task_uuid \| pt_id }` | `status → in_progress`. |

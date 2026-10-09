@@ -595,7 +595,7 @@ struct PlanArgs {
     gcal: Option<PathBuf>,
 }
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args)]
 struct AddArgs {
     /// Task title (parsed as quick-add unless --raw is set).
     /// Inline tokens: @label, #project, p1..p5, ~30m/~2h/~1d, !HH:MM,
@@ -629,6 +629,27 @@ struct AddArgs {
     /// is checked with `pt criteria check`.
     #[arg(long = "ac", value_name = "CRITERION")]
     acceptance: Vec<String>,
+}
+
+/// Debug omits an empty `acceptance` list so a keyed `pt add` fingerprints
+/// the same as it did before `--ac` existed (None/default fields added in a
+/// later release must not change the hash).
+impl std::fmt::Debug for AddArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("AddArgs");
+        s.field("title", &self.title)
+            .field("priority", &self.priority)
+            .field("description", &self.description)
+            .field("deadline", &self.deadline)
+            .field("reason", &self.reason)
+            .field("raw", &self.raw)
+            .field("kind", &self.kind)
+            .field("deliverable", &self.deliverable);
+        if !self.acceptance.is_empty() {
+            s.field("acceptance", &self.acceptance);
+        }
+        s.finish()
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -846,9 +867,9 @@ fn command_name(cmd: &Command) -> String {
         .to_string()
 }
 
-/// A keyed command's fingerprint: its parsed arguments, rendered by the
-/// derived Debug impl (fixed field order), so a retry of the same command
-/// matches and a different command under the same key does not.
+/// A keyed command's fingerprint: its parsed arguments, rendered by Debug
+/// (fixed field order; empty/default fields added after a release are
+/// omitted so a retry across the upgrade still matches).
 fn command_fingerprint(cmd: &Command) -> ptask_core::event_log::CommandFingerprint {
     ptask_core::event_log::CommandFingerprint::new(&command_name(cmd), &format!("{cmd:?}"))
 }

@@ -62,12 +62,13 @@ commit; a scoring failure does not roll back a successful edit.
   same arg. Completing an already-done task is an error.
 - **Acceptance criteria (v3.48.0).** `task_add(acceptance: [...])` creates a
   task with its definition of done; `task_criteria(id, add?, check?,
-  uncheck?, evidence?)` edits it (a bad batch is refused before any of it
-  lands) and returns the list; `task_show` returns `criteria` (`n`, `text`,
+  uncheck?, evidence?)` edits it in one transaction (a bad batch — duplicate
+  numbers, over-long evidence, a missing criterion — is refused and changes
+  nothing) and returns the list; `task_show` returns `criteria` (`n`, `text`,
   `done`, `checked_by`, `checked_at`, `evidence`), and the worker brief has
   them as a checklist. `task_done` refuses while any is unchecked, naming
-  them: check a criterion only when it is true, with the evidence. Tasks
-  without criteria are unaffected.
+  them: check a criterion only when it is true, with the evidence. Reopening
+  a task resets the checks. Tasks without criteria are unaffected.
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
   It is a claim, not a lease: the task stores no owner (the claimer appears

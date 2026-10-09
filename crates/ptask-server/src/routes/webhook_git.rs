@@ -285,6 +285,14 @@ async fn handle(
                     continue;
                 }
                 Ok(CloseOutcome::Failed(e)) => {
+                    warn!(
+                        target: "ptask::webhook",
+                        source,
+                        pt_id,
+                        commit = %commit.id.chars().take(12).collect::<String>(),
+                        error = %e,
+                        "git close refused"
+                    );
                     errors.push(e);
                     continue;
                 }
@@ -389,7 +397,25 @@ fn apply_close(
             }),
             result: format!("{}=advanced→{}", pt_id, next_deadline),
         },
-        Err(e) => CloseOutcome::Failed(format!("{}: {}", pt_id, e)),
+        Err(e) => {
+            let refuse_uuid = format!("{event_uuid}:refused");
+            if !matches!(event_log::get_by_uuid(&state.db, &refuse_uuid), Ok(Some(_))) {
+                let _ = event_log::record(
+                    &state.db,
+                    &refuse_uuid,
+                    Some(&task.id),
+                    "task.git_close_refused",
+                    &serde_json::json!({
+                        "task_uuid": task.id,
+                        "pt_id": task.pt_id,
+                        "commit_id": commit_id,
+                        "reason": e.to_string(),
+                    }),
+                    &EventCtx::webhook(source, refuse_uuid.clone()),
+                );
+            }
+            CloseOutcome::Failed(format!("{}: {}", pt_id, e))
+        }
     }
 }
 

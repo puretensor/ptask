@@ -944,20 +944,12 @@ pub fn mark_done(db: &Db, task: &Task, ctx: &EventCtx) -> Result<DoneOutcome> {
                 }),
             )?;
             // Each occurrence meets its criteria afresh.
-            if !crate::criteria::list_in_conn(&tx, &task.id)?.is_empty() {
-                let reset_uuid = match ctx.event_uuid.as_deref() {
-                    Some(key) => format!("{key}:criteria-reset"),
-                    None => local_event_uuid(),
-                };
-                crate::event_log::record_in_conn(
-                    &tx,
-                    &reset_uuid,
-                    Some(&task.id),
-                    "task.criteria_reset",
-                    &serde_json::json!({ "task_uuid": task.id, "next_deadline": next_iso }),
-                    ctx,
-                )?;
-            }
+            crate::criteria::reset_in_conn(
+                &tx,
+                &task.id,
+                ctx,
+                serde_json::json!({ "next_deadline": next_iso }),
+            )?;
             tx.commit()?;
             return Ok(DoneOutcome::Advanced {
                 next_deadline: next_iso,
@@ -1425,6 +1417,8 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "status": "pending" }),
     )?;
+    // The definition of done must be met again; an undone close is a reopen.
+    crate::criteria::reset_in_conn(tx, task_uuid, ctx, serde_json::json!({}))?;
     Ok(())
 }
 
@@ -1544,9 +1538,13 @@ const NOTHING_UNDOABLE: &str =
 /// undo must not delete a task HAL created. Any later event on the task,
 /// from ANY actor, protects it — every later mutation, including newly
 /// introduced event types, and reversals already recorded by an earlier
-/// undo or a manual reopen. A created task that another task depends on
-/// (or is depended on by), or that parents another task, is never deleted:
-/// those relations are not journaled under its own uuid.
+/// undo or a manual reopen. Acceptance-criteria journal events are
+/// transparent: they are not undo targets and they do not count as a later
+/// change, so a create that wrote its criteria in the same transaction, or
+/// a close followed by a criteria edit, still undoes. A created task that
+/// another task depends on (or is depended on by), or that parents another
+/// task, is never deleted: those relations are not journaled under its own
+/// uuid.
 fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<UndoPlan>> {
     // "Own" is actor AND surface: an MCP server can still run under the
     // operator's actor (PTASK_ACTOR=shell exported into `pt mcp`; the
@@ -1558,12 +1556,14 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
         other => (other, other),
     };
     let candidates: Vec<(i64, String, String, String)> = {
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare(&format!(
             "SELECT id, task_uuid, event_type, payload FROM pt_event_log
              WHERE task_uuid IS NOT NULL AND actor = ?1
                AND json_extract(payload, '$.source') IN (?2, ?3)
+               AND event_type NOT IN ({})
              ORDER BY id DESC LIMIT 50",
-        )?;
+            crate::criteria::EVENTS
+        ))?;
         let rows = stmt.query_map(params![ctx.actor, surface_a, surface_b], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
@@ -1572,7 +1572,11 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
 
     for (id, task_uuid, event_type, payload) in candidates {
         let superseded: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
+                   AND event_type NOT IN ({}))",
+                crate::criteria::EVENTS
+            ),
             params![task_uuid, id],
             |r| r.get(0),
         )?;
@@ -1582,10 +1586,15 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
             // wrote it, or this is the create of a task that still exists,
             // the newest change is protected: refuse rather than reach
             // further back and undo, or delete, something older instead.
+            // Criteria events are transparent and do not count here.
             let foreign: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
-                   AND (actor IS NOT ?3
-                        OR COALESCE(json_extract(payload, '$.source'), '') NOT IN (?4, ?5)))",
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
+                       AND event_type NOT IN ({})
+                       AND (actor IS NOT ?3
+                            OR COALESCE(json_extract(payload, '$.source'), '') NOT IN (?4, ?5)))",
+                    crate::criteria::EVENTS
+                ),
                 params![task_uuid, id, ctx.actor, surface_a, surface_b],
                 |r| r.get(0),
             )?;

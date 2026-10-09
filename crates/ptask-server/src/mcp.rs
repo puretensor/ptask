@@ -551,50 +551,19 @@ impl PtaskMcp {
         let ctx = self.ctx();
         on_blocking(move || {
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
-            // Refuse a bad batch before any of it lands, so a retry does not
-            // add the same criteria twice.
-            ptask_core::criteria::validate_all(&add).map_err(domain_err)?;
-            let before = ptask_core::criteria::list(&db, &t.id).map_err(domain_err)?;
-            let state = |n: i64| before.iter().find(|c| c.n == n).map(|c| c.done);
-            for &n in &check {
-                match state(n) {
-                    None => {
-                        return Err(McpError::invalid_params(format!("no criterion {n}"), None));
-                    }
-                    Some(true) => {
-                        return Err(McpError::invalid_params(
-                            format!("criterion {n} is already checked"),
-                            None,
-                        ));
-                    }
-                    Some(false) if uncheck.contains(&n) => {
-                        return Err(McpError::invalid_params(
-                            format!("criterion {n} is both checked and unchecked"),
-                            None,
-                        ));
-                    }
-                    Some(false) => {}
-                }
-            }
-            for &n in &uncheck {
-                if state(n) != Some(true) {
-                    return Err(McpError::invalid_params(
-                        format!("criterion {n} is not checked"),
-                        None,
-                    ));
-                }
-            }
-            if !add.is_empty() {
-                ptask_core::criteria::add(&db, &t.id, &add, &ctx).map_err(domain_err)?;
-            }
-            for n in check {
-                ptask_core::criteria::check(&db, &t.id, n, evidence.as_deref(), &ctx)
-                    .map_err(domain_err)?;
-            }
-            for n in uncheck {
-                ptask_core::criteria::uncheck(&db, &t.id, n, &ctx).map_err(domain_err)?;
-            }
-            let criteria = ptask_core::criteria::list(&db, &t.id).map_err(domain_err)?;
+            // One transaction: a bad batch (duplicate numbers, over-long
+            // evidence, missing criterion) changes nothing, so a retry does
+            // not add the same criteria twice.
+            let criteria = ptask_core::criteria::apply_batch(
+                &db,
+                &t.id,
+                &add,
+                &check,
+                &uncheck,
+                evidence.as_deref(),
+                &ctx,
+            )
+            .map_err(domain_err)?;
             let unchecked = criteria.iter().filter(|c| !c.done).count();
             json_ok(&serde_json::json!({
                 "pt_id": t.pt_id, "criteria": criteria, "unchecked": unchecked,

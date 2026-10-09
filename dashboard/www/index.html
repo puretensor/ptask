@@ -1213,7 +1213,7 @@ $('#domains').addEventListener('keydown',e=>{
 setInterval(()=>{$('#clock').textContent=new Date().toISOString().slice(11,19)+' UTC';},1000);
 
 /* ---- helpers ---- */
-const esc=s=>(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc=s=>String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function dueChip(t){
   if(t.deadline_date==null) return '';
   let cls='', d=t.days_until;
@@ -2326,7 +2326,7 @@ async function openDrawer(uuid){
       $('#d-crit-cnt').className='cnt'+(done===crit.length?' all':'');
       $('#d-crit').innerHTML=crit.map(c=>
         `<div class="crit${c.done?' ok':''}"><span class="box" aria-hidden="true">${c.done?'✓':'○'}</span>`+
-        `<span class="ctext"><span class="sr-only">${c.done?'checked':'unchecked'}: </span>${c.n}. ${esc(c.text)}</span>`+
+        `<span class="ctext"><span class="sr-only">${c.done?'checked':'unchecked'}: </span>${esc(c.n)}. ${esc(c.text)}</span>`+
         (c.done&&c.by?`<span class="cby">${esc(c.by)}</span>`:'')+`</div>`).join('');
       $('#d-crit-wrap').hidden=false;
     }
@@ -2336,9 +2336,9 @@ async function openDrawer(uuid){
   }catch(e){$('#d-hist').innerHTML='<span class="age">history unavailable: '+esc(e.message)+'</span>';}
 }
 /* Acceptance criteria from the journal (ptask_core::criteria): added,
-   checked, unchecked, removed, reset on a recurring advance. The events API
-   is newest first, and pt serve sends payload as a string, the sidecar as
-   an object. */
+   checked, unchecked, removed, reset on a recurring advance or reopen. The
+   events API is newest first (pt serve: payload string; sidecar: object)
+   and always includes every criteria event, even outside the history window. */
 function foldCriteria(events){
   const out=[];
   for(const e of [...events].reverse()){

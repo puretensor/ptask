@@ -13,9 +13,9 @@
 //! Criteria are journal events, not a table: `task.criterion_added`,
 //! `task.criterion_checked`, `task.criterion_unchecked`,
 //! `task.criterion_removed`, and `task.criteria_reset` when a recurring
-//! task advances (each occurrence has to meet them again). The state is
-//! folded from the task's events, so every change is attributed and the
-//! trail is the record.
+//! task advances or the task is reopened (each occurrence / reopening has
+//! to meet them again). The state is folded from the task's events, so
+//! every change is attributed and the trail is the record.
 
 use crate::error::{Error, Result};
 use crate::event_log::EventCtx;
@@ -42,7 +42,10 @@ pub struct Criterion {
     pub evidence: Option<String>,
 }
 
-const EVENTS: &str = "'task.criterion_added', 'task.criterion_checked', \
+/// SQL `IN (...)` list of criteria journal events. Undo treats these as
+/// transparent (not a target, not a later change), and the cockpit drawer
+/// always includes them when folding the checklist.
+pub(crate) const EVENTS: &str = "'task.criterion_added', 'task.criterion_checked', \
      'task.criterion_unchecked', 'task.criterion_removed', 'task.criteria_reset'";
 
 /// The task's criteria, in number order (folded from its journal).
@@ -162,6 +165,23 @@ fn validate_text(text: &str) -> Result<String> {
     Ok(t.to_string())
 }
 
+fn validate_evidence(evidence: Option<&str>) -> Result<Option<&str>> {
+    let evidence = evidence.map(str::trim).filter(|e| !e.is_empty());
+    if let Some(e) = evidence
+        && e.chars().count() > MAX_EVIDENCE_CHARS
+    {
+        return Err(Error::Other(format!(
+            "evidence exceeds {MAX_EVIDENCE_CHARS} characters"
+        )));
+    }
+    Ok(evidence)
+}
+
+fn unique_keep_order(ns: &[i64]) -> Vec<i64> {
+    let mut seen = std::collections::HashSet::new();
+    ns.iter().copied().filter(|n| seen.insert(*n)).collect()
+}
+
 /// Validate a batch of new criteria (e.g. for a create), all or nothing.
 pub fn validate_all(texts: &[String]) -> Result<Vec<String>> {
     if texts.len() > MAX_CRITERIA {
@@ -253,11 +273,60 @@ pub fn add(db: &Db, task_uuid: &str, texts: &[String], ctx: &EventCtx) -> Result
     with_task(db, task_uuid, |tx| add_in_conn(tx, task_uuid, texts, ctx))
 }
 
-fn current(tx: &rusqlite::Transaction<'_>, task_uuid: &str, n: i64) -> Result<Criterion> {
-    list_in_conn(tx, task_uuid)?
+fn current(conn: &rusqlite::Connection, task_uuid: &str, n: i64) -> Result<Criterion> {
+    list_in_conn(conn, task_uuid)?
         .into_iter()
         .find(|c| c.n == n)
         .ok_or_else(|| Error::Other(format!("no criterion {n} on this task")))
+}
+
+fn check_in_conn(
+    conn: &rusqlite::Connection,
+    task_uuid: &str,
+    n: i64,
+    evidence: Option<&str>,
+    ctx: &EventCtx,
+    uuid_part: &str,
+) -> Result<Criterion> {
+    let c = current(conn, task_uuid, n)?;
+    if c.done {
+        return Err(Error::Other(format!("criterion {n} is already checked")));
+    }
+    let mut payload = serde_json::json!({ "task_uuid": task_uuid, "n": n });
+    if let Some(e) = evidence {
+        payload["evidence"] = serde_json::json!(e);
+    }
+    crate::event_log::record_in_conn(
+        conn,
+        &event_uuid(ctx, uuid_part),
+        Some(task_uuid),
+        "task.criterion_checked",
+        &payload,
+        ctx,
+    )?;
+    current(conn, task_uuid, n)
+}
+
+fn uncheck_in_conn(
+    conn: &rusqlite::Connection,
+    task_uuid: &str,
+    n: i64,
+    ctx: &EventCtx,
+    uuid_part: &str,
+) -> Result<Criterion> {
+    let c = current(conn, task_uuid, n)?;
+    if !c.done {
+        return Err(Error::Other(format!("criterion {n} is not checked")));
+    }
+    crate::event_log::record_in_conn(
+        conn,
+        &event_uuid(ctx, uuid_part),
+        Some(task_uuid),
+        "task.criterion_unchecked",
+        &serde_json::json!({ "task_uuid": task_uuid, "n": n }),
+        ctx,
+    )?;
+    current(conn, task_uuid, n)
 }
 
 /// Check criterion `n`, optionally with evidence (what shows it holds).
@@ -268,52 +337,101 @@ pub fn check(
     evidence: Option<&str>,
     ctx: &EventCtx,
 ) -> Result<Criterion> {
-    let evidence = evidence.map(str::trim).filter(|e| !e.is_empty());
-    if let Some(e) = evidence
-        && e.chars().count() > MAX_EVIDENCE_CHARS
-    {
-        return Err(Error::Other(format!(
-            "evidence exceeds {MAX_EVIDENCE_CHARS} characters"
-        )));
-    }
+    let evidence = validate_evidence(evidence)?;
     with_task(db, task_uuid, |tx| {
-        let c = current(tx, task_uuid, n)?;
-        if c.done {
-            return Err(Error::Other(format!("criterion {n} is already checked")));
-        }
-        let mut payload = serde_json::json!({ "task_uuid": task_uuid, "n": n });
-        if let Some(e) = evidence {
-            payload["evidence"] = serde_json::json!(e);
-        }
-        crate::event_log::record_in_conn(
-            tx,
-            &event_uuid(ctx, ""),
-            Some(task_uuid),
-            "task.criterion_checked",
-            &payload,
-            ctx,
-        )?;
-        current(tx, task_uuid, n)
+        check_in_conn(tx, task_uuid, n, evidence, ctx, "")
     })
 }
 
 /// Uncheck criterion `n` (it no longer holds, or was checked by mistake).
 pub fn uncheck(db: &Db, task_uuid: &str, n: i64, ctx: &EventCtx) -> Result<Criterion> {
     with_task(db, task_uuid, |tx| {
-        let c = current(tx, task_uuid, n)?;
-        if !c.done {
-            return Err(Error::Other(format!("criterion {n} is not checked")));
-        }
-        crate::event_log::record_in_conn(
-            tx,
-            &event_uuid(ctx, ""),
-            Some(task_uuid),
-            "task.criterion_unchecked",
-            &serde_json::json!({ "task_uuid": task_uuid, "n": n }),
-            ctx,
-        )?;
-        current(tx, task_uuid, n)
+        uncheck_in_conn(tx, task_uuid, n, ctx, "")
     })
+}
+
+/// Add, check and uncheck in one transaction. An invalid batch changes
+/// nothing: evidence length, duplicate numbers (treated as one), missing
+/// numbers and already-checked/not-checked are all validated before any
+/// event is written. `check`/`uncheck` numbers refer to the task as it
+/// stood before the adds in this batch.
+pub fn apply_batch(
+    db: &Db,
+    task_uuid: &str,
+    add: &[String],
+    check: &[i64],
+    uncheck: &[i64],
+    evidence: Option<&str>,
+    ctx: &EventCtx,
+) -> Result<Vec<Criterion>> {
+    let evidence = validate_evidence(evidence)?;
+    validate_all(add)?;
+    let check = unique_keep_order(check);
+    let uncheck = unique_keep_order(uncheck);
+    for n in &check {
+        if uncheck.contains(n) {
+            return Err(Error::Other(format!(
+                "criterion {n} is both checked and unchecked"
+            )));
+        }
+    }
+    with_task(db, task_uuid, |tx| {
+        let before = list_in_conn(tx, task_uuid)?;
+        let state = |n: i64| before.iter().find(|c| c.n == n).map(|c| c.done);
+        for &n in &check {
+            match state(n) {
+                None => {
+                    return Err(Error::Other(format!("no criterion {n} on this task")));
+                }
+                Some(true) => {
+                    return Err(Error::Other(format!("criterion {n} is already checked")));
+                }
+                Some(false) => {}
+            }
+        }
+        for &n in &uncheck {
+            if state(n) != Some(true) {
+                return Err(Error::Other(format!("criterion {n} is not checked")));
+            }
+        }
+        if !add.is_empty() {
+            add_in_conn(tx, task_uuid, add, ctx)?;
+        }
+        for (i, n) in check.iter().enumerate() {
+            check_in_conn(tx, task_uuid, *n, evidence, ctx, &format!("check{i}"))?;
+        }
+        for (i, n) in uncheck.iter().enumerate() {
+            uncheck_in_conn(tx, task_uuid, *n, ctx, &format!("uncheck{i}"))?;
+        }
+        list_in_conn(tx, task_uuid)
+    })
+}
+
+/// Uncheck every criterion (journaled). No-op when the task has none.
+/// `extra` is merged into the event payload (`task_uuid` is always set).
+pub fn reset_in_conn(
+    conn: &rusqlite::Connection,
+    task_uuid: &str,
+    ctx: &EventCtx,
+    extra: serde_json::Value,
+) -> Result<()> {
+    if list_in_conn(conn, task_uuid)?.is_empty() {
+        return Ok(());
+    }
+    let mut payload = extra;
+    if let Some(obj) = payload.as_object_mut() {
+        obj.entry("task_uuid")
+            .or_insert_with(|| serde_json::json!(task_uuid));
+    }
+    crate::event_log::record_in_conn(
+        conn,
+        &event_uuid(ctx, "criteria-reset"),
+        Some(task_uuid),
+        "task.criteria_reset",
+        &payload,
+        ctx,
+    )?;
+    Ok(())
 }
 
 /// Remove criterion `n` from the definition of done (journaled; the number
@@ -462,5 +580,50 @@ mod tests {
             .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_bad_batch_writes_nothing() {
+        let (_d, db) = fresh();
+        let ctx = EventCtx::test();
+        let t = tasks::create(&db, NewTask::minimal("batch"), &ctx).unwrap();
+        add(&db, &t.id, &["one".into(), "two".into()], &ctx).unwrap();
+        let before = list(&db, &t.id).unwrap();
+        assert!(
+            apply_batch(
+                &db,
+                &t.id,
+                &["three".into()],
+                &[1, 1],
+                &[],
+                Some(&"e".repeat(MAX_EVIDENCE_CHARS + 1)),
+                &ctx,
+            )
+            .is_err()
+        );
+        assert_eq!(list(&db, &t.id).unwrap(), before);
+        let after = apply_batch(&db, &t.id, &["three".into()], &[1, 1], &[], None, &ctx).unwrap();
+        assert!(after.iter().any(|c| c.text == "three" && !c.done));
+        assert!(after[0].done);
+    }
+
+    #[test]
+    fn reopening_resets_checks() {
+        let (_d, db) = fresh();
+        let ctx = EventCtx::test();
+        let t = tasks::create_with_extensions(
+            &db,
+            NewTask::minimal("ship notes"),
+            crate::Extensions {
+                acceptance: vec!["reviewed".into()],
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .unwrap();
+        check(&db, &t.id, 1, None, &ctx).unwrap();
+        tasks::mark_done(&db, &t, &ctx).unwrap();
+        tasks::reopen(&db, &t.id, &ctx).unwrap();
+        assert!(!list(&db, &t.id).unwrap()[0].done);
     }
 }
