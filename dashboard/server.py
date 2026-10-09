@@ -16,7 +16,12 @@ Endpoints
   GET  /api/critical?limit=     -> top pending by priority_score
   GET  /api/timeline            -> pending tasks that have a deadline
   GET  /api/heatmap             -> priority x age-bucket matrix
-  POST /api/tasks/<id>/done     -> shells `pt done <id>`
+  GET  /api/tasks/<id>/events   -> journal history (newest first; default 60)
+  GET  /api/tasks/<id>/notes    -> notes + closure evidence (SQL; not capped
+                                   by the events window)
+  POST /api/tasks/<id>/done {note?} -> shells `pt done [--note=] <id>`
+  POST /api/tasks/<id>/note {text} -> shells `pt note <id> -- <text>`
+  POST /api/tasks/<id>/dismiss {note?} -> shells `pt dismiss [--note=] <id>`
   POST /api/tasks/<id>/priority {level:1..5} -> shells `pt priority <id> <level>`
   POST /api/tasks  {title, description?, priority?, deadline?}
                                 -> shells `pt add [--priority=] [--description=]
@@ -236,6 +241,20 @@ APPROVAL_STATUSES = frozenset({
     "pending", "approved", "rejected", "withdrawn", "expired", "all",
 })
 APPROVAL_NOTE_MAX = 2000
+# Task notes and closure evidence: pt's own cap (ptask_core::notes).
+TASK_NOTE_MAX = 16 * 1024
+
+
+def task_note_arg(body: dict, key: str = "note"):
+    """An optional note from a JSON body: (value, error). Absent or null is
+    no note; a string within the cap is passed on (pt trims and refuses a
+    blank one); anything else is a 400."""
+    note = body.get(key)
+    if note is None:
+        return None, None
+    if not isinstance(note, str) or len(note) > TASK_NOTE_MAX:
+        return None, f"{key} must be a string (max {TASK_NOTE_MAX})"
+    return note, None
 
 
 def parse_bind(bind: str) -> tuple[str, int]:
@@ -559,6 +578,24 @@ def q_heatmap():
     }
 
 
+def _event_dicts(rows):
+    events = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        events.append({
+            "uuid": r["uuid"],
+            "task_uuid": r["task_uuid"],
+            "event_type": r["event_type"],
+            "actor": r["actor"],
+            "ts": r["ts"],
+            "payload": payload,
+        })
+    return events
+
+
 def q_task_events(task_uuid: str, limit: int = 60):
     """Return attributed event history for the detail drawer, newest first.
 
@@ -577,21 +614,33 @@ def q_task_events(task_uuid: str, limit: int = 60):
             """,
             (task_uuid, limit),
         )
-        events = []
-        for r in rows:
-            try:
-                payload = json.loads(r["payload"] or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            events.append({
-                "uuid": r["uuid"],
-                "task_uuid": r["task_uuid"],
-                "event_type": r["event_type"],
-                "actor": r["actor"],
-                "ts": r["ts"],
-                "payload": payload,
-            })
-        return events
+        return _event_dicts(rows)
+    finally:
+        con.close()
+
+
+def q_task_notes(task_uuid: str, limit: int = 100):
+    """Notes and closure evidence for the drawer, newest first.
+
+    SQL over the journal so this sidecar does not shell out to `pt`. A
+    dedicated query, not the newest-N events window: a note older than
+    that window must still show.
+    """
+    con = connect()
+    try:
+        rows = con.execute(
+            """
+            SELECT uuid, task_uuid, event_type, actor, ts, payload
+            FROM pt_event_log
+            WHERE task_uuid=?
+              AND json_valid(payload)
+              AND json_type(payload, '$.note') = 'text'
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (task_uuid, limit),
+        )
+        return _event_dicts(rows)
     finally:
         con.close()
 
@@ -1360,6 +1409,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(data)
             if path == "/api/stream":
                 return self._stream()
+            m = re.match(r"^/api/tasks/([^/]+)/notes$", path)
+            if m:
+                task_uuid = m.group(1)
+                if not _ID_RE.match(task_uuid):
+                    return self._json({"error": "bad id"}, 400)
+                limit = parse_limit(qs.get("limit", ["100"])[0], 100, 200)
+                return self._json({"events": q_task_notes(task_uuid, limit=limit)})
             m = re.match(r"^/api/tasks/([^/]+)/events$", path)
             if m:
                 task_uuid = m.group(1)
@@ -1425,7 +1481,11 @@ class Handler(BaseHTTPRequestHandler):
             tid = m.group(1)
             if not _ID_RE.match(tid):
                 return self._json({"error": "bad id"}, 400)
-            ok, msg = pt_exec(["done", "--", tid])
+            note, err = task_note_arg(body)
+            if err:
+                return self._json({"error": err}, 400)
+            args = ["done"] + ([f"--note={note}"] if note is not None else []) + ["--", tid]
+            ok, msg = pt_exec(args)
             if not ok and (PT_BLOCKED_MARKER in msg or PT_CRITERIA_MARKER in msg):
                 # pt refused the close: open prerequisites. A conflict the
                 # operator resolves, not a server fault.
@@ -1456,8 +1516,31 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "days must be an integer"}, 400)
                 days = max(1, min(90, days))
                 ok, msg = pt_exec(["snooze", "--", tid, f"{days} days"])
+            elif verb == "dismiss":
+                note, err = task_note_arg(body)
+                if err:
+                    return self._json({"error": err}, 400)
+                ok, msg = pt_exec(
+                    ["dismiss"] + ([f"--note={note}"] if note is not None else []) + ["--", tid])
             else:
                 ok, msg = pt_exec([verb, "--", tid])
+            return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+
+        m = re.match(r"^/api/tasks/([^/]+)/note$", u.path)
+        if m:
+            tid = m.group(1)
+            if not _ID_RE.match(tid):
+                return self._json({"error": "bad id"}, 400)
+            text, err = task_note_arg(body, "text")
+            if err:
+                return self._json({"error": err}, 400)
+            if text is None or not text.strip():
+                return self._json({"error": "text is required"}, 400)
+            # `--` ends option parsing, so a note starting with "-" is text;
+            # a lone "-" would mean stdin to pt, hence the explicit check.
+            if text.strip() == "-":
+                return self._json({"error": "text must not be a lone '-'"}, 400)
+            ok, msg = pt_exec(["note", "--", tid, text])
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
 
         m = re.match(r"^/api/tasks/([^/]+)/edit$", u.path)

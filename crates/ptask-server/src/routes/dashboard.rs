@@ -101,6 +101,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/tasks/{id}/snooze", post(act_snooze))
         .route("/api/tasks/{id}/reopen", post(act_reopen))
         .route("/api/tasks/{id}/edit", post(act_edit))
+        .route("/api/tasks/{id}/note", post(act_note))
         .route("/api/tasks/{id}/events", get(api_events))
         .route("/api/stream", get(api_stream))
         .route(
@@ -799,6 +800,24 @@ fn ok_json(pt_id: Option<&str>, message: &str) -> Response {
 #[derive(Debug, Default, serde::Deserialize)]
 struct DoneBody {
     expected_deadline: Option<String>,
+    /// Closure evidence typed into the confirm dialog (optional).
+    note: Option<String>,
+}
+
+/// Optional body of `POST /api/tasks/{id}/dismiss`: the reason.
+#[derive(Debug, Default, serde::Deserialize)]
+struct DismissBody {
+    note: Option<String>,
+}
+
+/// Parse an optional JSON body: empty (or whitespace) is the default.
+#[allow(clippy::result_large_err)]
+fn optional_body<T: Default + serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(body)
+        .map_err(|e| jerr(StatusCode::BAD_REQUEST, &format!("invalid body: {e}")))
 }
 
 async fn act_done(
@@ -824,13 +843,9 @@ fn act_done_blocking(
     }
     // The body stays optional: clients that post nothing (or `{}`) complete
     // the current occurrence as before.
-    let body: DoneBody = if body.iter().all(u8::is_ascii_whitespace) {
-        DoneBody::default()
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(b) => b,
-            Err(e) => return jerr(StatusCode::BAD_REQUEST, &format!("invalid body: {e}")),
-        }
+    let body: DoneBody = match optional_body(&body) {
+        Ok(b) => b,
+        Err(r) => return r,
     };
     let task = match resolve_task(&state, &id) {
         Ok(t) => t,
@@ -840,7 +855,7 @@ fn act_done_blocking(
         Ok(t) => t,
         Err(e) => return jerr(StatusCode::BAD_REQUEST, &e.to_string()),
     };
-    match ptask_core::tasks::mark_done(&state.db, &task, &dash_ctx()) {
+    match ptask_core::tasks::mark_done_noted(&state.db, &task, body.note.as_deref(), &dash_ctx()) {
         Ok(ptask_core::tasks::DoneOutcome::Completed) => {
             rescore(&state);
             ok_json(task.pt_id.as_deref(), "done")
@@ -861,11 +876,55 @@ async fn act_dismiss(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> Response {
-    crate::blocking::db_response(move || act_dismiss_blocking(state, headers, id)).await
+    crate::blocking::db_response(move || act_dismiss_blocking(state, headers, id, body)).await
 }
 
-fn act_dismiss_blocking(state: AppState, headers: HeaderMap, id: String) -> Response {
+fn act_dismiss_blocking(
+    state: AppState,
+    headers: HeaderMap,
+    id: String,
+    body: axum::body::Bytes,
+) -> Response {
+    if !authed(&state, &headers) {
+        return need_auth();
+    }
+    if !origin_ok(&headers) {
+        return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
+    }
+    let body: DismissBody = match optional_body(&body) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let task = match resolve_task(&state, &id) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    match ptask_core::tasks::dismiss_noted(&state.db, &task.id, body.note.as_deref(), &dash_ctx()) {
+        Ok(()) => {
+            rescore(&state);
+            ok_json(task.pt_id.as_deref(), "dismissed")
+        }
+        Err(e) => jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct NoteBody {
+    text: String,
+}
+
+async fn act_note(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<NoteBody>,
+) -> Response {
+    crate::blocking::db_response(move || act_note_blocking(state, headers, id, body)).await
+}
+
+fn act_note_blocking(state: AppState, headers: HeaderMap, id: String, body: NoteBody) -> Response {
     if !authed(&state, &headers) {
         return need_auth();
     }
@@ -876,11 +935,8 @@ fn act_dismiss_blocking(state: AppState, headers: HeaderMap, id: String) -> Resp
         Ok(t) => t,
         Err(r) => return r,
     };
-    match ptask_core::tasks::dismiss(&state.db, &task.id, &dash_ctx()) {
-        Ok(()) => {
-            rescore(&state);
-            ok_json(task.pt_id.as_deref(), "dismissed")
-        }
+    match ptask_core::notes::add(&state.db, &task.id, &body.text, &dash_ctx()) {
+        Ok(_) => ok_json(task.pt_id.as_deref(), "noted"),
         Err(e) => jerr(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string()),
     }
 }

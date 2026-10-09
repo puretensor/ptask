@@ -3307,6 +3307,90 @@ Don't forget the sourdough.\r\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_notes_and_closure_evidence() {
+        let db = open_test_db();
+        let ctx = EventCtx::test();
+        let a = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("rack fox-n2"), &ctx)
+            .unwrap();
+        let b =
+            ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("rack dup"), &ctx).unwrap();
+        let c = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("c"), &ctx).unwrap();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let post = |uri: String, body: &'static str| {
+            app.clone().oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+        };
+        let cases: [(String, &'static str, StatusCode); 6] = [
+            (
+                format!("/api/tasks/{}/note", a.id),
+                r#"{"text":"rails arrived"}"#,
+                StatusCode::OK,
+            ),
+            (
+                format!("/api/tasks/{}/note", a.id),
+                r#"{"text":"  "}"#,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                format!("/api/tasks/{}/done", a.id),
+                r#"{"note":7}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                format!("/api/tasks/{}/done", a.id),
+                r#"{"note":"racked; IPMI reachable"}"#,
+                StatusCode::OK,
+            ),
+            (
+                format!("/api/tasks/{}/dismiss", b.id),
+                r#"{"note":"duplicate"}"#,
+                StatusCode::OK,
+            ),
+            // An empty body still dismisses (older cockpits post nothing).
+            (format!("/api/tasks/{}/dismiss", c.id), "", StatusCode::OK),
+        ];
+        for (uri, body, want) in cases {
+            let r = post(uri.clone(), body).await.unwrap();
+            assert_eq!(r.status(), want, "{uri} {body}");
+        }
+        let got: Vec<(String, String, Option<String>)> = ptask_core::notes::list(&db, &a.id, 50)
+            .unwrap()
+            .into_iter()
+            .map(|n| (n.kind, n.text, n.actor))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "note".into(),
+                    "rails arrived".into(),
+                    Some("dashboard".into())
+                ),
+                (
+                    "done".into(),
+                    "racked; IPMI reachable".into(),
+                    Some("dashboard".into())
+                ),
+            ]
+        );
+        assert_eq!(
+            ptask_core::notes::list(&db, &b.id, 50).unwrap()[0].text,
+            "duplicate"
+        );
+        assert!(ptask_core::notes::list(&db, &c.id, 50).unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn dashboard_done_reports_advanced_for_a_recurring_task() {
         let db = open_test_db();
         let rec = ptask_core::recurrence::parse("every monday").unwrap();
