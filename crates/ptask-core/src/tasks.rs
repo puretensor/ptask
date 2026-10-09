@@ -1704,22 +1704,56 @@ pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
 
 /// Mark a task in progress (status_v2 `in_progress`; legacy stays
 /// `pending`). Attributed `task.updated` event in the same transaction.
-pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
+/// Starting work makes the starter the holder unless someone already holds
+/// a live claim. An expired lease is free: this takes the holder and
+/// clears the lease. Returns a new claim token when this call took the
+/// claim (so the starter can heartbeat or release without `--force`).
+pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<Option<String>> {
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    // Starting work makes the starter the holder, unless someone already
-    // holds it (start is not gated by claims; it does not take one over).
-    let changed = tx.execute(
-        "UPDATE tasks SET status_v2='in_progress', status='pending',
-                          snoozed_until=NULL, updated_at=?1,
-                          claimed_by=CASE WHEN status_v2='in_progress' AND claimed_by IS NOT NULL
-                                          THEN claimed_by ELSE ?3 END,
-                          claimed_at=CASE WHEN status_v2='in_progress' AND claimed_by IS NOT NULL
-                                          THEN claimed_at ELSE ?1 END
-         WHERE id=?2 AND status_v2 NOT IN ('done','dismissed')",
-        params![now, task_uuid, ctx.actor],
-    )?;
+    let current: Option<(String, Option<String>, Option<String>)> = tx
+        .query_row(
+            "SELECT status_v2, claimed_by, claim_expires_at FROM tasks WHERE id=?1",
+            [task_uuid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((status, holder, expires_at)) = current else {
+        return Err(crate::Error::Other(
+            "task not found or terminal — cannot start".into(),
+        ));
+    };
+    if status == "done" || status == "dismissed" {
+        return Err(crate::Error::Other(
+            "task not found or terminal — cannot start".into(),
+        ));
+    }
+    let expired = crate::claims::lease_has_expired(expires_at.as_deref());
+    let take = status != "in_progress" || holder.is_none() || expired;
+    let new_token = take.then(crate::claims::new_claim_token);
+    let changed = if take {
+        tx.execute(
+            "UPDATE tasks SET status_v2='in_progress', status='pending',
+                              snoozed_until=NULL, updated_at=?1,
+                              claimed_by=?3, claimed_at=?1,
+                              claim_expires_at=NULL, claim_token=?4
+             WHERE id=?2 AND status_v2 NOT IN ('done','dismissed')
+               AND (
+                 status_v2 <> 'in_progress'
+                 OR claimed_by IS NULL
+                 OR claim_expires_at IS ?5
+               )",
+            params![now, task_uuid, ctx.actor, new_token.as_ref(), expires_at],
+        )?
+    } else {
+        tx.execute(
+            "UPDATE tasks SET status_v2='in_progress', status='pending',
+                              snoozed_until=NULL, updated_at=?1
+             WHERE id=?2 AND status_v2 NOT IN ('done','dismissed')",
+            params![now, task_uuid],
+        )?
+    };
     if changed == 0 {
         return Err(crate::Error::Other(
             "task not found or terminal — cannot start".into(),
@@ -1738,7 +1772,7 @@ pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
         &serde_json::json!({ "task_uuid": task_uuid, "status": "in_progress" }),
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(new_token)
 }
 
 /// Atomically claim a task for agent work, with no lease (see

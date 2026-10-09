@@ -37,7 +37,7 @@ pt mcp                                            # MCP server over stdio
 | TUI | `pt` / `pt tui` | ratatui |
 | Sync API | `pt serve` | axum; canonical store on one host, clients use `pt remote` |
 | Telegram | `pt bot` | Bot API long-poll |
-| MCP (agents) | `pt mcp` (stdio) or `/mcp` mount on the server | 23 tools; bearer-gated HTTP for HAL, scoped REST tokens for other agents — [`docs/agent-surface.md`](docs/agent-surface.md) |
+| MCP (agents) | `pt mcp` (stdio) or `/mcp` mount on the server | 22 tools; bearer-gated HTTP for HAL, scoped REST tokens for other agents — [`docs/agent-surface.md`](docs/agent-surface.md) |
 | Web | [`dashboard/`](dashboard/) | **PTASK Triage Cockpit** — read-only Python sidecar over the same DB; writes delegate to the `pt` binary |
 
 ## Architecture

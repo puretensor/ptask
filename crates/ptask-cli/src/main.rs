@@ -131,9 +131,11 @@ enum Command {
     /// you), optionally with a lease that `pt heartbeat` keeps alive.
     Claim(ClaimArgs),
     /// Renew your claim's lease; fails (exit 1) when the claim is no longer
-    /// yours, which means stop working on it.
+    /// yours, which means stop working on it. Requires `--claim` with the
+    /// token `pt claim` / `pt start` returned.
     Heartbeat(HeartbeatArgs),
     /// Hand a claimed task back (in_progress → todo) without closing it.
+    /// `--claim TOKEN` names the instance; without a token, `--force`.
     Release(ReleaseArgs),
     /// Return tasks whose claim lease ran out to todo (dry run unless --apply).
     Reclaim(ReclaimArgs),
@@ -238,6 +240,9 @@ struct ClaimArgs {
 struct HeartbeatArgs {
     /// PT-N, bare integer, uuid, or title substring.
     query: String,
+    /// Claim instance token returned by `pt claim` or `pt start`.
+    #[arg(long = "claim", value_name = "TOKEN")]
+    claim: String,
     /// New lease length from now (30m, 2h, 1d; max 1d).
     #[arg(long, default_value = "30m")]
     lease: String,
@@ -247,7 +252,13 @@ struct HeartbeatArgs {
 struct ReleaseArgs {
     /// PT-N, bare integer, uuid, or title substring.
     query: String,
-    /// Release a claim another actor holds (the operator's override).
+    /// Claim instance token returned by `pt claim` or `pt start`.
+    /// Without one, `--force` is required (and so is releasing an unowned
+    /// in-progress task).
+    #[arg(long = "claim", value_name = "TOKEN")]
+    claim: Option<String>,
+    /// Release a claim another actor holds, an unowned in-progress task,
+    /// or a claim whose token you do not have (the operator's override).
     #[arg(long)]
     force: bool,
     /// Why it is being handed back, journaled with the release.
@@ -2689,22 +2700,24 @@ fn accountability_verdict(
 
 fn cmd_start(db: &Db, a: StartArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    tasks::start(db, &task.id, &cli_ctx())?;
-    emit(
-        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress"}),
-        || {
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Busy,
-                    "started",
-                    task.pt_id.as_deref().unwrap_or(""),
-                    &task.title,
-                    "in progress"
-                )
+    let claim_token = tasks::start(db, &task.id, &cli_ctx())?;
+    let mut v =
+        serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress"});
+    if let Some(t) = &claim_token {
+        v["claim_token"] = serde_json::json!(t);
+    }
+    emit(&v, || {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Busy,
+                "started",
+                task.pt_id.as_deref().unwrap_or(""),
+                &task.title,
+                "in progress"
             )
-        },
-    )
+        )
+    })
 }
 
 /// "in 12m" / "5m ago" for a lease end, against now.
@@ -2736,34 +2749,33 @@ fn cmd_claim(db: &Db, a: ClaimArgs) -> Result<()> {
     let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
     let claim =
         ptask_core::claims::claim(db, &task.id, lease, &cli_ctx()).map_err(anyhow::Error::msg)?;
-    emit(
-        &serde_json::json!({
-            "pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress",
-            "claim": claim,
-        }),
-        || {
-            println!(
-                "{}",
-                ui::outcome(
-                    ui::Status::Busy,
-                    "claimed",
-                    task.pt_id.as_deref().unwrap_or(""),
-                    &task.title,
-                    &format!(
-                        "by {} · {}",
-                        claim.by,
-                        lease_phrase(claim.expires_at.as_deref())
-                    )
+    let v = serde_json::json!({
+        "pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress",
+        "claim": claim,
+        "claim_token": claim.token,
+    });
+    emit(&v, || {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Busy,
+                "claimed",
+                task.pt_id.as_deref().unwrap_or(""),
+                &task.title,
+                &format!(
+                    "by {} · {}",
+                    claim.by,
+                    lease_phrase(claim.expires_at.as_deref())
                 )
             )
-        },
-    )
+        )
+    })
 }
 
 fn cmd_heartbeat(db: &Db, a: HeartbeatArgs) -> Result<()> {
     let lease = ptask_core::claims::parse_lease(&a.lease).map_err(anyhow::Error::msg)?;
     let task = tasks::resolve_for_lookup(db, &a.query, true).map_err(anyhow::Error::msg)?;
-    let claim = ptask_core::claims::heartbeat(db, &task.id, lease, &cli_ctx())
+    let claim = ptask_core::claims::heartbeat(db, &task.id, lease, &a.claim, &cli_ctx())
         .map_err(anyhow::Error::msg)?;
     emit(
         &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "claim": claim}),
@@ -2784,8 +2796,15 @@ fn cmd_heartbeat(db: &Db, a: HeartbeatArgs) -> Result<()> {
 
 fn cmd_release(db: &Db, a: ReleaseArgs) -> Result<()> {
     let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
-    let r = ptask_core::claims::release(db, &task.id, a.force, a.reason.as_deref(), &cli_ctx())
-        .map_err(anyhow::Error::msg)?;
+    let r = ptask_core::claims::release(
+        db,
+        &task.id,
+        a.force,
+        a.reason.as_deref(),
+        a.claim.as_deref(),
+        &cli_ctx(),
+    )
+    .map_err(anyhow::Error::msg)?;
     emit(
         &serde_json::json!({
             "pt_id": task.pt_id, "task_uuid": task.id, "status": "todo",

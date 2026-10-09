@@ -9,6 +9,19 @@ fn claim_of(pt: &Pt, id: &str) -> serde_json::Value {
     pt.json(&["show", id])["claim"].clone()
 }
 
+/// `pt --json claim` as `actor`; returns the minted instance token.
+fn claim_token(pt: &Pt, actor: &str, id: &str, extra: &[&str]) -> String {
+    let mut args = vec!["--json", "claim", id];
+    args.extend_from_slice(extra);
+    let out = pt.ok_as(actor, &args);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    v["claim_token"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| panic!("pt claim returned no claim_token: {v}"))
+        .to_string()
+}
+
 fn status_of(pt: &Pt, id: &str) -> String {
     pt.json(&["show", id])["status"]
         .as_str()
@@ -64,19 +77,32 @@ fn a_claim_is_owned_and_the_second_claimer_learns_the_holder() {
 fn heartbeat_is_the_holders_and_a_lost_claim_exits_non_zero() {
     let pt = Pt::new();
     pt.ok(&["add", "--raw", "Long migration"]);
-    pt.ok_as("hal", &["claim", "PT-1", "--lease", "10m"]);
-    pt.ok_as("hal", &["heartbeat", "PT-1", "--lease", "2h"]);
-    let stolen = pt.run_as("grok", &["heartbeat", "PT-1"]);
+    let token = claim_token(&pt, "hal", "PT-1", &["--lease", "10m"]);
+    pt.ok_as(
+        "hal",
+        &["heartbeat", "PT-1", "--claim", &token, "--lease", "2h"],
+    );
+    let stolen = pt.run_as("grok", &["heartbeat", "PT-1", "--claim", &token]);
     assert!(!stolen.status.success());
     assert!(String::from_utf8_lossy(&stolen.stderr).contains("claim lost"));
     // A heartbeat writes no journal event: it is not a mutation to replay.
     assert!(
-        !pt.run_as("hal", &["--idempotency-key", "hb-1", "heartbeat", "PT-1"])
-            .status
-            .success()
+        !pt.run_as(
+            "hal",
+            &[
+                "--idempotency-key",
+                "hb-1",
+                "heartbeat",
+                "PT-1",
+                "--claim",
+                &token
+            ]
+        )
+        .status
+        .success()
     );
     pt.ok_as("hal", &["done", "PT-1"]);
-    let after_close = pt.run_as("hal", &["heartbeat", "PT-1"]);
+    let after_close = pt.run_as("hal", &["heartbeat", "PT-1", "--claim", &token]);
     assert!(!after_close.status.success());
     assert!(String::from_utf8_lossy(&after_close.stderr).contains("stop work"));
     assert!(claim_of(&pt, "PT-1").is_null(), "closing drops the claim");
@@ -103,10 +129,17 @@ fn release_is_the_holders_and_the_operator_can_force_it() {
     assert!(log.contains("task.released"), "{log}");
 
     // Now anyone may claim it; the holder releases its own without --force.
-    pt.ok_as("grok", &["claim", "PT-1"]);
+    let grok_token = claim_token(&pt, "grok", "PT-1", &[]);
     pt.ok_as(
         "grok",
-        &["release", "PT-1", "--reason", "blocked on BMC creds"],
+        &[
+            "release",
+            "PT-1",
+            "--claim",
+            &grok_token,
+            "--reason",
+            "blocked on BMC creds",
+        ],
     );
     assert_eq!(status_of(&pt, "PT-1"), "todo");
     // `pt start` makes the starter the holder.
@@ -119,7 +152,7 @@ fn reclaim_lists_by_default_and_applies_on_request() {
     let pt = Pt::new();
     pt.ok(&["add", "--raw", "dead agent's task"]); // PT-1
     pt.ok(&["add", "--raw", "live agent's task"]); // PT-2
-    pt.ok_as("hal", &["claim", "PT-1", "--lease", "10m"]);
+    let hal_token = claim_token(&pt, "hal", "PT-1", &["--lease", "10m"]);
     pt.ok_as("grok", &["claim", "PT-2", "--lease", "10m"]);
     expire_lease(&pt, "PT-1", 5);
     assert_eq!(claim_of(&pt, "PT-1")["expired"], true);
@@ -142,7 +175,7 @@ fn reclaim_lists_by_default_and_applies_on_request() {
     assert_eq!(applied["reclaimed"][0]["pt_id"], "PT-1");
     assert_eq!(status_of(&pt, "PT-1"), "todo");
     assert_eq!(status_of(&pt, "PT-2"), "in_progress");
-    let lost = pt.run_as("hal", &["heartbeat", "PT-1"]);
+    let lost = pt.run_as("hal", &["heartbeat", "PT-1", "--claim", &hal_token]);
     assert!(!lost.status.success(), "the old holder is told to stop");
     pt.ok_as("grok", &["claim", "PT-1"]);
 }

@@ -287,9 +287,7 @@ fn render(db: &Db) -> ptask_core::Result<String> {
         }
         Ok(())
     })?;
-    let expired = ptask_core::claims::expired(db)
-        .map(|v| v.len())
-        .unwrap_or(0);
+    let expired = ptask_core::claims::expired(db)?.len();
     writeln!(
         out,
         "# HELP pt_claims_expired In-progress tasks whose claim lease has run out (not yet reclaimed)."

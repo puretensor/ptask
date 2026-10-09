@@ -131,10 +131,10 @@ pt\-claim(1)
 Claim a task for work (todo/backlog/triage → in_progress, owned by you), optionally with a lease that `pt heartbeat` keeps alive
 .TP
 pt\-heartbeat(1)
-Renew your claim\*(Aqs lease; fails (exit 1) when the claim is no longer yours, which means stop working on it
+Renew your claim\*(Aqs lease; fails (exit 1) when the claim is no longer yours, which means stop working on it. Requires `\-\-claim` with the token `pt claim` / `pt start` returned
 .TP
 pt\-release(1)
-Hand a claimed task back (in_progress → todo) without closing it
+Hand a claimed task back (in_progress → todo) without closing it. `\-\-claim TOKEN` names the instance; without a token, `\-\-force`
 .TP
 pt\-reclaim(1)
 Return tasks whose claim lease ran out to todo (dry run unless \-\-apply)

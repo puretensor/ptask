@@ -2363,12 +2363,16 @@ _pt() {
             return 0
             ;;
         pt__subcmd__heartbeat)
-            opts="-h --lease --db --json --idempotency-key --color --no-color --help <QUERY>"
+            opts="-h --claim --lease --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --claim)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --lease)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -4073,12 +4077,16 @@ _pt() {
             return 0
             ;;
         pt__subcmd__release)
-            opts="-m -h --force --reason --db --json --idempotency-key --color --no-color --help <QUERY>"
+            opts="-m -h --claim --force --reason --db --json --idempotency-key --color --no-color --help <QUERY>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --claim)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --reason)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

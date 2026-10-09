@@ -13,9 +13,15 @@
 --                     expired lease is what `pt reclaim` (and, only when
 --                     PTASK_CLAIM_RECLAIM is on, the hourly scoring run)
 --                     returns to todo.
+--   claim_token       opaque instance id minted on every claim/start that
+--                     takes the holder. Heartbeat and unforced release
+--                     compare-and-set on this, so two sessions that share
+--                     an actor name cannot renew or hand back each other's
+--                     claim.
 ALTER TABLE tasks ADD COLUMN claimed_by TEXT;
 ALTER TABLE tasks ADD COLUMN claimed_at TEXT;
 ALTER TABLE tasks ADD COLUMN claim_expires_at TEXT;
+ALTER TABLE tasks ADD COLUMN claim_token TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_tasks_claim_expires
     ON tasks(claim_expires_at) WHERE claim_expires_at IS NOT NULL;
@@ -28,9 +34,10 @@ CREATE TRIGGER IF NOT EXISTS tasks_claim_ends_with_in_progress
 AFTER UPDATE OF status_v2 ON tasks
 WHEN NEW.status_v2 <> 'in_progress'
  AND (NEW.claimed_by IS NOT NULL OR NEW.claimed_at IS NOT NULL
-      OR NEW.claim_expires_at IS NOT NULL)
+      OR NEW.claim_expires_at IS NOT NULL OR NEW.claim_token IS NOT NULL)
 BEGIN
-    UPDATE tasks SET claimed_by = NULL, claimed_at = NULL, claim_expires_at = NULL
+    UPDATE tasks SET claimed_by = NULL, claimed_at = NULL,
+                     claim_expires_at = NULL, claim_token = NULL
      WHERE id = NEW.id;
 END;
 

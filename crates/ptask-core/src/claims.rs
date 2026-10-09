@@ -2,17 +2,21 @@
 //!
 //! A claim is the atomic todo/backlog/triage → in_progress flip
 //! ([`claim`]) plus who holds it (`tasks.claimed_by`) and, when the claimer
-//! asks for one, a lease (`tasks.claim_expires_at`). The holder keeps a
-//! lease alive with [`heartbeat`]; a heartbeat on a claim that is no longer
-//! the caller's fails, which is the signal to stop working. [`release`]
-//! hands a task back to todo without closing it. [`reclaim_expired`]
-//! returns tasks whose lease ran out to todo: `pt reclaim` runs it on
-//! demand (a dry run unless `--apply`), and the hourly scoring run only when
-//! the operator turns `PTASK_CLAIM_RECLAIM` on.
+//! asks for one, a lease (`tasks.claim_expires_at`). Each take also mints an
+//! opaque instance token (`tasks.claim_token`): [`heartbeat`] and unforced
+//! [`release`] compare-and-set on that token, so two sessions that share an
+//! actor name cannot renew or hand back each other's claim. A heartbeat on a
+//! token that is no longer current fails, which is the signal to stop
+//! working. [`release`] hands a task back to todo without closing it.
+//! [`reclaim_expired`] returns tasks whose lease ran out to todo: `pt reclaim`
+//! runs it on demand (a dry run unless `--apply`), and the hourly scoring run
+//! only when the operator turns `PTASK_CLAIM_RECLAIM` on.
 //!
-//! Leaving in_progress by any other path (done, dismiss, snooze, a
-//! recurring advance) drops the claim in a trigger (V021), so a claim never
-//! outlives its work. A claim without a lease never expires on its own.
+//! An expired lease is free: [`claim`] takes it over, and `pt start` takes
+//! the holder and clears the lease. Leaving in_progress by any other path
+//! (done, dismiss, snooze, a recurring advance) drops the claim in a trigger
+//! (V021), so a claim never outlives its work. A claim without a lease never
+//! expires on its own.
 
 use crate::error::{Error, Result};
 use crate::event_log::EventCtx;
@@ -34,6 +38,11 @@ pub struct Claim {
     /// True when the lease has run out (the holder stopped heartbeating).
     #[serde(default)]
     pub expired: bool,
+    /// Opaque instance token minted when this claim was taken. Present on
+    /// [`claim`] (and on `pt start` when it takes the holder); never loaded
+    /// by [`get`], never journaled, never shown.
+    #[serde(skip)]
+    pub token: String,
 }
 
 /// What [`release`] did.
@@ -95,6 +104,20 @@ fn is_expired(expires_at: Option<&str>, now: &jiff::Zoned) -> bool {
         .is_some_and(|end| end.timestamp() <= now.timestamp())
 }
 
+/// True when `expires_at` is a lease that has already run out.
+pub(crate) fn lease_has_expired(expires_at: Option<&str>) -> bool {
+    is_expired(expires_at, &utc_now())
+}
+
+/// Mint an opaque claim-instance token. New on every take.
+pub(crate) fn new_claim_token() -> String {
+    format!("ct_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn presented_token(token: Option<&str>) -> Option<&str> {
+    token.map(str::trim).filter(|t| !t.is_empty())
+}
+
 /// Parse a lease like `30m`, `2h`, `90` (minutes) or `1d`.
 pub fn parse_lease(input: &str) -> Result<i64> {
     let s = input.trim().to_ascii_lowercase();
@@ -138,14 +161,17 @@ pub fn get_in_conn(conn: &rusqlite::Connection, task_uuid: &str) -> Result<Optio
             by,
             at,
             expires_at,
+            token: String::new(),
         })
     }))
 }
 
 /// Atomically claim a task for the caller (todo/backlog/triage →
-/// in_progress), optionally with a lease of `lease_minutes`. The guarded
-/// flip, the owner and the `task.claimed` event are one transaction, so
-/// two claimers cannot both win and a claim is never without its record.
+/// in_progress), optionally with a lease of `lease_minutes`. An in-progress
+/// task whose lease has run out is free: this takes the holder and installs
+/// a new instance token. The guarded flip, the owner and the `task.claimed`
+/// event are one transaction, so two claimers cannot both win and a claim is
+/// never without its record.
 pub fn claim(
     db: &Db,
     task_uuid: &str,
@@ -155,27 +181,63 @@ pub fn claim(
     let now = utc_now();
     let at = crate::dates::format_iso(&now);
     let expires_at = lease_minutes.map(|m| lease_end(&now, m)).transpose()?;
+    let token = new_claim_token();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let changed = tx.execute(
         "UPDATE tasks SET status_v2='in_progress', status='pending', updated_at=?1,
-                          claimed_by=?2, claimed_at=?1, claim_expires_at=?3
-         WHERE id=?4 AND status_v2 IN ('triage','backlog','todo')",
-        params![crate::tasks::iso_now(), ctx.actor, expires_at, task_uuid],
+                          claimed_by=?2, claimed_at=?1, claim_expires_at=?3, claim_token=?4
+         WHERE id=?5 AND status_v2 IN ('triage','backlog','todo')",
+        params![
+            crate::tasks::iso_now(),
+            ctx.actor,
+            expires_at,
+            token,
+            task_uuid
+        ],
     )?;
     if changed == 0 {
-        let holder: Option<String> = tx
+        let row: Option<(String, Option<String>, Option<String>)> = tx
             .query_row(
-                "SELECT claimed_by FROM tasks WHERE id=?1 AND status_v2='in_progress'",
+                "SELECT status_v2, claimed_by, claim_expires_at FROM tasks WHERE id=?1",
                 [task_uuid],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .optional()?
-            .flatten();
-        return Err(Error::Other(match holder {
-            Some(h) => format!("task not claimable: already claimed by {h}"),
-            None => "task not found or not claimable".into(),
-        }));
+            .optional()?;
+        let Some((status, holder, old_expires)) = row else {
+            return Err(Error::Other("task not found or not claimable".into()));
+        };
+        let expired = is_expired(old_expires.as_deref(), &now);
+        if status == "in_progress" && expired {
+            let took = tx.execute(
+                "UPDATE tasks SET status_v2='in_progress', status='pending', updated_at=?1,
+                                  claimed_by=?2, claimed_at=?1, claim_expires_at=?3, claim_token=?4
+                 WHERE id=?5 AND status_v2='in_progress' AND claim_expires_at IS ?6",
+                params![
+                    crate::tasks::iso_now(),
+                    ctx.actor,
+                    expires_at,
+                    token,
+                    task_uuid,
+                    old_expires
+                ],
+            )?;
+            if took == 0 {
+                return Err(Error::Other(match holder {
+                    Some(h) => {
+                        format!("task not claimable: already claimed by {h} (lease expired)")
+                    }
+                    None => "task not claimable: lease expired".into(),
+                }));
+            }
+        } else {
+            return Err(Error::Other(match (status.as_str(), holder) {
+                ("in_progress", Some(h)) => {
+                    format!("task not claimable: already claimed by {h}")
+                }
+                _ => "task not found or not claimable".into(),
+            }));
+        }
     }
     let mut payload = serde_json::json!({ "task_uuid": task_uuid, "by": ctx.actor });
     if let (Some(m), Some(e)) = (lease_minutes, &expires_at) {
@@ -189,49 +251,73 @@ pub fn claim(
         at: Some(at),
         expires_at,
         expired: false,
+        token,
     })
 }
 
 /// Keep a claim alive: push its lease to now + `lease_minutes`. Only the
-/// holder may, and only while the task is still in progress under its
-/// claim. Anything else (released, reclaimed, closed, taken by another)
-/// is an error that tells the caller to stop working. A lease that has run
-/// out but was not reclaimed yet is still the holder's to renew.
+/// holder of *this* claim instance may (`claim_token` from [`claim`] or
+/// `pt start`), and only while the task is still in progress under that
+/// token. Anything else (released, reclaimed, closed, taken by another,
+/// a stale session of the same actor) is an error that tells the caller to
+/// stop working. A lease that has run out but was not reclaimed yet is
+/// still that instance's to renew. A heartbeat with no token is refused.
 ///
 /// Not journaled: a heartbeat every few minutes would flood the journal and
 /// every sync client's delta, and it changes no task state.
-pub fn heartbeat(db: &Db, task_uuid: &str, lease_minutes: i64, ctx: &EventCtx) -> Result<Claim> {
+pub fn heartbeat(
+    db: &Db,
+    task_uuid: &str,
+    lease_minutes: i64,
+    claim_token: &str,
+    ctx: &EventCtx,
+) -> Result<Claim> {
+    let Some(claim_token) = presented_token(Some(claim_token)) else {
+        return Err(Error::Other(
+            "claim lost: claim token required; stop work on it (re-claim if it is still yours to do)"
+                .into(),
+        ));
+    };
     let now = utc_now();
     let expires_at = lease_end(&now, lease_minutes)?;
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let current: Option<(String, Option<String>, Option<String>)> = tx
+    let current = tx
         .query_row(
-            "SELECT status_v2, claimed_by, claimed_at FROM tasks WHERE id=?1",
+            "SELECT status_v2, claimed_by, claimed_at, claim_token FROM tasks WHERE id=?1",
             [task_uuid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((status, holder, at)) = current else {
+    let Some((status, holder, at, stored_token)) = current else {
         return Err(Error::Other("claim lost: task not found; stop work".into()));
     };
-    let mine = status == "in_progress"
-        && holder
-            .as_deref()
-            .is_some_and(|h| h.eq_ignore_ascii_case(&ctx.actor));
+    let token_ok = stored_token.as_deref() == Some(claim_token);
+    let actor_ok = holder
+        .as_deref()
+        .is_some_and(|h| h.eq_ignore_ascii_case(&ctx.actor));
+    let mine = status == "in_progress" && actor_ok && token_ok;
     if !mine {
-        let why = match (status.as_str(), holder.as_deref()) {
-            ("in_progress", Some(h)) => format!("now claimed by {h}"),
-            ("in_progress", None) => "the claim was released".to_string(),
-            (s, _) => format!("the task is {s}"),
+        let why = match (status.as_str(), holder.as_deref(), token_ok) {
+            ("in_progress", Some(h), true) => format!("now claimed by {h}"),
+            ("in_progress", Some(_), false) => "this claim is no longer current".to_string(),
+            ("in_progress", None, _) => "the claim was released".to_string(),
+            (s, _, _) => format!("the task is {s}"),
         };
         return Err(Error::Other(format!(
             "claim lost: {why}; stop work on it (re-claim if it is still yours to do)"
         )));
     }
     tx.execute(
-        "UPDATE tasks SET claim_expires_at=?1 WHERE id=?2",
-        params![expires_at, task_uuid],
+        "UPDATE tasks SET claim_expires_at=?1 WHERE id=?2 AND claim_token=?3",
+        params![expires_at, task_uuid, claim_token],
     )?;
     tx.commit()?;
     Ok(Claim {
@@ -239,19 +325,22 @@ pub fn heartbeat(db: &Db, task_uuid: &str, lease_minutes: i64, ctx: &EventCtx) -
         at,
         expires_at: Some(expires_at),
         expired: false,
+        token: claim_token.to_string(),
     })
 }
 
 /// Hand a task back: in_progress → todo, claim dropped, nothing closed.
-/// The holder may release its own claim; an unowned in-progress task
-/// (started before claims had owners) anyone may; someone else's claim
-/// only with `force` (the operator's override, journaled as forced).
+/// The holder of *this* claim instance may release it by presenting
+/// `claim_token`. An unowned in-progress task, a stale token, a missing
+/// token, or someone else's claim, only with `force` (the operator's
+/// override, journaled as forced). There is no force over MCP.
 /// `reason` is journaled with the release.
 pub fn release(
     db: &Db,
     task_uuid: &str,
     force: bool,
     reason: Option<&str>,
+    claim_token: Option<&str>,
     ctx: &EventCtx,
 ) -> Result<Released> {
     let reason = reason.map(str::trim).filter(|r| !r.is_empty());
@@ -265,14 +354,21 @@ pub fn release(
     }
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let current: Option<(String, Option<String>, Option<String>)> = tx
+    let current = tx
         .query_row(
-            "SELECT status_v2, claimed_by, pt_id FROM tasks WHERE id=?1",
+            "SELECT status_v2, claimed_by, pt_id, claim_token FROM tasks WHERE id=?1",
             [task_uuid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((status, holder, pt_id)) = current else {
+    let Some((status, holder, pt_id, stored_token)) = current else {
         return Err(Error::Other("task not found".into()));
     };
     if status != "in_progress" {
@@ -280,15 +376,27 @@ pub fn release(
             "task is {status}, not in progress: nothing to release"
         )));
     }
-    let others = holder
+    let presented = presented_token(claim_token);
+    let token_ok = matches!((presented, stored_token.as_deref()), (Some(p), Some(s)) if p == s);
+    let actor_ok = holder
         .as_deref()
-        .is_some_and(|h| !h.eq_ignore_ascii_case(&ctx.actor));
-    if others && !force {
-        return Err(Error::Other(format!(
-            "claimed by {}, not you: only the holder releases it (the operator can with --force)",
-            holder.as_deref().unwrap_or_default()
-        )));
+        .is_some_and(|h| h.eq_ignore_ascii_case(&ctx.actor));
+    let authorized = token_ok && actor_ok;
+    if !authorized && !force {
+        let others = holder
+            .as_deref()
+            .is_some_and(|h| !h.eq_ignore_ascii_case(&ctx.actor));
+        if others {
+            return Err(Error::Other(format!(
+                "claimed by {}, not you: only the holder releases it (the operator can with --force)",
+                holder.as_deref().unwrap_or_default()
+            )));
+        }
+        return Err(Error::Other(
+            "only the holder of this claim can release it (the operator can with --force)".into(),
+        ));
     }
+    let forced = !authorized;
     // The trigger clears the claim columns as the status leaves in_progress.
     tx.execute(
         "UPDATE tasks SET status_v2='todo', status='pending', updated_at=?1
@@ -297,7 +405,7 @@ pub fn release(
     )?;
     let mut payload = serde_json::json!({
         "task_uuid": task_uuid, "pt_id": pt_id, "status": "todo",
-        "holder": holder, "forced": others,
+        "holder": holder, "forced": forced,
     });
     if let Some(r) = reason {
         payload["reason"] = serde_json::json!(r);
@@ -308,7 +416,7 @@ pub fn release(
         task_uuid: task_uuid.to_string(),
         pt_id,
         holder,
-        forced: others,
+        forced,
     })
 }
 
@@ -464,21 +572,30 @@ mod tests {
     fn only_the_holder_heartbeats_and_a_lost_claim_says_stop() {
         let (_d, db) = fresh();
         let t = tasks::create(&db, NewTask::minimal("long job"), &EventCtx::test()).unwrap();
-        claim(&db, &t.id, Some(5), &EventCtx::local("hal")).unwrap();
+        let granted = claim(&db, &t.id, Some(5), &EventCtx::local("hal")).unwrap();
         expire(&db, &t.id, 1);
-        // Expired but not reclaimed yet: still the holder's to renew.
-        let renewed = heartbeat(&db, &t.id, 30, &EventCtx::local("HAL")).unwrap();
+        // Expired but not reclaimed yet: still this instance's to renew.
+        let renewed = heartbeat(&db, &t.id, 30, &granted.token, &EventCtx::local("HAL")).unwrap();
         assert!(!get(&db, &t.id).unwrap().unwrap().expired);
         assert!(renewed.expires_at.is_some());
-        let other = heartbeat(&db, &t.id, 30, &EventCtx::local("grok")).unwrap_err();
+        let other =
+            heartbeat(&db, &t.id, 30, &granted.token, &EventCtx::local("grok")).unwrap_err();
         assert!(
             other
                 .to_string()
                 .starts_with("claim lost: now claimed by hal"),
             "{other}"
         );
-        release(&db, &t.id, false, None, &EventCtx::local("hal")).unwrap();
-        let lost = heartbeat(&db, &t.id, 30, &EventCtx::local("hal")).unwrap_err();
+        release(
+            &db,
+            &t.id,
+            false,
+            None,
+            Some(granted.token.as_str()),
+            &EventCtx::local("hal"),
+        )
+        .unwrap();
+        let lost = heartbeat(&db, &t.id, 30, &granted.token, &EventCtx::local("hal")).unwrap_err();
         assert!(lost.to_string().contains("stop work"), "{lost}");
     }
 
@@ -487,7 +604,7 @@ mod tests {
         let (_d, db) = fresh();
         let t = tasks::create(&db, NewTask::minimal("t"), &EventCtx::test()).unwrap();
         claim(&db, &t.id, None, &EventCtx::local("hal")).unwrap();
-        let refused = release(&db, &t.id, false, None, &EventCtx::local("grok")).unwrap_err();
+        let refused = release(&db, &t.id, false, None, None, &EventCtx::local("grok")).unwrap_err();
         assert!(refused.to_string().contains("claimed by hal"), "{refused}");
         assert_eq!(status(&db, &t.id), "in_progress");
         let r = release(
@@ -495,6 +612,7 @@ mod tests {
             &t.id,
             true,
             Some("hal is down"),
+            None,
             &EventCtx::local("shell"),
         )
         .unwrap();
@@ -503,7 +621,7 @@ mod tests {
         assert_eq!(status(&db, &t.id), "todo");
         assert_eq!(get(&db, &t.id).unwrap(), None);
         // Claimable again; releasing a todo task is an error.
-        assert!(release(&db, &t.id, false, None, &EventCtx::local("hal")).is_err());
+        assert!(release(&db, &t.id, false, None, None, &EventCtx::local("hal")).is_err());
         claim(&db, &t.id, None, &EventCtx::local("grok")).unwrap();
         let payload: String = db
             .with_conn(|c| {
@@ -536,16 +654,16 @@ mod tests {
                 "dismiss" => tasks::dismiss(&db, &t.id, &ctx).unwrap(),
                 _ => tasks::snooze(&db, &t.id, "2099-01-01", &ctx).unwrap(),
             }
-            let cols: (Option<String>, Option<String>) = db
+            let cols: (Option<String>, Option<String>, Option<String>) = db
                 .with_conn(|c| {
                     Ok(c.query_row(
-                        "SELECT claimed_by, claim_expires_at FROM tasks WHERE id=?1",
+                        "SELECT claimed_by, claim_expires_at, claim_token FROM tasks WHERE id=?1",
                         [&t.id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                     )?)
                 })
                 .unwrap();
-            assert_eq!(cols, (None, None), "{close} left the claim behind");
+            assert_eq!(cols, (None, None, None), "{close} left the claim behind");
         }
     }
 
@@ -556,7 +674,7 @@ mod tests {
         let dead = tasks::create(&db, NewTask::minimal("dead agent"), &EventCtx::test()).unwrap();
         let alive = tasks::create(&db, NewTask::minimal("alive"), &EventCtx::test()).unwrap();
         let unleased = tasks::create(&db, NewTask::minimal("no lease"), &EventCtx::test()).unwrap();
-        claim(&db, &dead.id, Some(10), &hal).unwrap();
+        let dead_claim = claim(&db, &dead.id, Some(10), &hal).unwrap();
         claim(&db, &alive.id, Some(10), &hal).unwrap();
         claim(&db, &unleased.id, None, &hal).unwrap();
         expire(&db, &dead.id, 5);
@@ -579,7 +697,7 @@ mod tests {
             "in_progress",
             "no lease never expires"
         );
-        let lost = heartbeat(&db, &dead.id, 10, &hal).unwrap_err();
+        let lost = heartbeat(&db, &dead.id, 10, &dead_claim.token, &hal).unwrap_err();
         assert!(lost.to_string().contains("claim lost"), "{lost}");
         // Reclaimed work is claimable by the next worker.
         claim(&db, &dead.id, Some(10), &EventCtx::local("grok")).unwrap();
@@ -589,6 +707,87 @@ mod tests {
                 .reclaimed
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_new_claim_is_a_new_instance_and_the_old_token_is_dead() {
+        let (_d, db) = fresh();
+        let t = tasks::create(&db, NewTask::minimal("index"), &EventCtx::test()).unwrap();
+        let a = claim(&db, &t.id, Some(10), &EventCtx::local("hal")).unwrap();
+        expire(&db, &t.id, 5);
+        reclaim_expired(&db, false, &EventCtx::system("reclaim")).unwrap();
+        let b = claim(&db, &t.id, Some(10), &EventCtx::local("hal")).unwrap();
+        assert_ne!(a.token, b.token);
+        assert!(!b.token.is_empty());
+        let stale = heartbeat(&db, &t.id, 30, &a.token, &EventCtx::local("hal")).unwrap_err();
+        assert!(stale.to_string().contains("claim lost"), "{stale}");
+        heartbeat(&db, &t.id, 30, &b.token, &EventCtx::local("hal")).unwrap();
+        assert!(
+            release(
+                &db,
+                &t.id,
+                false,
+                None,
+                Some(a.token.as_str()),
+                &EventCtx::local("hal")
+            )
+            .is_err()
+        );
+        assert_eq!(status(&db, &t.id), "in_progress");
+        release(
+            &db,
+            &t.id,
+            false,
+            Some("handing back"),
+            Some(b.token.as_str()),
+            &EventCtx::local("hal"),
+        )
+        .unwrap();
+        assert_eq!(status(&db, &t.id), "todo");
+    }
+
+    #[test]
+    fn an_expired_lease_is_free_to_claim() {
+        let (_d, db) = fresh();
+        let t = tasks::create(&db, NewTask::minimal("nightly"), &EventCtx::test()).unwrap();
+        claim(&db, &t.id, Some(10), &EventCtx::local("hal")).unwrap();
+        expire(&db, &t.id, 5);
+        let taken = claim(&db, &t.id, Some(30), &EventCtx::local("grok")).unwrap();
+        assert_eq!(taken.by, "grok");
+        let c = get(&db, &t.id).unwrap().unwrap();
+        assert_eq!(c.by, "grok");
+        assert!(!c.expired);
+    }
+
+    #[test]
+    fn unowned_in_progress_needs_force_to_release() {
+        let (_d, db) = fresh();
+        let t = tasks::create(&db, NewTask::minimal("legacy"), &EventCtx::test()).unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET status_v2='in_progress', status='pending',
+                                  claimed_by=NULL, claimed_at=NULL,
+                                  claim_expires_at=NULL, claim_token=NULL
+                  WHERE id=?1",
+                [&t.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let refused = release(&db, &t.id, false, None, None, &EventCtx::local("grok")).unwrap_err();
+        assert!(refused.to_string().contains("--force"), "{refused}");
+        assert_eq!(status(&db, &t.id), "in_progress");
+        let r = release(
+            &db,
+            &t.id,
+            true,
+            Some("nobody on it"),
+            None,
+            &EventCtx::local("shell"),
+        )
+        .unwrap();
+        assert!(r.forced);
+        assert_eq!(status(&db, &t.id), "todo");
     }
 
     #[test]
