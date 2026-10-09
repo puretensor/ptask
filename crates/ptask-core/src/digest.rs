@@ -20,8 +20,8 @@ pub fn build(db: &Db, days: i64) -> Result<serde_json::Value> {
             // updated_at.
             let grab = |c: &rusqlite::Connection, status: &str| {
                 let mut stmt = c.prepare(&format!(
-                    "SELECT pt_id, title FROM (
-                         SELECT t.pt_id, t.title,
+                    "SELECT pt_id, title, id FROM (
+                         SELECT t.id, t.pt_id, t.title,
                                 COALESCE((SELECT MAX(i.ts) FROM interactions i
                                           WHERE i.task_id = t.id
                                             AND i.action = 'status_change'),
@@ -32,13 +32,25 @@ pub fn build(db: &Db, days: i64) -> Result<serde_json::Value> {
                 ))?;
                 let rows = stmt
                     .query_map([status], |r| {
-                        Ok(serde_json::json!({
-                            "pt_id": r.get::<_, Option<String>>(0)?,
-                            "title": r.get::<_, String>(1)?,
-                        }))
+                        Ok((
+                            r.get::<_, Option<String>>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
-                Ok::<_, crate::Error>(rows)
+                // The closing evidence, when the close carried a note: the
+                // next session learns how the work was finished, not only
+                // that it was.
+                let mut out = Vec::with_capacity(rows.len());
+                for (pt_id, title, id) in rows {
+                    let mut v = serde_json::json!({ "pt_id": pt_id, "title": title });
+                    if let Some(note) = crate::notes::closure_note_in_conn(c, &id)? {
+                        v["note"] = serde_json::json!(crate::notes::preview(&note));
+                    }
+                    out.push(v);
+                }
+                Ok::<_, crate::Error>(out)
             };
             let done = grab(c, "done")?;
             let dismissed = grab(c, "dismissed")?;
@@ -116,5 +128,38 @@ mod tests {
             "a goal link is not a completion"
         );
         assert_eq!(titles(&build(&db, 60).unwrap(), "done").len(), 2);
+    }
+
+    #[test]
+    fn recently_closed_tasks_carry_their_closing_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("d.db")).unwrap();
+        let ctx = EventCtx::test();
+        let a = crate::tasks::create(&db, crate::NewTask::minimal("with evidence"), &ctx).unwrap();
+        let b = crate::tasks::create(&db, crate::NewTask::minimal("bare close"), &ctx).unwrap();
+        let c = crate::tasks::create(&db, crate::NewTask::minimal("won't do"), &ctx).unwrap();
+        crate::tasks::mark_done_noted(&db, &a, Some("CI green on abc123"), &ctx).unwrap();
+        crate::tasks::mark_done(&db, &b, &ctx).unwrap();
+        crate::tasks::dismiss_noted(&db, &c.id, Some("superseded by PT-9"), &ctx).unwrap();
+        let v = build(&db, 7).unwrap();
+        let note_of = |key: &str, title: &str| {
+            v[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["title"] == title)
+                .unwrap()
+                .get("note")
+                .cloned()
+        };
+        assert_eq!(
+            note_of("done", "with evidence"),
+            Some(serde_json::json!("CI green on abc123"))
+        );
+        assert_eq!(note_of("done", "bare close"), None);
+        assert_eq!(
+            note_of("dismissed", "won't do"),
+            Some(serde_json::json!("superseded by PT-9"))
+        );
     }
 }

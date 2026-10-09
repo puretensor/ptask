@@ -138,9 +138,10 @@ transaction.
 | GET | `/api/critical?limit=` | top pending by `priority_score` |
 | GET | `/api/timeline` | pending tasks with a deadline |
 | GET | `/api/heatmap` | priority × age-bucket matrix |
-| POST | `/api/tasks/<id>/done` | shells `pt done <id>` |
+| POST | `/api/tasks/<id>/done` | shells `pt done [--note=…] <id>`; optional `{"note"}` is the closure evidence (v0.23) |
+| POST | `/api/tasks/<id>/note` | `{"text"}` → shells `pt note <id> -- <text>` (v0.23) |
 | POST | `/api/tasks/<id>/snooze` `{days?}` | shells `pt snooze <id> "<days> days"` (v0.12) |
-| POST | `/api/tasks/<id>/dismiss` | shells `pt dismiss <id>` (v0.12) |
+| POST | `/api/tasks/<id>/dismiss` | shells `pt dismiss [--note=…] <id>` (v0.12; optional `{"note"}` reason, v0.23) |
 | POST | `/api/tasks/<id>/reopen` | shells `pt reopen <id>` (v0.12) |
 | POST | `/api/tasks/<id>/edit` `{title?, description?, priority?, deadline?, labels_add?, labels_remove?}` | shells `pt edit` (+ `pt priority` for level); null deadline clears (v0.12) |
 | POST | `/api/tasks` `{title, description?, priority?, deadline?}` | shells `pt add [--priority=] [--description=] [--deadline=] -- "<title>"` |
@@ -278,6 +279,12 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
   work in the selected window, with each actor's net; a positive net (the
   backlog grew) is flagged. `/api/stats` carries it as
   `flux.by_window.<w>.by_actor`, read from the journal like `pt flux`.
+- **v0.23.0** (pt 3.43.0) — Closure evidence and notes. The mark-done dialog has an
+  optional Evidence field (how was it verified?) that `pt done --note=…` journals
+  with the completion; the task drawer shows the task's Notes trail (standalone
+  notes and the evidence on each close, attributed, newest first) and an Add note
+  box (`POST /api/tasks/<id>/note`). Notes reach `pt` as one `--note=…` argument or
+  after `--`, never as flags; a lone `-` is refused (it means stdin to `pt`).
 - **v0.22.0** — The Host header must name the sidecar (IP literal, `localhost`, the
   machine's short hostname, `*.ts.net`, or `PTASK_DASH_ALLOWED_HOSTS`), else 421: since v0.21.0 a
   DNS-rebinding page could read every task and pass the Origin check, which only

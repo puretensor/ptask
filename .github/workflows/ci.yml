@@ -126,7 +126,7 @@ jobs:
       - run: python -m unittest discover -s tests -v
         working-directory: dashboard
       - name: open-access + markup contract tests
-        run: node --test tests/domains_markup.test.mjs tests/open_access.test.mjs tests/flux_markup.test.mjs
+        run: node --test tests/domains_markup.test.mjs tests/open_access.test.mjs tests/notes_markup.test.mjs tests/review_pr122_drawer.test.mjs tests/flux_markup.test.mjs
         working-directory: dashboard
 
   security:
