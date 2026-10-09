@@ -188,3 +188,92 @@ fn a_keyed_merge_replays_and_undo_reopens_the_duplicate() {
     assert_eq!(pt.json(&["show", "PT-2"])["status"], "todo");
     assert!(pt.json(&["show", "PT-2"])["duplicate_of"].is_null());
 }
+
+// A keyed `pt add` journaled before 3.45.0 (no `unique` field) must still
+// replay: the flag at its default is left out of the fingerprint.
+
+fn open_db(pt: &Pt) -> ptask_core::Db {
+    ptask_core::Db::open(pt.dir.path().join("tasks.db")).unwrap()
+}
+
+/// What pt 3.44 journaled as the fingerprint of a keyed `pt add --raw <title>`.
+fn add_before_unique(title: &str) -> String {
+    format!(
+        "Add(AddArgs {{ title: {title:?}, priority: None, description: None, deadline: None, \
+         reason: None, raw: true, kind: None, deliverable: None }})"
+    )
+}
+
+#[test]
+fn the_add_fingerprint_is_unchanged_without_unique() {
+    use ptask_core::event_log::{self, CommandFingerprint};
+    let pt = Pt::new();
+    pt.ok(&[
+        "--idempotency-key",
+        "k-add",
+        "add",
+        "--raw",
+        "Rotate the signing key",
+    ]);
+    let journaled = event_log::get_by_uuid(&open_db(&pt), "k-add")
+        .unwrap()
+        .expect("the keyed add is journaled under its key")
+        .command;
+    assert_eq!(
+        journaled,
+        Some(CommandFingerprint::new(
+            "Add",
+            &add_before_unique("Rotate the signing key")
+        )),
+        "`pt add` without --unique must fingerprint as it did before the flag existed"
+    );
+
+    // --unique is a different command: the key must not replay it.
+    let other = pt.run(&[
+        "--idempotency-key",
+        "k-add",
+        "add",
+        "--raw",
+        "--unique",
+        "Rotate the signing key",
+    ]);
+    assert!(
+        !other.status.success(),
+        "--unique under a used key replayed"
+    );
+}
+
+#[test]
+fn a_keyed_add_journaled_before_unique_replays() {
+    use ptask_core::event_log::{CommandFingerprint, EventCtx};
+    let pt = Pt::new();
+    {
+        let db = open_db(&pt);
+        let ctx =
+            EventCtx::local("test")
+                .with_uuid("k-legacy")
+                .with_command(CommandFingerprint::new(
+                    "Add",
+                    &add_before_unique("Rotate the signing key"),
+                ));
+        ptask_core::tasks::create(
+            &db,
+            ptask_core::tasks::NewTask::minimal("Rotate the signing key"),
+            &ctx,
+        )
+        .unwrap();
+    }
+    let out = pt.run(&[
+        "--idempotency-key",
+        "k-legacy",
+        "add",
+        "--raw",
+        "Rotate the signing key",
+    ]);
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("replayed"),
+        "a retry of the same keyed add across the upgrade must replay: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!pt.exists("PT-2"), "the retry filed a second task");
+}

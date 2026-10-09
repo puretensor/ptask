@@ -974,9 +974,10 @@ fn command_name(cmd: &Command) -> String {
 /// derived Debug impl (fixed field order), so a retry of the same command
 /// matches and a different command under the same key does not.
 ///
-/// Optional fields at their default (`note: None`) are omitted so a key
-/// journaled before that field existed still matches. A lone `-` for a
-/// note is replaced by the stdin payload, so the key covers the text.
+/// Optional fields at their default (`note: None`, `unique: false`) are
+/// omitted so a key journaled before that field existed still matches. A
+/// lone `-` for a note is replaced by the stdin payload, so the key covers
+/// the text.
 fn command_fingerprint(cmd: &Command) -> Result<ptask_core::event_log::CommandFingerprint> {
     Ok(ptask_core::event_log::CommandFingerprint::new(
         &command_name(cmd),
@@ -1018,6 +1019,11 @@ fn fingerprint_args(cmd: &Command) -> Result<String> {
         Command::Remote(RemoteCommand::Dismiss(a)) if a.note.is_none() => format!(
             "Remote(Dismiss(RemoteDismissArgs {{ query: {:?}, url: {:?} }}))",
             a.query, a.url
+        ),
+        Command::Add(a) if !a.unique => format!(
+            "Add(AddArgs {{ title: {:?}, priority: {:?}, description: {:?}, deadline: {:?}, \
+             reason: {:?}, raw: {:?}, kind: {:?}, deliverable: {:?} }})",
+            a.title, a.priority, a.description, a.deadline, a.reason, a.raw, a.kind, a.deliverable
         ),
         other => format!("{other:?}"),
     })
