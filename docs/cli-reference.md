@@ -117,7 +117,10 @@ pt criteria rm PT-7 2                      # drop it from the definition of done
 the worker brief. A recurring task's criteria reset when it advances: each
 occurrence meets them again. Criteria are journal events
 (`task.criterion_added|checked|unchecked|removed`, `task.criteria_reset`),
-so every change is attributed in `pt log`.
+so every change is attributed in `pt log`. `pt undo` looks straight through
+them: it never reverses a criteria edit, and an edit (anyone's) neither
+blocks undoing the close or create before it nor pushes undo onto an older
+task.
 
 ### `pt dismiss <query>`
 

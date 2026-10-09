@@ -1528,6 +1528,14 @@ pub struct UndoOutcome {
     pub action: UndoAction,
 }
 
+/// Journal events undo looks straight through: criteria edits annotate a
+/// task's definition of done rather than change its state. They are never
+/// undo candidates and never supersede or foreign-protect an earlier change
+/// (another actor's too), so ticking a closed task's checklist cannot make
+/// undo reach past that close to an older task, and `pt add --ac` (whose
+/// criteria are journaled after the create) stays undoable.
+const UNDO_TRANSPARENT_EVENTS: &str = crate::criteria::EVENTS;
+
 const NOTHING_UNDOABLE: &str =
     "nothing undoable in your recent journal (undo covers your own done/dismiss/create)";
 
@@ -1544,9 +1552,11 @@ const NOTHING_UNDOABLE: &str =
 /// undo must not delete a task HAL created. Any later event on the task,
 /// from ANY actor, protects it — every later mutation, including newly
 /// introduced event types, and reversals already recorded by an earlier
-/// undo or a manual reopen. A created task that another task depends on
-/// (or is depended on by), or that parents another task, is never deleted:
-/// those relations are not journaled under its own uuid.
+/// undo or a manual reopen — except acceptance-criteria edits
+/// ([`UNDO_TRANSPARENT_EVENTS`]), which are transparent. A created task that
+/// another task depends on (or is depended on by), or that parents another
+/// task, is never deleted: those relations are not journaled under its own
+/// uuid.
 fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<UndoPlan>> {
     // "Own" is actor AND surface: an MCP server can still run under the
     // operator's actor (PTASK_ACTOR=shell exported into `pt mcp`; the
@@ -1558,12 +1568,13 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
         other => (other, other),
     };
     let candidates: Vec<(i64, String, String, String)> = {
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare(&format!(
             "SELECT id, task_uuid, event_type, payload FROM pt_event_log
              WHERE task_uuid IS NOT NULL AND actor = ?1
                AND json_extract(payload, '$.source') IN (?2, ?3)
-             ORDER BY id DESC LIMIT 50",
-        )?;
+               AND event_type NOT IN ({UNDO_TRANSPARENT_EVENTS})
+             ORDER BY id DESC LIMIT 50"
+        ))?;
         let rows = stmt.query_map(params![ctx.actor, surface_a, surface_b], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
@@ -1572,7 +1583,10 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
 
     for (id, task_uuid, event_type, payload) in candidates {
         let superseded: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
+                   AND event_type NOT IN ({UNDO_TRANSPARENT_EVENTS}))"
+            ),
             params![task_uuid, id],
             |r| r.get(0),
         )?;
@@ -1583,9 +1597,12 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
             // the newest change is protected: refuse rather than reach
             // further back and undo, or delete, something older instead.
             let foreign: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
-                   AND (actor IS NOT ?3
-                        OR COALESCE(json_extract(payload, '$.source'), '') NOT IN (?4, ?5)))",
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
+                       AND event_type NOT IN ({UNDO_TRANSPARENT_EVENTS})
+                       AND (actor IS NOT ?3
+                            OR COALESCE(json_extract(payload, '$.source'), '') NOT IN (?4, ?5)))"
+                ),
                 params![task_uuid, id, ctx.actor, surface_a, surface_b],
                 |r| r.get(0),
             )?;

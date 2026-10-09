@@ -849,8 +849,22 @@ fn command_name(cmd: &Command) -> String {
 /// A keyed command's fingerprint: its parsed arguments, rendered by the
 /// derived Debug impl (fixed field order), so a retry of the same command
 /// matches and a different command under the same key does not.
+///
+/// Optional fields at their default (`acceptance: []`) are omitted so a key
+/// journaled before that field existed still matches.
 fn command_fingerprint(cmd: &Command) -> ptask_core::event_log::CommandFingerprint {
-    ptask_core::event_log::CommandFingerprint::new(&command_name(cmd), &format!("{cmd:?}"))
+    ptask_core::event_log::CommandFingerprint::new(&command_name(cmd), &fingerprint_args(cmd))
+}
+
+fn fingerprint_args(cmd: &Command) -> String {
+    match cmd {
+        Command::Add(a) if a.acceptance.is_empty() => format!(
+            "Add(AddArgs {{ title: {:?}, priority: {:?}, description: {:?}, deadline: {:?}, \
+             reason: {:?}, raw: {:?}, kind: {:?}, deliverable: {:?} }})",
+            a.title, a.priority, a.description, a.deadline, a.reason, a.raw, a.kind, a.deliverable
+        ),
+        other => format!("{other:?}"),
+    }
 }
 
 /// Commands whose retry under `--idempotency-key` is replay-safe: the keyed

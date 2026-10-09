@@ -42,7 +42,7 @@ pub struct Criterion {
     pub evidence: Option<String>,
 }
 
-const EVENTS: &str = "'task.criterion_added', 'task.criterion_checked', \
+pub(crate) const EVENTS: &str = "'task.criterion_added', 'task.criterion_checked', \
      'task.criterion_unchecked', 'task.criterion_removed', 'task.criteria_reset'";
 
 /// The task's criteria, in number order (folded from its journal).
