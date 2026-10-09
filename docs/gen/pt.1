@@ -76,6 +76,12 @@ Append a note to a task: findings, evidence, a handover. Attributed and append\-
 pt\-rm(1)
 Delete a task permanently (hard delete + tombstone)
 .TP
+pt\-dupes(1)
+Likely duplicates: of one task, or pairs among all open tasks (lexical title similarity; read\-only)
+.TP
+pt\-merge(1)
+Merge a duplicate into the task it duplicates: dismiss it as `duplicate_of`, move its dependents, prerequisites, labels, recurrence, goal, provenance and subtasks, keep the higher priority
+.TP
 pt\-next(1)
 Show ready\-to\-start tasks (all dependencies done)
 .TP
@@ -129,6 +135,18 @@ Set a task\*(Aqs kind (scout|ship) and optional deliverable
 .TP
 pt\-start(1)
 Mark a task in progress (you\*(Aqre actively working it)
+.TP
+pt\-claim(1)
+Claim a task for work (todo/backlog/triage → in_progress, owned by you), optionally with a lease that `pt heartbeat` keeps alive
+.TP
+pt\-heartbeat(1)
+Renew your claim\*(Aqs lease; fails (exit 1) when the claim is no longer yours, which means stop working on it. Requires `\-\-claim` with the token `pt claim` / `pt start` returned
+.TP
+pt\-release(1)
+Hand a claimed task back (in_progress → todo) without closing it. `\-\-claim TOKEN` names the instance; without a token, `\-\-force`
+.TP
+pt\-reclaim(1)
+Return tasks whose claim lease ran out to todo (dry run unless \-\-apply)
 .TP
 pt\-snooze(1)
 Snooze a task until a date — it leaves `pt next` and reminders, then wakes to todo automatically

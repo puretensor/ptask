@@ -255,6 +255,8 @@ scrape time:
 | `pt_distill_last_run_ok` | gauge | — (`1` ok / `0` failed) |
 | `pt_distill_quarantined_captures` | gauge | — |
 | `pt_notifications_last_sent_age_seconds` | gauge | `channel` |
+| `pt_claims_active` | gauge | `holder` (in-progress tasks with a holder, v3.44.0) |
+| `pt_claims_expired` | gauge | — (in-progress tasks whose claim lease ran out, not yet reclaimed) |
 | `pt_webhook_dropped_total` | counter | — (outbound events dropped on a full per-URL backlog) |
 
 ## Dashboard surface (v2.3.0)

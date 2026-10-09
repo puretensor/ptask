@@ -91,14 +91,18 @@ pub fn unblocked_by(db: &Db, closed_uuid: &str) -> Result<Vec<Task>> {
 /// Close-and-continue, part two: claim the next ready task for `ctx`'s
 /// actor, in `pt next` order, skipping tasks already in progress. When
 /// another claimer wins a candidate between the read and the claim, the
-/// next one is tried; `None` when nothing ready is claimable.
-pub fn claim_next(db: &Db, ctx: &crate::event_log::EventCtx) -> Result<Option<Task>> {
+/// next one is tried; `None` when nothing ready is claimable. The claim
+/// (no lease) carries its instance token for heartbeat and release.
+pub fn claim_next(
+    db: &Db,
+    ctx: &crate::event_log::EventCtx,
+) -> Result<Option<(Task, crate::claims::Claim)>> {
     for t in next_ready(db, 50)? {
         if !matches!(t.status.as_str(), "triage" | "backlog" | "todo") {
             continue;
         }
-        match crate::tasks::claim(db, &t.id, ctx) {
-            Ok(()) => return Ok(Some(t)),
+        match crate::claims::claim(db, &t.id, None, ctx) {
+            Ok(claim) => return Ok(Some((t, claim))),
             // Lost the race (or it moved on): the next candidate.
             Err(crate::Error::Other(msg)) if msg.contains("not claimable") => continue,
             Err(e) => return Err(e),
@@ -316,16 +320,21 @@ mod tests {
         );
 
         let hal = EventCtx::local("hal");
-        let got = claim_next(&db, &hal).unwrap().unwrap();
+        let (got, claim) = claim_next(&db, &hal).unwrap().unwrap();
         assert_eq!(
             got.title, "waits on base only",
             "highest priority ready first"
         );
+        assert_eq!(claim.by, "hal");
+        assert!(
+            !claim.token.is_empty(),
+            "the claim carries its instance token"
+        );
         // In progress now: the next call skips it and takes the next ready.
-        let got = claim_next(&db, &hal).unwrap().unwrap();
+        let (got, _) = claim_next(&db, &hal).unwrap().unwrap();
         assert_eq!(got.title, "second prerequisite");
         crate::tasks::mark_done(&db, &other, &ctx).unwrap();
-        let got = claim_next(&db, &hal).unwrap().unwrap();
+        let (got, _) = claim_next(&db, &hal).unwrap().unwrap();
         assert_eq!(got.title, "waits on base and other");
         assert!(
             claim_next(&db, &hal).unwrap().is_none(),

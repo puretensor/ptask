@@ -105,6 +105,10 @@ fn a_keyed_retry_reports_the_task_it_claimed_and_claims_no_other() {
         retry["claimed_next"]["pt_id"], claimed,
         "the retry must name the task the first run claimed"
     );
+    assert!(
+        retry["claimed_next"]["claim_token"].is_null(),
+        "claim tokens are never journaled, so a replay cannot hand one back"
+    );
     assert_eq!(
         in_progress(&pt),
         vec![claimed],
@@ -227,4 +231,25 @@ fn a_noted_done_fingerprints_as_it_did_before_claim_next() {
         )),
         "a keyed `pt done -m` must fingerprint as 3.43 did, with claim_next left out"
     );
+}
+
+#[test]
+fn the_claimed_next_task_comes_with_a_token_that_heartbeats() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Provision the VLAN"]); // PT-1
+    pt.ok(&["add", "--raw", "Move the cameras"]); // PT-2
+    let r = pt.json(&["done", "PT-1", "--claim-next"]);
+    let next = &r["claimed_next"];
+    let id = next["pt_id"].as_str().unwrap();
+    let token = next["claim_token"]
+        .as_str()
+        .expect("--claim-next returns the claim's instance token");
+    assert!(!token.is_empty());
+    let beat = pt.json(&["heartbeat", id, "--claim", token, "--lease", "10m"]);
+    assert!(
+        beat["claim"]["expires_at"].is_string(),
+        "the token from --claim-next renews the lease: {beat}"
+    );
+    let stale = pt.run(&["heartbeat", id, "--claim", "not-the-token"]);
+    assert!(!stale.status.success(), "a wrong token is refused");
 }

@@ -8,11 +8,13 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod accountability;
 pub mod approvals;
+pub mod claims;
 pub mod config;
 pub mod convert;
 pub mod dag;
 pub mod dates;
 pub mod digest;
+pub mod dupes;
 pub mod error;
 pub mod event_log;
 pub mod filter;

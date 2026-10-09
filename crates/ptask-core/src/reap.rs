@@ -297,7 +297,9 @@ mod tests {
 
         for (touch, t) in &cases {
             match *touch {
-                "start" => crate::tasks::start(&db, &t.id, &ctx).unwrap(),
+                "start" => {
+                    crate::tasks::start(&db, &t.id, &ctx).unwrap();
+                }
                 "done" => {
                     crate::tasks::mark_done(&db, t, &ctx).unwrap();
                 }

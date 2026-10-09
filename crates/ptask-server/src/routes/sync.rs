@@ -653,7 +653,7 @@ fn apply_command(
         }
         "task_start" => {
             let task = resolve_task(state, &cmd.args)?;
-            tasks::start(&state.db, &task.id, &sync_ctx(actor, cmd))?;
+            let _ = tasks::start(&state.db, &task.id, &sync_ctx(actor, cmd))?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
