@@ -169,6 +169,9 @@ enum Command {
     Bulk(BulkArgs),
     /// Show a task's attributed event history (who did what, via which surface).
     Log(LogArgs),
+    /// Who opened and who closed work over a window: created, done,
+    /// dismissed, reopened and net per actor, from the journal.
+    Flux(FluxArgs),
     /// Reverse your own most recent undoable mutation (done/dismiss/create).
     ///
     /// done/dismiss → reopen (a merge is fully reversed); create → delete.
@@ -358,6 +361,13 @@ struct BulkArgs {
     /// Preview without applying.
     #[arg(long = "dry-run")]
     dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct FluxArgs {
+    /// Window: 30m, 6h, 24h, 7d, 2w (max 90d).
+    #[arg(long, default_value = "24h")]
+    since: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1404,6 +1414,7 @@ fn run() -> Result<()> {
                 Some(Command::Why(a)) => cmd_why(&db, a),
                 Some(Command::Bulk(a)) => cmd_bulk(&db, a),
                 Some(Command::Log(a)) => cmd_log(&db, a),
+                Some(Command::Flux(a)) => cmd_flux(&db, a),
                 Some(Command::Undo(a)) => cmd_undo(&db, a),
                 Some(Command::Token(c)) => cmd_token(&db, c),
                 Some(Command::Approval(c)) => cmd_approval(&db, c),
@@ -4172,6 +4183,72 @@ fn cmd_log(db: &Db, a: LogArgs) -> Result<()> {
         &Default::default(),
     ));
     println!("{}", ui::footer(n, "event", ""));
+    Ok(())
+}
+
+fn cmd_flux(db: &Db, a: FluxArgs) -> Result<()> {
+    let minutes = ptask_core::flux::parse_window(&a.since).map_err(anyhow::Error::msg)?;
+    let r = ptask_core::flux::by_actor(db, minutes)?;
+    if json_mode() {
+        return crate::print_json(&r);
+    }
+    print_lines(ui::headline(
+        &format!("ptask · flux {}", a.since.trim()),
+        None,
+        &format!(
+            "+{} opened · −{} closed · net {:+} · since {}",
+            r.total.created + r.total.reopened,
+            r.total.done + r.total.dismissed,
+            r.total.net,
+            r.since.get(..16).unwrap_or(&r.since).replace('T', " ")
+        ),
+    ));
+    if r.actors.is_empty() {
+        println!(
+            "{}",
+            ui::empty("no task created, closed or reopened in the window")
+        );
+        return Ok(());
+    }
+    let cols = [
+        ui::Column::new("ACTOR", 16),
+        ui::Column::new("CREATED", 7),
+        ui::Column::new("DONE", 6),
+        ui::Column::new("DISMISSED", 9),
+        ui::Column::new("REOPENED", 8),
+        ui::Column::new("NET", 6),
+    ];
+    let row = |f: &ptask_core::flux::ActorFlux| {
+        // A positive net grew the backlog: amber, so it stands out.
+        let net = format!("{:+}", f.net);
+        vec![
+            ui::paint(&f.actor, ui::Ink::Cyan),
+            f.created.to_string(),
+            f.done.to_string(),
+            f.dismissed.to_string(),
+            f.reopened.to_string(),
+            if f.net > 0 {
+                ui::paint(&net, ui::Ink::Amber)
+            } else {
+                ui::paint(&net, ui::Ink::Green)
+            },
+        ]
+    };
+    let mut rows: Vec<Vec<String>> = r.actors.iter().map(row).collect();
+    rows.push(row(&r.total));
+    print_lines(ui::table(
+        &cols,
+        &ui::painted_rows(rows),
+        &Default::default(),
+    ));
+    println!(
+        "{}",
+        ui::footer(
+            r.actors.len(),
+            "actor",
+            "net = created + reopened − done − dismissed"
+        )
+    );
     Ok(())
 }
 
