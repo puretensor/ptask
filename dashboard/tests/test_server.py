@@ -722,6 +722,56 @@ class EventHistoryTests(unittest.TestCase):
             (e.get("payload") or {}).get("note") for e in window
         ))
 
+    def test_q_task_notes_a_capture_resolved_close_shows_once(self):
+        # capture-resolve journals the recovery evidence on task.completed
+        # and a second task.capture_resolved row with the resolver's note.
+        # The drawer must show the close once, as pt show / pt serve do.
+        old_db = server.DB_PATH
+        with tempfile.NamedTemporaryFile(suffix=".db") as f:
+            con = sqlite3.connect(f.name)
+            con.execute(
+                """
+                CREATE TABLE pt_event_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT NOT NULL UNIQUE,
+                    task_uuid TEXT,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    actor TEXT
+                )
+                """
+            )
+            con.executemany(
+                """
+                INSERT INTO pt_event_log(uuid, task_uuid, event_type, payload, ts, actor)
+                VALUES (?, 'PT-1', ?, ?, ?, 'monitor')
+                """,
+                [
+                    ("created", "task.created", "{}",
+                     "2026-10-01T09:00:00+00:00"),
+                    ("done", "task.completed",
+                     '{"note":"recovered: monitor resolved capture disk: back to 61%"}',
+                     "2026-10-01T10:00:00+00:00"),
+                    ("resolved", "task.capture_resolved",
+                     '{"client_key":"disk","note":"back to 61%"}',
+                     "2026-10-01T10:00:01+00:00"),
+                ],
+            )
+            con.commit()
+            con.close()
+            server.DB_PATH = f.name
+            try:
+                notes = server.q_task_notes("PT-1")
+            finally:
+                server.DB_PATH = old_db
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["event_type"], "task.completed")
+        self.assertEqual(
+            notes[0]["payload"]["note"],
+            "recovered: monitor resolved capture disk: back to 61%",
+        )
+
 
 class StatsFluxTests(unittest.TestCase):
     def test_q_stats_reports_windowed_flux_split_by_origin(self):

@@ -140,7 +140,7 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
-VERSION = "0.24.0"
+VERSION = "0.24.1"
 
 
 def _allowed_host_entry(entry: str) -> str:
@@ -729,7 +729,10 @@ def q_task_notes(task_uuid: str, limit: int = 100):
 
     SQL over the journal so this sidecar does not shell out to `pt`. A
     dedicated query, not the newest-N events window: a note older than
-    that window must still show.
+    that window must still show. Restricted to the note-bearing event
+    types `pt show` / `pt serve` read, so a capture-resolved close (which
+    also journals `task.capture_resolved` with the resolver's note) shows
+    once.
     """
     con = connect()
     try:
@@ -738,6 +741,12 @@ def q_task_notes(task_uuid: str, limit: int = 100):
             SELECT uuid, task_uuid, event_type, actor, ts, payload
             FROM pt_event_log
             WHERE task_uuid=?
+              AND event_type IN (
+                  'task.noted',
+                  'task.completed',
+                  'task.recurrence_advanced',
+                  'task.updated'
+              )
               AND json_valid(payload)
               AND json_type(payload, '$.note') = 'text'
             ORDER BY id DESC

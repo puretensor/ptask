@@ -106,6 +106,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/tasks/{id}/edit", post(act_edit))
         .route("/api/tasks/{id}/note", post(act_note))
         .route("/api/tasks/{id}/events", get(api_events))
+        .route("/api/tasks/{id}/notes", get(api_notes))
         .route("/api/stream", get(api_stream))
         .route(
             "/api/voice",
@@ -477,6 +478,22 @@ struct TasksQ {
     order: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct NotesQ {
+    limit: Option<String>,
+}
+
+/// Sidecar `parse_limit` for `GET /api/tasks/{id}/notes`: default 100, max
+/// 200; empty uses the default; a non-integer is 400; negatives and zero
+/// become 1.
+fn parse_notes_limit(raw: Option<&str>) -> Result<usize, &'static str> {
+    let Some(raw) = raw.filter(|s| !s.is_empty()) else {
+        return Ok(ptask_core::notes::MAX_NOTES_LISTED);
+    };
+    let n: i128 = raw.parse().map_err(|_| "limit must be an integer")?;
+    Ok(n.clamp(1, ptask_core::notes::NOTES_ROUTE_MAX as i128) as usize)
+}
+
 // The GET reads below are blocking bodies too (a pooled connection plus a
 // full-table scan), so they run on the blocking pool like the writes.
 async fn api_tasks(
@@ -772,6 +789,56 @@ fn api_events_blocking(state: AppState, headers: HeaderMap, id: String) -> Respo
                     serde_json::json!({
                         "ts": e.ts, "event_type": e.event_type,
                         "actor": e.actor, "payload": e.payload,
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({"pt_id": task.pt_id, "events": rows})).into_response()
+        }
+        Err(e) => jerr(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// GET /api/tasks/{id}/notes — the drawer's notes trail (standalone notes
+/// and closure evidence), newest first, in the events shape the drawer
+/// renders. A dedicated read, not the events window, so an old note still
+/// shows; the sidecar serves the same route over SQL. `?limit=` matches
+/// the sidecar: default 100, max 200.
+async fn api_notes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<NotesQ>,
+) -> Response {
+    crate::blocking::db_response(move || api_notes_blocking(state, headers, id, q)).await
+}
+
+fn api_notes_blocking(state: AppState, headers: HeaderMap, id: String, q: NotesQ) -> Response {
+    if !authed(&state, &headers) {
+        return need_auth();
+    }
+    let task = match resolve_task(&state, &id) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let limit = match parse_notes_limit(q.limit.as_deref()) {
+        Ok(n) => n,
+        Err(msg) => return jerr(StatusCode::BAD_REQUEST, msg),
+    };
+    match ptask_core::notes::list(&state.db, &task.id, limit) {
+        Ok(notes) => {
+            let rows: Vec<serde_json::Value> = notes
+                .into_iter()
+                .rev()
+                .map(|n| {
+                    let event_type = match n.kind.as_str() {
+                        "done" => "task.completed",
+                        "advanced" => "task.recurrence_advanced",
+                        "dismissed" => "task.updated",
+                        _ => "task.noted",
+                    };
+                    serde_json::json!({
+                        "ts": n.ts, "event_type": event_type, "actor": n.actor,
+                        "payload": { "note": n.text, "source": n.source },
                     })
                 })
                 .collect();

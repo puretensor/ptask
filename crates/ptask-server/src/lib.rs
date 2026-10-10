@@ -3391,6 +3391,128 @@ Don't forget the sourdough.\r\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_notes_route_serves_the_drawer_trail() {
+        // The cockpit drawer reads GET /api/tasks/{id}/notes; without the
+        // route under `pt serve` the drawer showed "history unavailable".
+        let db = open_test_db();
+        let ctx = EventCtx::test();
+        let t = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("rack fox-n2"), &ctx)
+            .unwrap();
+        ptask_core::notes::add(&db, &t.id, "rails arrived", &ctx).unwrap();
+        ptask_core::tasks::mark_done_noted(&db, &t, Some("racked; IPMI reachable"), &ctx).unwrap();
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let get = |uri: String| {
+            app.clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        };
+        let resp = get(format!("/api/tasks/{}/notes", t.id)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let got: Vec<(&str, &str)> = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["event_type"].as_str().unwrap(),
+                    e["payload"]["note"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("task.completed", "racked; IPMI reachable"),
+                ("task.noted", "rails arrived"),
+            ],
+            "newest first, in the events shape the drawer renders"
+        );
+        let missing = get("/api/tasks/no-such-task/notes".into()).await.unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_notes_route_honours_limit_like_the_sidecar() {
+        let db = open_test_db();
+        let ctx = EventCtx::test();
+        let t = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("notes cap"), &ctx)
+            .unwrap();
+        for i in 0..105 {
+            ptask_core::notes::add(&db, &t.id, &format!("n{i}"), &ctx).unwrap();
+        }
+        let app = router(AppState::new(
+            db.clone(),
+            Default::default(),
+            Default::default(),
+        ));
+        let get = |qs: &str| {
+            app.clone().oneshot(
+                Request::builder()
+                    .uri(format!("/api/tasks/{}/notes{qs}", t.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        let texts = |v: &serde_json::Value| -> Vec<String> {
+            v["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["payload"]["note"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let json_ok = |resp: axum::http::Response<Body>| async move {
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+
+        let default = json_ok(get("").await.unwrap()).await;
+        let default_notes = texts(&default);
+        assert_eq!(default_notes.len(), 100, "default limit is 100");
+        assert_eq!(default_notes[0], "n104");
+        assert_eq!(default_notes[99], "n5");
+
+        let two = json_ok(get("?limit=2").await.unwrap()).await;
+        assert_eq!(texts(&two), ["n104", "n103"]);
+
+        let empty = json_ok(get("?limit=").await.unwrap()).await;
+        assert_eq!(texts(&empty).len(), 100);
+
+        let over = json_ok(get("?limit=200").await.unwrap()).await;
+        let over_notes = texts(&over);
+        assert_eq!(over_notes.len(), 105, "max 200 returns every note");
+        assert_eq!(over_notes[0], "n104");
+        assert_eq!(over_notes[104], "n0");
+
+        let clamped = json_ok(get("?limit=999").await.unwrap()).await;
+        assert_eq!(texts(&clamped).len(), 105);
+
+        let neg = json_ok(get("?limit=-1").await.unwrap()).await;
+        assert_eq!(texts(&neg), ["n104"]);
+
+        let zero = json_ok(get("?limit=0").await.unwrap()).await;
+        assert_eq!(texts(&zero), ["n104"]);
+
+        let bad = get("?limit=many").await.unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(bad.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "limit must be an integer");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn dashboard_done_reports_advanced_for_a_recurring_task() {
         let db = open_test_db();
         let rec = ptask_core::recurrence::parse("every monday").unwrap();
