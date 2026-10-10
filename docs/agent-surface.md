@@ -6,8 +6,8 @@ a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 26 tools (`task_flux / task_next / task_list / task_add /
-task_show / task_done / task_dismiss / task_note / task_edit / task_claim /
+Two transports, one handler, 27 tools (`task_flux / task_next / task_list / task_add /
+task_show / task_done / task_dismiss / task_note / task_edit / task_criteria / task_claim /
 task_heartbeat / task_release / task_promote / task_duplicates / task_merge /
 task_depend / task_capture / task_search / task_digest` plus
 `approval_request / approval_list / approval_status / approval_withdraw` —
@@ -86,6 +86,15 @@ commit; a scoring failure does not roll back a successful edit.
   with a marker; `task_show` / `pt context --json`'s `notes` array stay
   full. A note is transparent to `pt undo`: it is never reversed and never
   shadows the close it follows.
+- **Acceptance criteria (v3.48.0).** `task_add(acceptance: [...])` creates a
+  task with its definition of done; `task_criteria(id, add?, check?,
+  uncheck?, evidence?)` edits it in one transaction (a bad batch — duplicate
+  numbers, over-long evidence, a missing criterion — is refused and changes
+  nothing) and returns the list; `task_show` returns `criteria` (`n`, `text`,
+  `done`, `checked_by`, `checked_at`, `evidence`), and the worker brief has
+  them as a checklist. `task_done` refuses while any is unchecked, naming
+  them: check a criterion only when it is true, with the evidence. Reopening
+  a task resets the checks. Tasks without criteria are unaffected.
 - **task_claim** — atomic todo/backlog/triage → in_progress; the check-and-set
   is one UPDATE, so parallel agents can't both win. Journaled `task.claimed`.
   Since v3.44.0 the task records its holder (`claimed_by`, `claimed_at`; a
@@ -153,8 +162,9 @@ commit; a scoring failure does not roll back a successful edit.
   candidates for an existing task. `task_merge(duplicate, into, reason?)`
   folds one into the other: dismissed as `duplicate_of`, dependents moved to
   the target (so nothing unblocks), prerequisites, labels, recurrence, goal,
-  provenance and subtasks carried, the higher priority kept. A done target
-  with open dependents on the duplicate is refused. `task_show` returns
+  provenance, subtasks and unchecked acceptance criteria carried, the higher
+  priority kept. A done target with open dependents on the duplicate, or
+  with unchecked criteria to carry, is refused. `task_show` returns
   `duplicate_of` and `merged_in` from the `task_links` row.
 - **task_flux** (v3.46.0) — who opened and who closed work over a window
   (`minutes`, default 24h): created, done, dismissed, reopened and net per

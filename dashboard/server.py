@@ -140,7 +140,7 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
-VERSION = "0.24.1"
+VERSION = "0.25.0"
 
 
 def _allowed_host_entry(entry: str) -> str:
@@ -683,6 +683,17 @@ def q_heatmap():
     }
 
 
+# Criteria journal events the drawer folds into the checklist. Always
+# included in q_task_events, even when they fall outside the history window.
+CRITERIA_EVENT_TYPES = (
+    "task.criterion_added",
+    "task.criterion_checked",
+    "task.criterion_unchecked",
+    "task.criterion_removed",
+    "task.criteria_reset",
+)
+
+
 def _event_dicts(rows):
     events = []
     for r in rows:
@@ -706,18 +717,29 @@ def q_task_events(task_uuid: str, limit: int = 60):
 
     Ordered by id (commit order), not ts: ts carries the operator-timezone
     offset, so across the autumn fall-back hour the text sorts in reverse.
+    Every acceptance-criteria event is included, even when older than
+    `limit`, so a recurring task's checklist still folds.
     """
     con = connect()
     try:
+        placeholders = ",".join("?" * len(CRITERIA_EVENT_TYPES))
         rows = con.execute(
-            """
+            f"""
             SELECT uuid, task_uuid, event_type, actor, ts, payload
             FROM pt_event_log
             WHERE task_uuid=?
+              AND (
+                event_type IN ({placeholders})
+                OR id IN (
+                  SELECT id FROM pt_event_log
+                   WHERE task_uuid=?
+                   ORDER BY id DESC
+                   LIMIT ?
+                )
+              )
             ORDER BY id DESC
-            LIMIT ?
             """,
-            (task_uuid, limit),
+            (task_uuid, *CRITERIA_EVENT_TYPES, task_uuid, limit),
         )
         return _event_dicts(rows)
     finally:
@@ -871,6 +893,9 @@ def build_edit_args(tid: str, body: dict) -> tuple[list[str] | None, str | None]
 # open depends_on prerequisites; pt exits 1 for every error, so the text is
 # the only signal.
 PT_BLOCKED_MARKER = " is blocked by open task(s): "
+# The same class of refusal for a task whose acceptance criteria are not all
+# checked (ptask_core::criteria): a state the operator resolves, not a fault.
+PT_CRITERIA_MARKER = " has unchecked acceptance criteria: "
 
 
 def pt_exec(args: list[str]) -> tuple[bool, str]:
@@ -1597,7 +1622,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": err}, 400)
             args = ["done"] + ([f"--note={note}"] if note is not None else []) + ["--", tid]
             ok, msg = pt_exec(args)
-            if not ok and PT_BLOCKED_MARKER in msg:
+            if not ok and (PT_BLOCKED_MARKER in msg or PT_CRITERIA_MARKER in msg):
                 # pt refused the close: open prerequisites. A conflict the
                 # operator resolves, not a server fault.
                 return self._json({"ok": False, "message": msg}, 409)

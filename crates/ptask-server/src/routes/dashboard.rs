@@ -781,7 +781,7 @@ fn api_events_blocking(state: AppState, headers: HeaderMap, id: String) -> Respo
         Ok(t) => t,
         Err(r) => return r,
     };
-    match ptask_core::event_log::history_for_task(&state.db, &task.id, 200) {
+    match ptask_core::event_log::history_for_drawer(&state.db, &task.id, 200) {
         Ok(events) => {
             let rows: Vec<serde_json::Value> = events
                 .into_iter()

@@ -11,6 +11,7 @@ pub mod approvals;
 pub mod claims;
 pub mod config;
 pub mod convert;
+pub mod criteria;
 pub mod dag;
 pub mod dates;
 pub mod digest;

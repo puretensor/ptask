@@ -8,6 +8,7 @@
 
 - **Capture fast** — inline-token quick-add (`2030-03-01 @home p2 ~1h`, `every monday at 9am`), idempotent `capture` lane that fast-tracks fleet incidents (severity ≥ 3) into tasks.
 - **Find fast** — Linear-style `PT-N` IDs, filter DSL (`pt list "(today | overdue) & p1"`), FTS5 full-text search, saved views.
+- **Done means done** — acceptance criteria (`pt add … --ac "CI green"`, `pt criteria check PT-7 1 -m "run 3812"`): a task with an unchecked criterion cannot close from any surface, and the worker brief carries the checklist.
 - **File once** — every `pt add` / MCP `task_add` reports likely duplicates among open and recently closed tasks (`--unique` / `skip_if_duplicate` refuses to file them); `pt dupes` finds lookalike pairs; `pt merge PT-B --into PT-A` folds a duplicate in without unblocking anything that waited on it.
 - **Work in order** — DAG dependencies (`pt depend PT-3 --on PT-1`; `pt next` shows only unblocked tasks, a task cannot be closed while a prerequisite is open, and `pt done` names what a close unblocked; `--claim-next` / MCP `claim_next` claims the next ready task in the same step — owner and optional lease, like `pt claim` / `task_claim` — never the one this close just advanced), composite priority scoring with explainability (`pt why PT-42`), recurrence (`every` vs `every!`), snooze.
 - **Stay honest** — closure evidence and notes (`pt done PT-42 -m "PR #7 merged, CI green"`, `pt note PT-42 …`: append-only, attributed, carried into `pt show`, `pt context` worker briefs, the digest, the export and the cockpit drawer; git, recovery and reaper closes record their own evidence), attributed event log (`pt log`: who did what, via which surface), `pt flux` (who opened and who closed work over a window, per actor: the closing-pass rule made checkable), `pt undo`, accountability escalation state machine with Telegram/SMTP/HAL notifications, staleness reaper for machine-generated tasks, operator **approval inbox** (`pt approval` / `pt approve` / `pt reject`: agents request, only the operator decides, executors consume once — [`docs/approvals.md`](docs/approvals.md)), **goal tree** (`pt goal` / `pt context`: every task traces up to the mission — [`docs/goals.md`](docs/goals.md)).
@@ -38,7 +39,7 @@ pt mcp                                            # MCP server over stdio
 | TUI | `pt` / `pt tui` | ratatui |
 | Sync API | `pt serve` | axum; canonical store on one host, clients use `pt remote` |
 | Telegram | `pt bot` | Bot API long-poll |
-| MCP (agents) | `pt mcp` (stdio) or `/mcp` mount on the server | 26 tools; bearer-gated HTTP for HAL, scoped REST tokens for other agents — [`docs/agent-surface.md`](docs/agent-surface.md) |
+| MCP (agents) | `pt mcp` (stdio) or `/mcp` mount on the server | 27 tools; bearer-gated HTTP for HAL, scoped REST tokens for other agents — [`docs/agent-surface.md`](docs/agent-surface.md) |
 | Web | [`dashboard/`](dashboard/) | **PTASK Triage Cockpit** — read-only Python sidecar over the same DB; writes delegate to the `pt` binary |
 
 ## Architecture

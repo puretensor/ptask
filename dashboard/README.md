@@ -274,6 +274,12 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.25.0** (pt 3.48.0) — Acceptance criteria. The task drawer shows a task's
+  definition of done as a checklist (checked / unchecked, who checked it),
+  folded from the full criteria trail in the journal (not only the newest 60
+  history events). Criterion numbers are HTML-escaped. A close refused because
+  criteria are unchecked is a 409 with pt's message, like a close refused by
+  open prerequisites.
 - **v0.24.1** (pt 3.47.1) — The drawer's notes fetch can fail without taking the
   history with it: under `pt serve` before 3.47.1 (no notes route) every drawer
   read "history unavailable". `pt serve` now serves `GET /api/tasks/{id}/notes`

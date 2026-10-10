@@ -88,6 +88,10 @@ enum Command {
     Note(NoteArgs),
     /// Delete a task permanently (hard delete + tombstone).
     Rm(RmArgs),
+    /// Acceptance criteria (definition of done): a task with an unchecked
+    /// criterion cannot be closed.
+    #[command(subcommand, alias = "ac")]
+    Criteria(CriteriaCommand),
     /// Likely duplicates: of one task, or pairs among all open tasks
     /// (lexical title similarity; read-only).
     #[command(alias = "dups")]
@@ -704,7 +708,7 @@ struct PlanArgs {
     gcal: Option<PathBuf>,
 }
 
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args)]
 struct AddArgs {
     /// Task title (parsed as quick-add unless --raw is set).
     /// Inline tokens: @label, #project, p1..p5, ~30m/~2h/~1d, !HH:MM,
@@ -740,6 +744,57 @@ struct AddArgs {
     /// the command exits 1.
     #[arg(long)]
     unique: bool,
+    /// An acceptance criterion (repeatable): the task closes only once each
+    /// is checked with `pt criteria check`.
+    #[arg(long = "ac", value_name = "CRITERION")]
+    acceptance: Vec<String>,
+}
+
+/// Debug omits empty/default fields added after a release (`unique: false`,
+/// an empty `acceptance` list) so a keyed `pt add` fingerprints the same as
+/// it did before those flags existed.
+impl std::fmt::Debug for AddArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("AddArgs");
+        s.field("title", &self.title)
+            .field("priority", &self.priority)
+            .field("description", &self.description)
+            .field("deadline", &self.deadline)
+            .field("reason", &self.reason)
+            .field("raw", &self.raw)
+            .field("kind", &self.kind)
+            .field("deliverable", &self.deliverable);
+        if self.unique {
+            s.field("unique", &self.unique);
+        }
+        if !self.acceptance.is_empty() {
+            s.field("acceptance", &self.acceptance);
+        }
+        s.finish()
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum CriteriaCommand {
+    /// List a task's acceptance criteria and their state.
+    Ls { query: String },
+    /// Add one criterion (the words joined).
+    Add {
+        query: String,
+        #[arg(required = true)]
+        text: Vec<String>,
+    },
+    /// Check criterion N, optionally with the evidence that it holds.
+    Check {
+        query: String,
+        n: i64,
+        #[arg(short = 'm', long = "evidence")]
+        evidence: Option<String>,
+    },
+    /// Uncheck criterion N.
+    Uncheck { query: String, n: i64 },
+    /// Remove criterion N from the definition of done.
+    Rm { query: String, n: i64 },
 }
 
 #[derive(clap::Args, Debug)]
@@ -989,16 +1044,18 @@ fn command_name(cmd: &Command) -> String {
         .to_string()
 }
 
-/// A keyed command's fingerprint: its parsed arguments, rendered by the
-/// derived Debug impl (fixed field order), so a retry of the same command
-/// matches and a different command under the same key does not.
+/// A keyed command's fingerprint: its parsed arguments, rendered so a retry
+/// of the same command matches and a different command under the same key
+/// does not.
 ///
-/// Optional fields at their default (`note: None`, `unique: false`,
-/// `claim_next: false`) are omitted so a key journaled before that field
-/// existed still matches. `--claim-next` (and `--lease` when given) change
-/// what the command does, so they are part of the fingerprint when set. A
-/// lone `-` for a note is replaced by the stdin payload, so the key covers
-/// the text.
+/// Optional fields at their default (`note: None`, `unique: false`, empty
+/// `acceptance`, `claim_next: false`) are omitted so a key journaled before
+/// that field existed still matches. `--claim-next` (and `--lease` when
+/// given) change what the command does, so they are part of the fingerprint
+/// when set. A lone `-` for a note is replaced by the stdin payload, so the
+/// key covers the text. The 3.42.2 `Add` form applies only when `--unique`
+/// is off and `--ac` is empty: a keyed plain add must not replay an add with
+/// acceptance criteria (or `--unique`), and vice versa.
 fn command_fingerprint(cmd: &Command) -> Result<ptask_core::event_log::CommandFingerprint> {
     Ok(ptask_core::event_log::CommandFingerprint::new(
         &command_name(cmd),
@@ -1060,7 +1117,7 @@ fn fingerprint_args(cmd: &Command) -> Result<String> {
             "Remote(Dismiss(RemoteDismissArgs {{ query: {:?}, url: {:?} }}))",
             a.query, a.url
         ),
-        Command::Add(a) if !a.unique => format!(
+        Command::Add(a) if !a.unique && a.acceptance.is_empty() => format!(
             "Add(AddArgs {{ title: {:?}, priority: {:?}, description: {:?}, deadline: {:?}, \
              reason: {:?}, raw: {:?}, kind: {:?}, deliverable: {:?} }})",
             a.title, a.priority, a.description, a.deadline, a.reason, a.raw, a.kind, a.deliverable
@@ -1383,6 +1440,7 @@ fn run() -> Result<()> {
                 Some(Command::Dismiss(a)) => cmd_dismiss(&db, a),
                 Some(Command::Note(a)) => cmd_note(&db, a),
                 Some(Command::Rm(a)) => cmd_rm(&db, a),
+                Some(Command::Criteria(c)) => cmd_criteria(&db, c),
                 Some(Command::Dupes(a)) => cmd_dupes(&db, a),
                 Some(Command::Merge(a)) => cmd_merge(&db, a),
                 Some(Command::Next(a)) => cmd_next(&db, a),
@@ -1499,6 +1557,7 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
     new.ai_reasoning = a.reason.unwrap_or_default();
     (ext.kind, ext.deliverable) =
         tasks::kind_and_deliverable(a.kind.as_deref(), a.deliverable.as_deref())?;
+    ext.acceptance = a.acceptance.clone();
 
     // Likely duplicates of what is about to be filed: reported on every add,
     // and with --unique a reason not to file it at all.
@@ -1759,6 +1818,10 @@ fn cmd_merge(db: &Db, a: MergeArgs) -> Result<()> {
         }
         if !m.subtasks_moved.is_empty() {
             moved.push(format!("subtasks {}", m.subtasks_moved.join(", ")));
+        }
+        if !m.criteria_carried.is_empty() {
+            let ns: Vec<String> = m.criteria_carried.iter().map(|n| format!("#{n}")).collect();
+            moved.push(format!("acceptance criteria {}", ns.join(", ")));
         }
         if !moved.is_empty() {
             println!(
@@ -2289,6 +2352,7 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         v["goal_source"] = serde_json::json!(eg.source.as_str());
         v["notes"] = serde_json::to_value(&d.notes)?;
         v["claim"] = serde_json::to_value(&d.claim)?;
+        v["criteria"] = serde_json::to_value(ptask_core::criteria::list(db, &t.id)?)?;
         let links = ptask_core::dupes::links(db, &t.id)?;
         v["duplicate_of"] = serde_json::json!(links.duplicate_of);
         v["merged_in"] = serde_json::json!(links.merged_in);
@@ -2296,6 +2360,11 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         return Ok(());
     }
     print_lines(render_show(&t, Some(&d), &blocked, &eg.chain));
+    let criteria = ptask_core::criteria::list(db, &t.id)?;
+    if !criteria.is_empty() {
+        println!();
+        print_lines(render_criteria(&criteria));
+    }
     let links = ptask_core::dupes::links(db, &t.id)?;
     if let Some(of) = &links.duplicate_of {
         println!();
@@ -2487,6 +2556,100 @@ fn render_show(
         }
     }
     out
+}
+
+/// The criteria block shared by `pt show` and `pt criteria ls`.
+fn render_criteria(criteria: &[ptask_core::criteria::Criterion]) -> Vec<String> {
+    let done = criteria.iter().filter(|c| c.done).count();
+    let mut out = vec![ui::section(
+        "acceptance",
+        if done == criteria.len() {
+            ui::Ink::Green
+        } else {
+            ui::Ink::Amber
+        },
+        &format!(
+            "{done}/{} checked · the task closes when all are",
+            criteria.len()
+        ),
+    )];
+    for c in criteria {
+        let mark = if c.done {
+            ui::paint("[x]", ui::Ink::Green)
+        } else {
+            ui::paint("[ ]", ui::Ink::Amber)
+        };
+        let by = match (&c.checked_by, c.done) {
+            (Some(who), true) => ui::dim(&format!("  · {who}"), ui::Ink::Slate),
+            _ => String::new(),
+        };
+        out.push(format!("  {mark} {}. {}{by}", c.n, ui::one_line(&c.text)));
+        if let Some(e) = &c.evidence {
+            out.push(format!(
+                "        {}",
+                ui::paint(&ui::one_line(e), ui::Ink::Steel)
+            ));
+        }
+    }
+    out
+}
+
+fn cmd_criteria(db: &Db, c: CriteriaCommand) -> Result<()> {
+    let ctx = cli_ctx();
+    let (query, changed) = match &c {
+        CriteriaCommand::Ls { query } => (query.clone(), None),
+        CriteriaCommand::Add { query, .. }
+        | CriteriaCommand::Check { query, .. }
+        | CriteriaCommand::Uncheck { query, .. }
+        | CriteriaCommand::Rm { query, .. } => (query.clone(), Some(())),
+    };
+    // A done task's criteria are history, but still readable (and fixable)
+    // by PT-N or uuid; a substring reaches open tasks.
+    let task = tasks::resolve_for_lookup(db, &query, false).map_err(anyhow::Error::msg)?;
+    let res = match c {
+        CriteriaCommand::Ls { .. } => Ok(()),
+        CriteriaCommand::Add { text, .. } => {
+            ptask_core::criteria::add(db, &task.id, &[text.join(" ")], &ctx).map(|_| ())
+        }
+        CriteriaCommand::Check { n, evidence, .. } => {
+            ptask_core::criteria::check(db, &task.id, n, evidence.as_deref(), &ctx).map(|_| ())
+        }
+        CriteriaCommand::Uncheck { n, .. } => {
+            ptask_core::criteria::uncheck(db, &task.id, n, &ctx).map(|_| ())
+        }
+        CriteriaCommand::Rm { n, .. } => {
+            ptask_core::criteria::remove(db, &task.id, n, &ctx).map(|_| ())
+        }
+    };
+    res.map_err(anyhow::Error::msg)?;
+    let criteria = ptask_core::criteria::list(db, &task.id)?;
+    let open = criteria.iter().filter(|c| !c.done).count();
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id,
+            "criteria": criteria, "unchecked": open,
+        }),
+        || {
+            let pt = task.pt_id.as_deref().unwrap_or_else(|| short_id(&task.id));
+            if changed.is_some() {
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Changed,
+                        "criteria",
+                        pt,
+                        &task.title,
+                        &format!("{open} unchecked")
+                    )
+                );
+            }
+            if criteria.is_empty() {
+                println!("{}", ui::empty("no acceptance criteria"));
+            } else {
+                print_lines(render_criteria(&criteria));
+            }
+        },
+    )
 }
 
 fn cmd_dismiss(db: &Db, a: DismissArgs) -> Result<()> {

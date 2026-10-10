@@ -25,6 +25,7 @@ Create a task. The free-text title runs through the quick-add parser
 | `--deadline <ISO>` | `2026-05-21` or `2026-05-21T10:00:00+01:00` |
 | `--reason` | persisted as `ai_reasoning` |
 | `--raw` | skip quick-add parsing |
+| `--ac <CRITERION>` | an acceptance criterion (repeatable), created with the task in one transaction; see `pt criteria` |
 | `--unique` | refuse to create when a near-certain duplicate exists (score ≥ 0.75 and the same identifier-like words — numbers, dates, hashes, hosts; reporting starts at 0.6, refusing is stricter); lists the candidates and exits 1 (`--json`: `{"created": false, "possible_duplicates": [...]}` on stdout) |
 
 Every add reports likely duplicates (v3.45.0): open tasks, and tasks done or
@@ -116,7 +117,9 @@ one journal event; a rejected field leaves the entire edit unapplied.
 Flip a completed or dismissed task back to `pending` (resolve by PT-N for a
 done task — substring resolution only matches active tasks). Logs a
 `status_change` interaction the neglect score reads as a reopen, and rescores
-immediately so the task re-enters `pt next` ordering.
+immediately so the task re-enters `pt next` ordering. Reopening (and undoing
+a close) resets the task's acceptance-criteria checks, so the definition of
+done must be met again.
 
 ### `pt show <query>`
 
@@ -151,6 +154,36 @@ All honour `--json`. Tree order is parent before children, siblings by seq.
 `set-parent` refuses self and cycles. Walks are cycle-safe (stop on a
 repeated node, depth cap 16). Full model: [goals.md](goals.md).
 
+### `pt criteria ls|add|check|uncheck|rm <query> …` (alias `ac`, v3.48.0)
+
+A task's acceptance criteria: its definition of done as checkable
+conditions. **A task with an unchecked criterion cannot be closed**, exactly
+as a task with an open prerequisite cannot: `pt done`, `pt bulk --done`,
+MCP `task_done`, `/sync`, the cockpit (409), git `Closes PT-N` and
+`/capture/resolve` all refuse it, naming the open criteria. Tasks without
+criteria close as before, so the gate is opt-in per task.
+
+```
+pt criteria ls PT-7
+pt criteria add PT-7 tests pass on CI      # words joined; numbers are never reused
+pt criteria check PT-7 1 -m "run 3812 green"   # who checked it, and the evidence
+pt criteria uncheck PT-7 1
+pt criteria rm PT-7 2                      # drop it from the definition of done
+```
+
+`pt show` lists them (`[x]` / `[ ]`, who checked, evidence; `--json`:
+`criteria`) and `pt context` adds an `## Acceptance criteria` checklist to
+the worker brief. A recurring task's criteria reset when it advances: each
+occurrence meets them again. Reopening a task, and undoing a close, also
+reset the checks. Criteria are journal events
+(`task.criterion_added|checked|unchecked|removed`, `task.criteria_reset`),
+so every change is attributed in `pt log`. A git `Closes PT-N` refused by
+the gate is a warn in the `pt serve` log naming the task, and a
+`task.git_close_refused` journal event on it that names the commit. `pt
+undo` looks straight through criteria edits: it never reverses one, and an
+edit (anyone's) neither blocks undoing the close or create before it nor
+pushes undo onto an older task.
+
 ### `pt dupes [query] [--threshold 0.6] [-n 20]` (alias `dups`, v3.45.0)
 
 Read-only. Without a query: pairs of open tasks that look like the same work,
@@ -174,13 +207,18 @@ Close a duplicate into the task it duplicates, in one transaction:
   `discovered_from` links and subtasks carry over; the target takes the
   higher priority, and takes the duplicate's deadline when it has none
   (and did not already recur);
+- the duplicate's unchecked acceptance criteria are added to the target
+  (`--json`: `criteria_carried`, their numbers there), so the merge drops
+  no part of the definition of done; text the target already has is not
+  added twice, and checked ones already held;
 - a move that would close a dependency cycle refuses the whole merge.
 
 The duplicate must be open; the target may be done (it was already done)
 but not dismissed, and a done target is refused when the duplicate still
-has open dependents (moving them onto closed work would unblock them).
+has open dependents (moving them onto closed work would unblock them) or
+unchecked criteria (a done task cannot owe them).
 `pt undo` of a merge reopens the duplicate and moves back what the merge
-carried. Honours `--idempotency-key`.
+carried, the criteria included. Honours `--idempotency-key`.
 
 ### `pt dismiss <query> [-m | --note TEXT]`
 
@@ -331,7 +369,7 @@ not-yet-retired consumers).
 | Verb | Use |
 |---|---|
 | `pt log <query> [-n N]` | attributed event history for a task: when, who (actor), via which surface, what |
-| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor, `$PTASK_ACTOR`, default `shell`, through the CLI/TUI surface: a task a `pt mcp` server added under your actor is not yours) within your last 50 task events (done/dismiss → reopen, a merge fully reversed, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. A created task that another task depends on or is depended on by, that parents another task, or that an approval references, is never deleted: when your most recent undoable change is such a create, undo refuses and names it rather than reaching further back. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
+| `pt undo [--yes]` | reverse **your own** most recent eligible mutation (the caller's actor, `$PTASK_ACTOR`, default `shell`, through the CLI/TUI surface: a task a `pt mcp` server added under your actor is not yours) within your last 50 task events (done/dismiss → reopen, a merge fully reversed, create → delete); a later event on that task by anyone protects it, including claims, promotions, edits and prior reversals. Acceptance-criteria journal events (`task.criterion_*`, `task.criteria_reset`) and `task.noted` are transparent: they are not undo targets and they do not count as a later change, so `pt add --ac` still undoes the create, a criteria edit after your close does not let undo skip that close, and a note never shadows the close it follows. A created task that another task depends on or is depended on by, that parents another task, or that an approval references, is never deleted: when your most recent undoable change is such a create, undo refuses and names it rather than reaching further back. Undoing a create deletes the task permanently, so it names the PT-N and title and asks first; without a TTY (or with `--json`) it refuses unless `--yes`. Selection and reversal are atomic (a plan confirmed at the prompt is re-checked before anything changes); the reversal is itself attributed. |
 | `pt token create <client_id> [--scope read\|capture\|write\|admin]` | mint a named scoped API token (plain value shown ONCE; only the sha256 is stored) |
 | `pt token list` | client, scope, active/revoked, created/last-used |
 | `pt token revoke <client_id>` | revoke all active tokens for a client |

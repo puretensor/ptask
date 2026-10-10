@@ -102,6 +102,9 @@ pub struct Extensions {
     /// `discovered_from` link is written in the create transaction and named
     /// in the `task.created` payload, so it can't fail after the task exists.
     pub discovered_from: Option<String>,
+    /// Acceptance criteria (the definition of done), journaled in the create
+    /// transaction; see [`crate::criteria`].
+    pub acceptance: Vec<String>,
 }
 
 /// Insert a task with byte-for-byte Python defaults, mint a PT-N, log a
@@ -288,6 +291,10 @@ pub fn create_with_extensions(
         payload["discovered_from"] = serde_json::json!(parent);
     }
     record_event_tx(&tx, ctx, &task.id, "task.created", &payload)?;
+    // The definition of done commits with the task (or neither does).
+    if !ext.acceptance.is_empty() {
+        crate::criteria::add_in_conn(&tx, &task.id, &ext.acceptance, ctx)?;
+    }
 
     tx.commit()?;
     debug!(target: "ptask::tasks", pt_id = %pt_id_str, "created");
@@ -756,6 +763,15 @@ pub fn mark_done_noted(
             blockers.join(", ")
         )));
     }
+    // Definition-of-done gate: a task given acceptance criteria closes only
+    // when every one is checked (tasks without criteria are unaffected).
+    // Read under the same write lock, so a criterion unchecked between the
+    // read and the flip cannot slip through.
+    let open = crate::criteria::unchecked_in_conn(&tx, &task.id)?;
+    if !open.is_empty() {
+        let handle = task.pt_id.clone().unwrap_or_else(|| task.id.clone());
+        return Err(crate::criteria::blocked_error(&handle, &open));
+    }
 
     // Look up the recurrence rule, if any.
     let rec_row: Option<RecurrenceRow> = tx
@@ -939,6 +955,13 @@ pub fn mark_done_noted(
                 payload["note"] = serde_json::json!(n);
             }
             record_event_tx(&tx, ctx, &task.id, "task.recurrence_advanced", &payload)?;
+            // Each occurrence meets its criteria afresh.
+            crate::criteria::reset_in_conn(
+                &tx,
+                &task.id,
+                ctx,
+                serde_json::json!({ "next_deadline": next_iso }),
+            )?;
             tx.commit()?;
             return Ok(DoneOutcome::Advanced {
                 next_deadline: next_iso,
@@ -1417,6 +1440,8 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
         "task.updated",
         &serde_json::json!({ "task_uuid": task_uuid, "status": "pending" }),
     )?;
+    // The definition of done must be met again; an undone close is a reopen.
+    crate::criteria::reset_in_conn(tx, task_uuid, ctx, serde_json::json!({}))?;
     Ok(())
 }
 
@@ -1542,9 +1567,11 @@ const NOTHING_UNDOABLE: &str =
 /// undo must not delete a task HAL created. Any later event on the task,
 /// from ANY actor, protects it — every later mutation, including newly
 /// introduced event types, and reversals already recorded by an earlier
-/// undo or a manual reopen — except `task.noted`, which is transparent: a
-/// note is never an undo candidate and never supersedes or foreign-protects
-/// an earlier mutation (another actor's note too). A created task that
+/// undo or a manual reopen. `task.noted` and acceptance-criteria journal
+/// events are transparent: they are not undo targets and they do not count
+/// as a later change, so a create that wrote its criteria in the same
+/// transaction, a close followed by a note or a criteria edit, still undoes.
+/// Another actor's note is transparent too. A created task that
 /// another task depends on (or is depended on by), or that parents another
 /// task, is never deleted: those relations are not journaled under its own
 /// uuid.
@@ -1559,13 +1586,14 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
         other => (other, other),
     };
     let candidates: Vec<(i64, String, String, String)> = {
-        let mut stmt = tx.prepare(
+        let mut stmt = tx.prepare(&format!(
             "SELECT id, task_uuid, event_type, payload FROM pt_event_log
              WHERE task_uuid IS NOT NULL AND actor = ?1
                AND json_extract(payload, '$.source') IN (?2, ?3)
-               AND event_type != 'task.noted'
+               AND event_type NOT IN ('task.noted', {})
              ORDER BY id DESC LIMIT 50",
-        )?;
+            crate::criteria::EVENTS
+        ))?;
         let rows = stmt.query_map(params![ctx.actor, surface_a, surface_b], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
@@ -1574,8 +1602,11 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
 
     for (id, task_uuid, event_type, payload) in candidates {
         let superseded: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pt_event_log
-                           WHERE task_uuid=?1 AND id>?2 AND event_type != 'task.noted')",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
+                   AND event_type NOT IN ('task.noted', {}))",
+                crate::criteria::EVENTS
+            ),
             params![task_uuid, id],
             |r| r.get(0),
         )?;
@@ -1585,13 +1616,15 @@ fn select_undo(tx: &rusqlite::Transaction<'_>, ctx: &EventCtx) -> Result<Option<
             // wrote it, or this is the create of a task that still exists,
             // the newest change is protected: refuse rather than reach
             // further back and undo, or delete, something older instead.
-            // `task.noted` is excluded: a note is not a mutation undo must
-            // protect or skip past.
+            // Notes and criteria events are transparent and do not count here.
             let foreign: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
-                   AND event_type != 'task.noted'
-                   AND (actor IS NOT ?3
-                        OR COALESCE(json_extract(payload, '$.source'), '') NOT IN (?4, ?5)))",
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pt_event_log WHERE task_uuid=?1 AND id>?2
+                       AND event_type NOT IN ('task.noted', {})
+                       AND (actor IS NOT ?3
+                            OR COALESCE(json_extract(payload, '$.source'), '') NOT IN (?4, ?5)))",
+                    crate::criteria::EVENTS
+                ),
                 params![task_uuid, id, ctx.actor, surface_a, surface_b],
                 |r| r.get(0),
             )?;

@@ -219,6 +219,10 @@ pub struct AddArg {
     /// the kind's deliverable.
     #[serde(default)]
     pub deliverable: Option<String>,
+    /// Acceptance criteria (definition of done), one checkable condition
+    /// each: the task will not close until every one is checked.
+    #[serde(default)]
+    pub acceptance: Vec<String>,
     /// When a near-certain duplicate exists (an open task, or one closed in
     /// the last 14 days, scoring at least 0.75 with the same identifier-like
     /// words), create nothing and return the candidates instead (`ok` is
@@ -227,6 +231,24 @@ pub struct AddArg {
     /// possible_duplicates.
     #[serde(default)]
     pub skip_if_duplicate: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CriteriaArg {
+    /// Task handle: PT-N, bare number, task uuid, or a title substring.
+    pub id: String,
+    /// Criteria to add.
+    #[serde(default)]
+    pub add: Vec<String>,
+    /// Numbers of criteria to check (they hold now).
+    #[serde(default)]
+    pub check: Vec<i64>,
+    /// Numbers of criteria to uncheck.
+    #[serde(default)]
+    pub uncheck: Vec<i64>,
+    /// Evidence journaled with each check (the command, the readback).
+    #[serde(default)]
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -451,7 +473,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Create a task. Quick-add tokens parse inline (p4, @label, #project, ~30m, due:/deadline phrases). Pass discovered_from to link provenance. The reply lists possible_duplicates (open, or closed in the last 14 days, with a similar title): if one is the same work, work or note that task and task_merge the new one into it. Pass skip_if_duplicate=true to create nothing when a near-certain duplicate (score >= 0.75 and the same identifier-like words) exists (the reply then has ok=false, created=false, skipped=true)."
+        description = "Create a task. Quick-add tokens parse inline (p4, @label, #project, ~30m, due:/deadline phrases). Pass discovered_from to link provenance. Pass acceptance: the definition of done as checkable conditions; the task will not close until each is checked (task_criteria). The reply lists possible_duplicates (open, or closed in the last 14 days, with a similar title): if one is the same work, work or note that task and task_merge the new one into it. Pass skip_if_duplicate=true to create nothing when a near-certain duplicate (score >= 0.75 and the same identifier-like words) exists (the reply then has ok=false, created=false, skipped=true)."
     )]
     async fn task_add(
         &self,
@@ -461,6 +483,7 @@ impl PtaskMcp {
             discovered_from,
             kind,
             deliverable,
+            acceptance,
             skip_if_duplicate,
         }): Parameters<AddArg>,
     ) -> Result<CallToolResult, McpError> {
@@ -479,6 +502,7 @@ impl PtaskMcp {
                 .transpose()
                 .map_err(domain_err)?
                 .map(|parent| parent.id);
+            ext.acceptance = acceptance;
             let dupes = ptask_core::dupes::similar(
                 &db,
                 &new.title,
@@ -509,7 +533,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Full detail for one task: fields, attributed journal history, and notes (findings and closure evidence, oldest first)."
+        description = "Full detail for one task: fields, attributed journal history, notes (findings and closure evidence, oldest first), claim, duplicate_of / merged_in, and acceptance criteria."
     )]
     async fn task_show(
         &self,
@@ -539,6 +563,8 @@ impl PtaskMcp {
             // Open prerequisites: non-empty means task_done will be refused.
             let blockers = ptask_core::tasks::open_blockers(&db, &t.id).map_err(domain_err)?;
             v["blocked_by"] = serde_json::json!(blockers);
+            v["criteria"] =
+                serde_json::json!(ptask_core::criteria::list(&db, &t.id).map_err(domain_err)?);
             v["claim"] =
                 serde_json::json!(ptask_core::claims::get(&db, &t.id).map_err(domain_err)?);
             json_ok(&v)
@@ -709,6 +735,44 @@ impl PtaskMcp {
     }
 
     #[tool(
+        description = "A task's acceptance criteria (definition of done): add conditions, check the ones that now hold (with evidence: the command, the readback), uncheck any that stopped holding. Returns the list. task_done refuses while any criterion is unchecked; check them only when they are true."
+    )]
+    async fn task_criteria(
+        &self,
+        Parameters(CriteriaArg {
+            id,
+            add,
+            check,
+            uncheck,
+            evidence,
+        }): Parameters<CriteriaArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        let ctx = self.ctx();
+        on_blocking(move || {
+            let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
+            // One transaction: a bad batch (duplicate numbers, over-long
+            // evidence, missing criterion) changes nothing, so a retry does
+            // not add the same criteria twice.
+            let criteria = ptask_core::criteria::apply_batch(
+                &db,
+                &t.id,
+                &add,
+                &check,
+                &uncheck,
+                evidence.as_deref(),
+                &ctx,
+            )
+            .map_err(domain_err)?;
+            let unchecked = criteria.iter().filter(|c| !c.done).count();
+            json_ok(&serde_json::json!({
+                "pt_id": t.pt_id, "criteria": criteria, "unchecked": unchecked,
+            }))
+        })
+        .await
+    }
+
+    #[tool(
         description = "Likely duplicates of a task: open tasks, or tasks closed in the last 14 days, with a similar title (lexical; best first). Read-only."
     )]
     async fn task_duplicates(
@@ -732,7 +796,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Merge a duplicate into the task it duplicates, in one step: the duplicate is dismissed as duplicate_of, every task that depended on it now depends on the target (so nothing is silently unblocked), its prerequisites, labels, recurrence, goal, discovered_from links and subtasks carry over, and the target keeps the higher priority. Use instead of dismissing a duplicate by hand. The duplicate must be open; a dismissed target, a done target that would unblock open dependents, or a dependency cycle refuses the merge."
+        description = "Merge a duplicate into the task it duplicates, in one step: the duplicate is dismissed as duplicate_of, every task that depended on it now depends on the target (so nothing is silently unblocked), its prerequisites, labels, recurrence, goal, discovered_from links, subtasks and unchecked acceptance criteria carry over, and the target keeps the higher priority. Use instead of dismissing a duplicate by hand. The duplicate must be open; a dismissed target, a done target that would unblock open dependents or drop unchecked criteria, or a dependency cycle refuses the merge."
     )]
     async fn task_merge(
         &self,
@@ -1183,7 +1247,10 @@ impl ServerHandler for PtaskMcp {
                  task_digest (recent context) or task_next (what to work on). \
                  task_claim before starting work so parallel agents don't collide; \
                  task_add with discovered_from records provenance; task_capture \
-                 (severity>=3) fast-lanes incidents into tasks."
+                 (severity>=3) fast-lanes incidents into tasks. \
+                 task_note appends findings and closure evidence; \
+                 task_add skip_if_duplicate / task_duplicates / task_merge fold lookalikes; \
+                 task_add(acceptance) / task_criteria gate the close until every criterion is checked."
                     .to_string(),
             )
     }
@@ -1310,6 +1377,7 @@ mod tests {
                 discovered_from: Some("PT-999999".into()),
                 kind: None,
                 deliverable: None,
+                acceptance: vec![],
                 skip_if_duplicate: false,
             }))
             .await;
@@ -1527,6 +1595,7 @@ mod tests {
                 discovered_from: parent.pt_id.clone(),
                 kind: None,
                 deliverable: None,
+                acceptance: vec![],
                 skip_if_duplicate: false,
             }))
             .await;
@@ -1575,6 +1644,7 @@ mod tests {
                 discovered_from: parent.pt_id.clone(),
                 kind: None,
                 deliverable: None,
+                acceptance: vec![],
                 skip_if_duplicate: false,
             }))
         };
@@ -1682,6 +1752,85 @@ mod tests {
         })
         .unwrap();
         let _ = result;
+    }
+
+    #[tokio::test]
+    async fn criteria_gate_task_done_over_mcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "hal".into());
+        let text = |r: CallToolResult| -> serde_json::Value {
+            let v = serde_json::to_value(&r).unwrap();
+            serde_json::from_str(v.pointer("/content/0/text").unwrap().as_str().unwrap()).unwrap()
+        };
+        let created = text(
+            mcp.task_add(Parameters(AddArg {
+                text: "Upgrade sglang on the fox pair".into(),
+                reason: None,
+                discovered_from: None,
+                kind: None,
+                deliverable: None,
+                acceptance: vec![
+                    "TP4 smoke test passes".into(),
+                    "256k context verified".into(),
+                ],
+                skip_if_duplicate: false,
+            }))
+            .await
+            .unwrap(),
+        );
+        let pt = created["pt_id"].as_str().unwrap().to_string();
+        let done = || {
+            mcp.task_done(Parameters(DoneArg {
+                id: pt.clone(),
+                expected_deadline: None,
+                note: None,
+                claim_next: false,
+                lease_minutes: None,
+            }))
+        };
+        let err = done().await.unwrap_err();
+        assert!(
+            err.message.contains("unchecked acceptance criteria"),
+            "{err:?}"
+        );
+        // A bad batch changes nothing (no half-applied add).
+        assert!(
+            mcp.task_criteria(Parameters(CriteriaArg {
+                id: pt.clone(),
+                add: vec!["extra".into()],
+                check: vec![9],
+                uncheck: vec![],
+                evidence: None,
+            }))
+            .await
+            .is_err()
+        );
+        let r = text(
+            mcp.task_criteria(Parameters(CriteriaArg {
+                id: pt.clone(),
+                add: vec![],
+                check: vec![1, 2],
+                uncheck: vec![],
+                evidence: Some("smoke ok; ctx 262144".into()),
+            }))
+            .await
+            .unwrap(),
+        );
+        assert_eq!(r["unchecked"], 0);
+        assert_eq!(
+            r["criteria"].as_array().unwrap().len(),
+            2,
+            "the bad batch added nothing"
+        );
+        assert_eq!(r["criteria"][0]["checked_by"], "hal");
+        let shown = text(
+            mcp.task_show(Parameters(IdArg { id: pt.clone() }))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(shown["criteria"][1]["evidence"], "smoke ok; ctx 262144");
+        done().await.unwrap();
     }
 
     #[tokio::test]
@@ -1888,6 +2037,7 @@ mod tests {
                 discovered_from: None,
                 kind: None,
                 deliverable: None,
+                acceptance: vec![],
                 skip_if_duplicate: skip,
             }))
         };

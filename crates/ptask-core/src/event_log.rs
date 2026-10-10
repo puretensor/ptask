@@ -338,6 +338,38 @@ pub fn history_for_task(db: &Db, task_uuid: &str, limit: usize) -> Result<Vec<Hi
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
+/// Newest `limit` events, plus every criteria event on the task so a
+/// cockpit drawer can fold the checklist from the full trail, not only
+/// the history window.
+pub fn history_for_drawer(db: &Db, task_uuid: &str, limit: usize) -> Result<Vec<HistoryEvent>> {
+    let conn = db.get()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, ts, actor, event_type, payload FROM pt_event_log
+          WHERE task_uuid = ?1
+            AND (
+              event_type IN ({})
+              OR id IN (
+                SELECT id FROM pt_event_log
+                 WHERE task_uuid = ?1
+                 ORDER BY id DESC
+                 LIMIT ?2
+              )
+            )
+          ORDER BY id DESC",
+        crate::criteria::EVENTS
+    ))?;
+    let rows = stmt.query_map(params![task_uuid, limit as i64], |r| {
+        Ok(HistoryEvent {
+            id: r.get(0)?,
+            ts: r.get(1)?,
+            actor: r.get(2)?,
+            event_type: r.get(3)?,
+            payload: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
 /// Tombstones: `task_uuid` values with a `task.deleted` event after the
 /// cursor. Delta clients drop these from their local state.
 pub fn deleted_task_uuids_since(db: &Db, since: i64) -> Result<Vec<String>> {

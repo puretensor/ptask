@@ -478,6 +478,13 @@ class DoneBlockedTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(body, {"ok": False, "message": msg})
 
+    def test_close_refused_by_unchecked_criteria_is_a_409_too(self):
+        msg = ("\u2716 ERROR   PT-3 has unchecked acceptance criteria: 1. CI green \u2014 check "
+               "them (`pt criteria check PT-3 N`) or remove them first")
+        status, body = self._post_done((False, msg))
+        self.assertEqual(status, 409)
+        self.assertEqual(body, {"ok": False, "message": msg})
+
     def test_other_done_failures_stay_500(self):
         status, body = self._post_done((False, "exec error: timed out"))
         self.assertEqual(status, 500)
