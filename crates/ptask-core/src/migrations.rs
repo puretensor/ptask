@@ -176,4 +176,77 @@ mod tests {
             .unwrap();
         assert_eq!(objects, 5);
     }
+
+    #[test]
+    fn v021_backfills_the_holder_of_a_live_claim_only() {
+        // Rows as a 3.43 binary left them: claims without owners.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        {
+            let mut conn = rusqlite::Connection::open(&path).unwrap();
+            let target = runner()
+                .get_migrations()
+                .iter()
+                .map(|m| m.version())
+                .filter(|v| *v < 21)
+                .max()
+                .unwrap();
+            runner()
+                .set_grouped(true)
+                .set_target(refinery::Target::Version(target))
+                .run(&mut conn)
+                .unwrap();
+            let task = |id: &str, status: &str| {
+                conn.execute(
+                    "INSERT INTO tasks (id, title, status, status_v2, created_at, updated_at)
+                     VALUES (?1, ?1, 'pending', ?2, '2026-10-01T00:00:00+00:00',
+                             '2026-10-01T00:00:00+00:00')",
+                    rusqlite::params![id, status],
+                )
+                .unwrap();
+            };
+            let event = |n: i64, id: &str, kind: &str, actor: &str, payload: &str| {
+                conn.execute(
+                    "INSERT INTO pt_event_log (uuid, task_uuid, event_type, payload, ts, actor)
+                     VALUES (?1, ?2, ?3, ?4, '2026-10-01T00:00:00+00:00', ?5)",
+                    rusqlite::params![format!("e{n}"), id, kind, payload, actor],
+                )
+                .unwrap();
+            };
+            task("live", "in_progress");
+            event(1, "live", "task.claimed", "hal", "{}");
+            // Claimed, then closed and reopened, then started by hand: the
+            // old claim is not the current holder.
+            task("stale", "in_progress");
+            event(2, "stale", "task.claimed", "grok", "{}");
+            event(3, "stale", "task.completed", "grok", "{}");
+            event(
+                4,
+                "stale",
+                "task.updated",
+                "shell",
+                r#"{"status":"pending"}"#,
+            );
+            event(
+                5,
+                "stale",
+                "task.updated",
+                "shell",
+                r#"{"status":"in_progress"}"#,
+            );
+            task("closed", "done");
+            event(6, "closed", "task.claimed", "hal", "{}");
+        }
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        run(&mut conn).unwrap();
+        let holder = |id: &str| -> Option<String> {
+            conn.query_row("SELECT claimed_by FROM tasks WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(holder("live").as_deref(), Some("hal"));
+        assert_eq!(holder("stale"), None);
+        assert_eq!(holder("closed"), None);
+    }
 }

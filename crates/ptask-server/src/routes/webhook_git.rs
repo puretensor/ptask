@@ -244,6 +244,7 @@ async fn handle(
             let close_pt_id = pt_id.clone();
             let close_source = source.to_string();
             let commit_id = commit.id.clone();
+            let note = close_note(source, full_name, commit);
             // Commit and enqueue under the commit-order lock, like /sync, so
             // subscribers see this close in commit order.
             match crate::blocking::db_value(move || {
@@ -254,6 +255,7 @@ async fn handle(
                         &commit_id,
                         &close_pt_id,
                         &event_uuid,
+                        &note,
                     );
                     if let CloseOutcome::Applied {
                         event_type,
@@ -353,6 +355,7 @@ fn apply_close(
     commit_id: &str,
     pt_id: &str,
     event_uuid: &str,
+    note: &str,
 ) -> CloseOutcome {
     match event_log::get_by_uuid(&state.db, event_uuid) {
         Ok(Some(_)) => return CloseOutcome::Duplicate,
@@ -369,9 +372,10 @@ fn apply_close(
         Ok(task) => task,
         Err(e) => return CloseOutcome::Failed(format!("{}: {}", pt_id, e)),
     };
-    match tasks::mark_done(
+    match tasks::mark_done_noted(
         &state.db,
         &task,
+        Some(note),
         &EventCtx::webhook(source, event_uuid.to_string()),
     ) {
         Ok(DoneOutcome::Completed) => CloseOutcome::Applied {
@@ -417,6 +421,33 @@ fn apply_close(
             CloseOutcome::Failed(format!("{}: {}", pt_id, e))
         }
     }
+}
+
+/// The closure evidence a git close journals: which push, which commit, and
+/// the commit's subject line, so `pt show` answers "what closed this?".
+fn close_note(source: &str, repo: Option<&str>, commit: &PushCommit) -> String {
+    let id: String = commit.id.trim().chars().take(12).collect();
+    let subject: String = commit
+        .message
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(200)
+        .collect();
+    let mut note = format!("closed by a {source} push");
+    if let Some(repo) = repo.map(str::trim).filter(|r| !r.is_empty()) {
+        let repo: String = repo.chars().take(200).collect();
+        note.push_str(&format!(" to {repo}"));
+    }
+    if !id.is_empty() {
+        note.push_str(&format!(", commit {id}"));
+    }
+    if !subject.is_empty() {
+        note.push_str(&format!(": {subject}"));
+    }
+    note
 }
 
 fn close_event_uuid(source: &str, commit: &PushCommit, pt_id: &str) -> String {
@@ -505,5 +536,22 @@ mod tests {
     fn verify_rejects_tampered_body() {
         let sig = "095d5a21fe6d0646db223fdf3de6436bb8dfb2fab0b51677ecf6441fcf5f2a67";
         assert!(!verify_hmac(b"hello WORLD", "secret-key", sig));
+    }
+
+    #[test]
+    fn a_git_close_journals_the_push_and_commit_as_evidence() {
+        let commit = PushCommit {
+            message: "Fix the drill (closes PT-7)\n\nlong body".into(),
+            id: "0123456789abcdef0123".into(),
+        };
+        assert_eq!(
+            close_note("github", Some("puretensor/ptask"), &commit),
+            "closed by a github push to puretensor/ptask, commit 0123456789ab: Fix the drill (closes PT-7)"
+        );
+        let bare = PushCommit {
+            message: String::new(),
+            id: String::new(),
+        };
+        assert_eq!(close_note("gitea", None, &bare), "closed by a gitea push");
     }
 }

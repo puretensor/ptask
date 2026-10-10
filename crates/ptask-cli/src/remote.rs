@@ -292,16 +292,22 @@ impl RemoteClient {
     /// `pt remote done <query>` — accepts PT-N, bare integer, or title
     /// substring. Resolves the task on the server, then dispatches
     /// `task_done` by uuid.
-    pub fn done(&self, query: &str) -> Result<Task> {
+    pub fn done(&self, query: &str, note: Option<&str>) -> Result<Task> {
+        // Refuse a blank note before anything reaches the server.
+        let note = ptask_core::notes::normalize_opt(note).map_err(anyhow::Error::msg)?;
         let task = self.resolve(query, false)?;
         let cmd_uuid = self.command_uuid("");
+        let mut args = json!({ "task_uuid": task.id });
+        if let Some(n) = &note {
+            args["note"] = json!(n);
+        }
         let req = json!({
             "sync_token": NO_DELTA_TOKEN,
             "resource_types": ["tasks"],
             "commands": [{
                 "type": "task_done",
                 "uuid": cmd_uuid,
-                "args": { "task_uuid": task.id }
+                "args": args
             }]
         });
         let resp = self.sync(&req)?;
@@ -444,22 +450,36 @@ impl RemoteClient {
 
     /// `pt remote dismiss <query>` — soft-close a task (status → dismissed).
     /// Reversible via `reopen`. Resolves active tasks only.
-    pub fn dismiss(&self, query: &str) -> Result<Task> {
+    pub fn dismiss(&self, query: &str, note: Option<&str>) -> Result<Task> {
+        let note = ptask_core::notes::normalize_opt(note).map_err(anyhow::Error::msg)?;
         let mut task = self.resolve(query, false)?;
         let cmd_uuid = self.command_uuid("");
+        let mut args = json!({ "task_uuid": task.id });
+        if let Some(n) = &note {
+            args["note"] = json!(n);
+        }
         let req = json!({
             "sync_token": NO_DELTA_TOKEN,
             "resource_types": ["tasks"],
             "commands": [{
                 "type": "task_dismiss",
                 "uuid": cmd_uuid,
-                "args": { "task_uuid": task.id }
+                "args": args
             }]
         });
         let resp = self.sync(&req)?;
         ensure_ok(&resp.sync_status, &cmd_uuid)?;
         task.status = "dismissed".to_string();
         Ok(task)
+    }
+
+    /// `pt remote note <query> <text>` — append a note on the canonical host
+    /// (a done or dismissed task by PT-N, as locally).
+    pub fn note(&self, query: &str, text: &str) -> Result<Task> {
+        let text = ptask_core::notes::normalize(text).map_err(anyhow::Error::msg)?;
+        let mut extra = serde_json::Map::new();
+        extra.insert("text".into(), json!(text));
+        self.simple_task_command("task_note", query, extra, false)
     }
 
     /// `pt remote start <query>` — mark in progress on the canonical host.
@@ -946,8 +966,8 @@ mod tests {
         let c = RemoteClient::with_url(&url)
             .unwrap()
             .with_idempotency_key(Some("retry-probe".into()));
-        c.done("PT-100").unwrap();
-        c.done("PT-100").unwrap();
+        c.done("PT-100", None).unwrap();
+        c.done("PT-100", None).unwrap();
         let uuids: Vec<String> = calls
             .lock()
             .unwrap()
@@ -977,7 +997,7 @@ mod tests {
             .unwrap();
         let (url, calls) = server_rt.block_on(spawn_mock_sync());
         let c = RemoteClient::with_url(&url).unwrap();
-        let task = c.done("PT-100").unwrap();
+        let task = c.done("PT-100", None).unwrap();
         assert_eq!(task.pt_id.as_deref(), Some("PT-100"));
         let calls_v = calls.lock().unwrap();
         assert_eq!(
@@ -1212,7 +1232,7 @@ mod tests {
     #[test]
     fn remote_dismiss_dispatches_task_dismiss() {
         let (c, calls, _rt) = mock_client();
-        let task = c.dismiss("PT-100").unwrap();
+        let task = c.dismiss("PT-100", None).unwrap();
         assert_eq!(task.status, "dismissed");
         let calls_v = calls.lock().unwrap();
         let cmd = dispatched(&calls_v, "task_dismiss").expect("task_dismiss dispatched");

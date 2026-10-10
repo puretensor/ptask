@@ -947,6 +947,27 @@ pub fn context_markdown(db: &Db, task: &Task) -> Result<String> {
             ));
         }
     }
+    // What earlier workers found: a worker picking the task up starts from
+    // the trail, not from zero. Each note is one line so a note cannot
+    // forge a heading or another entry; `pt show` has the full text.
+    let notes = crate::notes::list(db, &task.id, crate::notes::MAX_NOTES_LISTED)?;
+    if !notes.is_empty() {
+        md.push_str("\n## Notes\n\n");
+        for n in &notes {
+            let when = n.ts.get(..16).unwrap_or(&n.ts).replace('T', " ");
+            let who = n.actor.as_deref().unwrap_or("unknown");
+            let kind = if n.kind == "note" {
+                String::new()
+            } else {
+                format!(" ({})", n.kind)
+            };
+            md.push_str(&format!(
+                "- {when} {}{kind}: {}\n",
+                line(who),
+                crate::notes::preview(&line(&n.text))
+            ));
+        }
+    }
     Ok(md)
 }
 
