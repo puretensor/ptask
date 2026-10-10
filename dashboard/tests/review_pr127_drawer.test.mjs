@@ -55,12 +55,21 @@ for i, e in enumerate(spec["events"]):
 con.commit()
 `;
 
+// A throwaway environment for python3: nothing of the caller's but PATH and,
+// when set, LD_LIBRARY_PATH (a toolcache or pyenv python3 built as a shared
+// library cannot load libpython without it).
+function pyEnv(vars) {
+  const env = { PATH: process.env.PATH, ...vars };
+  if (process.env.LD_LIBRARY_PATH) env.LD_LIBRARY_PATH = process.env.LD_LIBRARY_PATH;
+  return env;
+}
+
 function buildDb(dir, spec) {
   const db = join(dir, "tasks.db");
   const specPath = join(dir, "spec.json");
   writeFileSync(specPath, JSON.stringify(spec));
   const r = spawnSync("python3", ["-c", BUILD_DB, DASH, db, specPath], {
-    env: { PATH: process.env.PATH, HOME: dir, PTASK_DB: db },
+    env: pyEnv({ HOME: dir, PTASK_DB: db }),
     encoding: "utf8",
   });
   assert.equal(r.status, 0, `building the scratch db failed: ${r.stderr}`);
@@ -99,10 +108,10 @@ async function startSidecar(dir, db) {
   chmodSync(stubPt, 0o755);
   const port = await freePort();
   const child = spawn("python3", [join(DASH, "server.py")], {
-    env: {
-      PATH: process.env.PATH, HOME: dir, PTASK_DB: db, PTASK_BIN: stubPt,
+    env: pyEnv({
+      HOME: dir, PTASK_DB: db, PTASK_BIN: stubPt,
       PTASK_DASH_BIND: `127.0.0.1:${port}`, PTASK_ACTOR: "dashboard",
-    },
+    }),
     stdio: ["ignore", "ignore", "pipe"],
   });
   let stderr = "";
