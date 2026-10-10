@@ -462,3 +462,66 @@ fn a_git_close_refused_by_the_criteria_gate_is_logged_and_journaled() {
         "a git close refused by the criteria gate left nothing on the task's journal: {journal}"
     );
 }
+
+// --- follow-up (HAL, at the merge onto #122/#124's fingerprints) -------------
+
+/// main hand-renders a keyed `add` in its 3.42.2 form when `--unique` is off.
+/// `--ac` changes what the command does (the close is gated on criteria), so
+/// under one key a plain add and an add with criteria are different
+/// commands: the second must be refused, not replayed as the first.
+#[test]
+fn a_key_used_by_a_plain_add_is_not_replayed_by_an_add_with_criteria() {
+    let pt = Pt::new();
+    pt.ok(&[
+        "--idempotency-key",
+        "file-7",
+        "add",
+        "--raw",
+        "Ship the release",
+    ]);
+    let out = pt.run(&[
+        "--idempotency-key",
+        "file-7",
+        "add",
+        "--raw",
+        "Ship the release",
+        "--ac",
+        "CI green",
+    ]);
+    assert!(
+        !out.status.success(),
+        "a keyed add --ac replayed a plain keyed add under the same key: {}",
+        stdout(&out)
+    );
+    assert!(
+        criteria(&pt, "PT-1").is_empty(),
+        "nothing may be added to the first task"
+    );
+}
+
+/// The reverse: a key used by an add with criteria must not replay a plain add.
+#[test]
+fn a_key_used_by_an_add_with_criteria_is_not_replayed_by_a_plain_add() {
+    let pt = Pt::new();
+    pt.ok(&[
+        "--idempotency-key",
+        "file-8",
+        "add",
+        "--raw",
+        "Ship the release",
+        "--ac",
+        "CI green",
+    ]);
+    let out = pt.run(&[
+        "--idempotency-key",
+        "file-8",
+        "add",
+        "--raw",
+        "Ship the release",
+    ]);
+    assert!(
+        !out.status.success(),
+        "a plain keyed add replayed a keyed add --ac under the same key: {}",
+        stdout(&out)
+    );
+}
