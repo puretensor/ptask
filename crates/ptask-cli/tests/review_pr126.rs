@@ -540,11 +540,48 @@ fn a_key_used_by_a_plain_done_is_not_replayed_by_done_claim_next() {
     pt.ok(&["add", "--raw", "Close the ticket"]); // PT-1
     pt.ok(&["add", "--raw", "Pick this up next"]); // PT-2
     pt.ok(&["--idempotency-key", "sweep-9", "done", "PT-1"]);
-    let out = pt.run(&["--idempotency-key", "sweep-9", "done", "PT-1", "--claim-next"]);
+    let out = pt.run(&[
+        "--idempotency-key",
+        "sweep-9",
+        "done",
+        "PT-1",
+        "--claim-next",
+    ]);
     assert!(
         !out.status.success(),
         "a keyed done --claim-next replayed a plain keyed done under the same key: {}",
         text(&out.stdout)
     );
     assert_eq!(status_of(&pt, "PT-2"), "todo", "nothing may be claimed");
+}
+
+/// 3.43.0 to 3.46.0 (main before this PR) journaled a keyed `done -m` as the
+/// derived Debug of DoneArgs { queries, note }. Adding `--claim-next` must
+/// not change that fingerprint when the flag is off, or a retry of the same
+/// keyed close across the upgrade fails as a different command.
+#[test]
+fn a_keyed_noted_done_fingerprints_as_it_did_before_claim_next() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Rotate the signing key"]); // PT-1
+    pt.ok(&[
+        "--idempotency-key",
+        "k-noted",
+        "done",
+        "PT-1",
+        "-m",
+        "verified",
+    ]);
+    let db = ptask_core::Db::open(pt.dir.path().join("tasks.db")).unwrap();
+    let journaled = ptask_core::event_log::get_by_uuid(&db, "k-noted")
+        .unwrap()
+        .expect("the keyed close is journaled under its key")
+        .command;
+    assert_eq!(
+        journaled,
+        Some(ptask_core::event_log::CommandFingerprint::new(
+            "Done",
+            r#"Done(DoneArgs { queries: ["PT-1"], note: Some("verified") })"#
+        )),
+        "a keyed `done -m` without --claim-next must fingerprint exactly as 3.46.0 did"
+    );
 }
