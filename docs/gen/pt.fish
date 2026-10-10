@@ -117,11 +117,13 @@ complete -c pt -n "__fish_pt_using_subcommand list" -l json -d 'Emit machine-rea
 complete -c pt -n "__fish_pt_using_subcommand list" -l no-color -d 'Plain output — shorthand for `--color never`'
 complete -c pt -n "__fish_pt_using_subcommand list" -s h -l help -d 'Print help'
 complete -c pt -n "__fish_pt_using_subcommand done" -s m -l note -d 'Closure evidence journaled with the completion (what was done, how it was verified). With several tasks, each gets the same note' -r
+complete -c pt -n "__fish_pt_using_subcommand done" -l lease -d 'Lease for `--claim-next` (`30m`, `2h`, `1d`; max 1d). Without one the claim never expires on its own' -r
 complete -c pt -n "__fish_pt_using_subcommand done" -l db -d 'Override the SQLite path (default: $PTASK_DB or ~/puretensor-tasks/tasks.db)' -r
 complete -c pt -n "__fish_pt_using_subcommand done" -l idempotency-key -d 'Idempotency key recorded with the mutation\'s event — a retried command with the same key returns ok without re-applying' -r
 complete -c pt -n "__fish_pt_using_subcommand done" -l color -d 'Colour: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c pt -n "__fish_pt_using_subcommand done" -l claim-next -d 'After closing, claim the next ready task (`pt next` order) for $PTASK_ACTOR: close and continue in one command. Same take as `pt claim`: an owner, an optional `--lease`, and a claim_token'
 complete -c pt -n "__fish_pt_using_subcommand done" -l json -d 'Emit machine-readable JSON instead of human text (task-facing verbs)'
 complete -c pt -n "__fish_pt_using_subcommand done" -l no-color -d 'Plain output — shorthand for `--color never`'
 complete -c pt -n "__fish_pt_using_subcommand done" -s h -l help -d 'Print help'

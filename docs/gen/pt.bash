@@ -1836,7 +1836,7 @@ _pt() {
             return 0
             ;;
         pt__subcmd__done)
-            opts="-m -h --note --db --json --idempotency-key --color --no-color --help <QUERIES>..."
+            opts="-m -h --note --claim-next --lease --db --json --idempotency-key --color --no-color --help <QUERIES>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1847,6 +1847,10 @@ _pt() {
                     return 0
                     ;;
                 -m)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --lease)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

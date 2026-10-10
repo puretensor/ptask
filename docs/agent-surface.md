@@ -55,12 +55,23 @@ leave the task and journal unchanged. A successful combined edit produces one
 commit; a scoring failure does not roll back a successful edit.
 
 - **task_done** — completes a task, or advances a recurring one in place
-  (`status=advanced`, `next_deadline`). Pass `expected_deadline` (the deadline
-  you last saw; `""` = none) to make a retry or a duplicate safe: if the task
-  has moved on, the call errors and nothing changes, instead of completing the
-  next occurrence too. The dashboard's `POST /api/tasks/{id}/done` takes the
-  same optional `{"expected_deadline": …}` body, and `/sync` `task_done` the
-  same arg. Completing an already-done task is an error.
+  (`status=advanced`, `next_deadline`). The reply lists `unblocked`: the
+  tasks this close made ready. With `claim_next: true` (v3.47.0) it also
+  claims the next ready task (task_next order, skipping in-progress ones and
+  the task this call just closed or advanced) the same way `task_claim` does
+  (holder, optional `lease_minutes` 1..=1440, `claim_token`) and returns it
+  as `claimed_next` after the claim (status `in_progress`, with `claimed_by`,
+  `claim_expires_at` and `claim_token`, and its goal chain when that lookup
+  succeeds; without the chain if it fails; null when nothing is claimable;
+  `{"error": …}` if the claim itself failed). The close is already committed
+  in every case: a later claim or goal-lookup failure does not read as a
+  failed close. Close and continue without a task_next + task_claim round
+  trip. Pass `expected_deadline` (the deadline you last saw; `""` = none) to
+  make a retry or a duplicate safe: if the task has moved on, the call errors
+  and nothing changes, instead of completing the next occurrence too. The
+  dashboard's `POST /api/tasks/{id}/done` takes the same optional
+  `{"expected_deadline": …}` body, and `/sync` `task_done` the same arg.
+  Completing an already-done task is an error.
 - **task_note** (v3.43.0) — append a note: findings, partial progress, a
   handover. Append-only, attributed to the caller (actor + `source=mcp`);
   works on done/dismissed tasks by PT-N or uuid, for evidence that arrives
