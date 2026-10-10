@@ -189,6 +189,97 @@ fn a_keyed_merge_replays_and_undo_reopens_the_duplicate() {
     assert!(pt.json(&["show", "PT-2"])["duplicate_of"].is_null());
 }
 
+fn criteria_texts(pt: &Pt, id: &str) -> Vec<String> {
+    pt.json(&["show", id])["criteria"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["text"].as_str().unwrap().to_string())
+        .collect()
+}
+
+// A merge must not drop part of the definition of done: the duplicate's
+// unchecked criteria are still owed by the work, so they move to the
+// target (text the target already has is not added twice; checked ones
+// already held), and undo takes them back.
+#[test]
+fn a_merge_carries_unchecked_criteria_and_undo_takes_them_back() {
+    let pt = Pt::new();
+    pt.ok(&[
+        "add",
+        "--raw",
+        "Nightly export job",
+        "--ac",
+        "export verified",
+    ]);
+    pt.ok(&[
+        "add",
+        "--raw",
+        "Nightly export job, phase 2",
+        "--ac",
+        "Export verified",
+        "--ac",
+        "row counts match",
+        "--ac",
+        "alert wired",
+    ]);
+    pt.ok(&["criteria", "check", "PT-2", "3", "-m", "pager test"]);
+
+    let m = pt.json(&["merge", "PT-2", "--into", "PT-1"]);
+    assert_eq!(m["criteria_carried"], serde_json::json!([2]), "{m}");
+    assert_eq!(
+        criteria_texts(&pt, "PT-1"),
+        ["export verified", "row counts match"]
+    );
+    pt.ok(&["criteria", "check", "PT-1", "1"]);
+    let done = pt.run(&["done", "PT-1"]);
+    assert!(
+        !done.status.success(),
+        "the carried criterion gates the close"
+    );
+    assert!(
+        String::from_utf8_lossy(&done.stderr).contains("row counts match"),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+
+    pt.ok(&["undo", "--yes"]);
+    assert_eq!(pt.json(&["show", "PT-2"])["status"], "todo");
+    assert_eq!(criteria_texts(&pt, "PT-1"), ["export verified"]);
+    assert_eq!(
+        criteria_texts(&pt, "PT-2"),
+        ["Export verified", "row counts match", "alert wired"],
+        "the duplicate kept its own criteria throughout"
+    );
+}
+
+#[test]
+fn a_merge_into_a_done_task_refuses_unchecked_criteria() {
+    let pt = Pt::new();
+    pt.ok(&["add", "--raw", "Nightly export job"]);
+    pt.ok(&["done", "PT-1"]);
+    pt.ok(&[
+        "add",
+        "--raw",
+        "Nightly export job, phase 2",
+        "--ac",
+        "row counts match",
+    ]);
+    let r = pt.run(&["merge", "PT-2", "--into", "PT-1"]);
+    assert!(!r.status.success());
+    let err = String::from_utf8_lossy(&r.stderr);
+    assert!(
+        err.contains("unchecked acceptance criteria") && err.contains("nothing was merged"),
+        "{err}"
+    );
+    assert_eq!(pt.json(&["show", "PT-2"])["status"], "todo");
+    assert!(criteria_texts(&pt, "PT-1").is_empty());
+
+    pt.ok(&["criteria", "check", "PT-2", "1"]);
+    pt.ok(&["merge", "PT-2", "--into", "PT-1"]);
+    assert_eq!(pt.json(&["show", "PT-2"])["status"], "dismissed");
+}
+
 // A keyed `pt add` journaled before 3.45.0 (no `unique` field) must still
 // replay: the flag at its default is left out of the fingerprint.
 

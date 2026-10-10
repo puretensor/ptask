@@ -17,11 +17,12 @@
 //!   (the schema's merge relation since V012), every task that depended on
 //!   it now depends on the canonical one (dismissing a prerequisite
 //!   satisfies it, so without the move its dependents would unblock), its
-//!   own prerequisites, labels, recurrence, goal, `discovered_from` links
-//!   and subtasks carry over, and the canonical task takes the higher
-//!   priority and, when it has none, the duplicate's deadline. A merge
-//!   into a closed target that would unblock open dependents is refused.
-//!   `pt undo` of a merge reverses those moves.
+//!   own prerequisites, labels, recurrence, goal, `discovered_from` links,
+//!   subtasks and unchecked acceptance criteria carry over, and the
+//!   canonical task takes the higher priority and, when it has none, the
+//!   duplicate's deadline. A merge into a closed target that would unblock
+//!   open dependents, or drop unchecked criteria, is refused. `pt undo` of
+//!   a merge reverses those moves.
 
 use crate::error::{Error, Result};
 use crate::event_log::EventCtx;
@@ -323,6 +324,10 @@ pub struct Merged {
     /// Subtasks whose parent is now `into`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub subtasks_moved: Vec<String>,
+    /// The duplicate's unchecked acceptance criteria, as their numbers on
+    /// `into` (text `into` already had is not added twice).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub criteria_carried: Vec<i64>,
 }
 
 struct Side {
@@ -419,7 +424,8 @@ fn sub_ctx(ctx: &EventCtx, part: &str) -> EventCtx {
 /// Merge `duplicate` into `into` (see the module docs). The duplicate must
 /// be open; `into` may be done ("already done") but not dismissed, and a
 /// done target is refused when the duplicate still has open dependents
-/// (moving them onto closed work would unblock them). A dependency move
+/// (moving them onto closed work would unblock them) or unchecked
+/// acceptance criteria (a done task cannot owe them). A dependency move
 /// that would close a cycle refuses the whole merge, changing nothing.
 pub fn merge(
     db: &Db,
@@ -479,6 +485,28 @@ pub fn merge(
                 open_dependents.join(", ")
             )));
         }
+    }
+    // Acceptance criteria: the duplicate's unchecked ones are still owed by
+    // the work, wherever it lives; checked ones already held. Without the
+    // carry, merging would drop part of the definition of done the close
+    // gate enforces.
+    let canon_texts: BTreeSet<String> = crate::criteria::list_in_conn(&tx, &canon.id)?
+        .into_iter()
+        .map(|c| c.text.to_lowercase())
+        .collect();
+    let owed: Vec<String> = crate::criteria::unchecked_in_conn(&tx, &dup.id)?
+        .into_iter()
+        .filter(|c| !canon_texts.contains(&c.text.to_lowercase()))
+        .map(|c| c.text)
+        .collect();
+    if is_closed(&canon.status) && !owed.is_empty() {
+        return Err(Error::Other(format!(
+            "{} is {} and {} has unchecked acceptance criteria ({}): check or remove them, or reopen the target first; nothing was merged",
+            handle(&canon),
+            canon.status,
+            handle(&dup),
+            owed.join("; ")
+        )));
     }
     let now = crate::tasks::iso_now();
 
@@ -687,6 +715,22 @@ pub fn merge(
         subtasks_moved.push(pt_handle(&tx, child)?);
     }
 
+    let criteria_carried: Vec<i64> = if owed.is_empty() {
+        Vec::new()
+    } else {
+        crate::criteria::add_in_conn(&tx, &canon.id, &owed, &sub_ctx(ctx, "criteria"))
+            .map_err(|e| {
+                Error::Other(format!(
+                    "carrying {}'s acceptance criteria to {}: {e}; nothing was merged",
+                    handle(&dup),
+                    handle(&canon)
+                ))
+            })?
+            .into_iter()
+            .map(|c| c.n)
+            .collect()
+    };
+
     tx.execute(
         "UPDATE tasks SET updated_at=?1 WHERE id=?2",
         params![now, canon.id],
@@ -749,6 +793,9 @@ pub fn merge(
         "discovered_from_added": discovered_from_added,
         "subtasks_moved": subtasks_moved,
     });
+    if !criteria_carried.is_empty() {
+        canon_payload["criteria_carried"] = serde_json::json!(criteria_carried);
+    }
     if let Some((from, to)) = priority_raised {
         canon_payload["priority"] = serde_json::json!(to);
         canon_payload["priority_from"] = serde_json::json!(from);
@@ -782,6 +829,7 @@ pub fn merge(
         goal_copied,
         discovered_from_added,
         subtasks_moved,
+        criteria_carried,
     })
 }
 
@@ -945,6 +993,26 @@ pub(crate) fn unmerge_if_needed(
                  VALUES (?1, ?2, 'subtask_of', ?3)",
                 params![child, duplicate_uuid, now],
             )?;
+        }
+        // The carried criteria go back with the duplicate (which kept its
+        // own throughout), checked or not: they were the duplicate's.
+        let carried: Vec<i64> = payload
+            .get("criteria_carried")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|n| n.as_i64()).collect())
+            .unwrap_or_default();
+        if !carried.is_empty() {
+            for c in crate::criteria::list_in_conn(tx, &canon)?
+                .into_iter()
+                .filter(|c| carried.contains(&c.n))
+            {
+                crate::criteria::remove_in_conn(
+                    tx,
+                    &canon,
+                    &c,
+                    &sub_ctx(ctx, &format!("uncriterion:{}", c.n)),
+                )?;
+            }
         }
         tx.execute(
             "UPDATE tasks SET updated_at=?1 WHERE id=?2",

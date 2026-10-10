@@ -179,7 +179,10 @@ reset the checks. Criteria are journal events
 (`task.criterion_added|checked|unchecked|removed`, `task.criteria_reset`),
 so every change is attributed in `pt log`. A git `Closes PT-N` refused by
 the gate is a warn in the `pt serve` log naming the task, and a
-`task.git_close_refused` journal event on it that names the commit.
+`task.git_close_refused` journal event on it that names the commit. `pt
+undo` looks straight through criteria edits: it never reverses one, and an
+edit (anyone's) neither blocks undoing the close or create before it nor
+pushes undo onto an older task.
 
 ### `pt dupes [query] [--threshold 0.6] [-n 20]` (alias `dups`, v3.45.0)
 
@@ -204,13 +207,18 @@ Close a duplicate into the task it duplicates, in one transaction:
   `discovered_from` links and subtasks carry over; the target takes the
   higher priority, and takes the duplicate's deadline when it has none
   (and did not already recur);
+- the duplicate's unchecked acceptance criteria are added to the target
+  (`--json`: `criteria_carried`, their numbers there), so the merge drops
+  no part of the definition of done; text the target already has is not
+  added twice, and checked ones already held;
 - a move that would close a dependency cycle refuses the whole merge.
 
 The duplicate must be open; the target may be done (it was already done)
 but not dismissed, and a done target is refused when the duplicate still
-has open dependents (moving them onto closed work would unblock them).
+has open dependents (moving them onto closed work would unblock them) or
+unchecked criteria (a done task cannot owe them).
 `pt undo` of a merge reopens the duplicate and moves back what the merge
-carried. Honours `--idempotency-key`.
+carried, the criteria included. Honours `--idempotency-key`.
 
 ### `pt dismiss <query> [-m | --note TEXT]`
 

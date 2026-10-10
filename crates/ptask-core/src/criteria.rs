@@ -439,16 +439,28 @@ pub fn reset_in_conn(
 pub fn remove(db: &Db, task_uuid: &str, n: i64, ctx: &EventCtx) -> Result<Criterion> {
     with_task(db, task_uuid, |tx| {
         let c = current(tx, task_uuid, n)?;
-        crate::event_log::record_in_conn(
-            tx,
-            &event_uuid(ctx, ""),
-            Some(task_uuid),
-            "task.criterion_removed",
-            &serde_json::json!({ "task_uuid": task_uuid, "n": n, "text": c.text }),
-            ctx,
-        )?;
+        remove_in_conn(tx, task_uuid, &c, ctx)?;
         Ok(c)
     })
+}
+
+/// Journal the removal of `c` inside the caller's transaction (the undo of
+/// a merge takes back the criteria it carried this way).
+pub(crate) fn remove_in_conn(
+    conn: &rusqlite::Connection,
+    task_uuid: &str,
+    c: &Criterion,
+    ctx: &EventCtx,
+) -> Result<()> {
+    crate::event_log::record_in_conn(
+        conn,
+        &event_uuid(ctx, ""),
+        Some(task_uuid),
+        "task.criterion_removed",
+        &serde_json::json!({ "task_uuid": task_uuid, "n": c.n, "text": c.text }),
+        ctx,
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

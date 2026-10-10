@@ -1819,6 +1819,10 @@ fn cmd_merge(db: &Db, a: MergeArgs) -> Result<()> {
         if !m.subtasks_moved.is_empty() {
             moved.push(format!("subtasks {}", m.subtasks_moved.join(", ")));
         }
+        if !m.criteria_carried.is_empty() {
+            let ns: Vec<String> = m.criteria_carried.iter().map(|n| format!("#{n}")).collect();
+            moved.push(format!("acceptance criteria {}", ns.join(", ")));
+        }
         if !moved.is_empty() {
             println!(
                 "    {} {}",

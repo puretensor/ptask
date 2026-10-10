@@ -162,8 +162,9 @@ commit; a scoring failure does not roll back a successful edit.
   candidates for an existing task. `task_merge(duplicate, into, reason?)`
   folds one into the other: dismissed as `duplicate_of`, dependents moved to
   the target (so nothing unblocks), prerequisites, labels, recurrence, goal,
-  provenance and subtasks carried, the higher priority kept. A done target
-  with open dependents on the duplicate is refused. `task_show` returns
+  provenance, subtasks and unchecked acceptance criteria carried, the higher
+  priority kept. A done target with open dependents on the duplicate, or
+  with unchecked criteria to carry, is refused. `task_show` returns
   `duplicate_of` and `merged_in` from the `task_links` row.
 - **task_flux** (v3.46.0) — who opened and who closed work over a window
   (`minutes`, default 24h): created, done, dismissed, reopened and net per
