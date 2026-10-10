@@ -276,7 +276,10 @@ process with a different posture: no login at all since PT-2201, the same Host
 check on every request, and approval decisions gated by
 `PTASK_DASH_DECIDE_TOKEN` (see `dashboard/README.md`).
 
-Reads: `GET /api/stats · /api/tasks?status=&limit= · /api/critical?limit= ·
+Reads: `GET /api/stats` (its `flux.by_window.<w>.by_actor` lists created,
+done, dismissed, reopened and net per actor, as `pt flux` — real
+open↔closed transitions; deleting an open task is a closure; v3.46.0) ·
+`/api/tasks?status=&limit= · /api/critical?limit= ·
 /api/timeline · /api/heatmap · /api/tasks/{id}/events` (journal history) ·
 `GET /api/tasks/{id}/notes` (the drawer's notes trail, newest first) ·
 `GET /api/stream` (SSE, `event: change` frames with journal deltas).
