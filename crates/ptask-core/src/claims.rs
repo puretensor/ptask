@@ -138,22 +138,6 @@ pub fn parse_lease(input: &str) -> Result<i64> {
     Ok(minutes)
 }
 
-/// The instance token of the live claim on `task_uuid`, if any. [`get`]
-/// does not load it and `pt show` does not show it; claim-next returns it
-/// so the claimer can heartbeat without a second round trip.
-pub fn instance_token(db: &Db, task_uuid: &str) -> Result<Option<String>> {
-    let conn = db.get()?;
-    let token: Option<String> = conn
-        .query_row(
-            "SELECT claim_token FROM tasks
-              WHERE id=?1 AND status_v2='in_progress' AND claim_token IS NOT NULL",
-            [task_uuid],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(token.filter(|t| !t.is_empty()))
-}
-
 /// The claim on a task, if any.
 pub fn get(db: &Db, task_uuid: &str) -> Result<Option<Claim>> {
     let conn = db.get()?;

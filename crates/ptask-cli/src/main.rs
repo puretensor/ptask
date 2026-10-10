@@ -1857,13 +1857,11 @@ fn attach_claim_fields(v: &mut serde_json::Value, claim: &ptask_core::claims::Cl
     }
 }
 
-/// Holder, lease and token for a claim-next reply (fresh take or keyed replay).
+/// Holder and lease for a keyed claim-next replay. No claim_token: tokens
+/// are never handed back on a replay (as with a keyed `pt claim`), so only
+/// the session that took the claim holds it.
 fn claim_for_reply(db: &Db, task_uuid: &str) -> Option<ptask_core::claims::Claim> {
-    let mut claim = ptask_core::claims::get(db, task_uuid).ok().flatten()?;
-    if let Ok(Some(token)) = ptask_core::claims::instance_token(db, task_uuid) {
-        claim.token = token;
-    }
-    Some(claim)
+    ptask_core::claims::get(db, task_uuid).ok().flatten()
 }
 
 /// Look up a keyed `K:claim-next` claim, or make one, skipping `skip`
