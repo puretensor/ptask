@@ -8,7 +8,7 @@ mod common;
 use common::Pt;
 use ptask_core::event_log::{self, CommandFingerprint, EventCtx};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Output, Stdio};
 
 fn status(pt: &Pt, id: &str) -> String {
@@ -401,25 +401,7 @@ fn a_git_close_refused_by_the_criteria_gate_is_logged_and_journaled() {
         "green three runs in a row",
     ]); // PT-1
 
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let mut server = pt
-        .command("test", &["serve", "--bind", &format!("127.0.0.1:{port}")])
-        .env("PTASK_GITHUB_WEBHOOK_SECRET", SECRET)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let up = (0..200).any(|_| {
-        std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            false
-        }
-    });
-    assert!(up, "pt serve did not come up");
+    let server = pt.serve_with(&[("PTASK_GITHUB_WEBHOOK_SECRET", SECRET)]);
 
     let body = json!({
         "ref": "refs/heads/main",
@@ -429,7 +411,7 @@ fn a_git_close_refused_by_the_criteria_gate_is_logged_and_journaled() {
     .to_string();
     let signature = ptask_server::webhooks::sign(body.as_bytes(), SECRET);
     let reply = reqwest::blocking::Client::new()
-        .post(format!("http://127.0.0.1:{port}/webhook/github"))
+        .post(format!("{}/webhook/github", server.url))
         .header("Content-Type", "application/json")
         .header("X-GitHub-Event", "push")
         .header("X-Hub-Signature-256", format!("sha256={signature}"))
@@ -438,15 +420,7 @@ fn a_git_close_refused_by_the_criteria_gate_is_logged_and_journaled() {
         .unwrap();
     let reply_status = reply.status();
     let reply_body = reply.text().unwrap_or_default();
-    let _ = server.kill();
-    let mut log = String::new();
-    server
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut log)
-        .unwrap();
-    let _ = server.wait();
+    let log = server.stop();
 
     assert!(reply_status.is_success(), "{reply_status}: {reply_body}");
     assert_ne!(status(&pt, "PT-1"), "done", "the gate holds (sanity)");
