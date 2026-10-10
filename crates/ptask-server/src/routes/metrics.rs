@@ -258,6 +258,44 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     writeln!(out, "# TYPE pt_distill_quarantined_captures gauge").ok();
     writeln!(out, "pt_distill_quarantined_captures {}", quarantined).ok();
 
+    // --- claims (V021) ---
+    // In-progress work by holder, and leases that ran out: an agent that
+    // died holding a lease shows up here before anyone wonders why a task
+    // never moved. Expired claims stay until reclaimed (`pt reclaim
+    // --apply`, or the hourly run with PTASK_CLAIM_RECLAIM on).
+    writeln!(
+        out,
+        "# HELP pt_claims_active In-progress tasks with a holder, per holder."
+    )
+    .ok();
+    writeln!(out, "# TYPE pt_claims_active gauge").ok();
+    db.with_conn(|c| {
+        let mut stmt = c.prepare(
+            "SELECT claimed_by, COUNT(*) FROM tasks
+              WHERE status_v2 = 'in_progress' AND claimed_by IS NOT NULL
+              GROUP BY claimed_by ORDER BY claimed_by",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (holder, n) = row?;
+            let _ = writeln!(
+                out,
+                "pt_claims_active{{holder=\"{}\"}} {}",
+                escape(&holder),
+                n
+            );
+        }
+        Ok(())
+    })?;
+    let expired = ptask_core::claims::expired(db)?.len();
+    writeln!(
+        out,
+        "# HELP pt_claims_expired In-progress tasks whose claim lease has run out (not yet reclaimed)."
+    )
+    .ok();
+    writeln!(out, "# TYPE pt_claims_expired gauge").ok();
+    writeln!(out, "pt_claims_expired {}", expired).ok();
+
     // --- accountability dispatch freshness (per channel) ---
     // Rows land in `notifications` only on successful sends, so channel age
     // is a liveness signal for the dispatch path (the 401ing bot token sat

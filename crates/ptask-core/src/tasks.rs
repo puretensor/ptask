@@ -125,7 +125,7 @@ pub(crate) fn local_event_uuid() -> String {
 /// without an event row is invisible to the fleet, and a mutation without
 /// an actor is invisible to the audit trail; `ctx` is how the compiler
 /// forces every writer to identify itself.
-fn record_event_tx(
+pub(crate) fn record_event_tx(
     tx: &rusqlite::Connection,
     ctx: &EventCtx,
     task_uuid: &str,
@@ -1363,12 +1363,21 @@ pub fn delete_task(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
 }
 
 fn delete_task_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
-    // Capture the PT-N before the CASCADE wipes pt_extensions.
-    let pt_id: Option<String> = tx
-        .query_row("SELECT pt_id FROM tasks WHERE id=?1", [task_uuid], |r| {
-            r.get(0)
-        })
+    // Capture the PT-N and status before the CASCADE wipes the row.
+    // Flux counts a delete of an open task as a closure; the status on
+    // the tombstone is what new readers use (old tombstones fall back to
+    // the last status-bearing event).
+    let row: Option<(Option<String>, String)> = tx
+        .query_row(
+            "SELECT pt_id, status FROM tasks WHERE id=?1",
+            [task_uuid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
+    let (pt_id, status) = match row {
+        Some((pt_id, status)) => (pt_id, Some(status)),
+        None => (None, None),
+    };
     // task_links and task_labels (V010) carry no foreign key, so nothing
     // cascades: without these, a deleted task stayed a prerequisite (or a
     // dependent) of live tasks and kept its labels.
@@ -1378,13 +1387,11 @@ fn delete_task_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCt
     )?;
     tx.execute("DELETE FROM task_labels WHERE task_uuid=?1", [task_uuid])?;
     tx.execute("DELETE FROM tasks WHERE id=?1", [task_uuid])?;
-    record_event_tx(
-        tx,
-        ctx,
-        task_uuid,
-        "task.deleted",
-        &serde_json::json!({ "task_uuid": task_uuid, "pt_id": pt_id }),
-    )?;
+    let mut payload = serde_json::json!({ "task_uuid": task_uuid, "pt_id": pt_id });
+    if let Some(status) = status {
+        payload["status"] = serde_json::Value::String(status);
+    }
+    record_event_tx(tx, ctx, task_uuid, "task.deleted", &payload)?;
     Ok(())
 }
 
@@ -1433,6 +1440,7 @@ fn reopen_in_conn(tx: &rusqlite::Connection, task_uuid: &str, ctx: &EventCtx) ->
             format!("Reopened → pending (was {})", status)
         ],
     )?;
+    crate::dupes::clear_duplicate_of(tx, task_uuid)?;
     record_event_tx(
         tx,
         ctx,
@@ -1717,6 +1725,9 @@ fn apply_undo(
 ) -> Result<UndoOutcome> {
     let description = match plan.action {
         UndoAction::ReopenCompleted | UndoAction::ReopenDismissed => {
+            if plan.action == UndoAction::ReopenDismissed {
+                crate::dupes::unmerge_if_needed(tx, &plan.task_uuid, ctx)?;
+            }
             reopen_in_conn(tx, &plan.task_uuid, ctx)?;
             format!(
                 "reopened {} (was {})",
@@ -1781,16 +1792,56 @@ pub fn undo_last(db: &Db, ctx: &EventCtx) -> Result<UndoOutcome> {
 
 /// Mark a task in progress (status_v2 `in_progress`; legacy stays
 /// `pending`). Attributed `task.updated` event in the same transaction.
-pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
+/// Starting work makes the starter the holder unless someone already holds
+/// a live claim. An expired lease is free: this takes the holder and
+/// clears the lease. Returns a new claim token when this call took the
+/// claim (so the starter can heartbeat or release without `--force`).
+pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<Option<String>> {
     let now = iso_now();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let changed = tx.execute(
-        "UPDATE tasks SET status_v2='in_progress', status='pending',
-                          snoozed_until=NULL, updated_at=?1
-         WHERE id=?2 AND status_v2 NOT IN ('done','dismissed')",
-        params![now, task_uuid],
-    )?;
+    let current: Option<(String, Option<String>, Option<String>)> = tx
+        .query_row(
+            "SELECT status_v2, claimed_by, claim_expires_at FROM tasks WHERE id=?1",
+            [task_uuid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let Some((status, holder, expires_at)) = current else {
+        return Err(crate::Error::Other(
+            "task not found or terminal — cannot start".into(),
+        ));
+    };
+    if status == "done" || status == "dismissed" {
+        return Err(crate::Error::Other(
+            "task not found or terminal — cannot start".into(),
+        ));
+    }
+    let expired = crate::claims::lease_has_expired(expires_at.as_deref());
+    let take = status != "in_progress" || holder.is_none() || expired;
+    let new_token = take.then(crate::claims::new_claim_token);
+    let changed = if take {
+        tx.execute(
+            "UPDATE tasks SET status_v2='in_progress', status='pending',
+                              snoozed_until=NULL, updated_at=?1,
+                              claimed_by=?3, claimed_at=?1,
+                              claim_expires_at=NULL, claim_token=?4
+             WHERE id=?2 AND status_v2 NOT IN ('done','dismissed')
+               AND (
+                 status_v2 <> 'in_progress'
+                 OR claimed_by IS NULL
+                 OR claim_expires_at IS ?5
+               )",
+            params![now, task_uuid, ctx.actor, new_token.as_ref(), expires_at],
+        )?
+    } else {
+        tx.execute(
+            "UPDATE tasks SET status_v2='in_progress', status='pending',
+                              snoozed_until=NULL, updated_at=?1
+             WHERE id=?2 AND status_v2 NOT IN ('done','dismissed')",
+            params![now, task_uuid],
+        )?
+    };
     if changed == 0 {
         return Err(crate::Error::Other(
             "task not found or terminal — cannot start".into(),
@@ -1809,35 +1860,13 @@ pub fn start(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
         &serde_json::json!({ "task_uuid": task_uuid, "status": "in_progress" }),
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(new_token)
 }
 
-/// Atomically claim a task for agent work. The guarded status transition and
-/// its sync-visible event are one transaction, so a successful claim can
-/// never be committed without its audit record.
+/// Atomically claim a task for agent work, with no lease (see
+/// [`crate::claims::claim`] for the owner, the lease and the record).
 pub fn claim(db: &Db, task_uuid: &str, ctx: &EventCtx) -> Result<()> {
-    let now = iso_now();
-    let mut conn = db.get()?;
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let changed = tx.execute(
-        "UPDATE tasks SET status_v2='in_progress', status='pending', updated_at=?1
-         WHERE id=?2 AND status_v2 IN ('triage','backlog','todo')",
-        params![now, task_uuid],
-    )?;
-    if changed == 0 {
-        return Err(crate::Error::Other(
-            "task not found or not claimable".into(),
-        ));
-    }
-    record_event_tx(
-        &tx,
-        ctx,
-        task_uuid,
-        "task.claimed",
-        &serde_json::json!({ "task_uuid": task_uuid, "by": ctx.actor }),
-    )?;
-    tx.commit()?;
-    Ok(())
+    crate::claims::claim(db, task_uuid, None, ctx).map(|_| ())
 }
 
 /// The two shapes a task can have: an investigation whose output is a
@@ -2492,6 +2521,10 @@ pub struct TaskDetail {
     /// `/detail`, hence the default.
     #[serde(default)]
     pub notes: Vec<crate::notes::Note>,
+    /// Who holds the task while it is in progress, and the lease. Absent
+    /// from a pre-3.44 server's `/detail`, hence the default.
+    #[serde(default)]
+    pub claim: Option<crate::claims::Claim>,
 }
 
 /// Load the side-table state for one task. Returns defaults for missing rows.
@@ -2550,6 +2583,7 @@ pub fn load_detail(db: &Db, task_uuid: &str) -> Result<TaskDetail> {
         recurrence_mode: rec.as_ref().map(|r| r.1.clone()),
         recurrence_next: rec.as_ref().map(|r| r.2.clone()),
         notes: crate::notes::list_in_conn(&conn, task_uuid, crate::notes::MAX_NOTES_LISTED)?,
+        claim: crate::claims::get_in_conn(&conn, task_uuid)?,
     })
 }
 
@@ -3170,6 +3204,7 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
             assert_eq!(v["pt_id"], "PT-1");
             assert_eq!(v["task_uuid"], t.id);
+            assert_eq!(v["status"], "pending");
             let rows: i64 = c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))?;
             assert_eq!(rows, 0);
             Ok(())

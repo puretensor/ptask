@@ -255,6 +255,8 @@ scrape time:
 | `pt_distill_last_run_ok` | gauge | — (`1` ok / `0` failed) |
 | `pt_distill_quarantined_captures` | gauge | — |
 | `pt_notifications_last_sent_age_seconds` | gauge | `channel` |
+| `pt_claims_active` | gauge | `holder` (in-progress tasks with a holder, v3.44.0) |
+| `pt_claims_expired` | gauge | — (in-progress tasks whose claim lease ran out, not yet reclaimed) |
 | `pt_webhook_dropped_total` | counter | — (outbound events dropped on a full per-URL backlog) |
 
 ## Dashboard surface (v2.3.0)
@@ -274,7 +276,10 @@ process with a different posture: no login at all since PT-2201, the same Host
 check on every request, and approval decisions gated by
 `PTASK_DASH_DECIDE_TOKEN` (see `dashboard/README.md`).
 
-Reads: `GET /api/stats · /api/tasks?status=&limit= · /api/critical?limit= ·
+Reads: `GET /api/stats` (its `flux.by_window.<w>.by_actor` lists created,
+done, dismissed, reopened and net per actor, as `pt flux` — real
+open↔closed transitions; deleting an open task is a closure; v3.46.0) ·
+`/api/tasks?status=&limit= · /api/critical?limit= ·
 /api/timeline · /api/heatmap · /api/tasks/{id}/events` (journal history) ·
 `GET /api/stream` (SSE, `event: change` frames with journal deltas).
 `GET /` serves the cockpit when `PTASK_DASH_WWW` exists, else the banner.

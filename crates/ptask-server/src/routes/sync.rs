@@ -653,7 +653,7 @@ fn apply_command(
         }
         "task_start" => {
             let task = resolve_task(state, &cmd.args)?;
-            tasks::start(&state.db, &task.id, &sync_ctx(actor, cmd))?;
+            let _ = tasks::start(&state.db, &task.id, &sync_ctx(actor, cmd))?;
             Ok((
                 Some(task.id.clone()),
                 EventPayload {
@@ -728,7 +728,11 @@ fn apply_command(
                 Some(task.id.clone()),
                 EventPayload {
                     event_type: "task.deleted".into(),
-                    payload: serde_json::json!({ "task_uuid": task.id, "pt_id": task.pt_id }),
+                    payload: serde_json::json!({
+                        "task_uuid": task.id,
+                        "pt_id": task.pt_id,
+                        "status": task.status,
+                    }),
                 },
             ))
         }

@@ -38,6 +38,11 @@ pub struct Config {
     /// When true, approval Telegram messages include tap-to-decide
     /// callback buttons (`$PTASK_TG_APPROVAL_BUTTONS=1`).
     pub tg_approval_buttons: bool,
+    /// When true, the hourly `pt scoring run` returns tasks whose claim
+    /// lease ran out to todo (`$PTASK_CLAIM_RECLAIM=1`). Off by default: it
+    /// changes task state on a timer. `pt reclaim --apply` does the same on
+    /// demand either way.
+    pub claim_reclaim: bool,
 }
 
 /// Triage-cockpit surface served by `pt serve` (v2.3.0 — absorbed from the
@@ -265,6 +270,7 @@ impl Config {
             },
             tg_forwarders: parse_forwarders(env_nonempty("PTASK_TG_FORWARDERS")),
             tg_approval_buttons: env_truthy("PTASK_TG_APPROVAL_BUTTONS"),
+            claim_reclaim: env_truthy("PTASK_CLAIM_RECLAIM"),
         }
     }
 }

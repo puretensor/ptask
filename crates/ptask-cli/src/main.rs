@@ -92,6 +92,14 @@ enum Command {
     /// criterion cannot be closed.
     #[command(subcommand, alias = "ac")]
     Criteria(CriteriaCommand),
+    /// Likely duplicates: of one task, or pairs among all open tasks
+    /// (lexical title similarity; read-only).
+    #[command(alias = "dups")]
+    Dupes(DupesArgs),
+    /// Merge a duplicate into the task it duplicates: dismiss it as
+    /// `duplicate_of`, move its dependents, prerequisites, labels,
+    /// recurrence, goal, provenance and subtasks, keep the higher priority.
+    Merge(MergeArgs),
     /// Show ready-to-start tasks (all dependencies done).
     Next(NextArgs),
     /// Advisory day plan: fit the ready queue into calendar free/busy (dry-run
@@ -135,6 +143,18 @@ enum Command {
     Kind(KindArgs),
     /// Mark a task in progress (you're actively working it).
     Start(StartArgs),
+    /// Claim a task for work (todo/backlog/triage → in_progress, owned by
+    /// you), optionally with a lease that `pt heartbeat` keeps alive.
+    Claim(ClaimArgs),
+    /// Renew your claim's lease; fails (exit 1) when the claim is no longer
+    /// yours, which means stop working on it. Requires `--claim` with the
+    /// token `pt claim` / `pt start` returned.
+    Heartbeat(HeartbeatArgs),
+    /// Hand a claimed task back (in_progress → todo) without closing it.
+    /// `--claim TOKEN` names the instance; without a token, `--force`.
+    Release(ReleaseArgs),
+    /// Return tasks whose claim lease ran out to todo (dry run unless --apply).
+    Reclaim(ReclaimArgs),
     /// Snooze a task until a date — it leaves `pt next` and reminders,
     /// then wakes to todo automatically.
     Snooze(SnoozeArgs),
@@ -153,9 +173,13 @@ enum Command {
     Bulk(BulkArgs),
     /// Show a task's attributed event history (who did what, via which surface).
     Log(LogArgs),
+    /// Who opened and who closed work over a window: created, done,
+    /// dismissed, reopened and net per actor, from the journal.
+    Flux(FluxArgs),
     /// Reverse your own most recent undoable mutation (done/dismiss/create).
     ///
-    /// done/dismiss → reopen; create → delete. Only the caller's own events
+    /// done/dismiss → reopen (a merge is fully reversed); create → delete.
+    /// Only the caller's own events
     /// ($PTASK_ACTOR) are candidates. Undoing a create deletes the task
     /// permanently, so it asks first and, without a TTY, refuses unless --yes.
     Undo(UndoArgs),
@@ -220,6 +244,53 @@ struct AccountabilityRunArgs {
 struct StartArgs {
     /// PT-N, bare integer, or title substring.
     query: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct ClaimArgs {
+    /// PT-N, bare integer, uuid, or title substring (open tasks).
+    query: String,
+    /// Lease length (30m, 2h, 1d; max 1d). Without one the claim never
+    /// expires on its own.
+    #[arg(long)]
+    lease: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct HeartbeatArgs {
+    /// PT-N, bare integer, uuid, or title substring.
+    query: String,
+    /// Claim instance token returned by `pt claim` or `pt start`.
+    #[arg(long = "claim", value_name = "TOKEN")]
+    claim: String,
+    /// New lease length from now (30m, 2h, 1d; max 1d).
+    #[arg(long, default_value = "30m")]
+    lease: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReleaseArgs {
+    /// PT-N, bare integer, uuid, or title substring.
+    query: String,
+    /// Claim instance token returned by `pt claim` or `pt start`.
+    /// Without one, `--force` is required (and so is releasing an unowned
+    /// in-progress task).
+    #[arg(long = "claim", value_name = "TOKEN")]
+    claim: Option<String>,
+    /// Release a claim another actor holds, an unowned in-progress task,
+    /// or a claim whose token you do not have (the operator's override).
+    #[arg(long)]
+    force: bool,
+    /// Why it is being handed back, journaled with the release.
+    #[arg(short = 'm', long = "reason")]
+    reason: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct ReclaimArgs {
+    /// Return the expired claims to todo (default: list them only).
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -294,6 +365,13 @@ struct BulkArgs {
     /// Preview without applying.
     #[arg(long = "dry-run")]
     dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct FluxArgs {
+    /// Window: 30m, 6h, 24h, 7d, 2w (max 90d).
+    #[arg(long, default_value = "24h")]
+    since: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -664,6 +742,12 @@ struct AddArgs {
     /// is checked with `pt criteria check`.
     #[arg(long = "ac", value_name = "CRITERION")]
     acceptance: Vec<String>,
+    /// Refuse to create the task when a near-certain duplicate exists (an
+    /// open task, or one closed in the last 14 days, scoring at least 0.75
+    /// with the same identifier-like words); the candidates are listed and
+    /// the command exits 1.
+    #[arg(long)]
+    unique: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -687,6 +771,32 @@ enum CriteriaCommand {
     Uncheck { query: String, n: i64 },
     /// Remove criterion N from the definition of done.
     Rm { query: String, n: i64 },
+}
+
+#[derive(clap::Args, Debug)]
+struct DupesArgs {
+    /// A task to find duplicates of; omit to list likely duplicate pairs
+    /// among all open tasks.
+    query: Option<String>,
+    /// Similarity threshold, 0..=1 (Dice over normalised title words).
+    #[arg(long, default_value_t = ptask_core::dupes::DEFAULT_THRESHOLD)]
+    threshold: f64,
+    /// Max rows.
+    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    limit: usize,
+}
+
+#[derive(clap::Args, Debug)]
+struct MergeArgs {
+    /// The duplicate (open): PT-N, bare integer, uuid, or title substring.
+    duplicate: String,
+    /// The task it duplicates (open, or done with no open dependents on
+    /// the duplicate). Dismissed targets are refused.
+    #[arg(long = "into")]
+    into: String,
+    /// Why, journaled on both tasks.
+    #[arg(short = 'm', long = "reason")]
+    reason: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -905,10 +1015,10 @@ fn command_name(cmd: &Command) -> String {
 /// derived Debug impl (fixed field order), so a retry of the same command
 /// matches and a different command under the same key does not.
 ///
-/// Optional fields at their default (`note: None`, `acceptance: []`) are
-/// omitted so a key journaled before that field existed still matches. A
-/// lone `-` for a note is replaced by the stdin payload, so the key covers
-/// the text.
+/// Optional fields at their default (`note: None`, `acceptance: []`,
+/// `unique: false`) are omitted so a key journaled before that field
+/// existed still matches. A lone `-` for a note is replaced by the stdin
+/// payload, so the key covers the text.
 fn command_fingerprint(cmd: &Command) -> Result<ptask_core::event_log::CommandFingerprint> {
     Ok(ptask_core::event_log::CommandFingerprint::new(
         &command_name(cmd),
@@ -951,7 +1061,7 @@ fn fingerprint_args(cmd: &Command) -> Result<String> {
             "Remote(Dismiss(RemoteDismissArgs {{ query: {:?}, url: {:?} }}))",
             a.query, a.url
         ),
-        Command::Add(a) if a.acceptance.is_empty() => format!(
+        Command::Add(a) if a.acceptance.is_empty() && !a.unique => format!(
             "Add(AddArgs {{ title: {:?}, priority: {:?}, description: {:?}, deadline: {:?}, \
              reason: {:?}, raw: {:?}, kind: {:?}, deliverable: {:?} }})",
             a.title, a.priority, a.description, a.deadline, a.reason, a.raw, a.kind, a.deliverable
@@ -1029,11 +1139,14 @@ fn keyed_replay_spec(cmd: &Command) -> Option<(&'static [&'static str], KeyTarge
         Command::Dismiss(a) => (UPDATED, Task(a.query.clone())),
         Command::Note(a) => (&["task.noted"], Task(a.query.clone())),
         Command::Start(a) => (UPDATED, Task(a.query.clone())),
+        Command::Claim(a) => (&["task.claimed"], Task(a.query.clone())),
+        Command::Release(a) => (&["task.released"], Task(a.query.clone())),
         Command::Snooze(a) => (UPDATED, Task(a.query.clone())),
         Command::Depend(a) => (UPDATED, Task(a.query.clone())),
         Command::Kind(a) => (UPDATED, Task(a.query.clone())),
         Command::Promote(a) => (&["task.promoted"], Task(a.query.clone())),
         Command::Rm(a) => (&["task.deleted"], Task(a.query.clone())),
+        Command::Merge(a) => (UPDATED, Task(a.duplicate.clone())),
         Command::Goal(G::Add(_)) => (&["goal.created"], Untargeted),
         Command::Goal(G::Link(a)) => (&["task.goal_linked"], Task(a.task.clone())),
         Command::Goal(G::Unlink(a)) => (&["task.goal_unlinked"], Task(a.task.clone())),
@@ -1270,6 +1383,8 @@ fn run() -> Result<()> {
                 Some(Command::Note(a)) => cmd_note(&db, a),
                 Some(Command::Rm(a)) => cmd_rm(&db, a),
                 Some(Command::Criteria(c)) => cmd_criteria(&db, c),
+                Some(Command::Dupes(a)) => cmd_dupes(&db, a),
+                Some(Command::Merge(a)) => cmd_merge(&db, a),
                 Some(Command::Next(a)) => cmd_next(&db, a),
                 Some(Command::Plan(a)) => cmd_plan(&db, a),
                 Some(Command::View(c)) => cmd_view(&db, c),
@@ -1285,6 +1400,10 @@ fn run() -> Result<()> {
                 Some(Command::Accountability(c)) => cmd_accountability(db, c),
                 Some(Command::Scoring(c)) => cmd_scoring(&db, c),
                 Some(Command::Start(a)) => cmd_start(&db, a),
+                Some(Command::Claim(a)) => cmd_claim(&db, a),
+                Some(Command::Heartbeat(a)) => cmd_heartbeat(&db, a),
+                Some(Command::Release(a)) => cmd_release(&db, a),
+                Some(Command::Reclaim(a)) => cmd_reclaim(&db, a),
                 Some(Command::Promote(a)) => cmd_promote(&db, a),
                 Some(Command::Kind(a)) => cmd_kind(&db, a),
                 Some(Command::Snooze(a)) => cmd_snooze(&db, a),
@@ -1295,6 +1414,7 @@ fn run() -> Result<()> {
                 Some(Command::Why(a)) => cmd_why(&db, a),
                 Some(Command::Bulk(a)) => cmd_bulk(&db, a),
                 Some(Command::Log(a)) => cmd_log(&db, a),
+                Some(Command::Flux(a)) => cmd_flux(&db, a),
                 Some(Command::Undo(a)) => cmd_undo(&db, a),
                 Some(Command::Token(c)) => cmd_token(&db, c),
                 Some(Command::Approval(c)) => cmd_approval(&db, c),
@@ -1381,6 +1501,30 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         tasks::kind_and_deliverable(a.kind.as_deref(), a.deliverable.as_deref())?;
     ext.acceptance = a.acceptance.clone();
 
+    // Likely duplicates of what is about to be filed: reported on every add,
+    // and with --unique a reason not to file it at all.
+    let possible_duplicates = ptask_core::dupes::similar(
+        db,
+        &new.title,
+        None,
+        ptask_core::dupes::DEFAULT_THRESHOLD,
+        5,
+    )?;
+    if a.unique && ptask_core::dupes::refuses(&new.title, &possible_duplicates) {
+        if json_mode() {
+            crate::print_json(&serde_json::json!({
+                "created": false, "possible_duplicates": possible_duplicates,
+            }))?;
+        } else {
+            print_duplicates(&possible_duplicates, None);
+        }
+        anyhow::bail!(
+            "not created: {} likely duplicate(s) of {:?}; work the existing task, or drop --unique",
+            possible_duplicates.len(),
+            ui::one_line(&new.title)
+        );
+    }
+
     let task = tasks::create_with_extensions(db, new, ext, &cli_ctx())?;
 
     // The quick-add derivations (labels, project, duration) live on `q`, not on
@@ -1395,6 +1539,8 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         duration_min: Option<i64>,
         reminder: Option<String>,
         recurrence: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        possible_duplicates: Vec<ptask_core::dupes::Candidate>,
     }
     let out = AddOutput {
         task,
@@ -1403,6 +1549,7 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         duration_min: q.duration_min,
         reminder: q.reminder.clone(),
         recurrence: q.recurrence.as_ref().map(|r| r.original_input.clone()),
+        possible_duplicates,
     };
 
     emit(&out, || {
@@ -1445,6 +1592,185 @@ fn cmd_add(db: &Db, a: AddArgs) -> Result<()> {
         pairs.push(("uuid", ui::painted(ui::dim(&t.id, ui::Ink::Slate))));
         for l in ui::kv(&pairs, 14) {
             println!("    {}", l.trim_start());
+        }
+        if !out.possible_duplicates.is_empty() {
+            print_duplicates(&out.possible_duplicates, t.pt_id.as_deref());
+        }
+    })
+}
+
+/// The "possible duplicate" warning block: one line per candidate, and the
+/// merge command when the new task already exists.
+fn print_duplicates(cands: &[ptask_core::dupes::Candidate], new_pt: Option<&str>) {
+    for c in cands {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Warn,
+                "duplicate?",
+                c.pt_id.as_deref().unwrap_or_else(|| short_id(&c.task_uuid)),
+                &c.title,
+                &format!("{:.2} · {}", c.score, c.status)
+            )
+        );
+    }
+    if let (Some(new_pt), Some(first)) = (
+        new_pt,
+        cands
+            .iter()
+            .find(|c| !matches!(c.status.as_str(), "done" | "dismissed"))
+            .and_then(|c| c.pt_id.as_deref()),
+    ) {
+        println!(
+            "{}",
+            ui::note(&format!("same work? pt merge {new_pt} --into {first}"))
+        );
+    }
+}
+
+fn cmd_dupes(db: &Db, a: DupesArgs) -> Result<()> {
+    if !(0.0..=1.0).contains(&a.threshold) {
+        anyhow::bail!("--threshold must be within 0..=1");
+    }
+    if let Some(q) = a.query.as_deref() {
+        let task = tasks::resolve_for_lookup(db, q, true).map_err(anyhow::Error::msg)?;
+        let cands =
+            ptask_core::dupes::similar(db, &task.title, Some(&task.id), a.threshold, a.limit)?;
+        if json_mode() {
+            return crate::print_json(&cands);
+        }
+        print_lines(ui::headline(
+            &format!("ptask · dupes {}", task.pt_id.as_deref().unwrap_or("")),
+            None,
+            &ui::clip(&task.title, 60),
+        ));
+        if cands.is_empty() {
+            println!("{}", ui::empty("no likely duplicates"));
+            return Ok(());
+        }
+        print_duplicates(&cands, task.pt_id.as_deref());
+        return Ok(());
+    }
+    let pairs = ptask_core::dupes::pairs(db, a.threshold, a.limit)?;
+    if json_mode() {
+        return crate::print_json(&pairs);
+    }
+    print_lines(ui::headline(
+        "ptask · dupes",
+        None,
+        &format!("open tasks · similarity ≥ {:.2}", a.threshold),
+    ));
+    if pairs.is_empty() {
+        println!("{}", ui::empty("no likely duplicates"));
+        return Ok(());
+    }
+    for p in &pairs {
+        let a_id =
+            p.a.pt_id
+                .as_deref()
+                .unwrap_or_else(|| short_id(&p.a.task_uuid));
+        let b_id =
+            p.b.pt_id
+                .as_deref()
+                .unwrap_or_else(|| short_id(&p.b.task_uuid));
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Warn,
+                &format!("{:.2}", p.score),
+                a_id,
+                &p.a.title,
+                ""
+            )
+        );
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Warn,
+                "",
+                b_id,
+                &p.b.title,
+                &format!("pt merge {b_id} --into {a_id}")
+            )
+        );
+    }
+    println!(
+        "{}",
+        ui::footer(pairs.len(), "pair", "pt merge PT-B --into PT-A")
+    );
+    Ok(())
+}
+
+fn cmd_merge(db: &Db, a: MergeArgs) -> Result<()> {
+    let dup = tasks::resolve_for_lookup(db, &a.duplicate, false).map_err(anyhow::Error::msg)?;
+    let into = tasks::resolve_for_lookup(db, &a.into, true).map_err(anyhow::Error::msg)?;
+    let m = ptask_core::dupes::merge(db, &dup.id, &into.id, a.reason.as_deref(), &cli_ctx())
+        .map_err(anyhow::Error::msg)?;
+    if let Err(e) = ptask_core::scoring::run_once(db, false) {
+        eprintln!(
+            "{}",
+            ui::section(
+                "warning",
+                ui::Ink::Amber,
+                &format!("merged but rescore failed: {e}")
+            )
+        );
+    }
+    emit(&m, || {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Mute,
+                "merged",
+                &m.duplicate,
+                &dup.title,
+                &format!("→ duplicate of {}", m.into)
+            )
+        );
+        let mut moved = Vec::new();
+        if !m.dependents_moved.is_empty() {
+            moved.push(format!("dependents {}", m.dependents_moved.join(", ")));
+        }
+        if !m.prerequisites_added.is_empty() {
+            moved.push(format!(
+                "prerequisites {}",
+                m.prerequisites_added.join(", ")
+            ));
+        }
+        if !m.labels_added.is_empty() {
+            moved.push(format!("labels {}", m.labels_added.join(", ")));
+        }
+        if let Some((from, to)) = m.priority_raised {
+            moved.push(format!("priority {from} → {to}"));
+        }
+        if let Some(d) = &m.deadline_set {
+            moved.push(format!("deadline {d}"));
+        }
+        if m.recurrence_copied {
+            moved.push("recurrence".into());
+        }
+        if let Some(g) = &m.goal_copied {
+            moved.push(format!("goal {g}"));
+        }
+        if !m.discovered_from_added.is_empty() {
+            moved.push(format!(
+                "discovered_from {}",
+                m.discovered_from_added.join(", ")
+            ));
+        }
+        if !m.subtasks_moved.is_empty() {
+            moved.push(format!("subtasks {}", m.subtasks_moved.join(", ")));
+        }
+        if !m.criteria_carried.is_empty() {
+            let ns: Vec<String> = m.criteria_carried.iter().map(|n| format!("#{n}")).collect();
+            moved.push(format!("acceptance criteria {}", ns.join(", ")));
+        }
+        if !moved.is_empty() {
+            println!(
+                "    {} {}",
+                ui::dim("carried to", ui::Ink::Slate),
+                moved.join(" · ")
+            );
         }
     })
 }
@@ -1812,10 +2138,29 @@ fn cmd_show(db: &Db, a: ShowArgs) -> Result<()> {
         v["goal_source"] = serde_json::json!(eg.source.as_str());
         v["criteria"] = serde_json::to_value(ptask_core::criteria::list(db, &t.id)?)?;
         v["notes"] = serde_json::to_value(&d.notes)?;
+        v["claim"] = serde_json::to_value(&d.claim)?;
+        let links = ptask_core::dupes::links(db, &t.id)?;
+        v["duplicate_of"] = serde_json::json!(links.duplicate_of);
+        v["merged_in"] = serde_json::json!(links.merged_in);
         crate::print_json(&v)?;
         return Ok(());
     }
     print_lines(render_show(&t, Some(&d), &blocked, &eg.chain));
+    let links = ptask_core::dupes::links(db, &t.id)?;
+    if let Some(of) = &links.duplicate_of {
+        println!();
+        println!(
+            "{}",
+            ui::section("duplicate", ui::Ink::Slate, &format!("of {of} (merged)"))
+        );
+    }
+    if !links.merged_in.is_empty() {
+        println!();
+        println!(
+            "{}",
+            ui::section("merged in", ui::Ink::Slate, &links.merged_in.join(", "))
+        );
+    }
     let criteria = ptask_core::criteria::list(db, &t.id)?;
     if !criteria.is_empty() {
         println!();
@@ -1912,6 +2257,22 @@ fn render_show(
         }
         if let Some(r) = &d.recurrence_input {
             pairs.push(("recurs", r.into()));
+        }
+        if let Some(c) = &d.claim {
+            let lease = lease_phrase(c.expires_at.as_deref());
+            let since =
+                c.at.as_deref()
+                    .map(|a| format!(" · since {}", a.get(..16).unwrap_or(a).replace('T', " ")))
+                    .unwrap_or_default();
+            let text = format!("{}{since} · {lease}", c.by);
+            pairs.push((
+                "claimed by",
+                if c.expired {
+                    ui::painted(ui::paint(&text, ui::Ink::Amber))
+                } else {
+                    text.into()
+                },
+            ));
         }
     }
     pairs.push(("source", (&t.source_type).into()));
@@ -2977,22 +3338,184 @@ fn accountability_verdict(
 
 fn cmd_start(db: &Db, a: StartArgs) -> Result<()> {
     let task = tasks::resolve(db, &a.query).map_err(anyhow::Error::msg)?;
-    tasks::start(db, &task.id, &cli_ctx())?;
+    let claim_token = tasks::start(db, &task.id, &cli_ctx())?;
+    let mut v =
+        serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress"});
+    if let Some(t) = &claim_token {
+        v["claim_token"] = serde_json::json!(t);
+    }
+    emit(&v, || {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Busy,
+                "started",
+                task.pt_id.as_deref().unwrap_or(""),
+                &task.title,
+                "in progress"
+            )
+        )
+    })
+}
+
+/// "in 12m" / "5m ago" for a lease end, against now.
+fn lease_phrase(expires_at: Option<&str>) -> String {
+    let Some(end) = expires_at.and_then(ptask_core::dates::parse_iso_to_utc) else {
+        return "no lease".into();
+    };
+    let secs = end.timestamp().as_second() - ptask_core::jiff::Timestamp::now().as_second();
+    let mins = (secs.abs() + 59) / 60;
+    let span = if mins >= 120 {
+        format!("{}h", mins / 60)
+    } else {
+        format!("{mins}m")
+    };
+    if secs > 0 {
+        format!("lease ends in {span}")
+    } else {
+        format!("lease expired {span} ago")
+    }
+}
+
+fn cmd_claim(db: &Db, a: ClaimArgs) -> Result<()> {
+    let lease = a
+        .lease
+        .as_deref()
+        .map(ptask_core::claims::parse_lease)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
+    let claim =
+        ptask_core::claims::claim(db, &task.id, lease, &cli_ctx()).map_err(anyhow::Error::msg)?;
+    let v = serde_json::json!({
+        "pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress",
+        "claim": claim,
+        "claim_token": claim.token,
+    });
+    emit(&v, || {
+        println!(
+            "{}",
+            ui::outcome(
+                ui::Status::Busy,
+                "claimed",
+                task.pt_id.as_deref().unwrap_or(""),
+                &task.title,
+                &format!(
+                    "by {} · {}",
+                    claim.by,
+                    lease_phrase(claim.expires_at.as_deref())
+                )
+            )
+        )
+    })
+}
+
+fn cmd_heartbeat(db: &Db, a: HeartbeatArgs) -> Result<()> {
+    let lease = ptask_core::claims::parse_lease(&a.lease).map_err(anyhow::Error::msg)?;
+    let task = tasks::resolve_for_lookup(db, &a.query, true).map_err(anyhow::Error::msg)?;
+    let claim = ptask_core::claims::heartbeat(db, &task.id, lease, &a.claim, &cli_ctx())
+        .map_err(anyhow::Error::msg)?;
     emit(
-        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "status": "in_progress"}),
+        &serde_json::json!({"pt_id": task.pt_id, "task_uuid": task.id, "claim": claim}),
         || {
             println!(
                 "{}",
                 ui::outcome(
-                    ui::Status::Busy,
-                    "started",
+                    ui::Status::Ok,
+                    "renewed",
                     task.pt_id.as_deref().unwrap_or(""),
                     &task.title,
-                    "in progress"
+                    &lease_phrase(claim.expires_at.as_deref())
                 )
             )
         },
     )
+}
+
+fn cmd_release(db: &Db, a: ReleaseArgs) -> Result<()> {
+    let task = tasks::resolve_for_lookup(db, &a.query, false).map_err(anyhow::Error::msg)?;
+    let r = ptask_core::claims::release(
+        db,
+        &task.id,
+        a.force,
+        a.reason.as_deref(),
+        a.claim.as_deref(),
+        &cli_ctx(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    emit(
+        &serde_json::json!({
+            "pt_id": task.pt_id, "task_uuid": task.id, "status": "todo",
+            "released": r,
+        }),
+        || {
+            let detail = match (&r.holder, r.forced) {
+                (Some(h), true) => format!("→ todo · {h}'s claim released (forced)"),
+                (Some(_), false) => "→ todo · claim released".to_string(),
+                (None, _) => "→ todo".to_string(),
+            };
+            println!(
+                "{}",
+                ui::outcome(
+                    ui::Status::Changed,
+                    "released",
+                    task.pt_id.as_deref().unwrap_or(""),
+                    &task.title,
+                    &detail
+                )
+            )
+        },
+    )
+}
+
+fn cmd_reclaim(db: &Db, a: ReclaimArgs) -> Result<()> {
+    let report = ptask_core::claims::reclaim_expired(
+        db,
+        !a.apply,
+        &ptask_core::event_log::EventCtx::system("reclaim"),
+    )?;
+    print_reclaim(&report)
+}
+
+fn print_reclaim(report: &ptask_core::claims::ReclaimReport) -> Result<()> {
+    if json_mode() {
+        return crate::print_json(report);
+    }
+    if report.reclaimed.is_empty() {
+        println!(
+            "{}",
+            ui::section("reclaim ok", ui::Ink::Green, "no expired claims")
+        );
+        return Ok(());
+    }
+    let (status, verb) = if report.dry_run {
+        (ui::Status::Warn, "expired")
+    } else {
+        (ui::Status::Changed, "reclaimed")
+    };
+    for c in &report.reclaimed {
+        println!(
+            "{}",
+            ui::outcome(
+                status,
+                verb,
+                c.pt_id.as_deref().unwrap_or(&c.task_uuid),
+                &c.title,
+                &format!(
+                    "held by {} · {}",
+                    c.holder,
+                    lease_phrase(Some(&c.expired_at))
+                )
+            )
+        );
+    }
+    if report.dry_run {
+        println!(
+            "{}",
+            ui::note("dry run — `pt reclaim --apply` returns them to todo")
+        );
+    }
+    Ok(())
 }
 
 fn cmd_promote(db: &Db, a: StartArgs) -> Result<()> {
@@ -3607,6 +4130,72 @@ fn cmd_log(db: &Db, a: LogArgs) -> Result<()> {
         &Default::default(),
     ));
     println!("{}", ui::footer(n, "event", ""));
+    Ok(())
+}
+
+fn cmd_flux(db: &Db, a: FluxArgs) -> Result<()> {
+    let minutes = ptask_core::flux::parse_window(&a.since).map_err(anyhow::Error::msg)?;
+    let r = ptask_core::flux::by_actor(db, minutes)?;
+    if json_mode() {
+        return crate::print_json(&r);
+    }
+    print_lines(ui::headline(
+        &format!("ptask · flux {}", a.since.trim()),
+        None,
+        &format!(
+            "+{} opened · −{} closed · net {:+} · since {}",
+            r.total.created + r.total.reopened,
+            r.total.done + r.total.dismissed,
+            r.total.net,
+            r.since.get(..16).unwrap_or(&r.since).replace('T', " ")
+        ),
+    ));
+    if r.actors.is_empty() {
+        println!(
+            "{}",
+            ui::empty("no task created, closed or reopened in the window")
+        );
+        return Ok(());
+    }
+    let cols = [
+        ui::Column::new("ACTOR", 16),
+        ui::Column::new("CREATED", 7),
+        ui::Column::new("DONE", 6),
+        ui::Column::new("DISMISSED", 9),
+        ui::Column::new("REOPENED", 8),
+        ui::Column::new("NET", 6),
+    ];
+    let row = |f: &ptask_core::flux::ActorFlux| {
+        // A positive net grew the backlog: amber, so it stands out.
+        let net = format!("{:+}", f.net);
+        vec![
+            ui::paint(&f.actor, ui::Ink::Cyan),
+            f.created.to_string(),
+            f.done.to_string(),
+            f.dismissed.to_string(),
+            f.reopened.to_string(),
+            if f.net > 0 {
+                ui::paint(&net, ui::Ink::Amber)
+            } else {
+                ui::paint(&net, ui::Ink::Green)
+            },
+        ]
+    };
+    let mut rows: Vec<Vec<String>> = r.actors.iter().map(row).collect();
+    rows.push(row(&r.total));
+    print_lines(ui::table(
+        &cols,
+        &ui::painted_rows(rows),
+        &Default::default(),
+    ));
+    println!(
+        "{}",
+        ui::footer(
+            r.actors.len(),
+            "actor",
+            "net = created + reopened − done − dismissed"
+        )
+    );
     Ok(())
 }
 
@@ -4327,6 +4916,26 @@ fn cmd_scoring(db: &Db, c: ScoringCommand) -> Result<()> {
                 print_rank_diff(db)?;
             }
             let now = ptask_core::dates::now_in_operator_tz().map_err(anyhow::Error::msg)?;
+            // Expired claims go back to todo before scoring, so they rank
+            // as open work in this pass. Only when the operator turned it
+            // on: it changes task state on a timer.
+            if ptask_core::Config::from_env().claim_reclaim && !a.dry_run {
+                let r = ptask_core::claims::reclaim_expired(
+                    db,
+                    false,
+                    &ptask_core::event_log::EventCtx::system("reclaim"),
+                )?;
+                if !r.reclaimed.is_empty() {
+                    println!(
+                        "{}",
+                        ui::section(
+                            "reclaimed",
+                            ui::Ink::Amber,
+                            &format!("{} expired claim(s) returned to todo", r.reclaimed.len())
+                        )
+                    );
+                }
+            }
             let report = ptask_core::scoring::run_once_at_mode(db, a.dry_run, &now, !a.v1)?;
             println!(
                 "{}",

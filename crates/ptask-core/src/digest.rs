@@ -65,11 +65,34 @@ pub fn build(db: &Db, days: i64) -> Result<serde_json::Value> {
         .iter()
         .map(|t| serde_json::json!({"pt_id": t.pt_id, "title": t.title, "priority": t.priority}))
         .collect::<Vec<_>>();
+    // Work a dead agent left behind: leases that ran out, still in progress.
+    // A session starting up sees them before it claims something new.
+    let expired_claims = crate::claims::expired(db)?
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "pt_id": c.pt_id, "title": c.title,
+                "holder": c.holder, "expired_at": c.expired_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    // Who opened and who closed work in the same window as created_count
+    // (UTC midnight N days ago), not a rolling now−N×24h window.
+    let since: String = db.with_conn(|c| {
+        Ok(c.query_row(
+            &format!("SELECT {cutoff} || 'T00:00:00.000+00:00'"),
+            [],
+            |r| r.get(0),
+        )?)
+    })?;
+    let flux = crate::flux::by_actor_since(db, &since, days * 24 * 60)?;
     Ok(serde_json::json!({
         "window_days": days,
         "done": done, "dismissed": dismissed,
         "created_count": created,
         "ready_queue": ready,
+        "expired_claims": expired_claims,
+        "flux_by_actor": flux.actors,
     }))
 }
 
