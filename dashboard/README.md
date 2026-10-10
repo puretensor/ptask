@@ -274,8 +274,8 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
-- **v0.24.1** (pt 3.46.1) — The drawer's notes fetch can fail without taking the
-  history with it: under `pt serve` before 3.46.1 (no notes route) every drawer
+- **v0.24.1** (pt 3.47.1) — The drawer's notes fetch can fail without taking the
+  history with it: under `pt serve` before 3.47.1 (no notes route) every drawer
   read "history unavailable". `pt serve` now serves `GET /api/tasks/{id}/notes`
   too, and a server without it falls back to the notes in the events window.
 - **v0.24.0** (pt 3.46.0) — Flux by actor. The flux range picker lists, under the

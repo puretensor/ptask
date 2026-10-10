@@ -281,7 +281,8 @@ done, dismissed, reopened and net per actor, as `pt flux` — real
 open↔closed transitions; deleting an open task is a closure; v3.46.0) ·
 `/api/tasks?status=&limit= · /api/critical?limit= ·
 /api/timeline · /api/heatmap · /api/tasks/{id}/events` (journal history) ·
-`GET /api/tasks/{id}/notes` (the drawer's notes trail, newest first) ·
+`GET /api/tasks/{id}/notes` (the drawer's notes trail, newest first;
+`?limit=` default 100, max 200, v3.47.1) ·
 `GET /api/stream` (SSE, `event: change` frames with journal deltas).
 `GET /` serves the cockpit when `PTASK_DASH_WWW` exists, else the banner.
 

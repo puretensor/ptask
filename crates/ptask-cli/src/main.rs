@@ -813,6 +813,15 @@ struct DoneArgs {
     /// it was verified). With several tasks, each gets the same note.
     #[arg(short = 'm', long = "note")]
     note: Option<String>,
+    /// After closing, claim the next ready task (`pt next` order) for
+    /// $PTASK_ACTOR: close and continue in one command. Same take as
+    /// `pt claim`: an owner, an optional `--lease`, and a claim_token.
+    #[arg(long = "claim-next")]
+    claim_next: bool,
+    /// Lease for `--claim-next` (`30m`, `2h`, `1d`; max 1d). Without one
+    /// the claim never expires on its own.
+    #[arg(long, requires = "claim_next")]
+    lease: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -984,8 +993,10 @@ fn command_name(cmd: &Command) -> String {
 /// derived Debug impl (fixed field order), so a retry of the same command
 /// matches and a different command under the same key does not.
 ///
-/// Optional fields at their default (`note: None`, `unique: false`) are
-/// omitted so a key journaled before that field existed still matches. A
+/// Optional fields at their default (`note: None`, `unique: false`,
+/// `claim_next: false`) are omitted so a key journaled before that field
+/// existed still matches. `--claim-next` (and `--lease` when given) change
+/// what the command does, so they are part of the fingerprint when set. A
 /// lone `-` for a note is replaced by the stdin payload, so the key covers
 /// the text.
 fn command_fingerprint(cmd: &Command) -> Result<ptask_core::event_log::CommandFingerprint> {
@@ -997,6 +1008,27 @@ fn command_fingerprint(cmd: &Command) -> Result<ptask_core::event_log::CommandFi
 
 fn is_stdin_note(text: &[String]) -> bool {
     matches!(text, [s] if s == "-")
+}
+
+/// Keyed `pt done` fingerprint. 3.42.2 rendered only `queries`; optional
+/// fields at their default are omitted so those keys still replay.
+/// `--claim-next` (and `--lease` when given) change what the command does,
+/// so they are part of the fingerprint when set.
+fn fingerprint_done(a: &DoneArgs) -> String {
+    if a.note.is_none() && !a.claim_next {
+        return format!("Done(DoneArgs {{ queries: {:?} }})", a.queries);
+    }
+    let mut inner = format!("queries: {:?}", a.queries);
+    if let Some(note) = &a.note {
+        inner.push_str(&format!(", note: {:?}", Some(note)));
+    }
+    if a.claim_next {
+        inner.push_str(", claim_next: true");
+    }
+    if let Some(lease) = &a.lease {
+        inner.push_str(&format!(", lease: {:?}", Some(lease)));
+    }
+    format!("Done(DoneArgs {{ {inner} }})")
 }
 
 fn fingerprint_args(cmd: &Command) -> Result<String> {
@@ -1012,9 +1044,7 @@ fn fingerprint_args(cmd: &Command) -> Result<String> {
             vec![stdin_note_text()?],
             a.url
         ),
-        Command::Done(a) if a.note.is_none() => {
-            format!("Done(DoneArgs {{ queries: {:?} }})", a.queries)
-        }
+        Command::Done(a) => fingerprint_done(a),
         Command::Dismiss(a) if a.note.is_none() => {
             format!("Dismiss(DismissArgs {{ query: {:?} }})", a.query)
         }
@@ -1098,7 +1128,9 @@ fn keyed_replay_spec(cmd: &Command) -> Option<(&'static [&'static str], KeyTarge
     const UPDATED: &[&str] = &["task.updated"];
     Some(match cmd {
         Command::Add(_) => (&["task.created"], Untargeted),
-        Command::Done(a) if a.queries.len() == 1 => (
+        // `--claim-next` journals a second event under `K:claim-next`; cmd_done
+        // replays both so the retry still reports which task was claimed.
+        Command::Done(a) if a.queries.len() == 1 && !a.claim_next => (
             &["task.completed", "task.recurrence_advanced"],
             Task(a.queries[0].clone()),
         ),
@@ -1790,10 +1822,99 @@ fn print_lines(lines: Vec<String>) {
     }
 }
 
+/// `--claim-next` after the closes have committed. A claim failure is
+/// reported here so the command still succeeds for the closes.
+enum ClaimedNext {
+    Task {
+        task: Box<tasks::Task>,
+        claim: Option<ptask_core::claims::Claim>,
+    },
+    Nothing,
+    Error(String),
+}
+
+impl ClaimedNext {
+    fn to_json(&self) -> Result<serde_json::Value> {
+        Ok(match self {
+            Self::Task { task, claim } => {
+                let mut v = serde_json::to_value(task)?;
+                if let Some(c) = claim {
+                    attach_claim_fields(&mut v, c);
+                }
+                v
+            }
+            Self::Nothing => serde_json::Value::Null,
+            Self::Error(e) => serde_json::json!({ "error": e }),
+        })
+    }
+}
+
+fn attach_claim_fields(v: &mut serde_json::Value, claim: &ptask_core::claims::Claim) {
+    v["claimed_by"] = serde_json::json!(claim.by);
+    v["claim_expires_at"] = serde_json::json!(claim.expires_at);
+    if !claim.token.is_empty() {
+        v["claim_token"] = serde_json::json!(claim.token);
+    }
+}
+
+/// Holder and lease for a keyed claim-next replay. No claim_token: tokens
+/// are never handed back on a replay (as with a keyed `pt claim`), so only
+/// the session that took the claim holds it.
+fn claim_for_reply(db: &Db, task_uuid: &str) -> Option<ptask_core::claims::Claim> {
+    ptask_core::claims::get(db, task_uuid).ok().flatten()
+}
+
+/// Look up a keyed `K:claim-next` claim, or make one, skipping `skip`
+/// (the tasks this call just closed or advanced). `lease_minutes` is the
+/// optional lease on a fresh take (`pt claim` / `task_claim`).
+fn take_claimed_next(db: &Db, skip: &[String], lease_minutes: Option<i64>) -> ClaimedNext {
+    let ctx = cli_ctx();
+    let ctx = match ctx.event_uuid.clone() {
+        Some(key) => ctx.with_uuid(format!("{key}:claim-next")),
+        None => ctx,
+    };
+    if let Some(key) = ctx.event_uuid.as_deref() {
+        match ptask_core::event_log::get_by_uuid(db, key) {
+            Ok(Some(event)) => {
+                return match event.task_uuid.as_deref() {
+                    Some(id) => match tasks::resolve_for_lookup(db, id, true) {
+                        Ok(t) => ClaimedNext::Task {
+                            claim: claim_for_reply(db, id),
+                            task: Box::new(t),
+                        },
+                        Err(e) => ClaimedNext::Error(e.to_string()),
+                    },
+                    None => ClaimedNext::Nothing,
+                };
+            }
+            Ok(None) => {}
+            Err(e) => return ClaimedNext::Error(e.to_string()),
+        }
+    }
+    match ptask_core::dag::claim_next(db, &ctx, skip, lease_minutes) {
+        Ok(Some((t, claim))) => ClaimedNext::Task {
+            task: Box::new(t),
+            claim: Some(claim),
+        },
+        Ok(None) => ClaimedNext::Nothing,
+        Err(e) => ClaimedNext::Error(e.to_string()),
+    }
+}
+
 fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
+    let lease_minutes = if a.claim_next {
+        a.lease
+            .as_deref()
+            .map(ptask_core::claims::parse_lease)
+            .transpose()
+            .map_err(anyhow::Error::msg)?
+    } else {
+        None
+    };
     let multi = a.queries.len() > 1;
     let mut results = Vec::new();
     let mut failed = 0usize;
+    let mut skip = Vec::new();
     for query in &a.queries {
         // One task's failure (blocked, not found) no longer abandons the
         // rest of the list half-applied; every failure is reported.
@@ -1824,6 +1945,7 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
                 "pt_id": pt, "task_uuid": task.id, "title": task.title,
                 "outcome": "replayed"
             }));
+            skip.push(task.id.clone());
             continue;
         }
         let outcome = match tasks::mark_done_noted(db, &task, a.note.as_deref(), &ctx) {
@@ -1834,8 +1956,11 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
                 continue;
             }
         };
+        skip.push(task.id.clone());
         match &outcome {
             tasks::DoneOutcome::Completed => {
+                // What this close released: dependents that are ready now.
+                let unblocked = ptask_core::dag::unblocked_by(db, &task.id).unwrap_or_default();
                 if !json_mode() {
                     let detail = if a.note.is_some() {
                         "evidence noted"
@@ -1846,10 +1971,25 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
                         "{}",
                         ui::outcome(ui::Status::Ok, "done", &pt, &task.title, detail)
                     );
+                    for u in &unblocked {
+                        println!(
+                            "{}",
+                            ui::outcome(
+                                ui::Status::Changed,
+                                "unblocked",
+                                u.pt_id.as_deref().unwrap_or_else(|| short_id(&u.id)),
+                                &u.title,
+                                "ready"
+                            )
+                        );
+                    }
                 }
                 results.push(serde_json::json!({
                     "pt_id": pt, "task_uuid": task.id, "title": task.title,
-                    "outcome": "completed"
+                    "outcome": "completed",
+                    "unblocked": unblocked.iter().map(|u| serde_json::json!({
+                        "pt_id": u.pt_id, "task_uuid": u.id, "title": u.title,
+                    })).collect::<Vec<_>>(),
                 }));
             }
             tasks::DoneOutcome::Advanced { next_deadline } => {
@@ -1872,8 +2012,56 @@ fn cmd_done(db: &Db, a: DoneArgs) -> Result<()> {
             }
         }
     }
+    // Close and continue: only after every requested close went through
+    // (a failed close is not a cue to start something else). A claim
+    // failure after that does not fail the close: it lands in
+    // claimed_next.error. `--json --claim-next` is always the object.
+    let claimed = if a.claim_next {
+        Some(if failed == 0 {
+            take_claimed_next(db, &skip, lease_minutes)
+        } else {
+            ClaimedNext::Nothing
+        })
+    } else {
+        None
+    };
     if json_mode() {
-        crate::print_json(&results)?;
+        match &claimed {
+            Some(next) => crate::print_json(&serde_json::json!({
+                "results": results, "claimed_next": next.to_json()?,
+            }))?,
+            None => crate::print_json(&results)?,
+        }
+    } else if failed == 0
+        && let Some(next) = &claimed
+    {
+        match next {
+            ClaimedNext::Task { task: n, claim } => {
+                let detail = match claim {
+                    Some(c) => format!(
+                        "next ready · by {} · {}",
+                        c.by,
+                        lease_phrase(c.expires_at.as_deref())
+                    ),
+                    None => "next ready · in progress".into(),
+                };
+                println!(
+                    "{}",
+                    ui::outcome(
+                        ui::Status::Busy,
+                        "claimed",
+                        n.pt_id.as_deref().unwrap_or_else(|| short_id(&n.id)),
+                        &n.title,
+                        &detail
+                    )
+                )
+            }
+            ClaimedNext::Nothing => println!("{}", ui::empty("nothing ready to claim next")),
+            ClaimedNext::Error(e) => eprintln!(
+                "{}",
+                ui::section("error", ui::Ink::Red, &format!("claim-next: {e}"))
+            ),
+        }
     }
     if failed > 0 {
         anyhow::bail!("{failed} of {} task(s) not completed", a.queries.len());

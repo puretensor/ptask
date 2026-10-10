@@ -273,7 +273,7 @@ test("the drawer shows a note older than the task's newest 60 events", async () 
   });
 });
 
-// ---- a server without the notes route (pt serve before 3.46.1) -------------
+// ---- a server without the notes route (pt serve before 3.47.1) -------------
 
 test("the drawer keeps its history and notes when the server has no notes route", async () => {
   const NOTE = "cert served on lhr";
