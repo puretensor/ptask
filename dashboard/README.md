@@ -280,6 +280,10 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
   history events). Criterion numbers are HTML-escaped. A close refused because
   criteria are unchecked is a 409 with pt's message, like a close refused by
   open prerequisites.
+- **v0.24.1** (pt 3.47.1) — The drawer's notes fetch can fail without taking the
+  history with it: under `pt serve` before 3.47.1 (no notes route) every drawer
+  read "history unavailable". `pt serve` now serves `GET /api/tasks/{id}/notes`
+  too, and a server without it falls back to the notes in the events window.
 - **v0.24.0** (pt 3.46.0) — Flux by actor. The flux range picker lists, under the
   windows, who opened (+created, reopened) and who closed (−done, dismissed)
   work in the selected window, with each actor's net; a positive net (the

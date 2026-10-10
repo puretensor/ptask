@@ -27,6 +27,9 @@ pub const MAX_NOTE_CHARS: usize = 16 * 1024;
 /// Most notes one read returns (the newest ones, oldest first).
 pub const MAX_NOTES_LISTED: usize = 100;
 
+/// Sidecar / `pt serve` `GET /api/tasks/{id}/notes` `?limit=` cap.
+pub const NOTES_ROUTE_MAX: usize = 200;
+
 /// Character budget for a note on compact surfaces (digest, worker brief).
 /// `pt show` and `pt context --json`'s `notes` array keep the full text.
 pub const NOTE_PREVIEW_CHARS: usize = 300;
@@ -130,7 +133,7 @@ pub fn add(db: &Db, task_uuid: &str, text: &str, ctx: &EventCtx) -> Result<Note>
 }
 
 /// A task's notes (standalone and closure evidence), oldest first: the
-/// newest `limit` of them, capped at [`MAX_NOTES_LISTED`].
+/// newest `limit` of them, capped at [`NOTES_ROUTE_MAX`].
 pub fn list(db: &Db, task_uuid: &str, limit: usize) -> Result<Vec<Note>> {
     let conn = db.get()?;
     list_in_conn(&conn, task_uuid, limit)
@@ -142,7 +145,7 @@ pub fn list_in_conn(
     task_uuid: &str,
     limit: usize,
 ) -> Result<Vec<Note>> {
-    let limit = limit.clamp(1, MAX_NOTES_LISTED) as i64;
+    let limit = limit.clamp(1, NOTES_ROUTE_MAX) as i64;
     let mut stmt = conn.prepare(&format!(
         "SELECT id, ts, actor, json_extract(payload, '$.source'), event_type,
                 json_extract(payload, '$.status'), json_extract(payload, '$.note')

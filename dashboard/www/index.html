@@ -2383,9 +2383,12 @@ async function openDrawer(uuid){
   $('#drawer-scrim').classList.add('show');
   $('#d-close').focus({preventScroll:true});
   try{
+    /* the notes route is a dedicated read (an old note outlives the events
+       window); a server without it must not cost the drawer its history,
+       so its notes fall back to whatever the events carry */
     const [j, n]=await Promise.all([
       api('/api/tasks/'+encodeURIComponent(uuid)+'/events'),
-      api('/api/tasks/'+encodeURIComponent(uuid)+'/notes'),
+      api('/api/tasks/'+encodeURIComponent(uuid)+'/notes').catch(()=>null),
     ]);
     const crit=foldCriteria(j.events||[]);
     if(crit.length){
@@ -2398,7 +2401,7 @@ async function openDrawer(uuid){
         (c.done&&c.by?`<span class="cby">${esc(c.by)}</span>`:'')+`</div>`).join('');
       $('#d-crit-wrap').hidden=false;
     }
-    $('#d-notes').innerHTML=renderNotes(n.events||[]);
+    $('#d-notes').innerHTML=renderNotes((n||j).events||[]);
     $('#d-hist').innerHTML=(j.events||[]).slice(0,60).map(e=>
       `<div class="devt"><span class="who">${esc(e.actor||'—')}</span><span class="what">${esc(e.event_type)}</span><span class="when">${esc((e.ts||'').slice(0,16).replace('T',' '))}</span></div>`
     ).join('')||'<span class="age">no history</span>';
