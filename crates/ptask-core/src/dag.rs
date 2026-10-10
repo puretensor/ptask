@@ -92,15 +92,17 @@ pub fn unblocked_by(db: &Db, closed_uuid: &str) -> Result<Vec<Task>> {
 /// actor, in `pt next` order, skipping tasks already in progress and any
 /// uuid in `skip` (tasks this same call just closed or advanced — a
 /// recurring task that rolled forward is ready again and must not be
-/// claimed back). When another claimer wins a candidate between the read
-/// and the claim, the next one is tried; `None` when nothing ready is
-/// claimable. The returned task is re-read after the claim so callers see
-/// it in progress.
+/// claimed back). The take is [`crate::claims::claim`]: holder, optional
+/// `lease_minutes`, instance token. When another claimer wins a candidate
+/// between the read and the claim, the next one is tried; `None` when
+/// nothing ready is claimable. The returned task is re-read after the
+/// claim so callers see it in progress.
 pub fn claim_next(
     db: &Db,
     ctx: &crate::event_log::EventCtx,
     skip: &[String],
-) -> Result<Option<Task>> {
+    lease_minutes: Option<i64>,
+) -> Result<Option<(Task, crate::claims::Claim)>> {
     for t in next_ready(db, 50)? {
         if skip.iter().any(|id| id == &t.id) {
             continue;
@@ -108,14 +110,14 @@ pub fn claim_next(
         if !matches!(t.status.as_str(), "triage" | "backlog" | "todo") {
             continue;
         }
-        match crate::tasks::claim(db, &t.id, ctx) {
-            Ok(()) => {
+        match crate::claims::claim(db, &t.id, lease_minutes, ctx) {
+            Ok(claim) => {
                 let claimed =
                     crate::tasks::resolve_for_lookup(db, &t.id, true).unwrap_or_else(|_| Task {
                         status: "in_progress".into(),
                         ..t
                     });
-                return Ok(Some(claimed));
+                return Ok(Some((claimed, claim)));
             }
             // Lost the race (or it moved on): the next candidate.
             Err(crate::Error::Other(msg)) if msg.contains("not claimable") => continue,
@@ -335,22 +337,45 @@ mod tests {
 
         let hal = EventCtx::local("hal");
         let none: &[String] = &[];
-        let got = claim_next(&db, &hal, none).unwrap().unwrap();
+        let (got, claim) = claim_next(&db, &hal, none, None).unwrap().unwrap();
         assert_eq!(
             got.title, "waits on base only",
             "highest priority ready first"
         );
         assert_eq!(got.status, "in_progress", "returned after the claim");
+        assert_eq!(claim.by, "hal");
+        assert!(claim.expires_at.is_none());
         // In progress now: the next call skips it and takes the next ready.
-        let got = claim_next(&db, &hal, none).unwrap().unwrap();
+        let (got, _) = claim_next(&db, &hal, none, None).unwrap().unwrap();
         assert_eq!(got.title, "second prerequisite");
         crate::tasks::mark_done(&db, &other, &ctx).unwrap();
-        let got = claim_next(&db, &hal, none).unwrap().unwrap();
+        let (got, _) = claim_next(&db, &hal, none, None).unwrap().unwrap();
         assert_eq!(got.title, "waits on base and other");
         assert!(
-            claim_next(&db, &hal, none).unwrap().is_none(),
+            claim_next(&db, &hal, none, None).unwrap().is_none(),
             "nothing claimable left"
         );
+    }
+
+    #[test]
+    fn claim_next_takes_an_owner_and_an_optional_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("c.db")).unwrap();
+        let ctx = EventCtx::test();
+        crate::tasks::create(&db, NewTask::minimal("leased"), &ctx).unwrap();
+        crate::tasks::create(&db, NewTask::minimal("owned"), &ctx).unwrap();
+        let hal = EventCtx::local("hal");
+        let none: &[String] = &[];
+        let (got, claim) = claim_next(&db, &hal, none, Some(30)).unwrap().unwrap();
+        assert_eq!(got.status, "in_progress");
+        assert_eq!(claim.by, "hal");
+        assert!(claim.expires_at.is_some() && !claim.token.is_empty());
+        let stored = crate::claims::get(&db, &got.id).unwrap().unwrap();
+        assert_eq!(stored.by, "hal");
+        assert!(stored.expires_at.is_some());
+        let (_, claim) = claim_next(&db, &hal, none, None).unwrap().unwrap();
+        assert_eq!(claim.by, "hal");
+        assert!(claim.expires_at.is_none());
     }
 
     #[test]
@@ -362,7 +387,7 @@ mod tests {
         crate::tasks::update_priority(&db, &first.id, 4, &ctx).unwrap();
         crate::tasks::create(&db, NewTask::minimal("other ready"), &ctx).unwrap();
         let hal = EventCtx::local("hal");
-        let got = claim_next(&db, &hal, std::slice::from_ref(&first.id))
+        let (got, _) = claim_next(&db, &hal, std::slice::from_ref(&first.id), None)
             .unwrap()
             .unwrap();
         assert_eq!(got.title, "other ready");

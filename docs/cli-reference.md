@@ -47,7 +47,7 @@ network.
 | `-v`, `--verbose` | show description + UUID |
 | `[filter]` positional | DSL — see [dsl.md](dsl.md) |
 
-### `pt done <query> [...] [-m | --note TEXT] [--claim-next]`
+### `pt done <query> [...] [-m | --note TEXT] [--claim-next] [--lease D]`
 
 Mark done by `PT-N`, bare integer `42`, or title substring. `--note` journals
 closure evidence (what was done, how it was verified) inside the completion
@@ -58,13 +58,18 @@ Each completion lists the tasks it unblocked (dependents with no prerequisite
 left open; in `--json`, `unblocked` per result). `--claim-next` (v3.47.0) then
 claims the next ready task in `pt next` order for `$PTASK_ACTOR`, skipping
 tasks already in progress and any task this same call just closed or
-advanced, and prints it. `--json --claim-next` is always `{"results": [...],
-"claimed_next": task | null | {"error": ...}}` — on success, on a failed close
-(`claimed_next` is null and the command still fails), and on a keyed replay
-(the replay reports the task the first run claimed and claims nothing). A
-claim that fails after the closes committed still reports those closes;
-`claimed_next` carries the error and the command succeeds. It claims only
-when every requested close succeeded.
+advanced, and prints it. The take is the same as `pt claim`: an owner, an
+optional `--lease` (`30m`, `2h`, `1d`; max 1d; without one the claim never
+expires on its own), and `--json` `claimed_next` carries `claimed_by`,
+`claim_expires_at` and `claim_token`. `--json --claim-next` is always
+`{"results": [...], "claimed_next": task | null | {"error": ...}}` — on
+success, on a failed close (`claimed_next` is null and the command still
+fails), and on a keyed replay (the replay reports the task the first run
+claimed and claims nothing). A claim that fails after the closes committed
+still reports those closes; `claimed_next` carries the error and the command
+succeeds. It claims only when every requested close succeeded. `--lease`
+requires `--claim-next`. A keyed `done --claim-next` is a different command
+from a keyed plain `done` under the same key.
 
 ### `pt note <query> <text…>` (alias `annotate`, v3.43.0)
 

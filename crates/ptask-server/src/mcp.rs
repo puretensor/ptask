@@ -70,6 +70,17 @@ fn with_goals(
     Ok(v)
 }
 
+/// Holder, optional lease and instance token — the same fields `task_claim`
+/// returns — merged onto a claimed-next task object.
+fn with_claim(mut v: serde_json::Value, claim: &ptask_core::claims::Claim) -> serde_json::Value {
+    v["claimed_by"] = serde_json::json!(claim.by);
+    v["claim_expires_at"] = serde_json::json!(claim.expires_at);
+    if !claim.token.is_empty() {
+        v["claim_token"] = serde_json::json!(claim.token);
+    }
+    v
+}
+
 // ------------------------------------------------------------------ args
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -84,9 +95,15 @@ pub struct DoneArg {
     pub expected_deadline: Option<String>,
     /// After the close, claim the next ready task (task_next order) for you
     /// — never the task this call just closed or advanced — and return it
-    /// as claimed_next: close and continue in one call.
+    /// as claimed_next: close and continue in one call. Same take as
+    /// task_claim: an owner, an optional lease_minutes, and a claim_token.
     #[serde(default)]
     pub claim_next: bool,
+    /// Lease in minutes (1..=1440) for the claim-next take. Omit for a
+    /// claim that never expires on its own. Only used when claim_next is
+    /// true.
+    #[serde(default)]
+    pub lease_minutes: Option<i64>,
     /// Closure evidence: what was done and how it was verified (commit, PR,
     /// test run, readback). Journaled with the completion, attributed to you.
     #[serde(default)]
@@ -523,7 +540,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Mark a task done. Pass note with the verification evidence (commit, PR, test run, readback): it is journaled with the completion, so the close is not a bare claim. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline. The reply lists unblocked: tasks this close made ready. Pass claim_next=true to also claim the next ready task (task_next order, never the task this call just closed or advanced) and get it back as claimed_next after the claim (null when nothing is claimable; {error} if the claim failed after the close committed), saving a task_next + task_claim round trip."
+        description = "Mark a task done. Pass note with the verification evidence (commit, PR, test run, readback): it is journaled with the completion, so the close is not a bare claim. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline. The reply lists unblocked: tasks this close made ready. Pass claim_next=true to also claim the next ready task (task_next order, never the task this call just closed or advanced) the same way task_claim does (holder, optional lease_minutes, claim_token) and get it back as claimed_next after the claim (in progress, with claimed_by / claim_expires_at / claim_token; null when nothing is claimable; {error} if the claim failed after the close committed), saving a task_next + task_claim round trip."
     )]
     async fn task_done(
         &self,
@@ -532,11 +549,21 @@ impl PtaskMcp {
             expected_deadline,
             note,
             claim_next,
+            lease_minutes,
         }): Parameters<DoneArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
         let ctx = self.ctx();
         on_blocking(move || {
+            if claim_next
+                && let Some(m) = lease_minutes
+                && !(1..=ptask_core::claims::MAX_LEASE_MINUTES).contains(&m)
+            {
+                return Err(domain_err(format!(
+                    "lease must be 1..={} minutes, got {m}",
+                    ptask_core::claims::MAX_LEASE_MINUTES
+                )));
+            }
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
             let t = ptask_core::tasks::expect_deadline(t, expected_deadline.as_deref())
                 .map_err(domain_err)?;
@@ -563,9 +590,14 @@ impl PtaskMcp {
                 .unwrap_or_default();
             v["unblocked"] = serde_json::json!(unblocked);
             if claim_next {
-                v["claimed_next"] =
-                    match ptask_core::dag::claim_next(&db, &ctx, std::slice::from_ref(&t.id)) {
-                        Ok(Some(n)) => match with_goals(&db, &n, task_json(&n)) {
+                v["claimed_next"] = match ptask_core::dag::claim_next(
+                    &db,
+                    &ctx,
+                    std::slice::from_ref(&t.id),
+                    lease_minutes,
+                ) {
+                    Ok(Some((n, claim))) => {
+                        match with_goals(&db, &n, with_claim(task_json(&n), &claim)) {
                             Ok(j) => j,
                             Err(e) => {
                                 tracing::warn!(
@@ -573,12 +605,13 @@ impl PtaskMcp {
                                     error = %e,
                                     "goal lookup after claim-next failed"
                                 );
-                                task_json(&n)
+                                with_claim(task_json(&n), &claim)
                             }
-                        },
-                        Ok(None) => serde_json::Value::Null,
-                        Err(e) => serde_json::json!({ "error": e.to_string() }),
-                    };
+                        }
+                    }
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => serde_json::json!({ "error": e.to_string() }),
+                };
             }
             json_ok(&v)
         })
@@ -1348,6 +1381,7 @@ mod tests {
                 expected_deadline: Some("2099-01-01".into()),
                 note: None,
                 claim_next: false,
+                lease_minutes: None,
             }))
         };
         done().await.unwrap();
@@ -1376,6 +1410,7 @@ mod tests {
                 expected_deadline: None,
                 note: None,
                 claim_next: false,
+                lease_minutes: None,
             }))
         };
         done(t.pt_id.clone().unwrap()).await.unwrap();
@@ -1426,6 +1461,7 @@ mod tests {
                 expected_deadline: None,
                 note: None,
                 claim_next: false,
+                lease_minutes: None,
             }))
             .await
             .unwrap();
@@ -1656,6 +1692,7 @@ mod tests {
                 expected_deadline: None,
                 note: Some("  ".into()),
                 claim_next: false,
+                lease_minutes: None,
             }))
             .await
             .is_err()
@@ -1665,6 +1702,7 @@ mod tests {
             expected_deadline: None,
             note: Some("deployed; 256k ctx verified".into()),
             claim_next: false,
+            lease_minutes: None,
         }))
         .await
         .unwrap();
@@ -1894,6 +1932,7 @@ mod tests {
                 expected_deadline: None,
                 note: None,
                 claim_next: true,
+                lease_minutes: None,
             }))
             .await
             .unwrap();
