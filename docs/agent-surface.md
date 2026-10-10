@@ -6,7 +6,7 @@ a git-diffable export.
 
 ## MCP server
 
-Two transports, one handler, 25 tools (`task_next / task_list / task_add /
+Two transports, one handler, 26 tools (`task_flux / task_next / task_list / task_add /
 task_show / task_done / task_dismiss / task_note / task_edit / task_claim /
 task_heartbeat / task_release / task_promote / task_duplicates / task_merge /
 task_depend / task_capture / task_search / task_digest` plus
@@ -150,6 +150,13 @@ commit; a scoring failure does not roll back a successful edit.
   provenance and subtasks carried, the higher priority kept. A done target
   with open dependents on the duplicate is refused. `task_show` returns
   `duplicate_of` and `merged_in` from the `task_links` row.
+- **task_flux** (v3.46.0) — who opened and who closed work over a window
+  (`minutes`, default 24h): created, done, dismissed, reopened and net per
+  actor, counting real open↔closed transitions (deleting an open task is a
+  closure). Check your own row before reporting a closing pass: a pass must not
+  open more tasks than it closes (net > 0 means it did). `task_digest`
+  carries the same split for its own window (UTC midnight N days ago) as
+  `flux_by_actor`.
 - **task_digest** — deterministic session priming (recent done/dismissed,
   created count, ready queue). Deliberately NOT an LLM summary: the consumer
   is a model; structured facts beat a second model's paraphrase and can't
