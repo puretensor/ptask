@@ -70,6 +70,17 @@ fn with_goals(
     Ok(v)
 }
 
+/// Holder, optional lease and instance token — the same fields `task_claim`
+/// returns — merged onto a claimed-next task object.
+fn with_claim(mut v: serde_json::Value, claim: &ptask_core::claims::Claim) -> serde_json::Value {
+    v["claimed_by"] = serde_json::json!(claim.by);
+    v["claim_expires_at"] = serde_json::json!(claim.expires_at);
+    if !claim.token.is_empty() {
+        v["claim_token"] = serde_json::json!(claim.token);
+    }
+    v
+}
+
 // ------------------------------------------------------------------ args
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -82,6 +93,17 @@ pub struct DoneArg {
     /// task_done never advances a recurring task twice. "" = it had none.
     #[serde(default)]
     pub expected_deadline: Option<String>,
+    /// After the close, claim the next ready task (task_next order) for you
+    /// — never the task this call just closed or advanced — and return it
+    /// as claimed_next: close and continue in one call. Same take as
+    /// task_claim: an owner, an optional lease_minutes, and a claim_token.
+    #[serde(default)]
+    pub claim_next: bool,
+    /// Lease in minutes (1..=1440) for the claim-next take. Omit for a
+    /// claim that never expires on its own. Only used when claim_next is
+    /// true.
+    #[serde(default)]
+    pub lease_minutes: Option<i64>,
     /// Closure evidence: what was done and how it was verified (commit, PR,
     /// test run, readback). Journaled with the completion, attributed to you.
     #[serde(default)]
@@ -284,6 +306,13 @@ pub struct SearchArg {
     pub query: String,
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+pub struct FluxArg {
+    /// Window in minutes (default 1440 = 24h; max 129600 = 90d).
+    #[serde(default)]
+    pub minutes: Option<i64>,
 }
 
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
@@ -544,7 +573,7 @@ impl PtaskMcp {
     }
 
     #[tool(
-        description = "Mark a task done. Pass note with the verification evidence (commit, PR, test run, readback): it is journaled with the completion, so the close is not a bare claim. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline."
+        description = "Mark a task done. Pass note with the verification evidence (commit, PR, test run, readback): it is journaled with the completion, so the close is not a bare claim. Recurring tasks are advanced in place (status stays pending) and the JSON reports status=advanced plus next_deadline. The reply lists unblocked: tasks this close made ready. Pass claim_next=true to also claim the next ready task (task_next order, never the task this call just closed or advanced) the same way task_claim does (holder, optional lease_minutes, claim_token) and get it back as claimed_next after the claim (in progress, with claimed_by / claim_expires_at / claim_token; null when nothing is claimable; {error} if the claim failed after the close committed), saving a task_next + task_claim round trip."
     )]
     async fn task_done(
         &self,
@@ -552,30 +581,72 @@ impl PtaskMcp {
             id,
             expected_deadline,
             note,
+            claim_next,
+            lease_minutes,
         }): Parameters<DoneArg>,
     ) -> Result<CallToolResult, McpError> {
         let db = self.db.clone();
         let ctx = self.ctx();
         on_blocking(move || {
+            if claim_next
+                && let Some(m) = lease_minutes
+                && !(1..=ptask_core::claims::MAX_LEASE_MINUTES).contains(&m)
+            {
+                return Err(domain_err(format!(
+                    "lease must be 1..={} minutes, got {m}",
+                    ptask_core::claims::MAX_LEASE_MINUTES
+                )));
+            }
             let t = ptask_core::tasks::resolve_for_lookup(&db, &id, false).map_err(domain_err)?;
             let t = ptask_core::tasks::expect_deadline(t, expected_deadline.as_deref())
                 .map_err(domain_err)?;
             let outcome = ptask_core::tasks::mark_done_noted(&db, &t, note.as_deref(), &ctx)
                 .map_err(domain_err)?;
             rescore_db(&db);
-            match outcome {
-                ptask_core::tasks::DoneOutcome::Completed => json_ok(&serde_json::json!({
+            let mut v = match outcome {
+                ptask_core::tasks::DoneOutcome::Completed => serde_json::json!({
                     "ok": true, "pt_id": t.pt_id, "status": "done"
-                })),
+                }),
                 ptask_core::tasks::DoneOutcome::Advanced { next_deadline } => {
-                    json_ok(&serde_json::json!({
+                    serde_json::json!({
                         "ok": true,
                         "pt_id": t.pt_id,
                         "status": "advanced",
                         "next_deadline": next_deadline,
-                    }))
+                    })
                 }
+            };
+            // The close is committed; what follows only reads (and, asked,
+            // claims). A failure here must not read as a failed close.
+            let unblocked = ptask_core::dag::unblocked_by(&db, &t.id)
+                .map(|ts| ts.iter().map(task_json).collect::<Vec<_>>())
+                .unwrap_or_default();
+            v["unblocked"] = serde_json::json!(unblocked);
+            if claim_next {
+                v["claimed_next"] = match ptask_core::dag::claim_next(
+                    &db,
+                    &ctx,
+                    std::slice::from_ref(&t.id),
+                    lease_minutes,
+                ) {
+                    Ok(Some((n, claim))) => {
+                        match with_goals(&db, &n, with_claim(task_json(&n), &claim)) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "ptask::mcp",
+                                    error = %e,
+                                    "goal lookup after claim-next failed"
+                                );
+                                with_claim(task_json(&n), &claim)
+                            }
+                        }
+                    }
+                    Ok(None) => serde_json::Value::Null,
+                    Err(e) => serde_json::json!({ "error": e.to_string() }),
+                };
             }
+            json_ok(&v)
         })
         .await
     }
@@ -595,6 +666,22 @@ impl PtaskMcp {
                 .map_err(domain_err)?;
             rescore_db(&db);
             json_ok(&serde_json::json!({"ok": true, "pt_id": t.pt_id, "status": "dismissed"}))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Who opened and who closed work over a window (default 24h): created, done, dismissed, reopened and net per actor, from the journal. Counts are real open/closed transitions; deleting an open task is a closure. net = created + reopened - done - dismissed. Before reporting a closing pass, check your own row: a closing pass must not open more tasks than it closes (net > 0)."
+    )]
+    async fn task_flux(
+        &self,
+        Parameters(FluxArg { minutes }): Parameters<FluxArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let db = self.db.clone();
+        on_blocking(move || {
+            let r =
+                ptask_core::flux::by_actor(&db, minutes.unwrap_or(24 * 60)).map_err(domain_err)?;
+            json_ok(&r)
         })
         .await
     }
@@ -1384,6 +1471,8 @@ mod tests {
                 id: t.pt_id.clone().unwrap(),
                 expected_deadline: Some("2099-01-01".into()),
                 note: None,
+                claim_next: false,
+                lease_minutes: None,
             }))
         };
         done().await.unwrap();
@@ -1411,6 +1500,8 @@ mod tests {
                 id,
                 expected_deadline: None,
                 note: None,
+                claim_next: false,
+                lease_minutes: None,
             }))
         };
         done(t.pt_id.clone().unwrap()).await.unwrap();
@@ -1460,6 +1551,8 @@ mod tests {
                 id: t.pt_id.clone().unwrap(),
                 expected_deadline: None,
                 note: None,
+                claim_next: false,
+                lease_minutes: None,
             }))
             .await
             .unwrap();
@@ -1692,6 +1785,8 @@ mod tests {
                 id: pt.clone(),
                 expected_deadline: None,
                 note: None,
+                claim_next: false,
+                lease_minutes: None,
             }))
         };
         let err = done().await.unwrap_err();
@@ -1768,6 +1863,8 @@ mod tests {
                 id: pt.clone(),
                 expected_deadline: None,
                 note: Some("  ".into()),
+                claim_next: false,
+                lease_minutes: None,
             }))
             .await
             .is_err()
@@ -1776,6 +1873,8 @@ mod tests {
             id: pt.clone(),
             expected_deadline: None,
             note: Some("deployed; 256k ctx verified".into()),
+            claim_next: false,
+            lease_minutes: None,
         }))
         .await
         .unwrap();
@@ -1987,5 +2086,73 @@ mod tests {
         // A plain unrelated add has no possible_duplicates key.
         let other = text(add("Renew the office lease", false).await.unwrap());
         assert!(other.get("possible_duplicates").is_none());
+    }
+
+    #[tokio::test]
+    async fn task_done_reports_unblocked_and_can_claim_the_next_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let ctx = EventCtx::test();
+        let base = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("provision"), &ctx)
+            .unwrap();
+        let next =
+            ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("migrate"), &ctx).unwrap();
+        ptask_core::tasks::add_dependency(&db, &next.id, &base.id, &ctx).unwrap();
+        let mcp = PtaskMcp::new(db.clone(), "hal".into());
+        let r = mcp
+            .task_done(Parameters(DoneArg {
+                id: base.pt_id.clone().unwrap(),
+                expected_deadline: None,
+                note: None,
+                claim_next: true,
+                lease_minutes: None,
+            }))
+            .await
+            .unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(v.pointer("/content/0/text").unwrap().as_str().unwrap()).unwrap();
+        assert_eq!(body["status"], "done");
+        assert_eq!(body["unblocked"][0]["pt_id"], next.pt_id.clone().unwrap());
+        assert_eq!(body["claimed_next"]["pt_id"], next.pt_id.clone().unwrap());
+        let status: String = db
+            .with_conn(|c| {
+                Ok(
+                    c.query_row("SELECT status_v2 FROM tasks WHERE id=?1", [&next.id], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "in_progress");
+    }
+
+    #[tokio::test]
+    async fn task_flux_shows_an_agent_its_own_net() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("mcp.db")).unwrap();
+        let hal = PtaskMcp::new(db.clone(), "hal".into());
+        for t in ["one finding", "another finding"] {
+            ptask_core::tasks::create(
+                &db,
+                ptask_core::NewTask::minimal(t),
+                &EventCtx::local("hal"),
+            )
+            .unwrap();
+        }
+        let r = hal
+            .task_flux(Parameters(FluxArg { minutes: Some(60) }))
+            .await
+            .unwrap();
+        let v = serde_json::to_value(&r).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(v.pointer("/content/0/text").unwrap().as_str().unwrap()).unwrap();
+        assert_eq!(body["actors"][0]["actor"], "hal");
+        assert_eq!(body["actors"][0]["net"], 2);
+        assert!(
+            hal.task_flux(Parameters(FluxArg { minutes: Some(0) }))
+                .await
+                .is_err()
+        );
     }
 }

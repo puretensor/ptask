@@ -81,9 +81,11 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-m+[Closure evidence journaled with the completion (what was done, how it was verified). With several tasks, each gets the same note]:NOTE:_default' \
 '--note=[Closure evidence journaled with the completion (what was done, how it was verified). With several tasks, each gets the same note]:NOTE:_default' \
+'--lease=[Lease for \`--claim-next\` (\`30m\`, \`2h\`, \`1d\`; max 1d). Without one the claim never expires on its own]:LEASE:_default' \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
 '--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
 '--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--claim-next[After closing, claim the next ready task (\`pt next\` order) for \$PTASK_ACTOR\: close and continue in one command. Same take as \`pt claim\`\: an owner, an optional \`--lease\`, and a claim_token]' \
 '--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
 '--no-color[Plain output — shorthand for \`--color never\`]' \
 '-h[Print help]' \
@@ -1251,6 +1253,18 @@ _arguments "${_arguments_options[@]}" : \
 ':query -- PT-N (e.g. PT-42), bare integer (42), or title substring:_default' \
 && ret=0
 ;;
+(flux)
+_arguments "${_arguments_options[@]}" : \
+'--since=[Window\: 30m, 6h, 24h, 7d, 2w (max 90d)]:SINCE:_default' \
+'--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
+'--idempotency-key=[Idempotency key recorded with the mutation'\''s event — a retried command with the same key returns ok without re-applying]:IDEMPOTENCY_KEY:_default' \
+'--color=[Colour\: auto (TTY only; honours NO_COLOR and PT_COLOR=always|never), always, or never]:COLOR:(auto always never)' \
+'--json[Emit machine-readable JSON instead of human text (task-facing verbs)]' \
+'--no-color[Plain output — shorthand for \`--color never\`]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
 (undo)
 _arguments "${_arguments_options[@]}" : \
 '--db=[Override the SQLite path (default\: \$PTASK_DB or ~/puretensor-tasks/tasks.db)]:DB:_default' \
@@ -2181,6 +2195,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(flux)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (undo)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -2401,6 +2419,7 @@ _pt_commands() {
 'why:Explain a task'\''s composite score\: components, weights, rank' \
 'bulk:Apply one action to every task matching a filter DSL expression' \
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
+'flux:Who opened and who closed work over a window\: created, done, dismissed, reopened and net per actor, from the journal' \
 'undo:Reverse your own most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
 'approval:Approval inbox\: agents request, the operator decides, executors consume' \
@@ -2748,6 +2767,11 @@ _pt__subcmd__export_commands() {
     local commands; commands=()
     _describe -t commands 'pt export commands' commands "$@"
 }
+(( $+functions[_pt__subcmd__flux_commands] )) ||
+_pt__subcmd__flux_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt flux commands' commands "$@"
+}
 (( $+functions[_pt__subcmd__gen-completions_commands] )) ||
 _pt__subcmd__gen-completions_commands() {
     local commands; commands=()
@@ -2937,6 +2961,7 @@ _pt__subcmd__help_commands() {
 'why:Explain a task'\''s composite score\: components, weights, rank' \
 'bulk:Apply one action to every task matching a filter DSL expression' \
 'log:Show a task'\''s attributed event history (who did what, via which surface)' \
+'flux:Who opened and who closed work over a window\: created, done, dismissed, reopened and net per actor, from the journal' \
 'undo:Reverse your own most recent undoable mutation (done/dismiss/create)' \
 'token:Manage named scoped API tokens (create/list/revoke)' \
 'approval:Approval inbox\: agents request, the operator decides, executors consume' \
@@ -3148,6 +3173,11 @@ _pt__subcmd__help__subcmd__edit_commands() {
 _pt__subcmd__help__subcmd__export_commands() {
     local commands; commands=()
     _describe -t commands 'pt help export commands' commands "$@"
+}
+(( $+functions[_pt__subcmd__help__subcmd__flux_commands] )) ||
+_pt__subcmd__help__subcmd__flux_commands() {
+    local commands; commands=()
+    _describe -t commands 'pt help flux commands' commands "$@"
 }
 (( $+functions[_pt__subcmd__help__subcmd__gen-completions_commands] )) ||
 _pt__subcmd__help__subcmd__gen-completions_commands() {

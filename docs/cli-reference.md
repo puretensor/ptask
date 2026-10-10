@@ -48,12 +48,29 @@ network.
 | `-v`, `--verbose` | show description + UUID |
 | `[filter]` positional | DSL — see [dsl.md](dsl.md) |
 
-### `pt done <query> [...] [-m | --note TEXT]`
+### `pt done <query> [...] [-m | --note TEXT] [--claim-next] [--lease D]`
 
 Mark done by `PT-N`, bare integer `42`, or title substring. `--note` journals
 closure evidence (what was done, how it was verified) inside the completion
 event, attributed like the close itself; with several tasks each gets the
 note. A blank note refuses the close.
+
+Each completion lists the tasks it unblocked (dependents with no prerequisite
+left open; in `--json`, `unblocked` per result). `--claim-next` (v3.47.0) then
+claims the next ready task in `pt next` order for `$PTASK_ACTOR`, skipping
+tasks already in progress and any task this same call just closed or
+advanced, and prints it. The take is the same as `pt claim`: an owner, an
+optional `--lease` (`30m`, `2h`, `1d`; max 1d; without one the claim never
+expires on its own), and `--json` `claimed_next` carries `claimed_by`,
+`claim_expires_at` and `claim_token`. `--json --claim-next` is always
+`{"results": [...], "claimed_next": task | null | {"error": ...}}` — on
+success, on a failed close (`claimed_next` is null and the command still
+fails), and on a keyed replay (the replay reports the task the first run
+claimed and claims nothing). A claim that fails after the closes committed
+still reports those closes; `claimed_next` carries the error and the command
+succeeds. It claims only when every requested close succeeded. `--lease`
+requires `--claim-next`. A keyed `done --claim-next` is a different command
+from a keyed plain `done` under the same key.
 
 ### `pt note <query> <text…>` (alias `annotate`, v3.43.0)
 
@@ -200,6 +217,21 @@ carried. Honours `--idempotency-key`.
 Soft-close a task (`status → dismissed`). Reversible with `pt reopen`. Distinct
 from `pt rm`: the row and its history survive. `--note` records why (a
 duplicate of PT-N, superseded, obsolete) in the dismissal event.
+
+### `pt flux [--since 24h]` (v3.46.0)
+
+Who opened and who closed work over a window (`30m`, `6h`, `24h`, `7d`,
+`2w`; max 90d), from the attributed journal: per actor, tasks created, done,
+dismissed and reopened, and `net` = created + reopened − done − dismissed,
+the actor's effect on the open-task count. Counts are real open↔closed
+transitions (an un-block of an already-open task is not a reopen; a second
+completion of a done task is not a close). Deleting an open task counts as
+a closure. Largest net first, with a total row; a positive net is
+highlighted. It answers the question the cockpit's `+13 / −4` chip raises
+(who opened the thirteen?) and checks the rule that a closing pass must not
+open more than it closes. Read-only; `--json` honoured. The same split is
+in `pt digest` (`flux_by_actor`, covering the digest's own window from UTC
+midnight N days ago), MCP `task_flux`, and the cockpit's flux range picker.
 
 ### `pt rm <query> [-y | --yes]`
 

@@ -19,6 +19,7 @@ pub mod dupes;
 pub mod error;
 pub mod event_log;
 pub mod filter;
+pub mod flux;
 pub mod goals;
 pub mod magic_words;
 pub mod migrations;
