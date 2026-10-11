@@ -103,7 +103,7 @@ pub fn claim_next(
     skip: &[String],
     lease_minutes: Option<i64>,
 ) -> Result<Option<(Task, crate::claims::Claim)>> {
-    for t in next_ready(db, 50)? {
+    for t in next_ready(db, usize::MAX)? {
         if skip.iter().any(|id| id == &t.id) {
             continue;
         }

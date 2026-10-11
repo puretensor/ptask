@@ -18,8 +18,8 @@ fi
 # rewrite stale workspace package stamps and hide the repository defect.
 cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
-dependency_count=$(grep -Ec '^ptask-(core|tui|server|bot|distill|notify)[[:space:]]*=.*version = "' Cargo.toml)
-matching_dependencies=$(grep -Ec "^ptask-(core|tui|server|bot|distill|notify)[[:space:]]*=.*version = \"${version}\"" Cargo.toml)
+dependency_count=$(grep -Ec '^ptask-(core|tui|server|bot|distill|notify)[[:space:]]*=.*version = "' Cargo.toml || test $? -eq 1)
+matching_dependencies=$(grep -Ec "^ptask-(core|tui|server|bot|distill|notify)[[:space:]]*=.*version = \"${version}\"" Cargo.toml || test $? -eq 1)
 if [[ "$dependency_count" -ne 6 || "$matching_dependencies" -ne 6 ]]; then
     echo "version-check: internal dependency requirements do not all match ${version}" >&2
     exit 1
