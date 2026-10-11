@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "3.48.1"
+version = "3.48.2"
 edition = "2024"
 license-file = "LICENSE"
 authors = ["PureTensor, Inc. <hal@puretensor.ai>"]
