@@ -981,8 +981,12 @@ pub(crate) fn unmerge_if_needed(
         if payload.get("recurrence_copied").and_then(|v| v.as_bool()) == Some(true) {
             tx.execute("DELETE FROM pt_recurrence WHERE task_uuid=?1", [&canon])?;
         }
-        if payload.get("goal_copied").is_some() {
-            tx.execute("UPDATE tasks SET goal_id=NULL WHERE id=?1", [&canon])?;
+        if let Some(g) = payload.get("goal_copied").and_then(|v| v.as_str()) {
+            tx.execute(
+                "UPDATE tasks SET goal_id=NULL WHERE id=?1
+                   AND goal_id=(SELECT id FROM goals WHERE 'G-' || seq = ?2)",
+                params![canon, g],
+            )?;
         }
         for handle in json_str_list(&payload, "discovered_from_added") {
             let Some(to) = resolve_handle(tx, &handle)? else {
