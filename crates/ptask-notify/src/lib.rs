@@ -12,6 +12,7 @@
 use ptask_core::accountability::{Dispatch, NudgeRequest, html_escape};
 use ptask_core::approvals::Approval;
 use ptask_core::config::DispatchCfg;
+use ptask_core::text::has_hazard;
 use ptask_core::{Db, Error, Result};
 use tracing::warn;
 
@@ -55,41 +56,9 @@ fn excerpt(s: &str, max: usize) -> String {
     out
 }
 
-/// Characters that render invisibly or reorder the text around them:
-/// bidi embeddings/overrides/isolates and the Unicode
-/// Default_Ignorable_Code_Point set (zero-width spaces and joiners, word
-/// joiner, BOM, soft hyphen, variation selectors, tag characters, ...).
-/// A preview containing one can show the operator something other than
-/// the bytes being approved.
-/// True when the preview holds a character that renders invisibly or
-/// misleadingly: default-ignorable / bidi characters, or a control
-/// character other than a line break or tab. A lone CR or a backspace can
-/// make "pay 400\r9000" read as something else; CRLF line endings (every
-/// email) are ordinary.
-fn has_deceptive(preview: &str) -> bool {
-    let mut chars = preview.chars().peekable();
-    while let Some(ch) = chars.next() {
-        let benign_control =
-            ch == '\n' || ch == '\t' || (ch == '\r' && chars.peek() == Some(&'\n'));
-        if is_deceptive(ch) || (ch.is_control() && !benign_control) {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_deceptive(ch: char) -> bool {
-    matches!(ch,
-        '\u{00AD}' | '\u{034F}' | '\u{061C}' | '\u{115F}' | '\u{1160}'
-        | '\u{17B4}' | '\u{17B5}' | '\u{180B}'..='\u{180F}'
-        | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
-        | '\u{2060}'..='\u{206F}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}'
-        | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFF8}'
-        | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
-        | '\u{E0000}'..='\u{E0FFF}')
-}
-
-/// Why a ping must not offer tap-to-decide, if it must not.
+/// Why a ping must not offer tap-to-decide, if it must not. The deceptive
+/// check is core's strict-preview gate, the same one `pt approve` and the
+/// dashboard apply, so a tap can never approve what they refuse.
 fn tap_blocker(ap: &Approval, preview: &str) -> Option<&'static str> {
     let readable = ap
         .payload
@@ -99,7 +68,7 @@ fn tap_blocker(ap: &Approval, preview: &str) -> Option<&'static str> {
         Some("unseen")
     } else if utf16_len(preview) > PREVIEW_UNITS {
         Some("truncated")
-    } else if has_deceptive(preview) {
+    } else if has_hazard(preview) {
         Some("deceptive")
     } else {
         None
@@ -107,8 +76,8 @@ fn tap_blocker(ap: &Approval, preview: &str) -> Option<&'static str> {
 }
 
 /// True when a Telegram ping for `ap` shows the operator the whole payload,
-/// faithfully: stored, UTF-8, within the preview budget, and free of
-/// invisible or direction-changing characters. The message builder offers
+/// faithfully: stored, UTF-8, within the preview budget, and free of the
+/// characters `ptask_core::text::has_hazard` flags. The message builder offers
 /// Approve/Reject buttons only then, and `/tg/callback` re-checks it before
 /// honouring an Approve tap (pings sent by older builds carried buttons
 /// under looser rules).
