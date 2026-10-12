@@ -521,13 +521,16 @@ pub fn merge(
     };
     let mut dependents_moved = Vec::new();
     let mut dependents_already_on_into = Vec::new();
+    let mut dependency_on_duplicate_dropped = false;
     for f in &dependents {
         tx.execute(
             "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='depends_on'",
             params![f, dup.id],
         )?;
         if *f == canon.id {
-            // `into` waited on its own duplicate: the edge just goes.
+            // `into` waited on its own duplicate: the edge goes, and undo
+            // puts it back.
+            dependency_on_duplicate_dropped = true;
             continue;
         }
         if reaches(&tx, &canon.id, f)? {
@@ -802,6 +805,7 @@ pub fn merge(
         "recurrence_copied": recurrence_copied,
         "discovered_from_added": discovered_from_added,
         "subtasks_moved": subtasks_moved,
+        "dependency_on_duplicate_dropped": dependency_on_duplicate_dropped,
     });
     if !criteria_carried.is_empty() {
         canon_payload["criteria_carried"] = serde_json::json!(criteria_carried);
@@ -949,6 +953,24 @@ pub(crate) fn unmerge_if_needed(
                 &dep,
                 "task.updated",
                 &change,
+            )?;
+        }
+        if payload
+            .get("dependency_on_duplicate_dropped")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
+            tx.execute(
+                "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
+                 VALUES (?1, ?2, 'depends_on', ?3)",
+                params![canon, duplicate_uuid, now],
+            )?;
+            crate::tasks::record_event_tx(
+                tx,
+                &sub_ctx(ctx, &format!("undep:{canon}")),
+                &canon,
+                "task.updated",
+                &serde_json::json!({ "task_uuid": canon, "depends_on_added": duplicate_uuid }),
             )?;
         }
         for handle in json_str_list(&payload, "prerequisites_added") {
