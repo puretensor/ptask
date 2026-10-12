@@ -93,6 +93,7 @@ const AGE_BUCKETS: [(f64, f64, &str); 5] = [
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/config", get(api_config))
         .route("/api/stats", get(api_stats))
         .route("/api/tasks", get(api_tasks).post(api_create))
         .route("/api/critical", get(api_critical))
@@ -540,6 +541,23 @@ fn api_critical_blocking(state: AppState, headers: HeaderMap, q: TasksQ) -> Resp
         Ok(tasks) => Json(serde_json::json!({"tasks": tasks})).into_response(),
         Err(e) => jerr(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
+}
+
+/// Public cockpit config, as the sidecar serves it. The page's `startApp()`
+/// waits on this, so it is not behind Basic auth.
+async fn api_config(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let dash = &state.dash;
+    let domains: Vec<serde_json::Value> = dash
+        .domains
+        .iter()
+        .map(|d| serde_json::json!({ "key": d.key, "label": d.label, "abbr": d.abbr }))
+        .collect();
+    Json(serde_json::json!({
+        "title": dash.title,
+        "domains": domains,
+        "default_domain": dash.default_domain,
+        "version": ptask_core::VERSION,
+    }))
 }
 
 async fn api_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
