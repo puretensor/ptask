@@ -520,6 +520,7 @@ pub fn merge(
             .collect::<std::result::Result<_, _>>()?
     };
     let mut dependents_moved = Vec::new();
+    let mut dependents_already_on_into = Vec::new();
     for f in &dependents {
         tx.execute(
             "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='depends_on'",
@@ -534,21 +535,28 @@ pub fn merge(
                 "merging would create a dependency cycle through {f}: drop that edge first; nothing was merged"
             )));
         }
-        tx.execute(
+        let added = tx.execute(
             "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
              VALUES (?1, ?2, 'depends_on', ?3)",
             params![f, canon.id, now],
         )?;
+        let mut change = serde_json::json!({ "task_uuid": f, "depends_on_removed": dup.id });
+        if added == 1 {
+            change["depends_on_added"] = serde_json::json!(canon.id);
+        }
         crate::tasks::record_event_tx(
             &tx,
             &sub_ctx(ctx, &format!("dep:{f}")),
             f,
             "task.updated",
-            &serde_json::json!({
-                "task_uuid": f, "depends_on_added": canon.id, "depends_on_removed": dup.id,
-            }),
+            &change,
         )?;
-        dependents_moved.push(pt_handle(&tx, f)?);
+        let handle = pt_handle(&tx, f)?;
+        if added == 0 {
+            // Already waited on `into` before the merge: undo must keep that edge.
+            dependents_already_on_into.push(handle.clone());
+        }
+        dependents_moved.push(handle);
     }
 
     // Prerequisites: the duplicate's blockers block the work wherever it lives.
@@ -787,7 +795,9 @@ pub fn merge(
     let mut canon_payload = serde_json::json!({
         "task_uuid": canon.id, "pt_id": canon.pt_id,
         "from": dup.id, "from_pt_id": dup.pt_id, "from_title": dup.title,
-        "dependents_moved": dependents_moved, "prerequisites_added": prerequisites_added,
+        "dependents_moved": dependents_moved,
+        "dependents_already_on_into": dependents_already_on_into,
+        "prerequisites_added": prerequisites_added,
         "labels_added": labels_added,
         "recurrence_copied": recurrence_copied,
         "discovered_from_added": discovered_from_added,
@@ -911,27 +921,34 @@ pub(crate) fn unmerge_if_needed(
     if let Some(payload_s) = payload_s {
         let payload: serde_json::Value = serde_json::from_str(&payload_s).unwrap_or_default();
         let now = crate::tasks::iso_now();
+        let already_on_into = json_str_list(&payload, "dependents_already_on_into");
         for handle in json_str_list(&payload, "dependents_moved") {
             let Some(dep) = resolve_handle(tx, &handle)? else {
                 continue;
             };
-            tx.execute(
-                "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='depends_on'",
-                params![dep, canon],
-            )?;
+            let kept = already_on_into.contains(&handle);
+            if !kept {
+                tx.execute(
+                    "DELETE FROM task_links WHERE from_uuid=?1 AND to_uuid=?2 AND kind='depends_on'",
+                    params![dep, canon],
+                )?;
+            }
             tx.execute(
                 "INSERT OR IGNORE INTO task_links (from_uuid, to_uuid, kind, created_at)
                  VALUES (?1, ?2, 'depends_on', ?3)",
                 params![dep, duplicate_uuid, now],
             )?;
+            let mut change =
+                serde_json::json!({ "task_uuid": dep, "depends_on_added": duplicate_uuid });
+            if !kept {
+                change["depends_on_removed"] = serde_json::json!(canon);
+            }
             crate::tasks::record_event_tx(
                 tx,
                 &sub_ctx(ctx, &format!("undep:{dep}")),
                 &dep,
                 "task.updated",
-                &serde_json::json!({
-                    "task_uuid": dep, "depends_on_added": duplicate_uuid, "depends_on_removed": canon,
-                }),
+                &change,
             )?;
         }
         for handle in json_str_list(&payload, "prerequisites_added") {
