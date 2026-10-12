@@ -75,6 +75,21 @@ pub struct DashConfig {
     /// host of `$PTASK_DASH_URL`, and this machine's own short hostname.
     /// Lower-cased, without port or trailing dot.
     pub allowed_hosts: Vec<String>,
+    /// Brand shown in the cockpit (`$PTASK_DASH_TITLE`, default "PTASK").
+    pub title: String,
+    /// Domain hats (`$PTASK_DASH_DOMAINS`). Empty = legacy ENG/MGMT mode.
+    pub domains: Vec<DashDomain>,
+    /// Domain for unlabelled tasks (`$PTASK_DASH_DEFAULT_DOMAIN`, else the
+    /// first configured domain). None when no domains are configured.
+    pub default_domain: Option<String>,
+}
+
+/// One cockpit domain hat: `key[:Label[:ABBR]]` in `$PTASK_DASH_DOMAINS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashDomain {
+    pub key: String,
+    pub label: String,
+    pub abbr: String,
 }
 
 /// API-token material for `pt serve` (enforce-if-configured).
@@ -188,6 +203,10 @@ impl Config {
         {
             allowed_hosts.push(own);
         }
+        let domains = parse_dash_domains(env_nonempty("PTASK_DASH_DOMAINS").as_deref());
+        let default_domain = env_nonempty("PTASK_DASH_DEFAULT_DOMAIN")
+            .filter(|key| domains.iter().any(|d| &d.key == key))
+            .or_else(|| domains.first().map(|d| d.key.clone()));
         Config {
             db_path: env_db_path(),
             actor: env_nonempty("PTASK_ACTOR").unwrap_or_else(|| "shell".into()),
@@ -267,6 +286,9 @@ impl Config {
                 frame_ancestor: env_nonempty("PTASK_DASH_FRAME_ANCESTOR"),
                 url: env_nonempty("PTASK_DASH_URL"),
                 allowed_hosts,
+                title: env_nonempty("PTASK_DASH_TITLE").unwrap_or_else(|| "PTASK".into()),
+                domains,
+                default_domain,
             },
             tg_forwarders: parse_forwarders(env_nonempty("PTASK_TG_FORWARDERS")),
             tg_approval_buttons: env_truthy("PTASK_TG_APPROVAL_BUTTONS"),
@@ -294,6 +316,55 @@ fn dash_allowed_hosts(list: Option<&str>, url: Option<&str>) -> Vec<String> {
         }
     }
     hosts
+}
+
+/// `$PTASK_DASH_DOMAINS` as the sidecar's `parse_domains` reads it. Malformed
+/// entries are logged and skipped: `from_env` cannot fail, so the sidecar's
+/// refuse-to-start is not mirrored here.
+fn parse_dash_domains(raw: Option<&str>) -> Vec<DashDomain> {
+    let mut domains: Vec<DashDomain> = Vec::new();
+    for entry in raw
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        let fields: Vec<&str> = entry.split(':').map(str::trim).collect();
+        let key = fields[0];
+        let key_ok = key.len() <= 24
+            && key.starts_with(|c: char| c.is_ascii_lowercase())
+            && key
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+        let abbr = fields.get(2).copied().filter(|a| !a.is_empty());
+        if fields.len() > 3
+            || !key_ok
+            || key == "all"
+            || domains.iter().any(|d| d.key == key)
+            || abbr.is_some_and(|a| a.len() > 5)
+        {
+            tracing::warn!(entry, "ignoring malformed PTASK_DASH_DOMAINS entry");
+            continue;
+        }
+        let label = fields
+            .get(1)
+            .copied()
+            .filter(|l| !l.is_empty())
+            .map_or_else(
+                || format!("{}{}", key[..1].to_ascii_uppercase(), &key[1..]),
+                str::to_string,
+            );
+        let abbr = abbr.map_or_else(
+            || key[..key.len().min(4)].to_ascii_uppercase(),
+            str::to_string,
+        );
+        domains.push(DashDomain {
+            key: key.to_string(),
+            label,
+            abbr,
+        });
+    }
+    domains
 }
 
 fn host_without_port(host_port: &str) -> String {
