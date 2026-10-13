@@ -57,12 +57,20 @@ async fn create_counts_title_length_in_chars_not_bytes() {
     for (label, title, accepted) in cases() {
         let (app, _state, _guard) = app();
         let (status, body) = post(&app, "/api/tasks", serde_json::json!({ "title": title })).await;
-        let want = if accepted { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+        let want = if accepted {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        };
         if status != want {
             wrong.push(format!("create {label}: got {status}, want {want}: {body}"));
         }
     }
-    assert!(wrong.is_empty(), "title length must count chars:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "title length must count chars:\n{}",
+        wrong.join("\n")
+    );
 }
 
 #[tokio::test]
@@ -82,10 +90,18 @@ async fn edit_counts_title_length_in_chars_not_bytes() {
             serde_json::json!({ "title": title }),
         )
         .await;
-        let want = if accepted { StatusCode::OK } else { StatusCode::BAD_REQUEST };
+        let want = if accepted {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        };
         if status != want {
             wrong.push(format!("edit {label}: got {status}, want {want}: {body}"));
         }
     }
-    assert!(wrong.is_empty(), "title length must count chars:\n{}", wrong.join("\n"));
+    assert!(
+        wrong.is_empty(),
+        "title length must count chars:\n{}",
+        wrong.join("\n")
+    );
 }
