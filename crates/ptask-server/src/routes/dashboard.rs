@@ -1221,7 +1221,7 @@ fn act_edit_blocking(
     }
     if let Some(title) = body.title.as_mut() {
         *title = title.trim().to_string();
-        if !(3..=400).contains(&title.len()) {
+        if !(3..=400).contains(&title.chars().count()) {
             return jerr(StatusCode::BAD_REQUEST, "title 3-400 chars");
         }
     }
@@ -1267,7 +1267,7 @@ fn api_create_blocking(state: AppState, headers: HeaderMap, body: CreateBody) ->
         return jerr(StatusCode::FORBIDDEN, "cross-origin write rejected");
     }
     let title = body.title.trim().to_string();
-    if !(3..=400).contains(&title.len()) {
+    if !(3..=400).contains(&title.chars().count()) {
         return jerr(StatusCode::BAD_REQUEST, "title 3-400 chars");
     }
     if let Some(p) = body.priority
