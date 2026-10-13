@@ -34,8 +34,11 @@ jobs:
           echo "::error::CI does not run fork pull requests on the self-hosted runner. A maintainer can push this branch into the repository to test it."
           exit 1
 
-  actionlint:
-    name: actionlint
+  # actionlint, rustfmt, the dependency policy and clippy share one job: the
+  # single self-hosted runner takes jobs one at a time with about a minute
+  # between them, and GitHub cancels a job no runner acquires within ~12 min.
+  lint:
+    name: lint (actionlint, rustfmt, cargo-deny, clippy)
     runs-on: [self-hosted, tensor-core]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
@@ -52,29 +55,16 @@ jobs:
           install -m 0755 /tmp/actionlint "$HOME/.local/bin/actionlint"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: actionlint
-
-  fmt:
-    name: rustfmt
-    runs-on: [self-hosted, tensor-core]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: 1.98.1
-          components: rustfmt
+          components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-
-  clippy:
-    name: clippy
-    runs-on: [self-hosted, tensor-core]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: 1.98.1
-          components: clippy
+      - name: install cargo-deny
+        run: |
+          cargo deny --version 2>/dev/null | grep -q '0\.19\.9' \
+            || flock -w 900 /home/ghrunner/.cargo-install.lock cargo install cargo-deny --version 0.19.9 --locked
+      - run: cargo deny check advisories licenses sources
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # The feature-gated native ML stack still has to stay lint-clean.
@@ -128,23 +118,6 @@ jobs:
       - name: open-access + markup contract tests
         run: node --test tests/domains_markup.test.mjs tests/open_access.test.mjs tests/notes_markup.test.mjs tests/review_pr122_drawer.test.mjs tests/flux_markup.test.mjs tests/review_pr125.test.mjs tests/criteria_markup.test.mjs tests/review_pr127_drawer.test.mjs
         working-directory: dashboard
-
-  security:
-    name: dependency policy check
-    runs-on: [self-hosted, tensor-core]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: 1.98.1
-      # No rust-cache: cargo-deny compiles nothing, and the cache's save step
-      # prunes target/ in this runner's shared workspace.
-      - name: install cargo-deny
-        run: |
-          cargo deny --version 2>/dev/null | grep -q '0\.19\.9' \
-            || flock -w 900 /home/ghrunner/.cargo-install.lock cargo install cargo-deny --version 0.19.9 --locked
-      - run: cargo deny check advisories licenses sources
 
   schema-check:
     name: schema sanity
