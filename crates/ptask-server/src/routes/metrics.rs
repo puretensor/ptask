@@ -210,19 +210,15 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     // must describe now, not history (operator doctrine 2026-08-23) — the old
     // increase(pt_distill_failed_total[2h]) rule kept a WARNING latched for
     // two hours after full recovery. 1 = latest outcome ok (or never failed),
-    // 0 = latest outcome failed. Epoch comparison sidesteps the mixed
-    // +01:00/UTC offsets these rows carry.
+    // 0 = latest outcome failed. The journal's monotonic id orders outcomes
+    // even within one second or when the wall clock moves backwards.
     let distill_last_ok: i64 = db.with_conn(|c| {
         let n: i64 = c.query_row(
-            "SELECT CASE
-                    WHEN f.t IS NULL THEN 1
-                    WHEN s.t IS NULL THEN 0
-                    WHEN s.t >= f.t THEN 1
-                    ELSE 0 END
-                 FROM (SELECT MAX(CAST(strftime('%s', ts) AS INTEGER)) AS t
-                       FROM pt_event_log WHERE event_type = 'distill.run') s,
-                      (SELECT MAX(CAST(strftime('%s', ts) AS INTEGER)) AS t
-                       FROM pt_event_log WHERE event_type = 'distill.failed') f",
+            "SELECT COALESCE(
+                (SELECT CASE event_type WHEN 'distill.failed' THEN 0 ELSE 1 END
+                 FROM pt_event_log
+                 WHERE event_type IN ('distill.run', 'distill.failed')
+                 ORDER BY id DESC LIMIT 1), 1)",
             [],
             |r| r.get(0),
         )?;
