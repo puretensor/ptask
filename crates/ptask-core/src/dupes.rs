@@ -988,10 +988,14 @@ pub(crate) fn unmerge_if_needed(
                 params![canon, label],
             )?;
         }
-        if let Some(from) = payload.get("priority_from").and_then(|v| v.as_i64()) {
+        if let (Some(from), Some(to)) = (
+            payload.get("priority_from").and_then(|v| v.as_i64()),
+            payload.get("priority").and_then(|v| v.as_i64()),
+        ) {
+            // Take back only the value the merge set, preserving later edits.
             tx.execute(
-                "UPDATE tasks SET priority=?1 WHERE id=?2",
-                params![from, canon],
+                "UPDATE tasks SET priority=?1 WHERE id=?2 AND priority=?3",
+                params![from, canon, to],
             )?;
         }
         if let Some(d) = payload.get("deadline").and_then(|v| v.as_str()) {
