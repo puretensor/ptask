@@ -1161,8 +1161,6 @@ pub fn decide(
             "decider (actor) must not be empty".into(),
         )));
     }
-    let now_z = dates::now_in_operator_tz()?;
-    let now = dates::format_iso(&now_z);
     let note = note.map(str::trim).filter(|s| !s.is_empty());
     if let Some(note) = note {
         check_len("note", note, MAX_NOTE_CHARS)?;
@@ -1172,6 +1170,8 @@ pub fn decide(
     // on the write upgrade without waiting out busy_timeout.
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current = get_in_conn(&tx, id)?;
+    let now_z = dates::now_in_operator_tz()?;
+    let now = dates::format_iso(&now_z);
     if current.status != "pending" {
         return Err(Error::Approval(ApprovalError::Conflict(format!(
             "{} is {}, not pending",
@@ -1326,12 +1326,14 @@ pub fn verify(db: &Db, id: &str, offered: &PayloadSource) -> Result<Approval> {
 /// `consumed_at`/`consumed_by`. A digest mismatch does not latch.
 pub fn consume(db: &Db, id: &str, offered: &PayloadSource, ctx: &EventCtx) -> Result<Approval> {
     let digest = offered_digest(offered)?;
-    let now_z = dates::now_in_operator_tz()?;
-    let now = dates::format_iso(&now_z);
     let actor = ctx.actor.trim();
     let mut conn = db.get()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let current = get_in_conn(&tx, id)?;
+    // Lock acquisition can wait past expires_at; authorize at the time
+    // of the check-and-set, not when the caller entered the queue.
+    let now_z = dates::now_in_operator_tz()?;
+    let now = dates::format_iso(&now_z);
     gate_status_and_digest(&current, &digest, &now_z)?;
     tx.execute(
         "UPDATE approvals SET consumed_at = ?1, consumed_by = ?2
