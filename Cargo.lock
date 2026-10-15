@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-bot"
-version = "3.48.7"
+version = "3.50.2"
 dependencies = [
  "anyhow",
  "jiff",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-cli"
-version = "3.48.7"
+version = "3.50.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2693,7 +2693,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-core"
-version = "3.48.7"
+version = "3.50.2"
 dependencies = [
  "hex",
  "interim",
@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-distill"
-version = "3.48.7"
+version = "3.50.2"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -2738,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-notify"
-version = "3.48.7"
+version = "3.50.2"
 dependencies = [
  "lettre",
  "ptask-core",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-server"
-version = "3.48.7"
+version = "3.50.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-tui"
-version = "3.48.7"
+version = "3.50.2"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -3396,9 +3396,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
