@@ -104,7 +104,7 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     })?;
 
     // --- raw_items unprocessed ---
-    let unprocessed = ptask_core::raw_items::unprocessed_count(db).unwrap_or(0);
+    let unprocessed = ptask_core::raw_items::unprocessed_count(db)?;
     writeln!(
         out,
         "# HELP pt_raw_items_unprocessed Unprocessed inbox captures."
@@ -114,13 +114,13 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     writeln!(out, "pt_raw_items_unprocessed {}", unprocessed).ok();
 
     // --- views ---
-    let views = ptask_core::views::list(db).unwrap_or_default();
+    let views = ptask_core::views::list(db)?;
     writeln!(out, "# HELP pt_views_total Saved views count.").ok();
     writeln!(out, "# TYPE pt_views_total gauge").ok();
     writeln!(out, "pt_views_total {}", views.len()).ok();
 
     // --- event log cursor (sync token) ---
-    let cursor = ptask_core::event_log::current_cursor(db).unwrap_or(0);
+    let cursor = ptask_core::event_log::current_cursor(db)?;
     writeln!(
         out,
         "# HELP pt_event_log_cursor Highest pt_event_log.id (sync cursor)."
@@ -153,12 +153,10 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     })?;
 
     // --- recurrence count ---
-    let rec_count: i64 = db
-        .with_conn(|c| {
-            let n: i64 = c.query_row("SELECT COUNT(*) FROM pt_recurrence", [], |r| r.get(0))?;
-            Ok(n)
-        })
-        .unwrap_or(0);
+    let rec_count: i64 = db.with_conn(|c| {
+        let n: i64 = c.query_row("SELECT COUNT(*) FROM pt_recurrence", [], |r| r.get(0))?;
+        Ok(n)
+    })?;
     writeln!(
         out,
         "# HELP pt_recurrence_total Recurring task definitions."
@@ -174,18 +172,16 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     // -1 = never ran. Rows carry mixed +01:00/UTC offsets, so convert each
     // to epoch before taking MAX: `strftime(MAX(ts))` picked the greatest
     // *string*, and "10:30+01:00" (09:30Z) outranks a later "09:45Z".
-    let distill_age: i64 = db
-        .with_conn(|c| {
-            let n: Option<i64> = c.query_row(
-                "SELECT CAST(strftime('%s','now') AS INTEGER)
+    let distill_age: i64 = db.with_conn(|c| {
+        let n: Option<i64> = c.query_row(
+            "SELECT CAST(strftime('%s','now') AS INTEGER)
                         - MAX(CAST(strftime('%s', ts) AS INTEGER))
                  FROM pt_event_log WHERE event_type = 'distill.run'",
-                [],
-                |r| r.get(0),
-            )?;
-            Ok(n.unwrap_or(-1))
-        })
-        .unwrap_or(-1);
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n.unwrap_or(-1))
+    })?;
     writeln!(
         out,
         "# HELP pt_distill_last_success_age_seconds Seconds since the last successful distill run (-1 = never)."
@@ -194,16 +190,14 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     writeln!(out, "# TYPE pt_distill_last_success_age_seconds gauge").ok();
     writeln!(out, "pt_distill_last_success_age_seconds {}", distill_age).ok();
 
-    let distill_failed: i64 = db
-        .with_conn(|c| {
-            let n: i64 = c.query_row(
-                "SELECT COUNT(*) FROM pt_event_log WHERE event_type = 'distill.failed'",
-                [],
-                |r| r.get(0),
-            )?;
-            Ok(n)
-        })
-        .unwrap_or(0);
+    let distill_failed: i64 = db.with_conn(|c| {
+        let n: i64 = c.query_row(
+            "SELECT COUNT(*) FROM pt_event_log WHERE event_type = 'distill.failed'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    })?;
     writeln!(
         out,
         "# HELP pt_distill_failed_total Distill runs recorded as failed."
@@ -218,10 +212,9 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     // two hours after full recovery. 1 = latest outcome ok (or never failed),
     // 0 = latest outcome failed. Epoch comparison sidesteps the mixed
     // +01:00/UTC offsets these rows carry.
-    let distill_last_ok: i64 = db
-        .with_conn(|c| {
-            let n: i64 = c.query_row(
-                "SELECT CASE
+    let distill_last_ok: i64 = db.with_conn(|c| {
+        let n: i64 = c.query_row(
+            "SELECT CASE
                     WHEN f.t IS NULL THEN 1
                     WHEN s.t IS NULL THEN 0
                     WHEN s.t >= f.t THEN 1
@@ -230,12 +223,11 @@ fn render(db: &Db) -> ptask_core::Result<String> {
                        FROM pt_event_log WHERE event_type = 'distill.run') s,
                       (SELECT MAX(CAST(strftime('%s', ts) AS INTEGER)) AS t
                        FROM pt_event_log WHERE event_type = 'distill.failed') f",
-                [],
-                |r| r.get(0),
-            )?;
-            Ok(n)
-        })
-        .unwrap_or(1);
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    })?;
     writeln!(
         out,
         "# HELP pt_distill_last_run_ok Whether the most recent distill run succeeded (1) or failed (0)."
@@ -249,7 +241,7 @@ fn render(db: &Db) -> ptask_core::Result<String> {
     // forever and wedged everything behind it with no signal at all; the
     // pipeline now walks past it, so this gauge is what makes it visible.
     // Any non-zero value wants a human eye — nothing clears it automatically.
-    let quarantined = ptask_core::raw_items::quarantined_count(db).unwrap_or(0);
+    let quarantined = ptask_core::raw_items::quarantined_count(db)?;
     writeln!(
         out,
         "# HELP pt_distill_quarantined_captures Unprocessed raw_items parked after repeated distill failures."
