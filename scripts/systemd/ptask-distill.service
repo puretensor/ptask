@@ -12,11 +12,12 @@ OnFailure=ptask-failure-alert@%n.service
 Type=oneshot
 EnvironmentFile=%h/puretensor-tasks/.env
 # Wait up to ~15 min for the local provider (the seat takes ~10 min to load
-# after a reboot or a GPU lease). If it is still down and a pt-gpu lease is
-# active or ended <1 h ago, the broker deliberately stopped it: skip this run
-# (exit 1 = condition failed, unit not failed). Any other outage proceeds and
-# fails closed in pt, so a real provider outage still alerts.
-ExecCondition=/bin/sh -c 'case "$${LOCAL_LLM_URL:-}" in http*) ;; *) exit 0;; esac; for i in $$(seq 1 90); do curl -sf -m3 "$${LOCAL_LLM_URL%%/}/models" >/dev/null && exit 0; sleep 10; done; if python3 -c "import json,os,sys,time; L=open(os.path.expanduser(\\\"~/.local/state/ptcompute/audit.jsonl\\\")).read().splitlines(); e=[json.loads(x) for x in L[-50:] if x.strip()]; e=[x for x in e if x.get(\\\"event\\\") in (\\\"grant\\\",\\\"release\\\")]; l=e[-1] if e else {}; sys.exit(0 if l.get(\\\"event\\\")==\\\"grant\\\" or (l.get(\\\"event\\\")==\\\"release\\\" and time.time()-l.get(\\\"ts\\\",0)<3600) else 1)" 2>/dev/null; then echo "local llm down under a pt-gpu lease; skipping this run" >&2; exit 1; fi; echo "local llm not ready after wait; proceeding" >&2; exit 0'
+# after a reboot or a GPU lease). If it is still down and the last pt-gpu
+# lease event is a grant <12 h old or a release <1 h old, the broker
+# deliberately stopped it: skip this run (exit 1 = condition failed, unit not
+# failed). A stale grant (leaked by a crashed broker/holder) is ignored, so
+# any other outage proceeds and fails closed in pt and still alerts.
+ExecCondition=/bin/sh -c 'case "$${LOCAL_LLM_URL:-}" in http*) ;; *) exit 0;; esac; for i in $$(seq 1 90); do curl -sf -m3 "$${LOCAL_LLM_URL%%/}/models" >/dev/null && exit 0; sleep 10; done; if python3 -c "import json,os,sys,time; L=open(os.path.expanduser(\\\"~/.local/state/ptcompute/audit.jsonl\\\")).read().splitlines(); e=[json.loads(x) for x in L[-50:] if x.strip()]; e=[x for x in e if x.get(\\\"event\\\") in (\\\"grant\\\",\\\"release\\\")]; l=e[-1] if e else {}; a=time.time()-l.get(\\\"ts\\\",0); sys.exit(0 if (l.get(\\\"event\\\")==\\\"grant\\\" and -300<a<43200) or (l.get(\\\"event\\\")==\\\"release\\\" and -300<a<3600) else 1)" 2>/dev/null; then echo "local llm down under a pt-gpu lease; skipping this run" >&2; exit 1; fi; echo "local llm not ready after wait; proceeding" >&2; exit 0'
 ExecStart=%h/.cargo/bin/pt distill --batch 300
 Nice=10
 IOSchedulingClass=best-effort
