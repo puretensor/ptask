@@ -278,6 +278,12 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.26.2** (pt 3.51.5) — The brand is now **pTASK**, styled like pCIRCUIT
+  and pNOC: a white lowercase "p", then the name in capitals in the shared
+  wordmark blue (#40c4ff). Covers the header, the page title and the
+  home-screen app name. `PTASK_DASH_TITLE` (sidecar and `pt serve`) now
+  defaults to `pTASK`; a configured brand in the same "p" + capitals form gets
+  the same treatment, and any other brand stays plain text.
 - **v0.26.1** (pt 3.51.4) — iPhone 18 Pro Max home-screen app fit, checked in
   the iOS 27 simulator (440×956, 62px status-bar inset). A cold launch no
   longer leaves the board under a doubled 124px gap (iOS parks the page at

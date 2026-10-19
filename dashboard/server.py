@@ -63,7 +63,7 @@ Config (env)
   PTASK_DB         SQLite path (default ~/puretensor-tasks/tasks.db)
   PTASK_BIN        pt binary  (default ~/.cargo/bin/pt)
   PTASK_DASH_BIND  bind addr  (default 127.0.0.1:9510)
-  PTASK_DASH_TITLE dashboard brand (default "PTASK")
+  PTASK_DASH_TITLE dashboard brand (default "pTASK")
   PTASK_DASH_DOMAINS comma-separated key[:Label[:ABBR]] domain list
   PTASK_DASH_DEFAULT_DOMAIN configured key used for unlabelled tasks
   PTASK_DASH_WWW   static dir (default ./www next to this file)
@@ -147,7 +147,7 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
-VERSION = "0.26.1"
+VERSION = "0.26.2"
 
 
 def _allowed_host_entry(entry: str) -> str:
@@ -172,7 +172,7 @@ ALLOWED_HOSTS = frozenset(
 # or aws child inherits it.
 DECIDE_TOKEN_MIN = 16
 DECIDE_TOKEN = os.environ.pop("PTASK_DASH_DECIDE_TOKEN", "").strip()
-DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
+DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "pTASK")
 DASH_DOMAINS = parse_domains(os.environ.get("PTASK_DASH_DOMAINS"))
 DASH_DEFAULT_DOMAIN = resolve_default_domain(
     DASH_DOMAINS, os.environ.get("PTASK_DASH_DEFAULT_DOMAIN"),

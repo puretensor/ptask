@@ -9,10 +9,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="PTASK">
+<meta name="apple-mobile-web-app-title" content="pTASK">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
-<title>PTASK · Triage Cockpit</title>
+<title>pTASK · Triage Cockpit</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMTAwIDEwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9InB0ZyIgeDE9IjAlIiB5MT0iMCUiIHgyPSIxMDAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzAwRDRBQSIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzAwODBGRiIvPjwvbGluZWFyR3JhZGllbnQ+PC9kZWZzPjxyZWN0IHg9IjIiIHk9IjIiIHdpZHRoPSI5NiIgaGVpZ2h0PSI5NiIgcng9IjIyIiBmaWxsPSIjMGQxNjIyIiBzdHJva2U9IiMxZDJjM2QiIHN0cm9rZS13aWR0aD0iMiIvPjxwYXRoIGQ9Ik0yMCAyNCBIODAgTDU3IDU0IFY3OCBMNDMgNzAgVjU0IFoiIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNwdGcpIiBzdHJva2Utd2lkdGg9IjUuNSIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjUwIiBjeT0iMjQiIHI9IjAiIGZpbGw9InVybCgjcHRnKSIvPjwvc3ZnPg==">
 <style>
 /* ===================================================================== THEME
@@ -22,6 +22,9 @@
 :root{
   --gap:14px; --radius:14px; --speed:.45s;
   --teal:#00D4AA; --blue:#0080FF;
+  /* Wordmark blue shared with pCIRCUIT and pNOC: "p" white, name in this. */
+  --wordmark:#40c4ff;
+  --font-wordmark:-apple-system,BlinkMacSystemFont,"SF Pro Text","Inter","Segoe UI",Roboto,sans-serif;
   --p5:#ff3b5c; --p4:#ff9f43; --p3:#ffd93d; --p2:#4dabf7; --p1:#8a8aa8;
   /* ink on saturated fills (badges, gradient buttons) — dark passes >=4.5 on
      every priority fill and both gradient ends; white never did on p1/p2/teal */
@@ -79,6 +82,7 @@
   --accent:#ff9f43; --accent2:#cc88ff;
   --p5:#ff5544; --p4:#ff9f43; --p3:#ffcc66; --p2:#99ccff; --p1:#cc99cc;
   --font:'Antonio','Arial Narrow',sans-serif; --font-head:'Antonio','Arial Narrow',sans-serif;
+  --font-wordmark:var(--font-head);
   --shadow:none; --card-bg:#15151c;
   --glow:none; --chip-radius:0 14px 14px 0;
   --header-bg:#000; --grad:linear-gradient(90deg,#ff9f43,#cc88ff);
@@ -144,7 +148,10 @@ header{
 .brand{display:flex;align-items:center;gap:12px}
 .cube{width:34px;height:34px;flex:none;filter:drop-shadow(0 0 8px rgba(0,212,170,.5))}
 .brandtxt{display:flex;flex-direction:column;line-height:1.05}
-.brandtxt b{font-family:var(--font-head);font-size:18px;letter-spacing:.14em;color:#fff;font-weight:800}
+/* Product wordmark, matching pCIRCUIT and pNOC: white lowercase "p", the name
+   in capitals in the wordmark blue (see renderBrand). */
+.brandtxt b{font-family:var(--font-wordmark);font-size:18px;letter-spacing:.06em;color:#fff;font-weight:700}
+.brandtxt b .wordmark-name{color:var(--wordmark)}
 .brandtxt small{font-size:10px;letter-spacing:.3em;color:var(--teal);text-transform:uppercase}
 .accentline{height:3px;background:var(--dgrad);width:100%;transition:background var(--speed)}
 
@@ -499,6 +506,7 @@ button.chip{font-family:var(--font);cursor:pointer}
 [data-theme="lcars"] .chip{border-radius:0 14px 14px 0;border:none;background:#1d1d28}
 [data-theme="lcars"] .statusbar{border:none;border-radius:8px 24px 24px 8px;background:#0d0d12;box-shadow:inset 14px 0 0 #cc88ff;padding-left:26px}
 [data-theme="lcars"] .brandtxt b{color:#ff9f43}
+[data-theme="lcars"] .brandtxt b .wordmark-name{color:inherit}
 /* costume off below 700px — the 74px rail + 118px indent ate a third of a
    phone screen and forced horizontal scroll at 320px */
 @media(max-width:700px){
@@ -959,7 +967,7 @@ button,[role="button"]{touch-action:manipulation}
   <div class="hdr">
     <div class="brand">
       <svg class="cube" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="ptg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#00D4AA"/><stop offset="100%" stop-color="#0080FF"/></linearGradient></defs><path d="M20 24 H80 L57 54 V78 L43 70 V54 Z" fill="none" stroke="url(#ptg)" stroke-width="5.5" stroke-linejoin="round"/></svg>
-      <div class="brandtxt"><b id="brandTitle">PTASK</b><small>Intelligence Distilled</small></div>
+      <div class="brandtxt"><b id="brandTitle">p<span class="wordmark-name">TASK</span></b><small>Intelligence Distilled</small></div>
     </div>
     <span class="clock" id="clock">--:--:-- UTC</span>
     <div class="spacer"></div>
@@ -1184,6 +1192,17 @@ function domainColor(d){
   const item=_domainByKey.get(d);
   return `var(--domain-${item?item.palette:0}-text)`;
 }
+/* A "p"-family brand (pTASK, like pNOC and pCIRCUIT) is a white lowercase p
+   and the rest of the name in the wordmark blue. Any other configured brand
+   (another tenant's PTASK_DASH_TITLE) renders as plain text. */
+function renderBrand(el,title){
+  const m=/^p([A-Z0-9].*)$/.exec(title);
+  if(!m){el.textContent=title;return}
+  const name=document.createElement('span');
+  name.className='wordmark-name';
+  name.textContent=m[1];
+  el.replaceChildren('p',name);
+}
 function applyDomainConfig(cfg){
   const configured=Array.isArray(cfg&&cfg.domains)&&cfg.domains.length>0;
   const source=configured?cfg.domains:LEGACY_DOMAINS;
@@ -1197,8 +1216,8 @@ function applyDomainConfig(cfg){
   CDOM_OPTS=[['auto','AUTO','var(--muted)'],
     ..._domains.map(d=>[d.key,d.abbr,domainColor(d)])];
 
-  const title=String(cfg&&cfg.title!=null?cfg.title:'PTASK');
-  $('#brandTitle').textContent=title;
+  const title=String(cfg&&cfg.title!=null?cfg.title:'pTASK');
+  renderBrand($('#brandTitle'),title);
   document.title=title+' · Triage Cockpit';
   const appTitle=$('meta[name="apple-mobile-web-app-title"]');
   if(appTitle) appTitle.setAttribute('content',title);

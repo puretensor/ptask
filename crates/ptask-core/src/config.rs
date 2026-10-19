@@ -75,7 +75,7 @@ pub struct DashConfig {
     /// host of `$PTASK_DASH_URL`, and this machine's own short hostname.
     /// Lower-cased, without port or trailing dot.
     pub allowed_hosts: Vec<String>,
-    /// Brand shown in the cockpit (`$PTASK_DASH_TITLE`, default "PTASK").
+    /// Brand shown in the cockpit (`$PTASK_DASH_TITLE`, default "pTASK").
     pub title: String,
     /// Domain hats (`$PTASK_DASH_DOMAINS`). Empty = legacy ENG/MGMT mode.
     pub domains: Vec<DashDomain>,
@@ -286,7 +286,7 @@ impl Config {
                 frame_ancestor: env_nonempty("PTASK_DASH_FRAME_ANCESTOR"),
                 url: env_nonempty("PTASK_DASH_URL"),
                 allowed_hosts,
-                title: env_nonempty("PTASK_DASH_TITLE").unwrap_or_else(|| "PTASK".into()),
+                title: env_nonempty("PTASK_DASH_TITLE").unwrap_or_else(|| "pTASK".into()),
                 domains,
                 default_domain,
             },

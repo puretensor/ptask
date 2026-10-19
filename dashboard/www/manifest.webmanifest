@@ -1,6 +1,6 @@
 {
-  "name": "PTASK Triage Cockpit",
-  "short_name": "PTASK",
+  "name": "pTASK Triage Cockpit",
+  "short_name": "pTASK",
   "description": "PureTensor sovereign task triage",
   "start_url": "/",
   "display": "standalone",
