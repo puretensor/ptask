@@ -278,6 +278,19 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.26.1** (pt 3.51.4) — iPhone 18 Pro Max home-screen app fit, checked in
+  the iOS 27 simulator (440×956, 62px status-bar inset). A cold launch no
+  longer leaves the board under a doubled 124px gap (iOS parks the page at
+  scrollY -62 about 2s in; the cockpit puts it back at 0), and the brand +
+  counts row starts below the status-bar scrim that iOS 26+ lays over web
+  apps. Every pane can scroll its last ~108px clear of the tab bar (the body
+  was pinned to 100% height, so its tab-bar padding added no scroll room and
+  a 5-card lane could not scroll at all). The lane picker sticks under the
+  real header height, lane and review cards keep snooze · dismiss · done on
+  the right while their chips wrap, the task sheet scrolls without moving the
+  board behind it, the composer's Deadline field stays inside the card, the
+  timeline's NOW tag no longer collides with a nearby date, and the hidden
+  skip link no longer peeks out from behind the status bar.
 - **v0.26.0** (pt 3.51.0) — Superadmin delete. The task drawer, on desktop and
   as the phone bottom sheet, has **Delete permanently** for a task in any
   status (open, done or dismissed). It confirms first, then
