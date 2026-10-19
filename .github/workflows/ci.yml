@@ -95,7 +95,7 @@ jobs:
         with:
           python-version: '3.x'
       - name: install pytest
-        run: python -m pip install pytest==8.3.5
+        run: python -m pip install pytest==9.0.3
       - name: approvals and goals contracts
         run: PT_BIN=target/debug/pt python -m pytest tests/test_11_approvals_contract.py tests/test_12_goals_contract.py -q
       - run: bash scripts/ci-production-build-check.sh
