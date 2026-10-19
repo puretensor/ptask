@@ -109,7 +109,10 @@
 }
 
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
+/* min-height, not height: a body pinned to 100% kept its bottom padding (the
+   phone tab bar's 74px + home indicator) inside the viewport, so the last
+   ~108px of every pane sat under the tab bar with no scroll room to reach it */
+html{height:100%} body{min-height:100%}
 body{
   background:var(--bg); color:var(--text); font-family:var(--font);
   font-size:14px; line-height:1.45; -webkit-font-smoothing:antialiased;
@@ -395,15 +398,18 @@ button.chip{font-family:var(--font);cursor:pointer}
 @media(pointer:coarse){.tcard .btn-act,.tcard .btn-done{opacity:1}}
 .tcard .tt{line-height:1.3;margin-bottom:6px;min-height:24px;display:flex;align-items:center}
 .tcard .tm{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.tcard .tmm{display:contents}
 /* snooze · dismiss · done as one unbreakable group at the row's right end */
 .tcard .acts{display:inline-flex;gap:6px;align-items:center;margin-left:auto;flex:none}
 .tcard .acts .btn-done{margin-left:0}
 
 /* timeline */
 .timeline{background:var(--card-bg);border:var(--card-border);border-radius:var(--radius);padding:18px 16px;backdrop-filter:var(--backdrop);box-shadow:var(--shadow);overflow-x:auto}
-.tl-track{position:relative;height:8px;background:var(--panel2);border-radius:4px;margin:30px 10px 44px}
+.tl-track{position:relative;height:8px;background:var(--panel2);border-radius:4px;margin:42px 10px 44px}
 .tl-now{position:absolute;top:-6px;bottom:-6px;width:2px;background:var(--accent);box-shadow:var(--glow)}
-.tl-now::after{content:'NOW';position:absolute;top:-18px;left:-12px;font-size:9px;color:var(--accent);font-weight:700}
+/* NOW gets its own row above the date labels: on the top row it ran into
+   any date cluster near today ("09-21 +1NOW" on a 440px phone) */
+.tl-now::after{content:'NOW';position:absolute;top:-38px;left:-12px;font-size:9px;color:var(--accent);font-weight:700}
 .tl-pt{position:absolute;top:50%;transform:translate(-50%,-50%);width:14px;height:14px;border-radius:50%;border:2px solid var(--bg);cursor:pointer;transition:transform .15s;display:block}
 .tl-pt::after{content:'';position:absolute;inset:-6px}   /* 26px hit/touch target around the 14px dot */
 .tl-pt:hover{transform:translate(-50%,-50%) scale(1.5);z-index:5}
@@ -760,6 +766,10 @@ button,[role="button"]{touch-action:manipulation}
   .dtag{min-height:28px;padding:2px 8px}
 }
 .skip{top:calc(14px + env(safe-area-inset-top,0px))}
+/* parked fully above the screen: -160% of its own height only lifted it ~55px,
+   and a home-screen app starts it 76px down (14px + 62px inset), so it
+   peeked out from behind the status bar */
+.skip:not(:focus){transform:translateY(calc(-100% - 20px - env(safe-area-inset-top,0px)))}
 .drawer{padding-top:calc(20px + env(safe-area-inset-top,0px))}
 /* phone-only chrome, hidden everywhere else */
 .tabbar,.phone-only,.lane-tabs{display:none}
@@ -779,6 +789,10 @@ button,[role="button"]{touch-action:manipulation}
   body{padding-bottom:calc(74px + env(safe-area-inset-bottom,0px))}
   /* header row 1: brand · counts · [+]   row 2: full-width domain switch */
   .hdr{padding:8px 12px 6px;gap:8px;flex-wrap:nowrap}
+  /* home-screen app only: iOS 26+ lays a dark legibility scrim over the status
+     bar that fades out ~28px below it (62px inset → ~90px on an iPhone 18 Pro
+     Max), greying the brand + counts row. Start the row below the fade. */
+  @media(display-mode:standalone){header{padding-top:calc(env(safe-area-inset-top,0px) + 16px)}}
   .cube{width:28px;height:28px}
   .brandtxt b{font-size:16px}
   .brandtxt small{display:none}
@@ -845,6 +859,11 @@ button,[role="button"]{touch-action:manipulation}
   .tcard{padding:11px 12px;font-size:13px;margin-bottom:8px}
   .tcard .tt{font-size:13px;line-height:1.35}
   .tcard .tm{gap:6px 8px}
+  /* the chips wrap inside their own column and snooze · dismiss · done hold
+     the right edge: a deadline chip used to push all three onto a row of their
+     own, an empty 50px band under every dated card on a 440px-wide phone */
+  .tcard .tm{flex-wrap:nowrap}
+  .tcard .tmm{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;flex:1 1 auto;min-width:0}
   /* recent: page scroll + 2-line titles instead of a nested 340px box */
   .recent{max-height:none;overflow:visible;padding:2px 10px}
   .rrow{padding:10px 0;font-size:13px}
@@ -880,7 +899,11 @@ button,[role="button"]{touch-action:manipulation}
   .toast{bottom:calc(70px + env(safe-area-inset-bottom,0px));max-width:calc(100vw - 24px);text-align:center}
   /* detail drawer → bottom sheet */
   .drawer{top:auto;left:0;right:0;bottom:0;width:100%;max-height:88dvh;border-left:none;border-top:var(--card-border);
-    border-radius:18px 18px 0 0;transform:translateY(105%);padding:22px 16px calc(18px + env(safe-area-inset-bottom,0px))}
+    border-radius:18px 18px 0 0;transform:translateY(105%);padding:22px 16px calc(18px + env(safe-area-inset-bottom,0px));
+    overscroll-behavior:contain}
+  /* the board stays put under an open sheet: a fast flick inside the sheet
+     used to scroll the page behind it instead of (or as well as) the sheet */
+  html.sheet-open,html.sheet-open body{overflow:hidden}
   .drawer::before{content:"";position:absolute;top:8px;left:50%;width:36px;height:4px;border-radius:2px;background:var(--border);transform:translateX(-50%)}
   .drawer.open{transform:none}
   .drawer h3{font-size:16px;line-height:1.35;overflow-wrap:anywhere}
@@ -897,6 +920,10 @@ button,[role="button"]{touch-action:manipulation}
   #compose .modal-card{max-height:calc(100dvh - env(safe-area-inset-top,0px) - 20px);padding:18px 16px}
   .modal-card.compose{max-width:none}
   .cform input[type=text],.cform textarea,.cform input[type=date]{font-size:16px}
+  /* iOS draws a native date field at its own intrinsic width and ignores
+     width:100%, so Deadline ran past the composer's right edge */
+  .cform input[type=date]{-webkit-appearance:none;appearance:none;display:block;min-width:0;max-width:100%;min-height:44px}
+  .cform input[type=date]::-webkit-date-and-time-value{text-align:left}
   .cform{gap:12px}
   .sev button{min-width:0;flex:1 1 30%;padding:10px 4px}
   .modal-actions{gap:8px}
@@ -1433,9 +1460,27 @@ function applyPhone(){
   else { $('.hdr-sub').appendChild(th); if(_review&&_view==='review'){} }
 }
 PHONE_MQ.addEventListener('change',applyPhone);
-/* the lane picker sticks just under the header — export its live height */
+/* the lane picker sticks just under the header — export its live height.
+   Watch the border box: iOS only fills env(safe-area-inset-top) in after
+   launch, which grows the header's padding but not its content box, so a
+   content-box observer kept a stale height and the picker slid under it. */
 new ResizeObserver(()=>document.documentElement.style.setProperty('--hdr-h',document.querySelector('header').offsetHeight+'px'))
-  .observe(document.querySelector('header'));
+  .observe(document.querySelector('header'),{box:'border-box'});
+/* iOS 26+ home-screen app: ~2s after a cold launch the system parks the page
+   at scrollY -62 (the iPhone 18 Pro Max status-bar inset), though the sticky
+   header already pads itself by env(safe-area-inset-top), so the board sat
+   under a doubled 124px gap until the first scroll. Put it back at 0 once it
+   rests below 0 with no finger down; a real pull-to-bounce keeps firing scroll
+   events until it settles at 0 on its own, so it never trips this. */
+let _touch=false, _restT=0;
+addEventListener('touchstart',()=>{_touch=true},{passive:true});
+addEventListener('touchend',()=>{_touch=false},{passive:true});
+addEventListener('touchcancel',()=>{_touch=false},{passive:true});
+addEventListener('scroll',()=>{
+  clearTimeout(_restT);
+  if(scrollY>=0) return;
+  _restT=setTimeout(()=>{ if(!_touch&&scrollY<0) scrollTo({top:0,behavior:'instant'}); },200);
+},{passive:true});
 /* home-screen app resumed from the background: refresh now, and re-open the
    SSE stream iOS quietly killed while we were suspended */
 document.addEventListener('visibilitychange',()=>{
@@ -2111,8 +2156,8 @@ function renderLanes(tasks){
       <div class="lane-body" data-p="${p}" role="group" aria-label="P${p} ${PNAME[p]} — ${n} task${n===1?'':'s'}">
       ${n===0?'<div class="ph">none</div>':''}${list.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
         <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title.length>72?t.title.slice(0,70)+'…':t.title)}</div>
-        <div class="tm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
-        ${ptrigger(t)}${originTag(t)}${domainTag(t)}
+        <div class="tm"><span class="tmm"><span class="score">${t.priority_score.toFixed(2)}</span>${dueChip(t)}
+        ${ptrigger(t)}${originTag(t)}${domainTag(t)}</span>
         <span class="acts"><button class="btn-act snz" title="snooze 3d (shift: 7d)" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
         <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
         <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></span></div>
@@ -2367,8 +2412,8 @@ function renderReview(){
   if(!stale.length){$('#review-list').innerHTML='<div class="ph">nothing pending to review'+inDom()+'</div>';return;}
   $('#review-list').innerHTML=stale.map(t=>`<div class="tcard" data-id="${t.pt_id||t.id}" data-uuid="${t.id}" style="margin-bottom:10px">
     <div class="tt" style="cursor:pointer" role="button" tabindex="0" data-act="drawer">${esc(t.title)}</div>
-    <div class="tm">${ptrigger(t)}${originTag(t)}${domainTag(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
-      <span class="score">${(t.priority_score||0).toFixed(2)}</span>
+    <div class="tm"><span class="tmm">${ptrigger(t)}${originTag(t)}${domainTag(t)}<span class="age">${Math.round(t.age_days)}d old</span>${dueChip(t)}
+      <span class="score">${(t.priority_score||0).toFixed(2)}</span></span>
       <span class="acts"><button class="btn-act snz" title="snooze 3d" aria-label="snooze 3 days" data-act="snooze"><svg class="ic" aria-hidden="true"><use href="#i-zzz"/></svg></button>
       <button class="btn-act dis" title="dismiss" aria-label="dismiss" data-act="dismiss"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg></button>
       <button class="btn-done" title="done" aria-label="mark done" data-act="done"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg></button></span></div>
@@ -2394,6 +2439,7 @@ async function openDrawer(uuid){
   _drawerUuid=uuid;
   dr.classList.add('open');
   $('#drawer-scrim').classList.add('show');
+  document.documentElement.classList.add('sheet-open');
   $('#d-close').focus({preventScroll:true});
   try{
     /* the notes route is a dedicated read (an old note outlives the events
@@ -2503,7 +2549,7 @@ $('#d-delete').onclick=async()=>{
   finally{btn.disabled=false;}
 };
 function drawerOpen(){ return $('#drawer').classList.contains('open'); }
-function closeDrawer(){ $('#drawer').classList.remove('open'); $('#drawer-scrim').classList.remove('show'); restoreInvoker(); }
+function closeDrawer(){ $('#drawer').classList.remove('open'); $('#drawer-scrim').classList.remove('show'); document.documentElement.classList.remove('sheet-open'); restoreInvoker(); }
 $('#d-close').onclick=closeDrawer;
 $('#drawer-scrim').onclick=closeDrawer;   // click the dimmed board to dismiss
 /* focus trap — the drawer is now aria-modal; Tab must not reach the board */
