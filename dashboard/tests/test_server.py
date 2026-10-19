@@ -1407,7 +1407,9 @@ class ConfigEndpointTests(unittest.TestCase):
             self.assertEqual([d["key"] for d in cfg["domains"]], ["puretensor", "personal"])
             self.assertEqual(cfg["domains"][1]["abbr"], "ME")
             self.assertEqual(cfg["version"], server.VERSION)
-            self.assertEqual(set(cfg), {"title", "domains", "default_domain", "version"})
+            self.assertEqual(set(cfg),
+                             {"title", "domains", "default_domain", "version", "superadmin"})
+            self.assertIs(cfg["superadmin"], len(server.DECIDE_TOKEN) >= server.DECIDE_TOKEN_MIN)
         finally:
             httpd.shutdown()
             httpd.server_close()

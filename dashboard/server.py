@@ -23,6 +23,10 @@ Endpoints
   POST /api/tasks/<id>/note {text} -> shells `pt note <id> -- <text>`
   POST /api/tasks/<id>/dismiss {note?} -> shells `pt dismiss [--note=] <id>`
   POST /api/tasks/<id>/priority {level:1..5} -> shells `pt priority <id> <level>`
+  POST /api/tasks/<id>/delete   -> shells `pt rm --yes PT-N`: permanent delete
+                                   of a task in any status (tombstoned for
+                                   delta sync). Superadmin-only: needs
+                                   X-PTask-Decide-Token (see below)
   POST /api/tasks  {title, description?, priority?, deadline?}
                                 -> shells `pt add [--priority=] [--description=]
                                    [--deadline=] -- "<title>"`
@@ -47,10 +51,12 @@ Endpoints
     DNS-rebinding page could address the sidecar under the attacker's own
     name and read or write as same-origin. State-changing POSTs also need a
     same-origin Origin header when one is sent.
-  - Approval decisions are operator-only, and the tailnet does not separate
-    the operator from the fleet's agents. Approve/reject needs the
-    X-PTask-Decide-Token header to match PTASK_DASH_DECIDE_TOKEN; with the
-    variable unset (or shorter than 16 characters) decisions are refused.
+  - Approval decisions and permanent deletes are operator-only (superadmin),
+    and the tailnet does not separate the operator from the fleet's agents.
+    Both need the X-PTask-Decide-Token header to match
+    PTASK_DASH_DECIDE_TOKEN; with the variable unset (or shorter than 16
+    characters) they are refused. /api/config reports `superadmin` so the
+    cockpit only offers Delete where it can work.
 
 Config (env)
 ------------
@@ -65,8 +71,9 @@ Config (env)
                    (default "dashboard")
   PTASK_DASH_ALLOWED_HOSTS  extra comma-separated Host names to serve
                             (".example.org" entries match the suffix)
-  PTASK_DASH_DECIDE_TOKEN   secret the cockpit sends to approve/reject
-                            (unset = approval decisions disabled here)
+  PTASK_DASH_DECIDE_TOKEN   superadmin secret the cockpit sends to
+                            approve/reject and to delete a task (unset =
+                            decisions and deletes disabled here)
 """
 from __future__ import annotations
 
@@ -140,7 +147,7 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
-VERSION = "0.25.0"
+VERSION = "0.26.0"
 
 
 def _allowed_host_entry(entry: str) -> str:
@@ -159,9 +166,10 @@ ALLOWED_HOSTS = frozenset(
     filter(None, (_allowed_host_entry(h)
                   for h in os.environ.get("PTASK_DASH_ALLOWED_HOSTS", "").split(",")))
 )
-# Shared secret for approval decisions. Shorter values are refused rather than
-# trusted: a guessable secret would put decisions back within any tailnet
-# agent's reach. Popped from the environment so no pt or aws child inherits it.
+# Superadmin secret for approval decisions and permanent deletes. Shorter
+# values are refused rather than trusted: a guessable secret would put both
+# back within any tailnet agent's reach. Popped from the environment so no pt
+# or aws child inherits it.
 DECIDE_TOKEN_MIN = 16
 DECIDE_TOKEN = os.environ.pop("PTASK_DASH_DECIDE_TOKEN", "").strip()
 DASH_TITLE = os.environ.get("PTASK_DASH_TITLE", "PTASK")
@@ -710,6 +718,24 @@ def _event_dicts(rows):
             "payload": payload,
         })
     return events
+
+
+def q_task_ref(task_id: str) -> dict | None:
+    """PT-N, title and status of one task in any status, by PT-N or uuid.
+
+    `pt rm` resolves a PT-N in any status but reads anything else as a title
+    substring of an open task, so a delete always hands it the PT-N.
+    """
+    con = connect()
+    try:
+        r = con.execute(
+            "SELECT id, pt_id, title, status_v2 AS status FROM tasks"
+            " WHERE pt_id=? OR id=? LIMIT 1",
+            (task_id.upper(), task_id),
+        ).fetchone()
+        return dict(r) if r else None
+    finally:
+        con.close()
 
 
 def q_task_events(task_uuid: str, limit: int = 60):
@@ -1329,17 +1355,19 @@ class Handler(BaseHTTPRequestHandler):
     def _host_ok(self) -> bool:
         return host_allowed(self.headers.get("Host"))
 
-    def _decide_refusal(self):
-        """None when this request may decide an approval, else (code, message)."""
+    def _decide_refusal(self, what="approval decisions",
+                        fallback="decide with `pt approve|reject AP-n` at a terminal"):
+        """None when this request carries the superadmin (decide) token, else
+        (code, message). Gates approval decisions and permanent deletes."""
         if len(DECIDE_TOKEN) < DECIDE_TOKEN_MIN:
             return ("decide_disabled",
-                    "approval decisions are disabled on this dashboard: set "
+                    f"{what} are disabled on this dashboard: set "
                     f"PTASK_DASH_DECIDE_TOKEN (at least {DECIDE_TOKEN_MIN} characters), "
-                    "or decide with `pt approve|reject AP-n` at a terminal")
+                    f"or {fallback}")
         presented = (self.headers.get("X-PTask-Decide-Token") or "").strip()
         if presented and hmac.compare_digest(presented.encode(), DECIDE_TOKEN.encode()):
             return None
-        return ("decide_token_required", "approval decisions need the decide token")
+        return ("decide_token_required", f"{what} need the decide token")
 
     def _origin_ok(self) -> bool:
         # CSRF for state-changing requests: a browser on the tailnet sending
@@ -1511,6 +1539,9 @@ class Handler(BaseHTTPRequestHandler):
                 "domains": DASH_DOMAINS,
                 "default_domain": DASH_DEFAULT_DOMAIN,
                 "version": VERSION,
+                # Superadmin actions (permanent delete) are configured here;
+                # the token itself is still checked on every such request.
+                "superadmin": len(DECIDE_TOKEN) >= DECIDE_TOKEN_MIN,
             })
 
         try:
@@ -1661,6 +1692,23 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 ok, msg = pt_exec([verb, "--", tid])
             return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+
+        m = re.match(r"^/api/tasks/([^/]+)/delete$", u.path)
+        if m:
+            tid = m.group(1)
+            if not _ID_RE.match(tid):
+                return self._json({"error": "bad id"}, 400)
+            refusal = self._decide_refusal(
+                "permanent deletes", "delete with `pt rm PT-N` at a terminal")
+            if refusal is not None:
+                code, message = refusal
+                return self._json({"ok": False, "code": code, "error": message}, 403)
+            task = q_task_ref(tid)
+            if task is None or not task["pt_id"]:
+                return self._json({"ok": False, "error": f"no task {tid}"}, 404)
+            ok, msg = pt_exec(["rm", "--yes", "--", task["pt_id"]])
+            return self._json({"ok": ok, "pt_id": task["pt_id"], "message": msg},
+                              200 if ok else 500)
 
         m = re.match(r"^/api/tasks/([^/]+)/note$", u.path)
         if m:
