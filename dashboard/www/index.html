@@ -729,6 +729,12 @@ body.review #review-sec{display:block}
   padding:8px 11px;font-family:var(--font);font-size:12px;width:100%;resize:vertical;min-height:54px;line-height:1.45}
 .dnote-form textarea:focus,.cnote textarea:focus{outline:none;border-color:var(--accent);box-shadow:var(--glow)}
 .dnote-form .mbtn{align-self:flex-end}
+/* superadmin-only permanent delete: outlined in the critical colour, a full
+   touch target, set apart from the triage verbs */
+.drawer .ddanger{border-top:1px solid var(--border);padding-top:12px;margin-bottom:16px;display:flex;justify-content:flex-end}
+.mbtn.danger{color:var(--p5t);border-color:var(--p5t);display:inline-flex;align-items:center;gap:6px;min-height:44px}
+.mbtn.danger:hover{background:rgba(255,59,92,.12);border-color:var(--p5t)}
+.mbtn.danger:disabled{opacity:.5;cursor:default}
 .cnote{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
 .cnote label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
 .cnote label .opt{color:var(--dim);font-weight:600;text-transform:none;letter-spacing:0}
@@ -1038,6 +1044,9 @@ button,[role="button"]{touch-action:manipulation}
       <button type="submit" class="mbtn" id="d-note-add">Add note</button>
     </form>
   </div>
+  <div class="ddanger" id="d-danger" hidden>
+    <button type="button" class="mbtn danger" id="d-delete"><svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg> Delete permanently</button>
+  </div>
   <div class="dhist"><h4>History</h4><div id="d-hist"></div></div>
 </aside>
 <!-- body-level overlays (survive the 15s #lanes/#crit re-render) -->
@@ -1192,9 +1201,12 @@ function applyDomainConfig(cfg){
   const saved=localStorage.getItem('ptask-domain')||'all';
   setDomain(saved==='all'||_domainByKey.has(saved)?saved:'all');
 }
+/* true when this dashboard has the superadmin token configured: only then is
+   the drawer's permanent Delete offered (the server still checks the token) */
+let _superadmin=false;
 const _configReady=fetch('/api/config',{headers:{'Accept':'application/json'}})
   .then(r=>{if(!r.ok)throw new Error('/api/config '+r.status);return r.json();})
-  .then(cfg=>applyDomainConfig(cfg));
+  .then(cfg=>{_superadmin=!!(cfg&&cfg.superadmin);applyDomainConfig(cfg);});
 
 const ENG_PROJECTS=new Set(['infra','ptve','specola','puresentinel','nexus','immune','vulcan',
   'scriptorium','habla','pureprospect','instance08-hardening','ptask','puremind','warroom']);
@@ -2377,6 +2389,7 @@ async function openDrawer(uuid){
   $('#d-hist').innerHTML='<span class="age">loading…</span>';
   $('#d-crit-wrap').hidden=true;
   $('#d-notes').innerHTML='';
+  $('#d-danger').hidden=!_superadmin;
   if(_drawerUuid!==uuid) $('#d-note').value='';
   _drawerUuid=uuid;
   dr.classList.add('open');
@@ -2457,6 +2470,38 @@ $('#d-note-form').addEventListener('submit',async e=>{
   }catch(err){toast('✗ '+err.message);}
   finally{btn.disabled=false;}
 });
+/* Permanent delete, any status (pt rm: tombstoned, cannot be undone). The
+   sidecar treats it as superadmin-only, like approval decisions, so it wants
+   the same decide token: asked for once, kept in localStorage. */
+function postDelete(uuid, token){
+  return fetch('/api/tasks/'+encodeURIComponent(uuid)+'/delete',{method:'POST',
+    headers:{'Content-Type':'application/json','X-PTask-Decide-Token':token},body:'{}'});
+}
+$('#d-delete').onclick=async()=>{
+  const uuid=_drawerUuid; if(!uuid) return;
+  const t=_pendingAll.find(x=>x.id===uuid)||_recentAll.find(x=>x.id===uuid);
+  const label=(t&&t.pt_id?t.pt_id+' ':'')+'"'+((t&&t.title)||$('#d-title').textContent)+'"';
+  if(!window.confirm('Permanently delete '+label+'?\n\nThis cannot be undone.')) return;
+  const btn=$('#d-delete'); btn.disabled=true;
+  try{
+    let r=await postDelete(uuid, storedDecideToken());
+    let j=await r.json().catch(()=>({}));
+    if(r.status===403 && j.code==='decide_token_required'){
+      const entered=(window.prompt('Superadmin token (PTASK_DASH_DECIDE_TOKEN)')||'').trim();
+      if(entered){
+        r=await postDelete(uuid, entered);
+        j=await r.json().catch(()=>({}));
+        if(r.ok && j.ok){try{localStorage.setItem(DECIDE_KEY, entered);}catch(e){}}
+      }
+    }
+    if(r.ok && j.ok){
+      toast('🗑 '+(j.pt_id||uuid)+' deleted permanently');
+      if(_drawerUuid===uuid) closeDrawer();
+      load(true);
+    } else toast('✗ '+(j.error||j.message||'delete failed'));
+  }catch(e){toast('✗ '+e.message);}
+  finally{btn.disabled=false;}
+};
 function drawerOpen(){ return $('#drawer').classList.contains('open'); }
 function closeDrawer(){ $('#drawer').classList.remove('open'); $('#drawer-scrim').classList.remove('show'); restoreInvoker(); }
 $('#d-close').onclick=closeDrawer;

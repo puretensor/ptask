@@ -4,7 +4,7 @@ A visually compelling, on-brand, live **triage cockpit** for PureTensor Task
 Intelligence (`pt`). Surfaces pending tasks and critical issues ranked by the
 server's composite `priority_score`, with four runtime-switchable themes.
 
-**Live:** https://ptask.tail07f9ef.ts.net (tailnet-gated; no login; approval decisions need the decide token)
+**Live:** https://ptask.tail07f9ef.ts.net (tailnet-gated; no login; approval decisions and permanent deletes need the decide token)
 
 ## What it is
 
@@ -143,6 +143,7 @@ transaction.
 | POST | `/api/tasks/<id>/snooze` `{days?}` | shells `pt snooze <id> "<days> days"` (v0.12) |
 | POST | `/api/tasks/<id>/dismiss` | shells `pt dismiss [--note=…] <id>` (v0.12; optional `{"note"}` reason, v0.23) |
 | POST | `/api/tasks/<id>/reopen` | shells `pt reopen <id>` (v0.12) |
+| POST | `/api/tasks/<id>/delete` | superadmin: shells `pt rm --yes -- PT-N` for a task in any status (`<id>` is the PT-N or uuid; the sidecar looks up the PT-N, since `pt rm` reads anything else as an open-task title). Permanent, tombstoned for delta sync. Needs `X-PTask-Decide-Token` = `PTASK_DASH_DECIDE_TOKEN` (403 `decide_token_required` / `decide_disabled` otherwise); unknown task 404 (v0.26) |
 | POST | `/api/tasks/<id>/edit` `{title?, description?, priority?, deadline?, labels_add?, labels_remove?}` | shells `pt edit` (+ `pt priority` for level); null deadline clears (v0.12) |
 | POST | `/api/tasks` `{title, description?, priority?, deadline?}` | shells `pt add [--priority=] [--description=] [--deadline=] -- "<title>"` |
 | POST | `/api/voice` (raw audio body) | Whisper STT → Bedrock Claude draft → `{transcript, fields:{title,description,priority,deadline,labels,domain,reason}}` to pre-fill the composer |
@@ -182,7 +183,7 @@ PTASK_DB=/tmp/tasks.dev.db PTASK_DASH_BIND=127.0.0.1:9519 python3 server.py
 | `PTASK_ACTOR` | `dashboard` | actor stamped on dashboard-originated `pt` writes |
 | `PTASK_WAL_AUTOCHECKPOINT` | `0` in `ptask-dashboard.service` | passed to the `pt` writers the sidecar spawns, so they leave WAL checkpoints to Litestream like every other writer; set `1000` in `.dashboard.env` on a host without Litestream |
 | `PTASK_DASH_ALLOWED_HOSTS` | _(unset)_ | extra comma-separated `Host` names to serve besides IP literals, `localhost`, the machine's short hostname and `*.ts.net`; `.suffix` entries match the suffix |
-| `PTASK_DASH_DECIDE_TOKEN` | _(unset)_ | secret (≥ 16 chars) required to approve/reject from the cockpit; unset disables approval decisions here |
+| `PTASK_DASH_DECIDE_TOKEN` | _(unset)_ | superadmin secret (≥ 16 chars) required to approve/reject and to delete a task from the cockpit; unset disables both here and hides the drawer's Delete (`/api/config` → `superadmin: false`) |
 | `PTASK_STT_URL` | `http://127.0.0.1:9000/transcribe` | voice STT endpoint (local Whisper); accepts `-F audio=@` |
 | `PTASK_VOICE_MODEL` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Bedrock model for voice→task extraction |
 | `PTASK_VOICE_REGION` | `$AWS_DEFAULT_REGION` or `us-east-1` | Bedrock region (keyless, IAM via `~/.aws`) |
@@ -240,18 +241,21 @@ on the tailnet is the access decision for the board, with two limits:
   writes included, to the internet. Remove any tunnel that predates v0.21.0.
   The Host check refuses unknown public names; do not add them to
   `PTASK_DASH_ALLOWED_HOSTS`.
-- **Approval decisions need the decide token.** The tailnet carries the
-  fleet's agents too, and "only the operator decides" cannot rest on network
-  reach. Put a random secret in `~/puretensor-tasks/.dashboard.env`, restart,
-  and enter it once per browser when the cockpit asks:
+- **Superadmin actions need the decide token.** Approval decisions and
+  permanent deletes are operator-only. The tailnet carries the fleet's agents
+  too, and "only the operator" cannot rest on network reach. Put a random
+  secret in `~/puretensor-tasks/.dashboard.env` (and in Vaultwarden as
+  `pTask cockpit superadmin token`), restart, and enter it once per browser or
+  home-screen app when the cockpit asks:
 
   ```bash
   printf 'PTASK_DASH_DECIDE_TOKEN=%s\n' "$(openssl rand -hex 24)" >> ~/puretensor-tasks/.dashboard.env
   systemctl --user restart ptask-dashboard
   ```
 
-  Without it, approve/reject answers 403 `decide_disabled`; decide at a
-  terminal with `pt approve|reject AP-n` instead.
+  Without it, approve/reject and delete answer 403 `decide_disabled` and the
+  drawer offers no Delete; use `pt approve|reject AP-n` or `pt rm PT-N` at a
+  terminal instead.
 
 ## Rollback
 
@@ -274,6 +278,15 @@ The canonical `pt serve` and `tasks.db` are never modified — nothing to revert
 
 ## Version
 
+- **v0.26.0** (pt 3.51.0) — Superadmin delete. The task drawer, on desktop and
+  as the phone bottom sheet, has **Delete permanently** for a task in any
+  status (open, done or dismissed). It confirms first, then
+  `POST /api/tasks/<id>/delete` shells `pt rm --yes -- PT-N` (tombstoned, so
+  sync clients drop it). Like approval decisions it needs the decide token,
+  asked for once and kept in localStorage; `/api/config` reports
+  `superadmin` so the button only shows where the token is configured.
+  **Not** on the Rust `pt serve` dashboard, whose config carries no
+  `superadmin` (machine clients delete with `task_delete` on `/sync`).
 - **v0.25.0** (pt 3.48.0) — Acceptance criteria. The task drawer shows a task's
   definition of done as a checklist (checked / unchecked, who checked it),
   folded from the full criteria trail in the journal (not only the newest 60
