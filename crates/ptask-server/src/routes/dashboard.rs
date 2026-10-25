@@ -366,6 +366,12 @@ fn parse_deadline(s: &str) -> Option<(String, f64)> {
         let days = today.until(date).ok()?.get_days();
         return Some((date.to_string(), f64::from(days)));
     }
+    // Civil date is the date written on the timestamp, matching the sidecar
+    // `datetime.date()`. `parse_iso_to_utc` folds the instant into UTC
+    // first, so 00:30 at +01:00 became the previous UTC date. jiff refuses
+    // to parse an offset timestamp as `Zoned` without a `[Time/Zone]`
+    // annotation, so the written `YYYY-MM-DD` is read from the text. The
+    // day count stays an instant delta.
     let z = ptask_core::dates::parse_iso_to_utc(s).or_else(|| {
         // Date-only "YYYY-MM-DD" → midnight UTC. `s.get(..10)` is char-safe:
         // a raw `&s[..10]` panics when byte 10 lands inside a multi-byte scalar
@@ -379,7 +385,12 @@ fn parse_deadline(s: &str) -> Option<(String, f64)> {
         .ok()?
         .with_time_zone(ptask_core::jiff::tz::TimeZone::UTC);
     let days = (z.timestamp().as_second() - now.timestamp().as_second()) as f64 / 86_400.0;
-    Some((z.date().to_string(), (days * 10.0).round() / 10.0))
+    let date = s
+        .get(..10)
+        .filter(|prefix| prefix.parse::<ptask_core::jiff::civil::Date>().is_ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| z.date().to_string());
+    Some((date, (days * 10.0).round() / 10.0))
 }
 
 fn round4(v: f64) -> f64 {
@@ -1690,6 +1701,20 @@ mod tests {
             "unrelated runtime work was starved for {timer_elapsed:?} \
              while the dashboard write waited for a connection"
         );
+    }
+
+    #[test]
+    fn timed_deadline_keeps_the_offset_civil_date() {
+        // The sidecar's datetime.date() keeps the offset's calendar day.
+        // 00:30 at +01:00 is still 26 Oct there and 23:30 UTC on 25 Oct.
+        // Converting to UTC before reading the date files that deadline
+        // on the previous day in /api/tasks and /api/timeline.
+        let (date, _) = parse_deadline("2026-10-26T00:30:00+01:00").unwrap();
+        assert_eq!(date, "2026-10-26");
+        // A `Z` timestamp's civil date is the UTC date. The sidecar test
+        // locks the same string.
+        let (zdate, _) = parse_deadline("2026-01-01T09:00:00Z").unwrap();
+        assert_eq!(zdate, "2026-01-01");
     }
 
     #[test]
