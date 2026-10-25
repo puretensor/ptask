@@ -42,12 +42,9 @@ fn render_morning(db: &Db) -> Result<String> {
         return Ok(out);
     }
 
-    let (overdue, due_today): (Vec<&Task>, Vec<&Task>) = rows.iter().partition(|t| {
-        t.deadline
-            .as_deref()
-            .map(|d| d < today.as_str())
-            .unwrap_or(false)
-    });
+    let (overdue, due_today): (Vec<&Task>, Vec<&Task>) = rows
+        .iter()
+        .partition(|t| morning_row_is_overdue(t.deadline.as_deref(), &today, &now));
 
     if !overdue.is_empty() {
         out.push_str(&format!("🚨 OVERDUE ({})\n", overdue.len()));
@@ -124,6 +121,34 @@ fn render_evening_at(db: &Db, now: &jiff::Zoned) -> Result<String> {
         push_rows(&mut out, &refs);
     }
     Ok(out)
+}
+
+/// Whether a morning-digest row belongs under OVERDUE.
+///
+/// The list is `today | overdue`. Date-only deadlines are due all day, so
+/// only a date before today is overdue. A datetime is overdue once its
+/// instant has passed, even when the text starts with today's date
+/// (`"YYYY-MM-DDT…"` sorts after `"YYYY-MM-DD"`, which used to hide it).
+/// A deadline the filter cannot read is overdue too: that is the `overdue`
+/// term in docs/dsl.md.
+fn morning_row_is_overdue(deadline: Option<&str>, today: &str, now: &jiff::Zoned) -> bool {
+    let Some(d) = deadline.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    if d.len() == 10 && d.as_bytes().get(4) == Some(&b'-') && d.as_bytes().get(7) == Some(&b'-') {
+        // A real civil date is due all day. The same 10-character shape that
+        // is not a date is unreadable, and `overdue` counts that
+        // (`julianday` is NULL). A string compare would file "abcd-ef-gh"
+        // under today because it sorts after "YYYY-MM-DD".
+        if d.parse::<jiff::civil::Date>().is_ok() {
+            return d < today;
+        }
+        return true;
+    }
+    match dates::parse_iso_to_utc(d) {
+        Some(when) => when.timestamp() < now.timestamp(),
+        None => true,
+    }
 }
 
 fn local_day_utc_bounds(now: &jiff::Zoned) -> Result<(String, String)> {
@@ -216,6 +241,106 @@ mod tests {
         let (_dir, db) = fresh_db();
         let txt = render_morning(&db).unwrap();
         assert!(txt.contains("Clear runway"));
+    }
+
+    /// A datetime that has already passed is overdue even when its text
+    /// starts with today's date. The morning split used to compare the raw
+    /// deadline string with `today`, and `"YYYY-MM-DDT..."` sorts after
+    /// `"YYYY-MM-DD"`, so the 07:00 digest filed that occurrence under
+    /// DUE TODAY.
+    #[test]
+    fn morning_digest_counts_a_passed_datetime_on_todays_date_as_overdue() {
+        let (_dir, db) = fresh_db();
+        let today = dates::now_in_operator_tz().unwrap().date().to_string();
+        // 00:00 at UTC+14 is 10:00 the previous UTC day, so on this London
+        // date the instant is already past. The text still sorts after
+        // `today`. Write it directly: create() normalises an offset into
+        // UTC and that rewrite hides the comparison.
+        let deadline = format!("{today}T00:00:00+14:00");
+        let task = ptask_core::tasks::create(
+            &db,
+            NewTask::minimal("missed earlier today"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET deadline=?1 WHERE id=?2",
+                rusqlite::params![deadline, task.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let txt = render_morning(&db).unwrap();
+        assert!(
+            txt.contains("🚨 OVERDUE"),
+            "a datetime already past must be overdue even when its text starts with today, got:\n{txt}"
+        );
+        assert!(txt.contains("missed earlier today"), "got:\n{txt}");
+        assert!(
+            !txt.contains("📅 DUE TODAY"),
+            "the passed datetime must not be filed under due today, got:\n{txt}"
+        );
+    }
+
+    /// The overdue filter treats a deadline it cannot read as overdue
+    /// (docs/dsl.md). The morning split must use that same rule.
+    #[test]
+    fn morning_digest_counts_an_unreadable_deadline_as_overdue() {
+        let (_dir, db) = fresh_db();
+        let task = ptask_core::tasks::create(
+            &db,
+            NewTask::minimal("deadline we cannot read"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET deadline=?1 WHERE id=?2",
+                rusqlite::params!["not-a-date", task.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let txt = render_morning(&db).unwrap();
+        assert!(
+            txt.contains("🚨 OVERDUE"),
+            "an unreadable deadline is overdue, got:\n{txt}"
+        );
+        assert!(txt.contains("deadline we cannot read"), "got:\n{txt}");
+        assert!(!txt.contains("📅 DUE TODAY"), "got:\n{txt}");
+    }
+
+    /// "abcd-ef-gh" has the date-only shape and sorts after today's date, so
+    /// a string compare files it under DUE TODAY. `julianday` cannot read it,
+    /// and docs/dsl.md counts that as overdue.
+    #[test]
+    fn morning_digest_counts_a_dash_shaped_unreadable_deadline_as_overdue() {
+        let (_dir, db) = fresh_db();
+        let task = ptask_core::tasks::create(
+            &db,
+            NewTask::minimal("deadline shaped like a date"),
+            &EventCtx::test(),
+        )
+        .unwrap();
+        db.with_conn(|c| {
+            c.execute(
+                "UPDATE tasks SET deadline=?1 WHERE id=?2",
+                rusqlite::params!["abcd-ef-gh", task.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let txt = render_morning(&db).unwrap();
+        assert!(
+            txt.contains("🚨 OVERDUE"),
+            "an unreadable date-shaped deadline is overdue, got:\n{txt}"
+        );
+        assert!(txt.contains("deadline shaped like a date"), "got:\n{txt}");
+        assert!(!txt.contains("📅 DUE TODAY"), "got:\n{txt}");
     }
 
     #[test]
