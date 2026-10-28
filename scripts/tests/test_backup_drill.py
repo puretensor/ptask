@@ -5,7 +5,10 @@ local directories, ssh runs the remote command locally, and hosts listed in
 STUB_DOWN_HOSTS refuse connections. STUB_HANG ("host:glob ...") makes a
 matching remote command hang the way a D-state CephFS mount does: the ssh
 session stays alive (keepalives answer) but the command never returns;
-STUB_HANG_SCP ("host ...") does the same to a transfer. sqlite3 is a Python
+STUB_HANG_SCP ("host ...") does the same to a transfer, and STUB_SCP_SHORT
+("host ...") makes an upload "succeed" with a 0-byte file the way a full
+remote disk does. Restore-drill evidence (marker + metric) goes to the
+sandbox's textfile dir, never the host's. sqlite3 is a Python
 shim (list mode, URI filenames) so the suite needs no sqlite3 CLI.
 """
 
@@ -44,6 +47,9 @@ for p in "$src" "$dst"; do
         [ "$h" = "${p%%:*}" ] && { printf 'SQLite format 3' > "${dst#*:}"; exec sleep 300; }
     done ;; esac
 done
+case "$dst" in *:*) for h in $STUB_SCP_SHORT; do
+    [ "$h" = "${dst%%:*}" ] && { : > "${dst#*:}"; exit 0; }
+done ;; esac
 exec cp "${src#*:}" "${dst#*:}"
 """,
     "litestream": r"""#!/usr/bin/env bash
@@ -107,7 +113,8 @@ class Sandbox:
         self.bin = self.root / "bin"
         self.home = self.root / "home"
         self.log = self.root / "calls.log"
-        for d in (self.bin, self.home / "puretensor-tasks", self.root / "tmp"):
+        self.textfile = self.root / "textfile"
+        for d in (self.bin, self.home / "puretensor-tasks", self.root / "tmp", self.textfile):
             d.mkdir(parents=True)
         for name, body in STUBS.items():
             p = self.bin / name
@@ -130,7 +137,10 @@ class Sandbox:
             "STUB_DOWN_HOSTS": "",
             "STUB_HANG": "",
             "STUB_HANG_SCP": "",
+            "STUB_SCP_SHORT": "",
             "STUB_LITESTREAM_HANG": "",
+            "PTASK_METRICS_TEXTFILE_DIR": str(self.textfile),
+            "PTASK_TENANT": "test",
             "STUB_LITESTREAM_PRE": "",
             "LC_ALL": "C",
         }
@@ -222,6 +232,26 @@ class BackupLegsTests(unittest.TestCase):
         self.assertTrue(scps and all(".db.partial." in c for c in scps), scps)
         for d in (self.near, self.dr):
             self.assertEqual(list(d.glob("*.partial")), [])
+
+    def test_zero_byte_source_is_refused_and_nothing_ships(self):
+        # pt opens a 0-byte file as an empty database; a snapshot of one
+        # must never reach either target.
+        self.sb.live.write_bytes(b"")
+        r = self.sb.run("ptask-backup.sh", **self.env)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("REFUSED", r.stderr)
+        self.assertEqual([c for c in self.sb.calls() if c.startswith(("ssh ", "scp "))], [])
+        for d in (self.near, self.dr):
+            self.assertEqual(list(d.iterdir()), [])
+
+    def test_short_upload_is_removed_not_renamed_and_other_leg_ships(self):
+        r = self.sb.run("ptask-backup.sh", STUB_SCP_SHORT="mon1", **self.env)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("nearby upload landed as 0 bytes", r.stderr)
+        self.assertIn("FAILED leg(s): nearby", r.stderr)
+        self.assertEqual(list(self.near.iterdir()), [])
+        (snap,) = self.dr.glob("ptask-tasks-*.db")
+        self.assertGreater(snap.stat().st_size, 0)
 
     def test_stale_partials_are_pruned(self):
         stale = self.near / "ptask-tasks-2020-01-01.db.partial"
@@ -342,6 +372,77 @@ class RestoreDrillTests(unittest.TestCase):
         r = self.drill()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("3 check(s) failed: litestream nearby offsite", r.stderr)
+
+    # -- evidence: marker + textfile metric ----------------------------------
+    def prom(self, mode: str = "full") -> dict[str, str]:
+        """Parse ptask_restore_verify_<mode>.prom into {series: value}."""
+        text = (self.sb.textfile / f"ptask_restore_verify_{mode}.prom").read_text()
+        return dict(l.rsplit(" ", 1) for l in text.splitlines() if l and not l.startswith("#"))
+
+    def state(self, name: str) -> Path:
+        return self.sb.home / ".local" / "state" / "ptask" / name
+
+    def test_pass_writes_marker_and_metric(self):
+        self.healthy_backups()
+        r = self.drill()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        m = self.prom()
+        L = 'mode="full",tenant="test"'
+        self.assertEqual(m[f"ptask_restore_verify_success{{{L}}}"], "1")
+        self.assertEqual(m[f"ptask_restore_verify_last_success_timestamp_seconds{{{L}}}"],
+                         m[f"ptask_restore_verify_last_run_timestamp_seconds{{{L}}}"])
+        for check in ("litestream", "nearby", "offsite"):
+            self.assertEqual(m[f'ptask_restore_verify_check_ok{{{L},check="{check}"}}'], "1")
+        self.assertIn(" ok rc=0 failed=none", self.state("restore-verify-full.last").read_text())
+        self.assertTrue(self.state("restore-verify-full.ok").exists())
+        # Atomic write: no temp file left in the collector directory.
+        self.assertEqual(sorted(p.name for p in self.sb.textfile.iterdir()),
+                         ["ptask_restore_verify_full.prom"])
+
+    def test_fail_records_the_failed_check_and_keeps_the_last_pass(self):
+        self.healthy_backups()
+        self.assertEqual(self.drill().returncode, 0)
+        ok_line = self.state("restore-verify-full.ok").read_text()
+        ok_ts = str(int(self.state("restore-verify-full.ok").stat().st_mtime))
+        (self.near / "ptask-tasks-2026-10-05.db").write_bytes(b"")
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0)
+        m = self.prom()
+        L = 'mode="full",tenant="test"'
+        self.assertEqual(m[f"ptask_restore_verify_success{{{L}}}"], "0")
+        self.assertEqual(m[f'ptask_restore_verify_check_ok{{{L},check="nearby"}}'], "0")
+        self.assertEqual(m[f'ptask_restore_verify_check_ok{{{L},check="litestream"}}'], "1")
+        self.assertEqual(m[f"ptask_restore_verify_last_success_timestamp_seconds{{{L}}}"], ok_ts)
+        self.assertIn(" fail rc=1 failed=nearby", self.state("restore-verify-full.last").read_text())
+        self.assertEqual(self.state("restore-verify-full.ok").read_text(), ok_line)
+
+    def test_live_db_unreadable_still_leaves_a_failed_record(self):
+        self.healthy_backups()
+        self.sb.live.unlink()
+        r = self.drill()
+        self.assertNotEqual(r.returncode, 0)
+        m = self.prom()
+        L = 'mode="full",tenant="test"'
+        self.assertEqual(m[f"ptask_restore_verify_success{{{L}}}"], "0")
+        self.assertEqual(m[f"ptask_restore_verify_last_success_timestamp_seconds{{{L}}}"], "0")
+
+    def test_replica_mode_writes_its_own_record(self):
+        self.healthy_backups()
+        r = self.drill("--replica-only")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse((self.sb.textfile / "ptask_restore_verify_full.prom").exists())
+        m = self.prom("replica")
+        L = 'mode="replica",tenant="test"'
+        self.assertEqual(m[f"ptask_restore_verify_success{{{L}}}"], "1")
+        self.assertEqual(m[f'ptask_restore_verify_check_ok{{{L},check="litestream"}}'], "1")
+        self.assertNotIn(f'ptask_restore_verify_check_ok{{{L},check="nearby"}}', m)
+
+    def test_unwritable_metrics_dir_keeps_the_marker_and_the_verdict(self):
+        self.healthy_backups()
+        r = self.drill(PTASK_METRICS_TEXTFILE_DIR=str(self.sb.root / "absent"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("marker only", r.stdout)
+        self.assertTrue(self.state("restore-verify-full.ok").exists())
 
     # -- round 2: hangs, partial uploads, races, cross-leg digest ------------
     FAST = {"PTASK_VERIFY_STEP_TIMEOUT": "2", "PTASK_VERIFY_XFER_TIMEOUT": "2",

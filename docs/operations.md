@@ -12,6 +12,14 @@ file (safe with WAL — readers and writers continue concurrently), copies
 the resulting snapshot to `backup-host:/var/backups/ptask/`, and prunes
 files older than 30 days.
 
+It never ships a zero-byte or truncated file. The snapshot must pass
+`PRAGMA quick_check`, hold a `tasks` table and be exactly `page_count *
+page_size` bytes, or the run exits non-zero before either leg starts (pt
+opens a 0-byte file silently as an empty database, so a junk nightly is
+worse than a missing one). Each upload is renamed into place only when the
+remote file's size equals the snapshot's; a short upload is removed and its
+leg fails.
+
 ### Deployment (workstation that owns `tasks.db`)
 
 Symlink-install the user-mode systemd units:
@@ -65,6 +73,15 @@ one). `ptask-replica-check.timer` runs the Litestream part alone daily
 scratch file and fails, and alerts, when any task write older than 10
 minutes is missing from it, so a Litestream that runs but has stopped
 replicating is caught within a day.
+
+Every drill run, pass or fail, leaves evidence: `restore-verify-<mode>.last`
+(and `.ok`, rewritten on a pass only) under `~/.local/state/ptask/`, and
+`ptask_restore_verify_<mode>.prom` in the node_exporter textfile directory
+(`PTASK_METRICS_TEXTFILE_DIR`, default `/var/lib/prometheus/node-exporter`)
+with `ptask_restore_verify_last_run_timestamp_seconds`,
+`..._last_success_timestamp_seconds`, `..._success`, `..._duration_seconds`
+and `..._check_ok{check=...}`. `<mode>` is `full` (weekly) or `replica`
+(daily). Alert on the last-success timestamp's age, not on the unit state.
 
 ### Recovery
 

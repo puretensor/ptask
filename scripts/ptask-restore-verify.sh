@@ -42,6 +42,28 @@
 #   PTASK_VERIFY_STEP_TIMEOUT    — seconds per remote command (default 30)
 #   PTASK_VERIFY_XFER_TIMEOUT    — seconds to copy the nearby nightly (default 120)
 #   PTASK_VERIFY_RESTORE_TIMEOUT — seconds for `litestream restore` (default 300)
+#   PTASK_VERIFY_STATE_DIR  — marker directory (default $XDG_STATE_HOME/ptask,
+#                             else ~/.local/state/ptask)
+#   PTASK_METRICS_TEXTFILE_DIR — node_exporter textfile collector directory
+#                             (default /var/lib/prometheus/node-exporter)
+#   PTASK_TENANT            — `tenant` label on the metrics (default "default")
+#
+# Evidence. Every run that gets past argument parsing leaves a record, pass
+# or fail, so "the drill ran and passed" can be graded without reading the
+# journal (the 2026-10-26 restore drill found none):
+#   <state>/restore-verify-<mode>.last  one line: UTC time, ok|fail, exit
+#                                       code, failed checks
+#   <state>/restore-verify-<mode>.ok    the same line, rewritten on a pass
+#                                       only; its mtime is the last pass
+#   <textfile>/ptask_restore_verify_<mode>.prom (written atomically, when
+#                                       the directory is writable):
+#     ptask_restore_verify_last_run_timestamp_seconds
+#     ptask_restore_verify_last_success_timestamp_seconds  (0 = never)
+#     ptask_restore_verify_success                         (1 pass, 0 fail)
+#     ptask_restore_verify_duration_seconds
+#     ptask_restore_verify_check_ok{check="litestream|nearby|offsite"}
+# <mode> is full or replica, so the weekly drill and the daily replica
+# check never overwrite each other's record.
 #
 # Nightlies are matched as ptask-tasks-*.db, so the .partial name an upload
 # carries until ptask-backup.sh renames it is never taken for the newest.
@@ -85,9 +107,87 @@ rscp() { timeout -k 10 "$XFER_TIMEOUT" scp -q "${SSH_OPTS[@]}" "$@"; }
 # leaves 340 s for the local sqlite checks. Raise it with the timeouts. --replica-only: 310 s, and
 # ptask-replica-check.service allows 10min.
 
+STATE_DIR="${PTASK_VERIFY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ptask}"
+METRICS_DIR="${PTASK_METRICS_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
+TENANT="${PTASK_TENANT:-default}"
+START_TS=$(date +%s)
+failed=()
+declare -A CHECK_OK=()
+
+# Write the evidence described in the header. Never changes the drill's exit
+# code: a record that cannot be written is reported on stderr, and the
+# metric then ages until the staleness alert reads it.
+write_evidence() {
+    local rc=$1 now result line labels ok_ts=0 tmp check
+    now=$(date +%s)
+    if [ "$rc" -eq 0 ]; then result=ok; else result=fail; fi
+    line="$(date -u +%Y-%m-%dT%H:%M:%SZ) $result rc=$rc failed=${failed[*]:-none}"
+    mkdir -p -- "$STATE_DIR" || return 1
+    printf '%s\n' "$line" > "$STATE_DIR/.restore-verify-$MODE.last.tmp" \
+        && mv -f -- "$STATE_DIR/.restore-verify-$MODE.last.tmp" "$STATE_DIR/restore-verify-$MODE.last" \
+        || return 1
+    if [ "$rc" -eq 0 ]; then
+        printf '%s\n' "$line" > "$STATE_DIR/.restore-verify-$MODE.ok.tmp" \
+            && mv -f -- "$STATE_DIR/.restore-verify-$MODE.ok.tmp" "$STATE_DIR/restore-verify-$MODE.ok" \
+            || return 1
+    fi
+    [ -f "$STATE_DIR/restore-verify-$MODE.ok" ] \
+        && ok_ts=$(stat -c %Y "$STATE_DIR/restore-verify-$MODE.ok")
+    if [ ! -d "$METRICS_DIR" ] || [ ! -w "$METRICS_DIR" ]; then
+        say "metrics: $METRICS_DIR not writable; marker only ($STATE_DIR)"
+        return 0
+    fi
+    labels="mode=\"$MODE\",tenant=\"$TENANT\""
+    # Temp name without .prom (node_exporter reads *.prom only), renamed
+    # into place so a scrape never sees a half-written file.
+    tmp=$(mktemp "$METRICS_DIR/.ptask_restore_verify_$MODE.XXXXXX") || return 1
+    {
+        echo "# HELP ptask_restore_verify_last_run_timestamp_seconds Unix time the pTask restore drill last finished."
+        echo "# TYPE ptask_restore_verify_last_run_timestamp_seconds gauge"
+        echo "ptask_restore_verify_last_run_timestamp_seconds{$labels} $now"
+        echo "# HELP ptask_restore_verify_last_success_timestamp_seconds Unix time of the last passing pTask restore drill (0 = never)."
+        echo "# TYPE ptask_restore_verify_last_success_timestamp_seconds gauge"
+        echo "ptask_restore_verify_last_success_timestamp_seconds{$labels} $ok_ts"
+        echo "# HELP ptask_restore_verify_success 1 when the last pTask restore drill passed every check, else 0."
+        echo "# TYPE ptask_restore_verify_success gauge"
+        echo "ptask_restore_verify_success{$labels} $([ "$rc" -eq 0 ] && echo 1 || echo 0)"
+        echo "# HELP ptask_restore_verify_duration_seconds Wall time of the last pTask restore drill."
+        echo "# TYPE ptask_restore_verify_duration_seconds gauge"
+        echo "ptask_restore_verify_duration_seconds{$labels} $(( now - START_TS ))"
+        echo "# HELP ptask_restore_verify_check_ok 1 when this check passed in the last pTask restore drill, else 0."
+        echo "# TYPE ptask_restore_verify_check_ok gauge"
+        for check in litestream nearby offsite; do
+            [ -n "${CHECK_OK[$check]:-}" ] || continue
+            echo "ptask_restore_verify_check_ok{$labels,check=\"$check\"} ${CHECK_OK[$check]}"
+        done
+    } > "$tmp" && chmod 0644 "$tmp" \
+        && mv -f -- "$tmp" "$METRICS_DIR/ptask_restore_verify_$MODE.prom" \
+        || { rm -f -- "$tmp"; return 1; }
+}
+
 SCRATCH=$(mktemp -d -t ptask-restore-verify-XXXXXX)
-cleanup() { rm -rf "$SCRATCH"; }
-trap cleanup EXIT
+on_exit() {
+    local rc=$?
+    rm -rf "$SCRATCH"
+    write_evidence "$rc" \
+        || echo "ptask-restore-verify: WARNING — could not write the evidence record ($STATE_DIR, $METRICS_DIR)" >&2
+    exit "$rc"
+}
+trap on_exit EXIT
+
+# run_check <name> <function>: records the verdict for the evidence and
+# collects failures. `if` suspends errexit inside the function the way `||`
+# did, so every fallible step still handles its own failure.
+run_check() {
+    local name=$1
+    shift
+    if "$@"; then
+        CHECK_OK[$name]=1
+    else
+        CHECK_OK[$name]=0
+        failed+=("$name")
+    fi
+}
 
 say() { echo "ptask-restore-verify: $*"; }
 fail() { echo "ptask-restore-verify: FAIL — $*" >&2; }
@@ -221,18 +321,17 @@ check_offsite() {
     say "offsite ok ($name, ${age_h}h old, $bytes bytes, $digest_note)"
 }
 
-failed=()
-check_replica || failed+=(litestream)
+run_check litestream check_replica
 if [ "$MODE" = replica ]; then
     [ "${#failed[@]}" -eq 0 ] || exit 1
     say "replica OK"
     exit 0
 fi
-check_nightly || failed+=(nearby)
+run_check nearby check_nightly
 if [ "$OFFSITE" = "none" ]; then
     say "offsite skipped (PTASK_BACKUP_OFFSITE=none)"
 else
-    check_offsite || failed+=(offsite)
+    run_check offsite check_offsite
 fi
 
 if [ "${#failed[@]}" -gt 0 ]; then

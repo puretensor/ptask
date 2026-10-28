@@ -1,5 +1,5 @@
 [Unit]
-Description=Nightly pTask SQLite backup to Ceph (mon1:/mnt/cephfs)
+Description=Nightly pTask SQLite backup (nearby + off-site targets)
 Documentation=https://github.com/puretensor/ptask
 
 [Timer]

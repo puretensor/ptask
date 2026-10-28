@@ -40,17 +40,41 @@ TMP=$(mktemp -t ptask-backup-XXXXXX.db)
 cleanup() { rm -f "$TMP" "$TMP-journal" "$TMP-shm" "$TMP-wal"; }
 trap cleanup EXIT
 
-python3 - "$DB" "$TMP" <<'PY'
+# The snapshot must be a whole, readable pTask database before anything
+# ships. 2026-10-26 restore drill: a 0-byte nightly sat in the Ceph/critical
+# copy, and pt opens a 0-byte file silently as an empty database, so a junk
+# file is worse than a missing one. The helper prints the byte count the
+# snapshot must have (page_count * page_size); a quick_check failure or a
+# missing tasks table exits non-zero.
+EXPECT=$(python3 - "$DB" "$TMP" <<'PY'
 import sqlite3, sys
 src = sqlite3.connect(sys.argv[1])
 dst = sqlite3.connect(sys.argv[2])
 try:
     src.backup(dst)
+    check = dst.execute("PRAGMA quick_check").fetchone()[0]
+    if check != "ok":
+        sys.exit(f"snapshot quick_check: {check}")
+    if not dst.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+    ).fetchone():
+        sys.exit("snapshot has no tasks table")
+    pages = dst.execute("PRAGMA page_count").fetchone()[0]
+    page_size = dst.execute("PRAGMA page_size").fetchone()[0]
+    print(pages * page_size)
 finally:
     dst.close()
     src.close()
 PY
+) || {
+    echo "ptask-backup: REFUSED: the snapshot of $DB failed validation; nothing shipped" >&2
+    exit 1
+}
 SIZE=$(stat -c%s "$TMP")
+if [ "$SIZE" -eq 0 ] || [ "$SIZE" != "$EXPECT" ]; then
+    echo "ptask-backup: REFUSED: the snapshot is $SIZE bytes, expected $EXPECT (zero-byte or truncated); nothing shipped" >&2
+    exit 1
+fi
 
 # Every ssh/scp gets a connect timeout and keepalives, which catch a dead
 # peer. They cannot catch a live peer whose command hangs: a remote mkdir or
@@ -65,8 +89,8 @@ XFER_TIMEOUT=${PTASK_BACKUP_XFER_TIMEOUT:-600}
 # foreground group, so a manual run would stop on SIGTTIN until timed out.
 rssh() { timeout -k 10 "$STEP_TIMEOUT" ssh -n "${SSH_OPTS[@]}" "$@"; }
 rscp() { timeout -k 10 "$XFER_TIMEOUT" scp -q "${SSH_OPTS[@]}" "$@"; }
-# Worst case with the defaults: a leg is 4 rssh steps (mkdir, mv, prune,
-# count) of at most 60+10 s plus one rscp of at most 600+10 s = 890 s, and
+# Worst case with the defaults: a leg is 4 rssh steps (mkdir, size-checked
+# mv, prune, count) of at most 60+10 s plus one rscp of at most 600+10 s = 890 s, and
 # two legs = 1780 s. ptask-backup.service allows TimeoutStartSec=40min
 # (2400 s), which leaves 620 s for the local snapshot. If you raise either
 # timeout, keep TimeoutStartSec above 2 * (4 * (STEP+10) + XFER+10) plus
@@ -87,7 +111,20 @@ upload_leg() {
     # half-written upload into place.
     local partial="$final.partial.$$"
     rscp "$TMP" "$host:$partial" || return 1
-    rssh "$host" "mv -f '$partial' '$final'" || return 1
+    # Rename into place only when the upload landed whole: a full or broken
+    # remote disk can leave a 0-byte or short file behind a "successful" scp.
+    # A short upload is removed and the leg fails (exit 3 = size mismatch;
+    # any other non-zero = the ssh step itself failed).
+    local landed rc=0
+    landed=$(rssh "$host" \
+        "s=\$(stat -c %s '$partial') || exit 4; \
+         if [ \"\$s\" != '$SIZE' ]; then echo \"\$s\"; rm -f '$partial'; exit 3; fi; \
+         mv -f '$partial' '$final'") || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        echo "ptask-backup: $label upload landed as ${landed:-unknown} bytes, not ${SIZE}; removed, not renamed into place" >&2
+        return 1
+    fi
+    [ "$rc" -eq 0 ] || return 1
     # Retention prune. `-mtime +N` means strictly older than N days.
     rssh "$host" \
         "find '$dir' -maxdepth 1 -type f \
