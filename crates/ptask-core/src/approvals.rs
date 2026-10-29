@@ -4,6 +4,7 @@
 //! payload that pTask stores and hashes itself. Executors consume an approved
 //! payload exactly once.
 
+use crate::approval_journal::{Claim, Journal};
 use crate::dates;
 use crate::error::{Error, Result};
 use crate::event_log::EventCtx;
@@ -51,6 +52,10 @@ pub enum ApprovalError {
     DigestMismatch,
     #[error("approval already consumed")]
     AlreadyConsumed,
+    /// The approval journal does not vouch for this row (forged, altered,
+    /// or the journal itself is unreadable or tampered with).
+    #[error("approval not verified by the journal: {0}")]
+    Unverified(String),
 }
 
 impl ApprovalError {
@@ -62,6 +67,7 @@ impl ApprovalError {
             Self::Terminal(_) => Some(4),
             Self::DigestMismatch => Some(5),
             Self::AlreadyConsumed => Some(6),
+            Self::Unverified(_) => Some(7),
             _ => None,
         }
     }
@@ -1120,6 +1126,20 @@ pub fn request(db: &Db, input: RequestInput, ctx: &EventCtx) -> Result<RequestOu
             "approval.requested",
             serde_json::json!({"approval_id": format_ap_id(seq), "digest": digest}),
         )?;
+        if let Some(j) = Journal::from_env() {
+            j.append(
+                "request",
+                &Claim {
+                    uuid: &uuid,
+                    digest: &digest,
+                    kind: &input.kind,
+                    expires_at: expires_at.as_deref(),
+                    decided_by: None,
+                },
+                requester,
+                &now,
+            )?;
+        }
         tx.commit()?;
         Ok(seq)
     })();
@@ -1225,6 +1245,17 @@ pub fn decide(
         decision.event_type(),
         serde_json::json!({"approval_id": current.ap_id(), "via": via.as_str()}),
     )?;
+    if let Some(j) = Journal::from_env() {
+        j.append(
+            match decision {
+                Decision::Approve => "approve",
+                Decision::Reject => "reject",
+            },
+            &claim_of(&current),
+            decider,
+            &now,
+        )?;
+    }
     tx.commit()?;
     get(db, &current.uuid)
 }
@@ -1259,8 +1290,21 @@ pub fn withdraw(db: &Db, id: &str, ctx: &EventCtx) -> Result<Approval> {
         "approval.withdrawn",
         serde_json::json!({"approval_id": current.ap_id()}),
     )?;
+    if let Some(j) = Journal::from_env() {
+        j.append("withdraw", &claim_of(&current), actor, &now)?;
+    }
     tx.commit()?;
     get(db, &current.uuid)
+}
+
+fn claim_of(ap: &Approval) -> Claim<'_> {
+    Claim {
+        uuid: &ap.uuid,
+        digest: &ap.digest,
+        kind: &ap.kind,
+        expires_at: ap.expires_at.as_deref(),
+        decided_by: ap.decided_by.as_deref(),
+    }
 }
 
 fn offered_digest(src: &PayloadSource) -> Result<String> {
@@ -1342,6 +1386,12 @@ pub fn consume(db: &Db, id: &str, offered: &PayloadSource, ctx: &EventCtx) -> Re
     )?;
     if tx.changes() != 1 {
         return Err(Error::Approval(ApprovalError::AlreadyConsumed));
+    }
+    // The journal, not the row, is the authority in enforce mode: a row
+    // written straight into SQLite has no journaled approval and is refused
+    // here, inside the transaction, so the latch rolls back.
+    if let Some(j) = Journal::from_env() {
+        j.check_and_record_consume(&claim_of(&current), actor, &now)?;
     }
     record_event(
         &tx,
