@@ -318,9 +318,9 @@ a record inside the same transaction as the row change.
 
 | `PTASK_APPROVAL_JOURNAL` | Behaviour |
 |---|---|
-| unset / `off` (default) | Unchanged. Nothing is read or written. |
+| unset, `off`, `0`, `false` or `no` (default) | Unchanged. Nothing is read or written. |
 | `shadow` | Records are appended; a consume the journal would refuse is logged and allowed. Journal errors are logged only. |
-| `enforce` | `consume` must find, in a verified chain, an unconsumed `approve` record whose digest (the action binding), kind, approver and `expires_at` equal the row's. Otherwise it exits **7** and the latch rolls back. A broken, truncated or unreadable journal also refuses. |
+| `enforce` | `consume` must find, in a verified chain, an unconsumed `approve` record whose digest (the action binding), kind, approver and `expires_at` equal the row's. Otherwise it exits **7** and the latch rolls back. A broken, truncated or unreadable journal also refuses. Any other value (a typo such as `enforcd`, or `true`, `on`, `disabled`) is treated as `enforce` and logs a warning, so a mistyped flag never turns the gate off. |
 
 Configure with `PTASK_APPROVAL_JOURNAL_PATH` and
 `PTASK_APPROVAL_JOURNAL_KEY_FILE` (at least 16 bytes; never logged). Put both
