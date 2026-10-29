@@ -202,3 +202,39 @@ fn default_off_keeps_legacy_behaviour() {
     assert!(consume(&s.db, &id, &digest()).is_ok());
     assert!(!s.journal.exists());
 }
+
+#[test]
+fn unrecognised_mode_fails_closed_not_off() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    // A typo in the flag must not silently turn the gate off.
+    let s = setup(Some("enforcd"));
+    let id = forge_approved_row(&s);
+    let r = consume(&s.db, &id, &digest());
+    assert!(
+        matches!(r, Err(Error::Approval(ApprovalError::Unverified(_)))),
+        "typo'd mode must behave as enforce: {r:?}"
+    );
+}
+
+#[test]
+fn explicit_off_values_stay_off() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    for v in ["off", "0", "false", ""] {
+        let s = setup(Some(v));
+        let id = forge_approved_row(&s);
+        assert!(consume(&s.db, &id, &digest()).is_ok(), "{v:?} must be off");
+    }
+}
+
+#[test]
+fn verify_of_missing_journal_is_an_error_not_zero_records() {
+    use ptask_core::approval_journal::{Journal, Mode};
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("key");
+    std::fs::write(&key, "0123456789abcdef0123456789abcdef\n").unwrap();
+    let j = Journal::new(Mode::Enforce, dir.path().join("absent.jsonl"), &key);
+    assert!(
+        j.verify().is_err(),
+        "a missing journal must not verify green"
+    );
+}

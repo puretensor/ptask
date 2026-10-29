@@ -10,10 +10,10 @@
 //! digest (the action binding), kind, approver and expiry.
 //!
 //! Modes (`PTASK_APPROVAL_JOURNAL`):
-//! * `off` (default): nothing is read or written; behaviour is unchanged.
+//! * `off` (default; also unset, `0`, `false`, `no`): nothing is read or written; behaviour is unchanged.
 //! * `shadow`: records are appended and a failing consume check is logged
 //!   but allowed, so the journal can soak before it is authoritative.
-//! * `enforce`: a consume without a matching journal record is refused
+//! * `enforce` (and any unrecognised value, so a typo fails closed): a consume without a matching journal record is refused
 //!   (exit code 7) and a journal that cannot be written fails the call.
 //!
 //! The key file (`PTASK_APPROVAL_JOURNAL_KEY_FILE`, at least 16 bytes) and
@@ -82,9 +82,10 @@ impl Journal {
             .to_ascii_lowercase()
             .as_str()
         {
+            "" | "off" | "0" | "false" | "no" => return None,
             "shadow" => Mode::Shadow,
-            "enforce" => Mode::Enforce,
-            _ => return None,
+            // Anything else, including a typo of "enforce", fails closed.
+            _ => Mode::Enforce,
         };
         let path = std::env::var_os("PTASK_APPROVAL_JOURNAL_PATH").map(PathBuf::from);
         let key_file = std::env::var_os("PTASK_APPROVAL_JOURNAL_KEY_FILE").map(PathBuf::from);
@@ -172,7 +173,8 @@ impl Journal {
     /// Verify the chain and return the number of records.
     pub fn verify(&self) -> Result<usize> {
         let key = self.key()?;
-        let text = std::fs::read_to_string(&self.path).unwrap_or_default();
+        let text = std::fs::read_to_string(&self.path)
+            .map_err(|e| unverified(format!("journal read: {e}")))?;
         Ok(self.read_chain(&key, &text)?.len())
     }
 
