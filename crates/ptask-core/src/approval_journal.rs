@@ -84,8 +84,14 @@ impl Journal {
         {
             "" | "off" | "0" | "false" | "no" => return None,
             "shadow" => Mode::Shadow,
+            "enforce" => Mode::Enforce,
             // Anything else, including a typo of "enforce", fails closed.
-            _ => Mode::Enforce,
+            other => {
+                tracing::warn!(
+                    "PTASK_APPROVAL_JOURNAL={other:?} is not recognised; treating it as enforce"
+                );
+                Mode::Enforce
+            }
         };
         let path = std::env::var_os("PTASK_APPROVAL_JOURNAL_PATH").map(PathBuf::from);
         let key_file = std::env::var_os("PTASK_APPROVAL_JOURNAL_KEY_FILE").map(PathBuf::from);
