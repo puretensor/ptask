@@ -306,3 +306,29 @@ binary, or steal an admin token can decide. The tamper triggers raise the
 cost of a confused-deputy `UPDATE`; they do not stop a process with the
 same uid from disabling them. Payload bytes are not secret from any of
 these writers either: see "What this gate is, and is not" under Consume.
+
+## Journal-verified consume (`PTASK_APPROVAL_JOURNAL`)
+
+The table alone cannot show that an `approved` row came from the operator:
+whoever can write the SQLite file can insert one. An optional off-database
+journal closes that. It is an append-only JSONL file with an HMAC-SHA256
+hash chain (each record's MAC covers the previous MAC and the record's
+fields). `request`, `approve`, `reject`, `withdraw` and `consume` each append
+a record inside the same transaction as the row change.
+
+| `PTASK_APPROVAL_JOURNAL` | Behaviour |
+|---|---|
+| unset / `off` (default) | Unchanged. Nothing is read or written. |
+| `shadow` | Records are appended; a consume the journal would refuse is logged and allowed. Journal errors are logged only. |
+| `enforce` | `consume` must find, in a verified chain, an unconsumed `approve` record whose digest (the action binding), kind, approver and `expires_at` equal the row's. Otherwise it exits **7** and the latch rolls back. A broken, truncated or unreadable journal also refuses. |
+
+Configure with `PTASK_APPROVAL_JOURNAL_PATH` and
+`PTASK_APPROVAL_JOURNAL_KEY_FILE` (at least 16 bytes; never logged). Put both
+where the requesting seats cannot write, and ship the journal off-host so a
+truncation is detectable against the shipped copy. Rows approved before the
+journal existed have no record: soak in `shadow`, let old approvals drain or
+be re-requested, then move to `enforce`.
+
+Limit: a writer that can read the key can mint a valid chain. The key and
+journal belong to the broker identity, not the seats; that separation is the
+seat-identity work (PT-2642), not this flag.
