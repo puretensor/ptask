@@ -1,5 +1,5 @@
 [Unit]
-Description=pTask weekly backup restore drill (litestream + nightlies)
+Description=pTask daily backup restore drill (litestream + nightlies)
 Documentation=https://github.com/puretensor/ptask
 ConditionPathExists=%h/puretensor-tasks/tasks.db
 After=network-online.target

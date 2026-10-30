@@ -65,7 +65,9 @@ sqlite3 "file:$HOME/puretensor-tasks/tasks.db?mode=ro" 'SELECT COUNT(*) FROM tas
 
 `integrity_check` must print `ok`, and the snapshot's task count should be at
 or a little below the live count (the snapshot is up to a day old).
-`ptask-restore-verify.timer` runs this check weekly, together with a
+`ptask-restore-verify.timer` runs this check daily (it was weekly until
+2026-10-30, when the Monday-only cadence made its textfile trip the fleet's
+26 h NodeTextfileStale rule six days out of seven), together with a
 Litestream restore and the off-site copy (`scripts/ptask-restore-verify.sh`,
 which also compares the off-site copy's sha256 with the same-date nearby
 one). `ptask-replica-check.timer` runs the Litestream part alone daily
