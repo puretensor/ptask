@@ -1390,9 +1390,32 @@ pub fn consume(db: &Db, id: &str, offered: &PayloadSource, ctx: &EventCtx) -> Re
     // The journal, not the row, is the authority in enforce mode: a row
     // written straight into SQLite has no journaled approval and is refused
     // here, inside the transaction, so the latch rolls back.
-    if let Some(j) = Journal::from_env() {
-        j.check_and_record_consume(&claim_of(&current), actor, &now)?;
-    }
+    //
+    // The consume line is fsynced before commit so a committed latch can
+    // never race ahead of the journal. The guard is declared after `tx`
+    // and dropped first, still holding the write lock: if `record_event`
+    // or `commit` fails, it appends `consume_void` before the rollback is
+    // visible. Without that, the journal consume sticks, the row stays
+    // approved and unconsumed, and every retry is AlreadyConsumed.
+    let mut void_guard = ConsumeVoidGuard {
+        journal: Journal::from_env(),
+        uuid: current.uuid.clone(),
+        digest: current.digest.clone(),
+        kind: current.kind.clone(),
+        expires_at: current.expires_at.clone(),
+        actor: actor.to_string(),
+        ts: now.clone(),
+        armed: false,
+    };
+    // Arm only when this call appended a consume. A refusal (forged row,
+    // or a committed consume whose database latch was cleared) must not
+    // void an earlier consume that did commit.
+    let appended = if let Some(j) = void_guard.journal.as_ref() {
+        j.check_and_record_consume(&claim_of(&current), actor, &now)?
+    } else {
+        false
+    };
+    void_guard.armed = appended;
     record_event(
         &tx,
         ctx,
@@ -1401,7 +1424,47 @@ pub fn consume(db: &Db, id: &str, offered: &PayloadSource, ctx: &EventCtx) -> Re
         serde_json::json!({"approval_id": current.ap_id()}),
     )?;
     tx.commit()?;
+    void_guard.armed = false;
     get(db, &current.uuid)
+}
+
+/// Voids a journal consume when dropped while still armed.
+///
+/// Declared after the SQLite transaction so Drop runs while that
+/// transaction, and its write lock, is still held.
+struct ConsumeVoidGuard {
+    journal: Option<Journal>,
+    uuid: String,
+    digest: String,
+    kind: String,
+    expires_at: Option<String>,
+    actor: String,
+    ts: String,
+    armed: bool,
+}
+
+impl Drop for ConsumeVoidGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(journal) = self.journal.as_ref() else {
+            return;
+        };
+        let claim = Claim {
+            uuid: &self.uuid,
+            digest: &self.digest,
+            kind: &self.kind,
+            expires_at: self.expires_at.as_deref(),
+            decided_by: None,
+        };
+        if let Err(e) = journal.void_uncommitted_consume(&claim, &self.actor, &self.ts) {
+            tracing::error!(
+                approval = %self.uuid,
+                "approval journal consume survived a rolled-back transaction and could not be voided: {e}"
+            );
+        }
+    }
 }
 
 /// Mark pending rows whose `expires_at` is in the past as expired.

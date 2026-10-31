@@ -48,7 +48,8 @@ pub struct Journal {
     key_file: PathBuf,
 }
 
-/// One journal line. `ev` is request, approve, reject, withdraw or consume.
+/// One journal line. `ev` is request, approve, reject, withdraw, consume,
+/// or consume_void (a consume whose database transaction did not commit).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Record {
     pub n: u64,
@@ -251,22 +252,64 @@ impl Journal {
     /// consume record under the same lock so a replay is refused across
     /// processes. Shadow mode logs a refusal and still records the consume
     /// when the chain is intact.
-    pub fn check_and_record_consume(&self, claim: &Claim, actor: &str, ts: &str) -> Result<()> {
+    ///
+    /// `Ok(true)` means a consume line was appended. `Ok(false)` is shadow
+    /// mode softening a failure that wrote nothing. Callers that void a
+    /// consume when their own database transaction rolls back must void
+    /// only after `Ok(true)`: a refusal leaves any earlier committed
+    /// consume in place.
+    pub fn check_and_record_consume(&self, claim: &Claim, actor: &str, ts: &str) -> Result<bool> {
         let res = self.locked(|key, file, chain| {
             let verdict = authorise(&chain, claim);
             match verdict {
                 Ok(()) => {
-                    Self::append_in(key, file, &chain, Self::record("consume", claim, actor, ts))
+                    Self::append_in(key, file, &chain, Self::record("consume", claim, actor, ts))?;
+                    Ok(true)
                 }
                 Err(e) if self.mode == Mode::Shadow => {
                     tracing::warn!(
                         approval = claim.uuid,
                         "approval journal (shadow) would refuse consume: {e}"
                     );
-                    Self::append_in(key, file, &chain, Self::record("consume", claim, actor, ts))
+                    Self::append_in(key, file, &chain, Self::record("consume", claim, actor, ts))?;
+                    Ok(true)
                 }
                 Err(e) => Err(e),
             }
+        });
+        match res {
+            Ok(appended) => Ok(appended),
+            Err(e) if self.mode == Mode::Shadow => {
+                tracing::warn!("approval journal (shadow) error ignored: {e}");
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Append `consume_void` when `uuid` has an unvoided consume.
+    ///
+    /// `consume` writes the journal line before the SQLite commit, because
+    /// the journal is the authority and must not lag a committed latch.
+    /// If that transaction then rolls back, the consume line would brick
+    /// the still-approved row forever (`authorise` treats consume as
+    /// sticky). Only a holder of the journal key can append the void, and
+    /// the void does not look at the database: clearing `consumed_at` in
+    /// SQLite must not undo a consume that did commit.
+    ///
+    /// No-op when this uuid has no open consume (the check failed before
+    /// any line was written, or a void is already in place).
+    pub fn void_uncommitted_consume(&self, claim: &Claim, actor: &str, ts: &str) -> Result<()> {
+        let res = self.locked(|key, file, chain| {
+            if !consume_is_open(&chain, claim.uuid) {
+                return Ok(());
+            }
+            Self::append_in(
+                key,
+                file,
+                &chain,
+                Self::record("consume_void", claim, actor, ts),
+            )
         });
         self.soften(res)
     }
@@ -301,6 +344,10 @@ fn authorise(chain: &[Record], claim: &Claim) -> Result<()> {
                 approve.insert("a", r);
             }
             "consume" => consumed = true,
+            // A consume whose database transaction rolled back. Only the
+            // key holder can write this; it does not clear a consume that
+            // has no matching void.
+            "consume_void" => consumed = false,
             "reject" | "withdraw" => {
                 approve.remove("a");
             }
@@ -331,4 +378,17 @@ fn authorise(chain: &[Record], claim: &Claim) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// True when the latest consume for `uuid` has not been voided.
+fn consume_is_open(chain: &[Record], uuid: &str) -> bool {
+    let mut consumed = false;
+    for r in chain.iter().filter(|r| r.uuid == uuid) {
+        match r.ev.as_str() {
+            "consume" => consumed = true,
+            "consume_void" => consumed = false,
+            _ => {}
+        }
+    }
+    consumed
 }
