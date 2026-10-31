@@ -257,7 +257,9 @@ impl Journal {
     /// mode softening a failure that wrote nothing. Callers that void a
     /// consume when their own database transaction rolls back must void
     /// only after `Ok(true)`: a refusal leaves any earlier committed
-    /// consume in place.
+    /// consume in place. A shadow refusal appends a consume only when none
+    /// is open; an already-open consume returns `Ok(false)` and writes
+    /// nothing, so a rolled-back retry cannot void it.
     pub fn check_and_record_consume(&self, claim: &Claim, actor: &str, ts: &str) -> Result<bool> {
         let res = self.locked(|key, file, chain| {
             let verdict = authorise(&chain, claim);
@@ -271,8 +273,20 @@ impl Journal {
                         approval = claim.uuid,
                         "approval journal (shadow) would refuse consume: {e}"
                     );
-                    Self::append_in(key, file, &chain, Self::record("consume", claim, actor, ts))?;
-                    Ok(true)
+                    // An open consume already committed. Another line and
+                    // Ok(true) would arm ConsumeVoidGuard; a rolled-back
+                    // retry would then void it and reopen the approval.
+                    if consume_is_open(&chain, claim.uuid) {
+                        Ok(false)
+                    } else {
+                        Self::append_in(
+                            key,
+                            file,
+                            &chain,
+                            Self::record("consume", claim, actor, ts),
+                        )?;
+                        Ok(true)
+                    }
                 }
                 Err(e) => Err(e),
             }

@@ -99,6 +99,17 @@ fn forge_approved_row(s: &Setup) -> String {
     "AP-9001".to_string()
 }
 
+fn journal_evs(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let rest = line.split("\"ev\":\"").nth(1)?;
+            rest.split('"').next().map(str::to_string)
+        })
+        .collect()
+}
+
 #[test]
 fn forged_row_consume_fails() {
     let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
@@ -364,6 +375,178 @@ fn clearing_the_db_latch_does_not_reopen_a_committed_consume() {
     assert!(
         !journal.contains("\"ev\":\"consume_void\""),
         "clearing the latch must not write a void: {journal}"
+    );
+}
+
+/// A first shadow consume whose database transaction rolls back is voided,
+/// whether `authorise` allowed it or shadow softened a refusal while nothing
+/// was open. The row stays unconsumed and a retry can proceed.
+#[test]
+fn shadow_rolled_back_first_consume_is_voided() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let s = setup(Some("shadow"));
+    let ap = request(&s.db, Some("1h"));
+    approve(&s.db, &ap.ap_id());
+
+    let conn = rusqlite::Connection::open(s.db_path()).unwrap();
+    conn.execute(
+        "INSERT INTO pt_event_log (uuid, task_uuid, event_type, payload, ts)
+         VALUES ('collide-shadow-first', NULL, 'probe', '{}', '2026-01-01T00:00:00+00:00')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let ctx = EventCtx::local("executor").with_uuid("collide-shadow-first");
+    let first = approvals::consume(&s.db, &ap.ap_id(), &PayloadSource::Digest(digest()), &ctx);
+    assert!(
+        first.is_err(),
+        "colliding event uuid must fail the consume: {first:?}"
+    );
+    let row = approvals::get(&s.db, &ap.ap_id()).unwrap();
+    assert_eq!(row.status, "approved");
+    assert!(
+        row.consumed_at.is_none(),
+        "the database latch must roll back with the event insert"
+    );
+    let evs = journal_evs(&s.journal);
+    assert!(
+        evs.iter().any(|e| e == "consume_void"),
+        "a rolled-back first shadow consume must be voided: {evs:?}"
+    );
+
+    consume(&s.db, &ap.ap_id(), &digest()).expect("retry after the rolled-back consume");
+    let consumed = approvals::get(&s.db, &ap.ap_id()).unwrap();
+    assert!(consumed.consumed_at.is_some(), "the retry latches");
+
+    // Nothing is open and authorise refuses (forged row, shadow Err arm).
+    // The arm must still append, and the rollback must void that line.
+    let forged = forge_approved_row(&s);
+    let conn = rusqlite::Connection::open(s.db_path()).unwrap();
+    conn.execute(
+        "INSERT INTO pt_event_log (uuid, task_uuid, event_type, payload, ts)
+         VALUES ('collide-shadow-forged', NULL, 'probe', '{}', '2026-01-01T00:00:00+00:00')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let forged_ctx = EventCtx::local("executor").with_uuid("collide-shadow-forged");
+    let forged_try = approvals::consume(
+        &s.db,
+        &forged,
+        &PayloadSource::Digest(digest()),
+        &forged_ctx,
+    );
+    assert!(
+        forged_try.is_err(),
+        "colliding event uuid must fail the forged consume: {forged_try:?}"
+    );
+    let evs = journal_evs(&s.journal);
+    let forged_consume = evs.iter().filter(|e| *e == "consume").count();
+    let forged_void = evs.iter().filter(|e| *e == "consume_void").count();
+    // The journaled approval above left consume, consume_void, consume.
+    assert_eq!(
+        forged_consume, 3,
+        "the softened refusal must append its own consume: {evs:?}"
+    );
+    assert_eq!(
+        forged_void, 2,
+        "a rolled-back shadow refusal with nothing open must be voided: {evs:?}"
+    );
+}
+
+/// Shadow mode must not arm `ConsumeVoidGuard` for a consume that is already
+/// open. A committed consume, a cleared `consumed_at`, and a colliding event
+/// uuid used to append a second consume and then `consume_void`. That void
+/// reopens the approval, so flipping to enforce later allows another consume.
+#[test]
+fn shadow_rollback_must_not_void_a_committed_consume() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let s = setup(Some("shadow"));
+    let ap = request(&s.db, Some("1h"));
+    approve(&s.db, &ap.ap_id());
+    consume(&s.db, &ap.ap_id(), &digest()).expect("shadow consume commits");
+
+    let conn = rusqlite::Connection::open(s.db_path()).unwrap();
+    conn.execute_batch("DROP TRIGGER IF EXISTS approvals_lock_after_decision;")
+        .unwrap();
+    conn.execute(
+        "UPDATE approvals SET consumed_at = NULL, consumed_by = NULL",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO pt_event_log (uuid, task_uuid, event_type, payload, ts)
+         VALUES ('collide-shadow-open', NULL, 'probe', '{}', '2026-01-01T00:00:00+00:00')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let ctx = EventCtx::local("executor").with_uuid("collide-shadow-open");
+    let rolled = approvals::consume(&s.db, &ap.ap_id(), &PayloadSource::Digest(digest()), &ctx);
+    assert!(
+        rolled.is_err(),
+        "colliding event uuid must roll the retry back: {rolled:?}"
+    );
+    let row = approvals::get(&s.db, &ap.ap_id()).unwrap();
+    assert!(
+        row.consumed_at.is_none(),
+        "the retry's database latch must roll back"
+    );
+    let evs = journal_evs(&s.journal);
+    assert_eq!(
+        evs.iter().filter(|e| *e == "consume").count(),
+        1,
+        "a rolled-back retry must not append another consume: {evs:?}"
+    );
+    assert!(
+        !evs.iter().any(|e| e == "consume_void"),
+        "a rolled-back retry of an open consume must not arm the void guard: {evs:?}"
+    );
+
+    // The latch is still clear, so a later call reaches the journal again.
+    // Shadow allows the row update and must still leave the open consume alone.
+    consume(&s.db, &ap.ap_id(), &digest()).expect("shadow still allows the row latch");
+    let evs = journal_evs(&s.journal);
+    assert_eq!(
+        evs.iter().filter(|e| *e == "consume").count(),
+        1,
+        "the committed consume stays the only one: {evs:?}"
+    );
+    assert!(
+        !evs.iter().any(|e| e == "consume_void"),
+        "the open consume must stay open: {evs:?}"
+    );
+
+    let conn = rusqlite::Connection::open(s.db_path()).unwrap();
+    conn.execute(
+        "UPDATE approvals SET consumed_at = NULL, consumed_by = NULL",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    // SAFETY: this test holds ENV for the whole run.
+    unsafe {
+        std::env::set_var("PTASK_APPROVAL_JOURNAL", "enforce");
+    }
+    let enforced = consume(&s.db, &ap.ap_id(), &digest());
+    assert!(
+        matches!(
+            enforced,
+            Err(Error::Approval(ApprovalError::AlreadyConsumed))
+        ),
+        "flipping to enforce must not allow a second consume: {enforced:?}"
+    );
+    let evs = journal_evs(&s.journal);
+    assert_eq!(
+        evs.iter().filter(|e| *e == "consume").count(),
+        1,
+        "enforce must not append over the open consume: {evs:?}"
+    );
+    assert!(
+        !evs.iter().any(|e| e == "consume_void"),
+        "the enforce refusal must not void the committed consume: {evs:?}"
     );
 }
 
