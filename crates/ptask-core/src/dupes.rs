@@ -1063,8 +1063,11 @@ pub(crate) fn unmerge_if_needed(
                 params![child, duplicate_uuid, now],
             )?;
         }
-        // The carried criteria go back with the duplicate (which kept its
-        // own throughout), checked or not: they were the duplicate's.
+        // An unchecked carried criterion goes back with the duplicate,
+        // which kept its own copy. A check recorded on the canonical is
+        // evidence: the duplicate's copy was never checked, and the reopen
+        // after this unmerge clears checks on the duplicate, so removing
+        // the canonical row would drop the evidence from every checklist.
         let carried: Vec<i64> = payload
             .get("criteria_carried")
             .and_then(|v| v.as_array())
@@ -1073,7 +1076,7 @@ pub(crate) fn unmerge_if_needed(
         if !carried.is_empty() {
             for c in crate::criteria::list_in_conn(tx, &canon)?
                 .into_iter()
-                .filter(|c| carried.contains(&c.n))
+                .filter(|c| carried.contains(&c.n) && !c.done)
             {
                 crate::criteria::remove_in_conn(
                     tx,
@@ -1394,5 +1397,59 @@ mod tests {
             "the duplicate keeps the original rule"
         );
         assert_eq!(status(&db, &dup.id), "todo");
+    }
+
+    /// Checking a carried criterion records the evidence on the canonical.
+    /// Undo used to remove that row. The duplicate's own copy was never
+    /// checked, and reopen clears its checks, so the evidence vanished.
+    #[test]
+    fn undo_merge_keeps_a_checked_carried_criterion() {
+        let ctx = EventCtx::test();
+        let (_d, db) = fresh();
+        let canon = add(&db, "Ship the backup drill");
+        let dup = tasks::create_with_extensions(
+            &db,
+            NewTask::minimal("Backup drill"),
+            tasks::Extensions {
+                acceptance: vec!["offsite copy verified".into(), "tape labelled".into()],
+                ..Default::default()
+            },
+            &ctx,
+        )
+        .unwrap();
+        merge(&db, &dup.id, &canon.id, None, &ctx).unwrap();
+        let carried = crate::criteria::list(&db, &canon.id).unwrap();
+        let offsite = carried
+            .iter()
+            .find(|c| c.text == "offsite copy verified")
+            .expect("the merge carries the duplicate's criteria");
+        crate::criteria::check(&db, &canon.id, offsite.n, Some("sha256 matches"), &ctx).unwrap();
+
+        tasks::undo_last(&db, &ctx).unwrap();
+        assert_eq!(status(&db, &dup.id), "todo");
+
+        let on_canon = crate::criteria::list(&db, &canon.id).unwrap();
+        let kept = on_canon
+            .iter()
+            .find(|c| c.text == "offsite copy verified")
+            .expect("the checked criterion and its evidence must stay on the canonical task");
+        assert!(kept.done, "{kept:?}");
+        assert_eq!(kept.evidence.as_deref(), Some("sha256 matches"));
+        assert!(
+            !on_canon.iter().any(|c| c.text == "tape labelled"),
+            "an unchecked carried criterion still goes back with the duplicate: {on_canon:?}"
+        );
+
+        let on_dup = crate::criteria::list(&db, &dup.id).unwrap();
+        assert!(
+            on_dup
+                .iter()
+                .any(|c| c.text == "offsite copy verified" && !c.done),
+            "the duplicate keeps its own unchecked copy: {on_dup:?}"
+        );
+        assert!(
+            on_dup.iter().any(|c| c.text == "tape labelled" && !c.done),
+            "{on_dup:?}"
+        );
     }
 }
