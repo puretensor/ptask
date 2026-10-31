@@ -226,6 +226,61 @@ fn explicit_off_values_stay_off() {
     }
 }
 
+/// The executor reads bytes with `payload`, then acts, then `consume`.
+/// Enforce mode must refuse that read for a row that was never journaled,
+/// or the action happens before consume can refuse it.
+#[test]
+fn forged_row_does_not_release_payload_or_verify() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let s = setup(Some("enforce"));
+    let conn = rusqlite::Connection::open(s.db_path()).unwrap();
+    conn.execute(
+        "INSERT INTO approvals (id, seq, kind, title, payload, payload_kind, digest, requester,
+                                status, created_at, decided_by, decided_via, decided_at)
+         VALUES ('forged-bytes', 9002, 'email', 'forged letter', ?1, 'file', ?2, 'requester',
+                 'approved', '2026-01-01T00:00:00+00:00', 'operator', 'api',
+                 '2026-01-01T00:00:01+00:00')",
+        rusqlite::params![b"send the money".as_slice(), digest()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let released = approvals::payload_bytes(&s.db, "AP-9002");
+    assert!(
+        matches!(released, Err(Error::Approval(ApprovalError::Unverified(_)))),
+        "a forged row must not release its bytes: {released:?}"
+    );
+    let verified = approvals::verify(&s.db, "AP-9002", &PayloadSource::Digest(digest()));
+    assert!(
+        matches!(verified, Err(Error::Approval(ApprovalError::Unverified(_)))),
+        "a forged row must not verify: {verified:?}"
+    );
+
+    let ap = approvals::request(
+        &s.db,
+        RequestInput {
+            kind: "email".into(),
+            title: "Real letter".into(),
+            request_note: None,
+            payload: PayloadSource::Json(br#"{"to":"a@b.c"}"#.to_vec()),
+            task_pt_id: None,
+            expires_in: Some("1h".into()),
+        },
+        &EventCtx::local("requester"),
+    )
+    .unwrap()
+    .approval;
+    approve(&s.db, &ap.ap_id());
+    let bytes = approvals::payload_bytes(&s.db, &ap.ap_id()).expect("journaled approval releases");
+    assert_eq!(bytes, br#"{"to":"a@b.c"}"#);
+    approvals::verify(
+        &s.db,
+        &ap.ap_id(),
+        &PayloadSource::Json(br#"{"to":"a@b.c"}"#.to_vec()),
+    )
+    .expect("journaled approval verifies");
+}
+
 /// `record_event` runs after the journal consume is fsynced. A colliding
 /// idempotency key makes that insert fail and the SQLite transaction roll
 /// back. The journal consume must be voided, or the still-approved row can
@@ -247,13 +302,11 @@ fn rolled_back_consume_is_voided_and_can_be_retried() {
     drop(conn);
 
     let ctx = EventCtx::local("executor").with_uuid("collide");
-    let first = approvals::consume(
-        &s.db,
-        &ap.ap_id(),
-        &PayloadSource::Digest(digest()),
-        &ctx,
+    let first = approvals::consume(&s.db, &ap.ap_id(), &PayloadSource::Digest(digest()), &ctx);
+    assert!(
+        first.is_err(),
+        "colliding event uuid must fail the consume: {first:?}"
     );
-    assert!(first.is_err(), "colliding event uuid must fail the consume: {first:?}");
     let row = approvals::get(&s.db, &ap.ap_id()).unwrap();
     assert_eq!(row.status, "approved");
     assert!(

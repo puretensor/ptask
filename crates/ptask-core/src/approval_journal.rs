@@ -287,6 +287,24 @@ impl Journal {
         }
     }
 
+    /// Whether the journal currently authorises `claim` (an approve is
+    /// present, unconsumed, and matches). Does not append. Shadow mode
+    /// logs a refusal and returns `Ok`. Used by `payload` and `verify`,
+    /// which release or attest before `consume` latches.
+    pub fn authorises(&self, claim: &Claim) -> Result<()> {
+        let res = self.locked(|_key, _file, chain| authorise(&chain, claim));
+        match res {
+            Err(e) if self.mode == Mode::Shadow => {
+                tracing::warn!(
+                    approval = claim.uuid,
+                    "approval journal (shadow) would refuse release: {e}"
+                );
+                Ok(())
+            }
+            other => other,
+        }
+    }
+
     /// Append `consume_void` when `uuid` has an unvoided consume.
     ///
     /// `consume` writes the journal line before the SQLite commit, because
