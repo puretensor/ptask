@@ -1005,7 +1005,29 @@ pub(crate) fn unmerge_if_needed(
             )?;
         }
         if payload.get("recurrence_copied").and_then(|v| v.as_bool()) == Some(true) {
-            tx.execute("DELETE FROM pt_recurrence WHERE task_uuid=?1", [&canon])?;
+            // Take the rule back only when it is still the copied row.
+            // A later deadline edit (or an advanced occurrence) rewrites
+            // next_occurrence and anchor on the canonical; deleting the
+            // row then throws that schedule away. The duplicate still has
+            // the original rule either way.
+            let unchanged: bool = tx.query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                      FROM pt_recurrence c
+                      JOIN pt_recurrence d ON d.task_uuid = ?2
+                     WHERE c.task_uuid = ?1
+                       AND c.rrule = d.rrule
+                       AND c.mode = d.mode
+                       AND c.original_input = d.original_input
+                       AND c.next_occurrence = d.next_occurrence
+                       AND c.anchor IS d.anchor
+                 )",
+                params![canon, duplicate_uuid],
+                |r| r.get(0),
+            )?;
+            if unchanged {
+                tx.execute("DELETE FROM pt_recurrence WHERE task_uuid=?1", [&canon])?;
+            }
         }
         if let Some(g) = payload.get("goal_copied").and_then(|v| v.as_str()) {
             tx.execute(
@@ -1308,5 +1330,69 @@ mod tests {
                 .to_string()
                 .contains("dismissed")
         );
+    }
+
+    fn has_recurrence(db: &Db, id: &str) -> bool {
+        db.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pt_recurrence WHERE task_uuid=?1)",
+                [id],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    fn recurring(db: &Db, title: &str) -> crate::Task {
+        let rec = crate::recurrence::parse("every monday at 9am").unwrap();
+        let mut new = NewTask::minimal(title);
+        new.deadline = Some("2026-05-18T09:00:00+01:00".into());
+        tasks::create_with_extensions(
+            db,
+            new,
+            tasks::Extensions {
+                recurrence: Some(rec),
+                ..Default::default()
+            },
+            &EventCtx::test(),
+        )
+        .unwrap()
+    }
+
+    /// Undo of a merge deletes the copied rule. A deadline edit after the
+    /// merge rewrites that rule's next occurrence and anchor; the delete
+    /// must not throw the edited schedule away. An untouched copy still goes.
+    #[test]
+    fn undo_merge_keeps_a_recurrence_edited_after_the_copy() {
+        let ctx = EventCtx::test();
+
+        let (_d, db) = fresh();
+        let canon = add(&db, "Canonical export");
+        let dup = recurring(&db, "Weekly export check");
+        merge(&db, &dup.id, &canon.id, None, &ctx).unwrap();
+        assert!(has_recurrence(&db, &canon.id));
+        tasks::undo_last(&db, &ctx).unwrap();
+        assert!(
+            !has_recurrence(&db, &canon.id),
+            "an untouched copied rule is part of the merge and must go back"
+        );
+        assert!(has_recurrence(&db, &dup.id));
+        assert_eq!(status(&db, &dup.id), "todo");
+
+        let (_d, db) = fresh();
+        let canon = add(&db, "Canonical export");
+        let dup = recurring(&db, "Weekly export check");
+        merge(&db, &dup.id, &canon.id, None, &ctx).unwrap();
+        tasks::update_deadline(&db, &canon.id, Some("2026-12-01"), &ctx).unwrap();
+        tasks::undo_last(&db, &ctx).unwrap();
+        assert!(
+            has_recurrence(&db, &canon.id),
+            "a schedule edited after the merge must survive undo"
+        );
+        assert!(
+            has_recurrence(&db, &dup.id),
+            "the duplicate keeps the original rule"
+        );
+        assert_eq!(status(&db, &dup.id), "todo");
     }
 }
