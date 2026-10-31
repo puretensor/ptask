@@ -226,6 +226,94 @@ fn explicit_off_values_stay_off() {
     }
 }
 
+/// `record_event` runs after the journal consume is fsynced. A colliding
+/// idempotency key makes that insert fail and the SQLite transaction roll
+/// back. The journal consume must be voided, or the still-approved row can
+/// never be consumed.
+#[test]
+fn rolled_back_consume_is_voided_and_can_be_retried() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let s = setup(Some("enforce"));
+    let ap = request(&s.db, Some("1h"));
+    approve(&s.db, &ap.ap_id());
+
+    let conn = rusqlite::Connection::open(s.db_path()).unwrap();
+    conn.execute(
+        "INSERT INTO pt_event_log (uuid, task_uuid, event_type, payload, ts)
+         VALUES ('collide', NULL, 'probe', '{}', '2026-01-01T00:00:00+00:00')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let ctx = EventCtx::local("executor").with_uuid("collide");
+    let first = approvals::consume(
+        &s.db,
+        &ap.ap_id(),
+        &PayloadSource::Digest(digest()),
+        &ctx,
+    );
+    assert!(first.is_err(), "colliding event uuid must fail the consume: {first:?}");
+    let row = approvals::get(&s.db, &ap.ap_id()).unwrap();
+    assert_eq!(row.status, "approved");
+    assert!(
+        row.consumed_at.is_none(),
+        "the database latch must roll back with the event insert"
+    );
+
+    let journal = std::fs::read_to_string(&s.journal).unwrap();
+    assert!(
+        journal.contains("\"ev\":\"consume_void\""),
+        "the uncommitted consume must be voided in the journal: {journal}"
+    );
+
+    consume(&s.db, &ap.ap_id(), &digest()).expect("retry after the rolled-back consume");
+    let consumed = approvals::get(&s.db, &ap.ap_id()).unwrap();
+    assert!(consumed.consumed_at.is_some(), "the retry latches");
+    assert!(
+        consume(&s.db, &ap.ap_id(), &digest()).is_err(),
+        "a committed consume is still one-shot"
+    );
+}
+
+/// A committed consume must stay consumed even if a SQLite writer clears
+/// the latch. The void path must not treat "row unconsumed" as authority.
+#[test]
+fn clearing_the_db_latch_does_not_reopen_a_committed_consume() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let s = setup(Some("enforce"));
+    let ap = request(&s.db, Some("1h"));
+    approve(&s.db, &ap.ap_id());
+    consume(&s.db, &ap.ap_id(), &digest()).unwrap();
+
+    let conn = rusqlite::Connection::open(s.db_path()).unwrap();
+    conn.execute_batch("DROP TRIGGER IF EXISTS approvals_lock_after_decision;")
+        .unwrap();
+    conn.execute(
+        "UPDATE approvals SET consumed_at = NULL, consumed_by = NULL",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let r = consume(&s.db, &ap.ap_id(), &digest());
+    assert!(
+        matches!(r, Err(Error::Approval(ApprovalError::AlreadyConsumed))),
+        "clearing consumed_at must not reopen a journaled consume: {r:?}"
+    );
+    // The refused attempt must not void the committed consume either.
+    let again = consume(&s.db, &ap.ap_id(), &digest());
+    assert!(
+        matches!(again, Err(Error::Approval(ApprovalError::AlreadyConsumed))),
+        "a refused retry must leave the journal consume in place: {again:?}"
+    );
+    let journal = std::fs::read_to_string(&s.journal).unwrap();
+    assert!(
+        !journal.contains("\"ev\":\"consume_void\""),
+        "clearing the latch must not write a void: {journal}"
+    );
+}
+
 #[test]
 fn verify_of_missing_journal_is_an_error_not_zero_records() {
     use ptask_core::approval_journal::{Journal, Mode};

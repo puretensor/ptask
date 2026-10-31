@@ -314,7 +314,14 @@ whoever can write the SQLite file can insert one. An optional off-database
 journal closes that. It is an append-only JSONL file with an HMAC-SHA256
 hash chain (each record's MAC covers the previous MAC and the record's
 fields). `request`, `approve`, `reject`, `withdraw` and `consume` each append
-a record inside the same transaction as the row change.
+a record before the row change commits. The journal is not inside SQLite, so
+a `consume` line is written before `commit`. If that transaction then rolls
+back (the event insert hits a used idempotency key, or the commit fails),
+the broker appends `consume_void` while it still holds the write lock. The
+row stays approved and unconsumed, and a retry can consume it. Clearing
+`consumed_at` in SQLite does not void a consume that did commit: only the
+key holder can append `consume_void`, and only for a consume this process
+has not committed.
 
 | `PTASK_APPROVAL_JOURNAL` | Behaviour |
 |---|---|
