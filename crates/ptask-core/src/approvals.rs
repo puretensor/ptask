@@ -910,6 +910,13 @@ pub fn payload_bytes(db: &Db, id: &str) -> Result<Vec<u8>> {
     if ap.consumed_at.is_some() {
         return Err(Error::Approval(ApprovalError::AlreadyConsumed));
     }
+    // Enforce mode: the executor pattern is payload, then act, then
+    // consume. A row written straight into SQLite passes the database
+    // gate and would otherwise release its bytes before consume refused
+    // it. The journal check does not latch.
+    if let Some(j) = Journal::from_env() {
+        j.authorises(&claim_of(&ap))?;
+    }
     stored_payload(ap)
 }
 
@@ -1363,6 +1370,11 @@ pub fn verify(db: &Db, id: &str, offered: &PayloadSource) -> Result<Approval> {
     let ap = get(db, id)?;
     let digest = offered_digest(offered)?;
     gate_status_and_digest(&ap, &digest, &dates::now_in_operator_tz()?)?;
+    // Same journal authority as consume, without the latch. A forged
+    // approved row must not verify in enforce mode.
+    if let Some(j) = Journal::from_env() {
+        j.authorises(&claim_of(&ap))?;
+    }
     Ok(ap)
 }
 

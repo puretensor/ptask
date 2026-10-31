@@ -106,7 +106,11 @@ pt approval consume AP-12 --payload-file /tmp/letter.html
 approved, not past `expires_at`, not yet consumed. Otherwise it writes
 nothing to stdout and exits 3 (pending), 4 (rejected / withdrawn / expired)
 or 6 (already consumed). A digest-only request has no bytes to release
-(exit 1).
+(exit 1). With `PTASK_APPROVAL_JOURNAL=enforce`, `payload` and `verify`
+also require the same unconsumed journaled `approve` as `consume` (exit
+7 when it is missing). They do not latch. `preview` and `in_force` stay
+database reads: `preview` is what the operator decides on, and a poller
+that then calls `payload` still hits the journal.
 
 Every approval JSON object (`show`/`ls --json`, HTTP, MCP) carries
 `"in_force": true|false`, the same verdict computed at read time. Pollers
@@ -327,7 +331,7 @@ has not committed.
 |---|---|
 | unset, `off`, `0`, `false` or `no` (default) | Unchanged. Nothing is read or written. |
 | `shadow` | Records are appended; a consume the journal would refuse is logged and allowed. Journal errors are logged only. |
-| `enforce` | `consume` must find, in a verified chain, an unconsumed `approve` record whose digest (the action binding), kind, approver and `expires_at` equal the row's. Otherwise it exits **7** and the latch rolls back. A broken, truncated or unreadable journal also refuses. Any other value (a typo such as `enforcd`, or `true`, `on`, `disabled`) is treated as `enforce` and logs a warning, so a mistyped flag never turns the gate off. |
+| `enforce` | `consume`, `payload` and `verify` must find, in a verified chain, an unconsumed `approve` record whose digest (the action binding), kind, approver and `expires_at` equal the row's. Otherwise they exit **7**. `consume` rolls its latch back; `payload` and `verify` do not write one. A broken, truncated or unreadable journal also refuses. Any other value (a typo such as `enforcd`, or `true`, `on`, `disabled`) is treated as `enforce` and logs a warning, so a mistyped flag never turns the gate off. |
 
 Configure with `PTASK_APPROVAL_JOURNAL_PATH` and
 `PTASK_APPROVAL_JOURNAL_KEY_FILE` (at least 16 bytes; never logged). Put both
