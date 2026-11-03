@@ -96,6 +96,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/config", get(api_config))
         .route("/api/stats", get(api_stats))
         .route("/api/tasks", get(api_tasks).post(api_create))
+        .route("/api/closed", get(api_closed))
         .route("/api/critical", get(api_critical))
         .route("/api/timeline", get(api_timeline))
         .route("/api/heatmap", get(api_heatmap))
@@ -481,6 +482,26 @@ fn q_tasks(
     Ok(rows.into_iter().map(finish_task).collect())
 }
 
+fn q_closed(state: &AppState, limit: i64) -> ptask_core::Result<Vec<serde_json::Value>> {
+    let cols = TASK_COLS
+        .iter()
+        .map(|c| format!("t.{c}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = include_str!("../../../../dashboard/closed_tasks.sql").replace("{columns}", &cols);
+    let conn = state.db.get()?;
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([limit], |r| {
+            let mut task = row_to_task(r)?;
+            task["closed_at"] = serde_json::json!(r.get::<_, Option<String>>(TASK_COLS.len() + 2)?);
+            task["closed_by"] = serde_json::json!(r.get::<_, Option<String>>(TASK_COLS.len() + 3)?);
+            Ok(task)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows.into_iter().map(finish_task).collect())
+}
+
 // ----------------------------------------------------------- GET reads
 
 #[derive(Deserialize)]
@@ -488,6 +509,28 @@ struct TasksQ {
     status: Option<String>,
     limit: Option<i64>,
     order: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClosedQ {
+    limit: Option<i64>,
+}
+
+async fn api_closed(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<ClosedQ>,
+) -> Response {
+    crate::blocking::db_response(move || {
+        if !authed(&state, &headers) {
+            return need_auth();
+        }
+        match q_closed(&state, q.limit.unwrap_or(100).clamp(1, 500)) {
+            Ok(tasks) => Json(serde_json::json!({"tasks": tasks})).into_response(),
+            Err(e) => jerr(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        }
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -1587,6 +1630,35 @@ mod tests {
     use crate::auth::host_allowed;
     use ptask_core::config::DashConfig;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn closed_chronology_uses_journal_transitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = ptask_core::Db::open(dir.path().join("closed.db")).unwrap();
+        let ctx = ptask_core::event_log::EventCtx::test();
+        let a = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("old creation"), &ctx)
+            .unwrap();
+        let b = ptask_core::tasks::create(&db, ptask_core::NewTask::minimal("new creation"), &ctx)
+            .unwrap();
+        ptask_core::tasks::mark_done(&db, &a, &ctx).unwrap();
+        ptask_core::tasks::mark_done(&db, &b, &ctx).unwrap();
+        db.with_conn(|c| {
+            c.execute("UPDATE pt_event_log SET ts='2020-01-01T00:00:00Z' WHERE event_type='task.created'", [])?;
+            c.execute("UPDATE pt_event_log SET ts='2020-01-03T12:00:00+02:00' WHERE task_uuid=? AND event_type='task.completed'", [&a.id])?;
+            c.execute("UPDATE pt_event_log SET ts='2020-01-03T09:00:00Z' WHERE task_uuid=? AND event_type='task.completed'", [&b.id])?;
+            c.execute("UPDATE tasks SET created_at='2090-01-01',updated_at='2099-01-01' WHERE id=?", [&b.id])?;
+            Ok(())
+        }).unwrap();
+        let state = AppState::new(db.clone(), Default::default(), Default::default());
+        let rows = super::q_closed(&state, 1).unwrap();
+        assert_eq!(rows[0]["id"], a.id);
+        assert_eq!(rows[0]["closed_at"], "2020-01-03T10:00:00.000Z");
+        ptask_core::tasks::reopen(&db, &a.id, &ctx).unwrap();
+        assert_eq!(super::q_closed(&state, 10).unwrap().len(), 1);
+        let reopened = ptask_core::tasks::resolve_for_lookup(&db, &a.id, true).unwrap();
+        ptask_core::tasks::mark_done(&db, &reopened, &ctx).unwrap();
+        assert_eq!(super::q_closed(&state, 10).unwrap()[0]["id"], a.id);
+    }
 
     #[test]
     fn sse_poll_returns_new_rows_and_advances_the_cursor() {

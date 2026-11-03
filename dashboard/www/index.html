@@ -347,10 +347,17 @@ button.chip{font-family:var(--font);cursor:pointer}
    generated and finished ten minutes ago still shows up as recent activity. */
 .recent{background:var(--bg2);border:var(--card-border);border-radius:var(--radius);
   padding:4px 12px;max-height:340px;overflow-y:auto;overscroll-behavior:contain}
+.recent-tabs{display:flex;gap:6px;margin:0 0 8px}
+.recent-tabs button{min-height:44px;padding:6px 14px;border:1px solid var(--border);
+  border-radius:6px;background:var(--bg2);color:var(--dim);font:inherit;cursor:pointer}
+.recent-tabs button[aria-selected="true"]{color:var(--accent-t);border-color:var(--accent-t);font-weight:700}
+.recent-tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .rrow{display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border);font-size:12px}
 .rrow:last-child{border-bottom:none}
 .rrow .when{flex:none;width:70px;font-family:var(--font);font-weight:700;font-size:10px;
   color:var(--accent-t);letter-spacing:.03em;cursor:default}
+.rrow .when time{display:flex;flex-direction:column;gap:2px}
+.rrow .when time small{font-size:9px;font-weight:400;letter-spacing:0;white-space:nowrap}
 .rrow.closed .when{color:var(--dim)}
 .rrow .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
 .rrow.closed .tt{color:var(--dim)}
@@ -360,7 +367,7 @@ button.chip{font-family:var(--font);cursor:pointer}
 .rst.done{background:rgba(0,212,170,.16);color:var(--teal)}
 .rst.dismissed{background:rgba(255,59,92,.12);color:var(--p5t)}
 .rst.blocked{background:rgba(255,159,67,.16);color:var(--p4t)}
-@media(max-width:620px){.rrow .when{width:52px}.rrow .ptag,.rrow .dtag{display:none}}
+@media(max-width:620px){.rrow .when{width:52px}.rrow.closed .when{width:68px}.rrow .ptag,.rrow .dtag{display:none}}
 
 /* lanes */
 .lanes{display:grid;grid-template-columns:repeat(5,1fr);gap:var(--gap);align-items:start}
@@ -1018,8 +1025,12 @@ button,[role="button"]{touch-action:manipulation}
   </section>
 
   <section id="recent-sec">
-    <div class="sec-h"><h2>Recently Added</h2><div class="ln"></div><span class="ct" id="rc-ct"></span></div>
-    <div class="recent" id="recent"><div class="ph">loading…</div></div>
+    <div class="sec-h"><h2>Recent Activity</h2><div class="ln"></div><span class="ct" id="rc-ct"></span></div>
+    <div class="recent-tabs" id="recent-tabs" role="tablist" aria-label="Recent task activity">
+      <button type="button" role="tab" id="recent-closed" aria-selected="true" aria-controls="recent" data-act="pick-recent" data-v="closed">Closed</button>
+      <button type="button" role="tab" id="recent-added" aria-selected="false" aria-controls="recent" data-act="pick-recent" data-v="added">Added</button>
+    </div>
+    <div class="recent" id="recent" role="tabpanel" aria-labelledby="recent-closed"><div class="ph">loading…</div></div>
   </section>
 
   <section id="lanes-sec">
@@ -1061,7 +1072,7 @@ button,[role="button"]{touch-action:manipulation}
 <nav class="tabbar" id="tabbar" aria-label="Sections">
   <button type="button" data-act="pick-view" data-v="crit" aria-label="Critical now"><svg class="ic" aria-hidden="true"><use href="#i-warn"/></svg>Critical<i class="bd" id="tab-crit-bd"></i></button>
   <button type="button" data-act="pick-view" data-v="lanes" aria-label="Priority lanes"><svg class="ic" aria-hidden="true"><use href="#i-lanes"/></svg>Lanes</button>
-  <button type="button" data-act="pick-view" data-v="recent" aria-label="Recently added"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>Recent</button>
+  <button type="button" data-act="pick-view" data-v="recent" aria-label="Recent activity"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg>Recent</button>
   <button type="button" data-act="pick-view" data-v="review" aria-label="Review — stalest first"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"/></svg>Review</button>
   <button type="button" data-act="pick-view" data-v="more" aria-label="Timeline, heatmap and appearance"><svg class="ic" aria-hidden="true"><use href="#i-dots"/></svg>More</button>
 </nav>
@@ -1437,6 +1448,7 @@ document.addEventListener('click',e=>{
   else if(kind==='pick-flux'){ pickFlux(el.dataset.w); }
   else if(kind==='pick-view'){ setView(el.dataset.v); }
   else if(kind==='pick-lane'){ setLane(el.dataset.p); }
+  else if(kind==='pick-recent'){ setRecentMode(el.dataset.v); }
   else if(kind==='cap-close'){ capClose(); }
   else if(kind==='cap-undo'){ capUndo(); }
   else if(kind==='cap-restore'){ capRestore(); }
@@ -2135,17 +2147,36 @@ function toggleCritExpand(btn){
   btn.setAttribute('aria-expanded', now);
   if(now) _critExpanded.add(card.dataset.uuid); else _critExpanded.delete(card.dataset.uuid);
 }
-/* recently added — any status, created_at DESC off /api/tasks?order=created.
-   Open rows keep the live priority picker + done button; closed rows dim,
-   swap to a static badge, and wear their status so freshly-finished work
-   still reads as recent activity instead of vanishing from the board. */
+/* Closed uses journal closure time; Added preserves the creation-ordered view.
+   Both remain addressable by the detail drawer across auto-refreshes. */
+let _recentMode='closed';
+function recentTasks(){return filterDomain(_recentMode==='closed'?_closedAll:_addedAll);}
+function setRecentMode(mode){
+  if(!['closed','added'].includes(mode)) return;
+  _recentMode=mode;
+  $$('#recent-tabs button').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.v===mode)));
+  $('#recent').setAttribute('aria-labelledby','recent-'+mode);
+  renderRecent(recentTasks());
+}
+document.addEventListener('keydown',e=>{
+  if(!e.target.closest('#recent-tabs')||!['ArrowLeft','ArrowRight'].includes(e.key)) return;
+  e.preventDefault();e.stopImmediatePropagation();
+  setRecentMode(_recentMode==='closed'?'added':'closed');
+  $('#recent-'+_recentMode).focus();
+});
 function renderRecent(tasks){
-  $('#rc-ct').textContent='newest first · last '+tasks.length+(_domain==='all'?'':' · '+DNAME[_domain].toLowerCase());
+  const closed=_recentMode==='closed';
+  $('#rc-ct').textContent=(closed?'newest closure first · UTC':'newest creation first')+' · '+tasks.length+(_domain==='all'?'':' · '+DNAME[_domain].toLowerCase());
   if(!tasks.length){$('#recent').innerHTML='<div class="ph">no recent tasks'+inDom()+'</div>';return;}
   $('#recent').innerHTML=tasks.map(t=>{
     const open=t.status==='pending';
+    const when=closed?t.closed_at:t.created_at;
+    const instant=when?new Date(when):null;
+    const stamp=instant&&Number.isFinite(instant.getTime())?instant.toISOString().slice(0,19).replace('T',' ')+' UTC':null;
+    const unknown=closed?'closure time unknown':'creation time unknown';
+    const timeHtml=stamp?(closed?`<time datetime="${esc(when)}"><b>${stamp.slice(11,19)}</b><small>${stamp.slice(0,10)}</small></time>`:relTime(when)):'time unknown';
     return `<div class="rrow${open?'':' closed'}" data-id="${t.pt_id||t.id}" data-uuid="${t.id}">
-      <span class="when" title="created ${esc((t.created_at||'').slice(0,16).replace('T',' '))} UTC">${relTime(t.created_at)}</span>
+      <span class="when" title="${stamp?(closed?'closed ':'created ')+esc(stamp):unknown}" aria-label="${stamp?(closed?'closed ':'created ')+esc(stamp):unknown}">${timeHtml}</span>
       ${open?ptrigger(t):`<span class="pbadge p${t.priority}">P${t.priority}</span>`}
       <span class="tt" role="button" tabindex="0" data-act="drawer">${esc(t.title)}</span>
       ${originTag(t)}${open?domainTag(t):''}
@@ -2389,7 +2420,7 @@ async function decideApproval(id, verb){
 /* ---- v2.3: task cache + selection model + keyboard triage ---- */
 /* _pendingAll/_recentAll are the raw payloads; _tasks is the domain-filtered
    pending view every panel renders from. */
-let _tasks=[], _pendingAll=[], _recentAll=[], _sel=-1, _review=false;
+let _tasks=[], _pendingAll=[], _recentAll=[], _addedAll=[], _closedAll=[], _sel=-1, _review=false;
 function cards(){return $$(_review?'#review-list .tcard':'.tcard,.ccard');}
 function select(i){
   const cs=cards(); if(!cs.length){_sel=-1;return;}
@@ -2651,7 +2682,7 @@ function renderAll(){
   renderDomainCounts();
   renderCritical(pending.slice().sort(bySeverity).slice(0,12));
   renderLanes(pending);
-  renderRecent(filterDomain(_recentAll));
+  renderRecent(recentTasks());
   renderTimeline(pending.filter(t=>t.deadline_date)
     .slice().sort((a,b)=>a.deadline_date<b.deadline_date?-1:a.deadline_date>b.deadline_date?1:0));
   renderHeat(buildHeat(pending));
@@ -2663,11 +2694,13 @@ let _lastGood=null;
 async function load(force){
   if(_popupOpen&&!force) return;   // don't wipe the board while a picker/confirm popup is open
   try{
-    const [stats,all,rec]=await Promise.all([
+    const [stats,all,rec,closed]=await Promise.all([
       api('/api/stats'),
       api('/api/tasks?status=pending&limit=5000'),
-      api('/api/tasks?status=all&order=created&limit=20')]);
-    _lastStats=stats; _pendingAll=all.tasks; _recentAll=rec.tasks;
+      api('/api/tasks?status=all&order=created&limit=20'),
+      api('/api/closed?limit=100')]);
+    _lastStats=stats; _pendingAll=all.tasks; _addedAll=rec.tasks; _closedAll=closed.tasks;
+    _recentAll=[..._closedAll,..._addedAll];
     _lastGood=new Date().toLocaleTimeString();
     $('#sbar').classList.remove('err'); $('#live-lbl').textContent='LIVE';
     renderAll();
