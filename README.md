@@ -64,6 +64,7 @@ Fleet topology (canonical store, Litestream WAL replication to CephFS, per-node 
 - [`docs/dsl.md`](docs/dsl.md) — the filter DSL
 - [`docs/recurrence.md`](docs/recurrence.md) — recurrence semantics (`every` vs `every!`)
 - [`docs/sync-api.md`](docs/sync-api.md) — HTTP API
+- [`docs/MACHINE_EVENTS.md`](docs/MACHINE_EVENTS.md) — read-scoped, cursor-based machine event journal
 - [`docs/agent-surface.md`](docs/agent-surface.md) — MCP tools, the atomic claim (owner, lease, heartbeat, release, reclaim), provenance
 - [`docs/approvals.md`](docs/approvals.md) — operator approval inbox (payload binding, consume, authority, threat model)
 - [`docs/goals.md`](docs/goals.md) — goal tree, inheritance, cycle guard, `pt context`
