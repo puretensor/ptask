@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "3.54.0"
+version = "3.54.1"
 edition = "2024"
 license-file = "LICENSE"
 authors = ["PureTensor, Inc. <hal@puretensor.ai>"]
@@ -52,12 +52,12 @@ rmcp = { version = "3.3.0", features = ["server", "macros", "schemars", "transpo
 futures-util = { version = "0.3", default-features = false }
 
 # Internal crates
-ptask-core    = { path = "crates/ptask-core",    version = "3.54.0" }
-ptask-tui     = { path = "crates/ptask-tui",     version = "3.54.0" }
-ptask-server  = { path = "crates/ptask-server",  version = "3.54.0" }
-ptask-bot     = { path = "crates/ptask-bot",     version = "3.54.0" }
-ptask-distill = { path = "crates/ptask-distill", version = "3.54.0" }
-ptask-notify  = { path = "crates/ptask-notify",  version = "3.54.0" }
+ptask-core    = { path = "crates/ptask-core",    version = "3.54.1" }
+ptask-tui     = { path = "crates/ptask-tui",     version = "3.54.1" }
+ptask-server  = { path = "crates/ptask-server",  version = "3.54.1" }
+ptask-bot     = { path = "crates/ptask-bot",     version = "3.54.1" }
+ptask-distill = { path = "crates/ptask-distill", version = "3.54.1" }
+ptask-notify  = { path = "crates/ptask-notify",  version = "3.54.1" }
 
 # HMAC for outbound webhook signing (v0.3.5).
 sha2 = "0.10"
@@ -73,9 +73,9 @@ lettre = { version = "0.11.23", default-features = false, features = ["smtp-tran
 # Native ML stack (v0.8.2). candle = HF's pure-Rust deep-learning runtime;
 # tokenizers = HF tokenizer; hf-hub for the on-disk cache lookup. Used by
 # ptask-distill for sentence-transformers/all-MiniLM-L6-v2 embeddings.
-candle-core = "0.10"
-candle-nn = "0.10"
-candle-transformers = "0.10"
+candle-core = "0.11.1"
+candle-nn = "0.11.1"
+candle-transformers = "0.11.1"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
 
