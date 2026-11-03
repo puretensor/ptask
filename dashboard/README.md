@@ -87,6 +87,13 @@ counts at 1.3:1; Mission statusbar/ages at 2.6-2.9:1):
 
 ## Layout
 
+- **Recent Activity** — defaults to **Closed**, ordered newest closure first
+  from recorded open-to-closed journal transitions. Each row shows its actual
+  close time and Done/Dismissed status; notes and edits do not move it. Reopened
+  tasks leave the list, and closing again records a new time. Legacy records
+  without a trustworthy close timestamp show “time unknown” at the end.
+  **Added** retains the creation-ordered view. Both tabs are available in the
+  phone's Recent pane. `GET /api/closed?limit=100` is read-only (maximum 500).
 - **Header** — crystal-cube mark, live UTC clock, count chips (crit / urgent /
   overdue / due≤7d / open), then the full-width **capture bar**: press to
   dictate, and the task is transcribed, classified ENG/MGMT and created in one

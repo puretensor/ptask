@@ -36,3 +36,31 @@ test("no split, no block; actor names are text", () => {
 test("the range picker appends the block for the selected window", () => {
   assert.match(shell, /\}\)\.join\(''\)\+fluxActorsHtml\(bw\[_fluxWin\]\);/);
 });
+
+function renderRecent(mode, tasks) {
+  const body = shell.match(/\nfunction renderRecent\(tasks\)\{[\s\S]*?\n\}\nlet _laneScroll/);
+  assert.ok(body, "recent activity renderer exists");
+  const nodes = { "#rc-ct": {}, "#recent": {} };
+  const esc = (s) => String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
+  const fn = new Function("$", "_recentMode", "_domain", "DNAME", "inDom", "relTime", "esc", "ptrigger", "originTag", "domainTag",
+    body[0].replace(/let _laneScroll$/, "") + ";return renderRecent;");
+  fn((s) => nodes[s], mode, "all", {}, () => "", (s) => "relative:" + s, esc, () => "", () => "", () => "")(tasks);
+  return nodes;
+}
+
+test("Closed is the visible default and uses closure time rather than creation or edits", () => {
+  assert.match(shell, /id="recent-closed" aria-selected="true"/);
+  assert.match(shell, /role="tabpanel" aria-labelledby="recent-closed"/);
+  const view = renderRecent("closed", [{ id: "a", title: "old task", status: "done", priority: 2,
+    created_at: "2020-01-01T00:00:00Z", updated_at: "2099-01-01T00:00:00Z", closed_at: "2026-11-03T14:48:00.000Z" }]);
+  assert.match(view["#rc-ct"].textContent, /newest closure first/);
+  assert.match(view["#recent"].innerHTML, /closed 2026-11-03 14:48:00 UTC/);
+  assert.match(view["#recent"].innerHTML, /<b>14:48:00<\/b><small>2026-11-03<\/small>/);
+  assert.doesNotMatch(view["#recent"].innerHTML, /2020|2099/);
+});
+
+test("unknown closure times are explicit and Added retains creation time", () => {
+  const task = { id: "a", title: "legacy", status: "done", priority: 2, created_at: "2020-01-01T00:00:00Z", closed_at: null };
+  assert.match(renderRecent("closed", [task])["#recent"].innerHTML, /closure time unknown/);
+  assert.match(renderRecent("added", [task])["#recent"].innerHTML, /relative:2020-01-01T00:00:00Z/);
+});
