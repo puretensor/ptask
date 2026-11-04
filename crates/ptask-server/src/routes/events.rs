@@ -46,10 +46,9 @@ async fn events(
     query: Result<Query<EventsQuery>, QueryRejection>,
 ) -> Response {
     crate::blocking::db_response(move || {
-        let has_credential = headers.get("authorization").and_then(|h| h.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer ")).is_some_and(|s| !s.is_empty())
-            || headers.get("x-ptask-token").and_then(|h| h.to_str().ok()).is_some_and(|s| !s.is_empty());
-        if !has_credential {
+        // The parser `authenticate` itself uses, so this gate and the token
+        // lookup agree on what counts as a presented credential.
+        if crate::auth::presented_token(&headers).is_none() {
             return error(StatusCode::UNAUTHORIZED, "events require a machine read token");
         }
         match crate::auth::authenticate(&state.db, &state.auth, &headers, Scope::Read) {
@@ -57,7 +56,10 @@ async fn events(
             Err(response) => return response,
         }
         let q = match query {
-            Ok(Query(q)) if q.cursor >= 0 && (1..=200).contains(&q.limit) => q,
+            Ok(Query(q))
+                if q.cursor >= 0
+                    && (1..=200).contains(&q.limit)
+                    && q.snapshot.is_none_or(|s| s >= q.cursor) => q,
             _ => return error(StatusCode::BAD_REQUEST,
                 "valid parameters: cursor >= 0, limit 1..200, optional snapshot >= cursor; unknown parameters are rejected"),
         };
@@ -68,7 +70,9 @@ async fn events(
                 "SELECT COALESCE(MIN(id),0), COALESCE(MAX(id),0) FROM pt_event_log", [],
                 |r| Ok((r.get(0)?, r.get(1)?)))?;
             let snapshot = q.snapshot.unwrap_or(current);
-            if snapshot < q.cursor || snapshot > current {
+            // Parameters already hold snapshot >= cursor. Anything past MAX(id)
+            // means the journal moved backwards (a restore), so resync.
+            if q.cursor > current || snapshot > current {
                 return Ok(None);
             }
             let total: i64 = tx.query_row(

@@ -8,9 +8,11 @@ dashboard Basic authentication. No new credentials are created by this feature.
 The reply carries `items`, `count`, `total` (remaining rows in this snapshot),
 `next_cursor`, `snapshot_cursor`, `oldest_cursor`, `has_more`, and `resync`.
 Continue pagination with `cursor=next_cursor&snapshot=snapshot_cursor`; omit
-snapshot when beginning the next poll. Limits are 1–200. Negative/ahead cursors,
-invalid limits, and unknown query fields fail explicitly. Empty results contain
-`items:[]`, `count:0`, `total:0`.
+snapshot when beginning the next poll. Limits are 1–200. Malformed parameters
+(a negative cursor, a snapshot below the cursor, a limit outside 1–200, an
+unknown query field) return HTTP 400 and never ask for a resync. A cursor or
+snapshot past the newest journal row returns HTTP 409 with `resync:true` (see
+below). Empty results contain `items:[]`, `count:0`, `total:0`.
 
 Rows include a stable source/event identity, task UUID, actor, observation time,
 event type and a sanitized payload. Only status words and integer priorities

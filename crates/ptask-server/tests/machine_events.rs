@@ -42,6 +42,14 @@ async fn get(app: axum::Router, uri: &str, token: Option<&str>) -> (StatusCode, 
     (status, serde_json::from_slice(&bytes).unwrap())
 }
 
+async fn status_with_header(app: axum::Router, uri: &str, name: &str, value: &str) -> StatusCode {
+    let req = Request::builder().uri(uri).header(name, value);
+    app.oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+        .status()
+}
+
 #[tokio::test]
 async fn events_require_machine_credentials_even_in_anonymous_development() {
     let (_dir, _db, token, app) = setup();
@@ -69,6 +77,33 @@ async fn events_require_machine_credentials_even_in_anonymous_development() {
         get(app, "/api/events", Some(&named)).await.0,
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn credentials_are_parsed_like_every_other_machine_route() {
+    let (_dir, _db, token, app) = setup();
+    // The shared parser accepts a lowercase scheme, as /list and /detail do.
+    assert_eq!(
+        status_with_header(
+            app,
+            "/api/events",
+            "Authorization",
+            &format!("bearer {token}")
+        )
+        .await,
+        StatusCode::OK
+    );
+    // A blank credential is no credential, even where anonymous access is open.
+    let dir = tempfile::tempdir().unwrap();
+    let db = ptask_core::Db::open(dir.path().join("anonymous.db")).unwrap();
+    let anonymous = router(AppState::new(db, Default::default(), Default::default()));
+    for (name, value) in [("Authorization", "Bearer   "), ("X-PTask-Token", "  ")] {
+        assert_eq!(
+            status_with_header(anonymous.clone(), "/api/events", name, value).await,
+            StatusCode::UNAUTHORIZED,
+            "{name}: {value:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -234,6 +269,7 @@ async fn snooze_transition_exports_its_status() {
 #[tokio::test]
 async fn invalid_inputs_fail_structurally_and_restore_requires_resync() {
     let (_dir, db, token, app) = setup();
+    // Malformed parameters are client errors, never a resync instruction.
     for query in [
         "cursor=-1",
         "limit=0",
@@ -241,13 +277,12 @@ async fn invalid_inputs_fail_structurally_and_restore_requires_resync() {
         "limit=no",
         "scope=all",
         "snapshot=-1",
+        "cursor=2&snapshot=1",
     ] {
         let (status, body) = get(app.clone(), &format!("/api/events?{query}"), Some(&token)).await;
-        assert!(
-            status == StatusCode::BAD_REQUEST || status == StatusCode::CONFLICT,
-            "{query}"
-        );
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
         assert!(body["error"].is_string());
+        assert!(body.get("resync").is_none(), "{query}");
     }
     let (status, body) = get(app.clone(), "/api/events?cursor=42", Some(&token)).await;
     assert_eq!(status, StatusCode::CONFLICT);
