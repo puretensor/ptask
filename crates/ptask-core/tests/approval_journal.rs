@@ -292,6 +292,109 @@ fn forged_row_does_not_release_payload_or_verify() {
     .expect("journaled approval verifies");
 }
 
+fn request_file(db: &Db, bytes: &[u8]) -> approvals::Approval {
+    approvals::request(
+        db,
+        RequestInput {
+            kind: "email".into(),
+            title: "Letter".into(),
+            request_note: None,
+            payload: PayloadSource::File {
+                bytes: bytes.to_vec(),
+                name: None,
+                reference: None,
+            },
+            task_pt_id: None,
+            expires_in: Some("1h".into()),
+        },
+        &EventCtx::local("requester"),
+    )
+    .unwrap()
+    .approval
+}
+
+/// Swap the stored payload behind the triggers' back, keeping the digest,
+/// as a writer of the SQLite file could.
+fn swap_payload(s: &Setup, uuid: &str, bytes: &[u8]) {
+    let conn = rusqlite::Connection::open(s.db_path()).unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS approvals_immutable_payload;
+         DROP TRIGGER IF EXISTS approvals_lock_after_decision;",
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE approvals SET payload = ?1 WHERE id = ?2",
+        rusqlite::params![bytes, uuid],
+    )
+    .unwrap();
+}
+
+/// The journal authenticates the row's digest column, not its payload
+/// column. `payload` must not release bytes that no longer hash to the
+/// approved digest, or the executor acts before consume's mismatch.
+#[test]
+fn substituted_payload_is_not_released() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let s = setup(Some("enforce"));
+    let ap = request_file(&s.db, b"approved instructions");
+    approve(&s.db, &ap.ap_id());
+    swap_payload(&s, &ap.uuid, b"unapproved instructions");
+
+    let released = approvals::payload_bytes(&s.db, &ap.ap_id());
+    assert!(
+        matches!(
+            released,
+            Err(Error::Approval(ApprovalError::DigestMismatch))
+        ),
+        "substituted bytes must not be released: {released:?}"
+    );
+    assert_eq!(ApprovalError::DigestMismatch.verify_exit_code(), Some(5));
+    let row = approvals::get(&s.db, &ap.ap_id()).unwrap();
+    assert!(row.consumed_at.is_none(), "payload does not latch");
+}
+
+/// The operator decides on the preview, rendered from the stored bytes; the
+/// journal records the digest column. A row whose two disagree must not be
+/// approved, or the approval names content the operator never saw.
+#[test]
+fn pending_row_with_substituted_payload_cannot_be_approved() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let s = setup(Some("enforce"));
+    let ap = request_file(&s.db, b"pay 10 GBP to the supplier");
+    swap_payload(&s, &ap.uuid, b"pay 10000 GBP to someone else");
+
+    let r = approvals::decide(
+        &s.db,
+        &ap.ap_id(),
+        Decision::Approve,
+        DecidedVia::Api,
+        None,
+        &EventCtx::local("operator"),
+    );
+    assert!(
+        matches!(r, Err(Error::Approval(ApprovalError::DigestMismatch))),
+        "an inconsistent row must not be approvable: {r:?}"
+    );
+    assert_eq!(
+        approvals::get(&s.db, &ap.ap_id()).unwrap().status,
+        "pending"
+    );
+    assert!(
+        !journal_evs(&s.journal).iter().any(|e| e == "approve"),
+        "a refused approve must not reach the journal"
+    );
+    // The operator can still reject it.
+    approvals::decide(
+        &s.db,
+        &ap.ap_id(),
+        Decision::Reject,
+        DecidedVia::Api,
+        None,
+        &EventCtx::local("operator"),
+    )
+    .expect("an inconsistent row can be rejected");
+}
+
 /// `record_event` runs after the journal consume is fsynced. A colliding
 /// idempotency key makes that insert fail and the SQLite transaction roll
 /// back. The journal consume must be voided, or the still-approved row can
