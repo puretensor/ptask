@@ -299,3 +299,194 @@ async fn invalid_inputs_fail_structurally_and_restore_requires_resync() {
     assert_eq!(body["oldest_cursor"], 2);
     assert_eq!(body["items"][0]["event_id"], "kept");
 }
+
+#[tokio::test]
+async fn missing_prefix_resync_stops_at_the_exact_oldest_cursor_boundary() {
+    let (_dir, db, token, app) = setup();
+    for key in ["removed", "retained-two", "retained-three"] {
+        record(&db, key, "task.updated", json!({}));
+    }
+    db.with_conn(|c| {
+        c.execute("DELETE FROM pt_event_log WHERE id=1", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, behind) = get(app.clone(), "/api/events?cursor=0", Some(&token)).await;
+    assert_eq!(behind["oldest_cursor"], 2);
+    assert_eq!(behind["resync"], true);
+    let (status, boundary) = get(app, "/api/events?cursor=1", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(boundary["oldest_cursor"], 2);
+    assert_eq!(boundary["resync"], false);
+    assert_eq!(boundary["count"], 2);
+    assert_eq!(boundary["items"][0]["event_id"], "retained-two");
+}
+
+#[tokio::test]
+async fn arbitrary_journal_deletion_is_not_a_missing_prefix_certificate() {
+    let (_dir, db, token, app) = setup();
+    for key in ["first", "interior", "last"] {
+        record(&db, key, "task.updated", json!({}));
+    }
+    db.with_conn(|c| {
+        c.execute("DELETE FROM pt_event_log WHERE uuid='interior'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (status, hole) = get(app.clone(), "/api/events?cursor=1", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hole["oldest_cursor"], 1);
+    assert_eq!(hole["resync"], false);
+    assert_eq!(hole["count"], 1);
+    assert_eq!(hole["total"], 1);
+    assert_eq!(hole["next_cursor"], 3);
+    assert_eq!(hole["items"][0]["event_id"], "last");
+
+    db.with_conn(|c| {
+        c.execute("DELETE FROM pt_event_log", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let (status, empty) = get(app.clone(), "/api/events?cursor=0", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["resync"], false);
+    assert_eq!(empty["items"], json!([]));
+    assert_eq!(empty["count"], 0);
+    assert_eq!(empty["total"], 0);
+    let (status, ahead) = get(app, "/api/events?cursor=3", Some(&token)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(ahead["resync"], true);
+}
+
+#[tokio::test]
+async fn snapshot_continuation_and_event_identity_survive_database_reopen() {
+    let (dir, db, token, app) = setup();
+    for key in ["one", "two", "three"] {
+        record(&db, key, "task.updated", json!({}));
+    }
+    let (_, first) = get(app.clone(), "/api/events?limit=1", Some(&token)).await;
+    let continuation = format!(
+        "/api/events?cursor={}&snapshot={}",
+        first["next_cursor"], first["snapshot_cursor"]
+    );
+    let path = db.path().to_path_buf();
+    drop(app);
+    drop(db);
+    let reopened = ptask_core::Db::open(path).unwrap();
+    record(&reopened, "four", "task.updated", json!({}));
+    let app = router(AppState::new(
+        reopened,
+        Default::default(),
+        Default::default(),
+    ));
+    let (status, rest) = get(app.clone(), &continuation, Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rest["snapshot_cursor"], 3);
+    assert_eq!(rest["count"], 2);
+    assert_eq!(rest["items"][0]["event_id"], "two");
+    assert_eq!(rest["items"][1]["event_id"], "three");
+    let (_, repeat) = get(app.clone(), "/api/events?limit=1", Some(&token)).await;
+    assert_eq!(
+        repeat["items"][0]["event_id"],
+        first["items"][0]["event_id"]
+    );
+    let (_, tail) = get(app, "/api/events?cursor=3", Some(&token)).await;
+    assert_eq!(tail["count"], 1);
+    assert_eq!(tail["items"][0]["event_id"], "four");
+    drop(dir);
+}
+
+#[tokio::test]
+async fn restoring_a_physical_snapshot_preserves_the_documented_catchup_limit() {
+    let (dir, db, token, app) = setup();
+    for key in ["one", "two"] {
+        record(&db, key, "task.updated", json!({}));
+    }
+    let backup = dir.path().join("backup.db");
+    db.with_conn(|c| {
+        c.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
+        Ok(())
+    })
+    .unwrap();
+    for key in ["original-three", "original-four"] {
+        record(&db, key, "task.updated", json!({}));
+    }
+    let (_, original) = get(app.clone(), "/api/events?cursor=3", Some(&token)).await;
+    assert_eq!(original["next_cursor"], 4);
+    assert_eq!(original["items"][0]["event_id"], "original-four");
+    drop(app);
+    drop(db);
+    let restored_path = dir.path().join("restored.db");
+    std::fs::copy(backup, &restored_path).unwrap();
+    let restored = ptask_core::Db::open(restored_path).unwrap();
+    let app = router(AppState::new(
+        restored.clone(),
+        Default::default(),
+        Default::default(),
+    ));
+    let (status, behind) = get(app.clone(), "/api/events?cursor=4", Some(&token)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(behind["resync"], true);
+    for key in ["replacement-three", "replacement-four", "replacement-five"] {
+        record(&restored, key, "task.updated", json!({}));
+    }
+    let (status, caught_up) = get(app.clone(), "/api/events?cursor=4", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(caught_up["resync"], false);
+    assert_eq!(caught_up["count"], 1);
+    assert_eq!(caught_up["items"][0]["event_id"], "replacement-five");
+    let (_, anchor) = get(app, "/api/events?cursor=3&limit=1", Some(&token)).await;
+    assert_eq!(anchor["items"][0]["id"], 4);
+    assert_eq!(anchor["items"][0]["event_id"], "replacement-four");
+    assert_ne!(
+        anchor["items"][0]["event_id"],
+        original["items"][0]["event_id"]
+    );
+}
+
+#[tokio::test]
+async fn continuation_reauthenticates_after_token_revocation() {
+    let (_dir, db, token_a, app) = setup();
+    let token_b = tokens::create(&db, "second-reader", Scope::Read).unwrap();
+    record(&db, "first", "task.updated", json!({}));
+    record(&db, "second", "task.updated", json!({}));
+    let (_, first) = get(app.clone(), "/api/events?limit=1", Some(&token_a)).await;
+    let continuation = format!(
+        "/api/events?cursor={}&snapshot={}",
+        first["next_cursor"], first["snapshot_cursor"]
+    );
+    assert_eq!(tokens::revoke(&db, "augmentation-reader").unwrap(), 1);
+    assert_eq!(
+        get(app.clone(), &continuation, Some(&token_a)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, second) = get(app.clone(), &continuation, Some(&token_b)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["items"][0]["event_id"], "second");
+    assert_eq!(
+        status_with_header(app.clone(), &continuation, "X-PTask-Token", &token_b).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status_with_header(
+            app.clone(),
+            &continuation,
+            "Authorization",
+            "Basic dXNlcjpwYXNz"
+        )
+        .await,
+        StatusCode::UNAUTHORIZED
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(&continuation)
+                .header("Authorization", "Bearer invalid")
+                .header("X-PTask-Token", token_b)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
