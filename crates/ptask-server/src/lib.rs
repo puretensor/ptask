@@ -186,6 +186,7 @@ pub fn router(state: AppState) -> Router {
         .merge(routes::tg::router())
         .merge(routes::approvals::router())
         .merge(routes::read::router())
+        .merge(routes::events::router())
         .merge(routes::metrics::router())
         .merge(routes::webhook_git::router())
         .with_state(state)

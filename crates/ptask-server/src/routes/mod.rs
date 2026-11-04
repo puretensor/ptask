@@ -5,6 +5,7 @@ pub mod base;
 pub mod capture;
 pub mod dashboard;
 pub mod email;
+pub mod events;
 pub mod metrics;
 pub mod read;
 pub mod sync;

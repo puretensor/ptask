@@ -248,7 +248,11 @@ fn valid_port(port: &str) -> bool {
     (1..=5).contains(&port.len()) && port.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn presented_token(headers: &HeaderMap) -> Option<String> {
+/// The credential a request presents: a `Bearer` (or `bearer`) Authorization
+/// value, else `X-PTask-Token`, trimmed and non-empty. Routes that must refuse
+/// anonymous callers gate on this so they parse credentials the same way
+/// [`authenticate`] does.
+pub(crate) fn presented_token(headers: &HeaderMap) -> Option<String> {
     if let Some(value) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
