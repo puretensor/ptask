@@ -5,6 +5,19 @@ Running register of review findings. One verb per item: **fixed** (version), **d
 why). Companion ledger: `review-ledger.jsonl`; the Opus reader report this section was
 triaged from is archived at `~/reports/cc/fable-pass-2026-09/reports/report-ptask.md`.
 
+## 2026-11-04 — GPT-6 Astra review (3.55.5–3.55.6)
+
+Scope: the whole tree at `4849664` (3.55.4), 20 read-only Astra xhigh units (PT-2758). 70 findings: 0 P0, 1 P1,
+65 P2, 4 P3, all quotes verbatim. The P1 was confirmed and fixed; P2/P3 are recorded in the review kit
+(`/mnt/storage/codex-review-targets/astra-review-20261104/findings_all.json`) and not changed here.
+
+### Fixed
+
+| Version | Finding | Fix |
+|---|---|---|
+| 3.55.5 | `payload_bytes` authenticated the row's digest column with the journal but released `payload` without rehashing it, so a direct SQLite writer (the journal's threat model) could swap the approved bytes and keep the digest; the same edit on a pending row made the preview show bytes other than the ones the journal records. | Release and approve both require `sha256(payload) == digest`, else `DigestMismatch` (exit 5). Two regression tests in `tests/approval_journal.rs`. |
+| 3.55.6 | The admin decide route returned 500 for that refusal. | `DigestMismatch` maps to 409. |
+
 ## 2026-10-05 — adversarial pass (3.35.0–3.42.0)
 
 Scope: the whole tree at `bd2c5cb` (3.34.0, after PT-2201 removed the cockpit login).

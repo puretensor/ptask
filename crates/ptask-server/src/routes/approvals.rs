@@ -64,6 +64,9 @@ fn err_status(e: &ptask_core::Error) -> StatusCode {
         ptask_core::Error::Approval(ApprovalError::Forbidden(_)) => StatusCode::FORBIDDEN,
         ptask_core::Error::Approval(ApprovalError::Conflict(_)) => StatusCode::CONFLICT,
         ptask_core::Error::Approval(ApprovalError::Invalid(_)) => StatusCode::BAD_REQUEST,
+        // The stored bytes do not hash to the row's digest: the row was edited outside
+        // pTask. Refusing to approve it is a conflict with the stored state, not a crash.
+        ptask_core::Error::Approval(ApprovalError::DigestMismatch) => StatusCode::CONFLICT,
         ptask_core::Error::PtIdNotFound(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -246,4 +249,15 @@ async fn decide(
         }
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digest_mismatch_is_a_conflict_not_a_server_error() {
+        let e = ptask_core::Error::Approval(ApprovalError::DigestMismatch);
+        assert_eq!(err_status(&e), StatusCode::CONFLICT);
+    }
 }
