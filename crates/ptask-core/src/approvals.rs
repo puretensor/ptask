@@ -917,7 +917,21 @@ pub fn payload_bytes(db: &Db, id: &str) -> Result<Vec<u8>> {
     if let Some(j) = Journal::from_env() {
         j.authorises(&claim_of(&ap))?;
     }
+    // The journal vouches for the digest column, not the payload column.
+    if payload_differs_from_digest(&ap) {
+        return Err(Error::Approval(ApprovalError::DigestMismatch));
+    }
     stored_payload(ap)
+}
+
+/// True when the row stores bytes that do not hash to its digest. The digest
+/// is what the journal and consume bind; the bytes are what the preview shows
+/// and `payload` releases. A writer of the SQLite file can change one
+/// without the other.
+fn payload_differs_from_digest(ap: &Approval) -> bool {
+    ap.payload
+        .as_deref()
+        .is_some_and(|bytes| sha256_hex(bytes) != ap.digest)
 }
 
 /// The stored payload whatever the status: the operator inspecting bytes the
@@ -1225,6 +1239,11 @@ pub fn decide(
         return Err(Error::Approval(ApprovalError::Forbidden(
             "the requester cannot decide their own approval; only the operator can".into(),
         )));
+    }
+    // The operator decides on the preview of the stored bytes; the approval
+    // binds the digest. Refuse a row where the two name different content.
+    if decision == Decision::Approve && payload_differs_from_digest(&current) {
+        return Err(Error::Approval(ApprovalError::DigestMismatch));
     }
     tx.execute(
         "UPDATE approvals
