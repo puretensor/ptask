@@ -38,9 +38,15 @@ callers supply and which can carry operational text (a capture key names its
 incident, for example). Treat both as identifiers, not as sanitized content.
 They are no wider than what a read credential already sees through `/detail`.
 
-The journal is durable; this endpoint does not delete it. If prior rows have
-been removed, `resync:true` tells the consumer to refresh authoritative task
-state. A cursor beyond the journal after a restore returns HTTP 409 with resync.
+The journal is durable and append-only; this endpoint does not delete it.
+For a nonempty journal, `resync:true` detects a missing prefix only when the
+consumer's cursor is below `oldest_cursor - 1`. A cursor exactly at that boundary
+has not missed a retained row. Interior deletions are not detected, and a fully
+emptied journal requested with cursor zero and no snapshot looks like an ordinary
+empty journal. After administrative journal removal, explicitly refresh
+authoritative task state and reset the consumer; `resync:false` does not certify
+that arbitrary deletion has not occurred. A cursor beyond the journal after a
+restore returns HTTP 409 with resync.
 Polling may deliver an event more than once after a disconnect; deduplicate by
 `source` and `event_id`. One snapshot is read in a database transaction so its
 denominator and high-water mark do not change during a page.
