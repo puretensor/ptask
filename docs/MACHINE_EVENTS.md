@@ -13,11 +13,18 @@ invalid limits, and unknown query fields fail explicitly. Empty results contain
 `items:[]`, `count:0`, `total:0`.
 
 Rows include a stable source/event identity, task UUID, actor, observation time,
-event type and a sanitized payload. Only enumerated status transitions and
-integer priorities are exported. Prompts, notes, descriptions, arbitrary text,
-command arguments and nested payloads never leave this endpoint. A
-`payload_redacted:true` receipt signals omitted fields. Resolve the task through
-the existing read API when more detail is needed.
+event type and a sanitized payload. Only status words and integer priorities
+(1–5) are exported in the payload. A status is exported when pTask's status
+model accepts it (`triage`, `backlog`, `todo`, `in_progress`, `snoozed`, `done`,
+`dismissed`, `blocked`, emitted in that canonical spelling) or when it is one of
+the legacy column values `pending` and `delayed`. Prompts, notes, descriptions,
+command arguments and nested values are never copied into the payload.
+`payload_redacted:true` means at least one content field was withheld: a key
+outside that allowlist, or an allowlisted key whose value is not exportable.
+The journal envelope (`actor`, `source`, `cmd`) and task references
+(`task_uuid`, `pt_id`) are not content and do not set it; the row already
+carries `actor` and `task_id`. Resolve the task through the existing read API
+when more detail is needed.
 
 The journal is durable; this endpoint does not delete it. If prior rows have
 been removed, `resync:true` tells the consumer to refresh authoritative task

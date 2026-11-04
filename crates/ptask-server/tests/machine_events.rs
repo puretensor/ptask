@@ -1,6 +1,7 @@
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use ptask_core::event_log::{self, EventCtx};
+use ptask_core::event_log::{self, CommandFingerprint, EventCtx};
+use ptask_core::tasks::{self as task_ops, NewTask};
 use ptask_core::tokens::{self, Scope};
 use ptask_server::{AppState, router};
 use serde_json::{Value, json};
@@ -153,6 +154,81 @@ async fn payload_does_not_export_credentials_prompts_or_arbitrary_nested_text() 
     assert_eq!(item["actor"], "test-worker");
     assert!(!body.to_string().contains("secret"));
     assert!(!body.to_string().contains("private request"));
+}
+
+#[tokio::test]
+async fn payload_redacted_ignores_the_envelope_and_task_references() {
+    let (_dir, db, token, app) = setup();
+    // record_in_conn adds actor and source to every payload; a keyed command
+    // also carries cmd. None of these is content, so nothing is withheld.
+    record(&db, "plain", "task.completed", json!({"status":"done"}));
+    let mut keyed = EventCtx::sync("augmentation-writer", "keyed-done");
+    keyed.command = Some(CommandFingerprint::new("done", "{}"));
+    event_log::record(
+        &db,
+        "keyed-done",
+        Some("f38f1ca2-09b4-4ca8-8d9d-cde739cc57bf"),
+        "task.completed",
+        &json!({"task_uuid":"f38f1ca2-09b4-4ca8-8d9d-cde739cc57bf","pt_id":"PT-7","status":"dismissed"}),
+        &keyed,
+    )
+    .unwrap();
+    record(
+        &db,
+        "legacy",
+        "task.updated",
+        json!({"status":"delayed","old_status":"pending"}),
+    );
+    // A status outside the model, or any other content key, is withheld.
+    record(
+        &db,
+        "unknown",
+        "task.updated",
+        json!({"status":"cancelled"}),
+    );
+    record(
+        &db,
+        "extra",
+        "task.updated",
+        json!({"status":"todo","woke_from_snooze":true}),
+    );
+    let (_, body) = get(app, "/api/events", Some(&token)).await;
+    let items = body["items"].as_array().unwrap();
+    let got: Vec<_> = items
+        .iter()
+        .map(|i| (i["payload"].clone(), i["payload_redacted"].clone()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (json!({"status":"done"}), json!(false)),
+            (json!({"status":"dismissed"}), json!(false)),
+            (
+                json!({"status":"delayed","old_status":"pending"}),
+                json!(false)
+            ),
+            (json!({}), json!(true)),
+            (json!({"status":"todo"}), json!(true)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn snooze_transition_exports_its_status() {
+    let (_dir, db, token, app) = setup();
+    let ctx = EventCtx::local("test-worker");
+    let task = task_ops::create(&db, NewTask::minimal("snooze me"), &ctx).unwrap();
+    task_ops::snooze(&db, &task.id, "2099-01-01", &ctx).unwrap();
+    let (_, body) = get(app, "/api/events", Some(&token)).await;
+    let items = body["items"].as_array().unwrap();
+    let snooze = items
+        .iter()
+        .find(|i| i["event_type"] == "task.updated")
+        .expect("snooze event exported");
+    assert_eq!(snooze["task_id"], json!(task.id));
+    assert_eq!(snooze["payload"], json!({"status":"snoozed"}));
+    // snoozed_until is content this endpoint withholds.
+    assert_eq!(snooze["payload_redacted"], true);
 }
 
 #[tokio::test]

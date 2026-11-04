@@ -7,6 +7,7 @@ use axum::extract::{Query, State, rejection::QueryRejection};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
+use ptask_core::status::Status;
 use ptask_core::tokens::Scope;
 use rusqlite::params;
 use serde::Deserialize;
@@ -79,14 +80,14 @@ async fn events(
             let rows = stmt.query_map(params![q.cursor, snapshot, q.limit as i64], |r| {
                 let payload: String = r.get(6)?;
                 let raw: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
-                let safe = safe_payload(&raw);
+                let (safe, redacted) = safe_payload(&raw);
                 Ok(json!({
                     "id": r.get::<_, i64>(0)?, "event_id": r.get::<_, String>(1)?,
                     "task_id": r.get::<_, Option<String>>(2)?,
                     "event_type": r.get::<_, String>(3)?,
                     "actor": r.get::<_, Option<String>>(4)?,
                     "observed_at": r.get::<_, String>(5)?, "source": "ptask",
-                    "payload_redacted": raw.as_object().is_none_or(|obj| obj.len() != safe.len()),
+                    "payload_redacted": redacted,
                     "payload": safe,
                 }))
             })?;
@@ -114,34 +115,61 @@ async fn events(
     }).await
 }
 
+/// Keys that are not event content. `event_log::record_in_conn` adds `actor`,
+/// `source` and (for keyed commands) `cmd` to every stored payload, and the task
+/// references duplicate the row's `task_id`. Dropping them does not make a row
+/// redacted; otherwise every real event would carry `payload_redacted:true`.
+const ENVELOPE_KEYS: [&str; 5] = ["actor", "source", "cmd", "task_uuid", "pt_id"];
+
 /// Never export descriptions, prompts, notes, command arguments or arbitrary nested
 /// values. The authorized consumer can explicitly fetch task details when needed.
-fn safe_payload(raw: &Value) -> serde_json::Map<String, Value> {
+///
+/// Returns the exported payload and whether any content key was withheld (a key
+/// outside the allowlist, or an allowlisted key whose value is not exportable).
+/// A payload that is not a JSON object counts as withheld.
+fn safe_payload(raw: &Value) -> (serde_json::Map<String, Value>, bool) {
     let mut result = serde_json::Map::new();
-    for key in ["status", "old_status", "new_status", "from", "to"] {
-        if let Some(s) = raw.get(key).and_then(Value::as_str)
-            && [
-                "todo",
-                "pending",
-                "backlog",
-                "triage",
-                "in_progress",
-                "done",
-                "dismissed",
-                "cancelled",
-                "blocked",
-            ]
-            .contains(&s)
-        {
-            result.insert(key.into(), json!(s));
+    let Some(obj) = raw.as_object() else {
+        return (result, true);
+    };
+    let mut redacted = false;
+    for (key, value) in obj {
+        if ENVELOPE_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        match safe_value(key, value) {
+            Some(safe) => {
+                result.insert(key.clone(), safe);
+            }
+            None => redacted = true,
         }
     }
-    for key in ["priority", "old_priority", "new_priority"] {
-        if let Some(n) = raw.get(key).and_then(Value::as_i64)
-            && (1..=5).contains(&n)
-        {
-            result.insert(key.into(), json!(n));
+    (result, redacted)
+}
+
+fn safe_value(key: &str, value: &Value) -> Option<Value> {
+    match key {
+        "status" | "old_status" | "new_status" | "from" | "to" => {
+            value.as_str().and_then(export_status).map(Value::from)
         }
+        "priority" | "old_priority" | "new_priority" => value
+            .as_i64()
+            .filter(|n| (1..=5).contains(n))
+            .map(Value::from),
+        _ => None,
     }
-    result
+}
+
+/// The v2 status vocabulary, normalised through the core model, plus the two
+/// legacy-column values with no v2 spelling (`Status::legacy`). Only these
+/// fixed words are emitted, so no caller-supplied text passes through.
+fn export_status(s: &str) -> Option<&'static str> {
+    if let Ok(status) = Status::parse(s) {
+        return Some(status.as_str());
+    }
+    match s {
+        "pending" => Some("pending"),
+        "delayed" => Some("delayed"),
+        _ => None,
+    }
 }
