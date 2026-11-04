@@ -14,6 +14,7 @@ Endpoints
   GET  /api/stats               -> counts, throughput, neglect buckets
   GET  /api/tasks?status=&limit&order -> task list + scoring fields (order: score|created)
   GET  /api/critical?limit=     -> top pending by priority_score
+  GET  /api/closed?limit=       -> closed tasks by recorded close time, newest first
   GET  /api/timeline            -> pending tasks that have a deadline
   GET  /api/heatmap             -> priority x age-bucket matrix
   GET  /api/tasks/<id>/events   -> journal history (newest first; default 60)
@@ -147,7 +148,7 @@ WWW_DIR = Path(os.environ.get("PTASK_DASH_WWW", str(Path(__file__).resolve().par
 # the dashboard exposes the same task data. Production sets PTASK_DASH_BIND.
 BIND = os.environ.get("PTASK_DASH_BIND", "127.0.0.1:9510")
 
-VERSION = "0.26.2"
+VERSION = "0.27.0"
 
 
 def _allowed_host_entry(entry: str) -> str:
@@ -477,6 +478,17 @@ def q_tasks(status="pending", limit=500, order=None):
             sql = base + f"WHERE t.status=? ORDER BY {order_q} LIMIT ?"
             rows = con.execute(sql, (status, limit)).fetchall()
         return [_row_to_task(r) for r in rows]
+    finally:
+        con.close()
+
+
+def q_closed(limit=100):
+    """Current closed tasks, latest genuine closure first; unknown times last."""
+    columns = ",".join("t." + c for c in TASK_COLS)
+    sql = (Path(__file__).parent / "closed_tasks.sql").read_text().replace("{columns}", columns)
+    con = connect()
+    try:
+        return [_row_to_task(r) for r in con.execute(sql, (limit,))]
     finally:
         con.close()
 
@@ -1555,6 +1567,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("order must be one of: " + ", ".join(sorted(TASK_ORDERS)))
                 return self._json({"tasks": q_tasks(status=status, limit=limit,
                                                     order=TASK_ORDERS[order_key])})
+            if path == "/api/closed":
+                limit = parse_limit(qs.get("limit", ["100"])[0], 100, 500)
+                return self._json({"tasks": q_closed(limit=limit)})
             if path == "/api/critical":
                 limit = parse_limit(qs.get("limit", ["12"])[0], 12, 100)
                 return self._json({"tasks": q_tasks(status="pending", limit=limit)})

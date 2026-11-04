@@ -255,6 +255,35 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires cached MiniLM assets; explicitly run for ML dependency upgrades"]
+    fn cached_sbert_upgrade_smoke() {
+        // This gate must fail, rather than silently skip or download, when
+        // the local model is unavailable.
+        let e = Embedder::from_local_hf_cache().expect("cached MiniLM assets required");
+        let long = "a longer task with several words ".repeat(400);
+        let texts = [
+            "short",
+            "a considerably longer mixed-length sentence",
+            "",
+            &long,
+        ];
+        let batch = e.embed(&texts).unwrap();
+        assert_eq!(batch.len(), texts.len());
+        for vector in &batch {
+            assert_eq!(vector.len(), EMBEDDING_DIM);
+            assert!(vector.iter().all(|x| x.is_finite()));
+            let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!((norm - 1.0).abs() < 1e-4, "L2 norm: {norm}");
+        }
+        for (text, vector) in texts.iter().zip(&batch) {
+            let one = e.embed_one(text).unwrap();
+            let cosine = vector.iter().zip(one).map(|(a, b)| a * b).sum::<f32>();
+            assert!(cosine > 0.9999, "batch/individual cosine: {cosine}");
+        }
+        println!("offline MiniLM smoke: 4x384, finite unit vectors and batch parity PASS");
+    }
+
+    #[test]
     fn embed_dimension_matches_sbert() {
         let Some(e) = load_or_skip() else {
             eprintln!("SBERT model not in HF cache — skipping test");
