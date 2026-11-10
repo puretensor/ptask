@@ -221,12 +221,16 @@ impl Approval {
     }
 
     /// The payload gate's verdict right now: approved, not past
-    /// `expires_at`, not consumed. What `payload` releases on and what a
-    /// poller should wait for (`status` stays "approved" after expiry and
-    /// after consume).
+    /// `expires_at`, not consumed, and the stored bytes (if any) still hash
+    /// to the digest. What `payload` releases on and what a poller should
+    /// wait for (`status` stays "approved" after expiry and after consume).
+    /// A database read: the journal is checked by `payload` itself.
     pub fn in_force(&self) -> bool {
-        dates::now_in_operator_tz()
-            .is_ok_and(|now| gate_status(self, &now).is_ok() && self.consumed_at.is_none())
+        dates::now_in_operator_tz().is_ok_and(|now| {
+            gate_status(self, &now).is_ok()
+                && self.consumed_at.is_none()
+                && !payload_differs_from_digest(self)
+        })
     }
 
     /// Machine object matching the contract JSON shape. `events` is set

@@ -7,7 +7,7 @@ triaged from is archived at `~/reports/cc/fable-pass-2026-09/reports/report-ptas
 
 ## 2026-11-10 — follow-up review of the payload rehash (3.55.7)
 
-Scope: the 3.55.5–3.55.6 diff, one medium-effort pass. 5 findings; 3 fixed, 2 deferred.
+Scope: the 3.55.5–3.55.6 diff, one medium-effort pass. 5 findings, all fixed.
 
 ### Fixed
 
@@ -16,12 +16,9 @@ Scope: the 3.55.5–3.55.6 diff, one medium-effort pass. 5 findings; 3 fixed, 2 
 | 3.55.7 | A stored payload that no longer hashed to its digest was refused with no log line, so the trace of an edit made outside pTask looked like an executor offering the wrong file. | `payload` and approve log a warning naming the row and the refused operation. |
 | 3.55.7 | `pt approval payload --any-status` printed mismatched bytes as if they were the requested ones. | The bytes are still printed, with a warning on stderr; `inspect_payload_bytes` returns `matches_digest`. |
 | 3.55.7 | The rehash was tested only under `PTASK_APPROVAL_JOURNAL=enforce`. | Regression test with the journal off. |
+| 3.55.7 | `in_force` stayed true for an approved row whose stored payload was swapped, so a poller waiting on it called `payload` and got exit 5 indefinitely. | `in_force` is false when the stored bytes do not hash to the digest. `verify`/`consume` are unchanged: an executor offering the bytes the digest names is still authorised. |
+| 3.55.7 | `Unverified` (the journal refusing a row) returned 500 from the HTTP approval routes. | Every approval refusal without its own status maps to 409. |
 | 3.55.7 | `cargo deny` advisories against `rmcp 3.3.0` (including RUSTSEC-2026-0462). | `rmcp` 3.9.0 (lockfile only). |
-
-### Deferred
-
-- `in_force` stays true for an approved row whose stored payload was swapped, although `payload` refuses it. `verify`/`consume` with the correct offered digest still succeed on such a row, so changing it is a contract decision.
-- `ApprovalError::Unverified` on the HTTP approval routes still maps to 500; the variant also covers an unreadable journal.
 
 ## 2026-11-04 — GPT-6 Astra review (3.55.5–3.55.6)
 

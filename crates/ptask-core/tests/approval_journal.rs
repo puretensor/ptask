@@ -404,7 +404,13 @@ fn substituted_payload_is_refused_without_a_journal() {
     let s = setup(None);
     let approved = request_file(&s.db, b"approved instructions");
     approve(&s.db, &approved.ap_id());
+    let in_force = |db: &Db| approvals::get(db, &approved.ap_id()).unwrap().in_force();
+    assert!(in_force(&s.db), "approved and intact");
     swap_payload(&s, &approved.uuid, b"unapproved instructions");
+    assert!(
+        !in_force(&s.db),
+        "a poller must not be told to fetch bytes `payload` refuses"
+    );
     let released = approvals::payload_bytes(&s.db, &approved.ap_id());
     assert!(
         matches!(

@@ -113,7 +113,8 @@ database reads: `preview` is what the operator decides on, and a poller
 that then calls `payload` still hits the journal. In every mode, stored
 bytes that no longer hash to the row's `digest` (the row was edited in
 SQLite) are not released (`payload` exits 5) and cannot be approved
-(`pt approve` exits 5; reject still works).
+(`pt approve` exits 5; reject still works), and `in_force` reports
+`false` for such a row.
 
 Every approval JSON object (`show`/`ls --json`, HTTP, MCP) carries
 `"in_force": true|false`, the same verdict computed at read time. Pollers
