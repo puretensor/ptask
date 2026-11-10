@@ -1,0 +1,51 @@
+name: Runner-local Rust toolchain
+description: >-
+  Install the pinned Rust toolchain into state owned by this runner service
+  instead of the ghrunner account's shared ~/.cargo and ~/.rustup.
+
+# Every runner service on tensor-core runs as ghrunner and shares one HOME.
+# Swatinem/rust-cache treats $CARGO_HOME as disposable: when it saves it
+# deletes the files that were already in $CARGO_HOME/bin (the rustup binary)
+# and prunes the registry down to this repo's crates, and its restore untars
+# over the same tree. On the shared ~/.cargo that broke other repos' Rust jobs
+# mid-build (2026-11-10, nexus codex-rs). Keep all of it beside this runner's
+# own work directory.
+inputs:
+  toolchain:
+    description: Rust toolchain version
+    required: true
+  components:
+    description: Comma-separated rustup components
+    required: false
+    default: ""
+  targets:
+    description: Comma-separated additional targets
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Configure runner-local Rust state
+      shell: bash
+      run: |
+        runner_rust_root="${RUNNER_TEMP%/*}/ptask-rust-state"
+        echo "CARGO_HOME=$runner_rust_root/cargo-home" >> "$GITHUB_ENV"
+        echo "RUSTUP_HOME=$runner_rust_root/rustup-home" >> "$GITHUB_ENV"
+    - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+    - name: Pin Rust proxies to this runner
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$CARGO_HOME/bin"
+        if [[ ! -e "$CARGO_HOME/bin/rustup" ]]; then
+          install -m 0755 "$(command -v rustup)" "$CARGO_HOME/bin/rustup"
+        fi
+        for proxy in cargo rustc rustdoc rustfmt cargo-fmt cargo-clippy clippy-driver; do
+          ln -sf rustup "$CARGO_HOME/bin/$proxy"
+        done
+        echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
