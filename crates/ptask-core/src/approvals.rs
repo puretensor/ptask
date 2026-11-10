@@ -918,9 +918,7 @@ pub fn payload_bytes(db: &Db, id: &str) -> Result<Vec<u8>> {
         j.authorises(&claim_of(&ap))?;
     }
     // The journal vouches for the digest column, not the payload column.
-    if payload_differs_from_digest(&ap) {
-        return Err(Error::Approval(ApprovalError::DigestMismatch));
-    }
+    refuse_substituted_payload(&ap, "payload")?;
     stored_payload(ap)
 }
 
@@ -934,10 +932,42 @@ fn payload_differs_from_digest(ap: &Approval) -> bool {
         .is_some_and(|bytes| sha256_hex(bytes) != ap.digest)
 }
 
+/// Refuse `op` on a row whose stored bytes do not hash to its digest, and
+/// say so in the log: pTask never writes such a row, so this is the trace
+/// of an edit made outside it, not an executor offering the wrong file.
+fn refuse_substituted_payload(ap: &Approval, op: &str) -> Result<()> {
+    if !payload_differs_from_digest(ap) {
+        return Ok(());
+    }
+    tracing::warn!(
+        approval = %ap.ap_id(),
+        uuid = %ap.uuid,
+        status = %ap.status,
+        op,
+        "stored approval payload does not hash to the row's digest; the row was edited outside pTask"
+    );
+    Err(Error::Approval(ApprovalError::DigestMismatch))
+}
+
 /// The stored payload whatever the status: the operator inspecting bytes the
 /// preview cannot show (binary files). Callers gate this to the operator.
-pub fn inspect_payload_bytes(db: &Db, id: &str) -> Result<Vec<u8>> {
-    stored_payload(get(db, id)?)
+/// The bytes come back even when they do not hash to the row's digest (the
+/// operator needs to see what is there); the flag says so.
+pub fn inspect_payload_bytes(db: &Db, id: &str) -> Result<InspectedPayload> {
+    let ap = get(db, id)?;
+    let matches_digest = !payload_differs_from_digest(&ap);
+    Ok(InspectedPayload {
+        bytes: stored_payload(ap)?,
+        matches_digest,
+    })
+}
+
+/// What [`inspect_payload_bytes`] found in the row.
+#[derive(Debug, Clone)]
+pub struct InspectedPayload {
+    pub bytes: Vec<u8>,
+    /// False when the stored bytes are not the ones the digest names.
+    pub matches_digest: bool,
 }
 
 fn stored_payload(ap: Approval) -> Result<Vec<u8>> {
@@ -1242,8 +1272,8 @@ pub fn decide(
     }
     // The operator decides on the preview of the stored bytes; the approval
     // binds the digest. Refuse a row where the two name different content.
-    if decision == Decision::Approve && payload_differs_from_digest(&current) {
-        return Err(Error::Approval(ApprovalError::DigestMismatch));
+    if decision == Decision::Approve {
+        refuse_substituted_payload(&current, "approve")?;
     }
     tx.execute(
         "UPDATE approvals
@@ -2226,8 +2256,11 @@ mod tests {
         assert_eq!(code(payload_bytes(&db, &stale)), 4);
 
         // The operator's inspection path ignores status.
-        assert_eq!(inspect_payload_bytes(&db, &pending).unwrap(), b"pending");
-        assert_eq!(inspect_payload_bytes(&db, &stale).unwrap(), b"late");
+        assert_eq!(
+            inspect_payload_bytes(&db, &pending).unwrap().bytes,
+            b"pending"
+        );
+        assert_eq!(inspect_payload_bytes(&db, &stale).unwrap().bytes, b"late");
     }
 
     #[test]
