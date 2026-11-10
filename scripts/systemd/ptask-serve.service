@@ -3,6 +3,10 @@ Description=pTask HTTP sync API (Rust pt serve)
 Documentation=https://github.com/puretensor/ptask
 After=network-online.target
 Wants=network-online.target
+# Never give up on a boot-time start: a user unit cannot order itself after the
+# system's tailscaled.service, and the default start limit (5 starts in 10 s)
+# killed this unit at the 2026-11-10 reboot before its bind address existed.
+StartLimitIntervalSec=0
 
 # Binds loopback by default. For LAN/VPN clients, set PTASK_SERVE_BIND in the
 # EnvironmentFile to a private interface address (not 0.0.0.0); it overrides
@@ -15,6 +19,17 @@ Wants=network-online.target
 Type=simple
 Environment=PTASK_SERVE_BIND=127.0.0.1:9501
 EnvironmentFile=%h/puretensor-tasks/.env
+# The bind address may be a Tailscale IP (100.x) that only exists once tailscaled
+# is up, after this user manager has started (2026-11-10 reboot: tailscaled
+# started 12:08:40.69, pt serve died three times with "Cannot assign requested
+# address (os error 99)" between 12:08:40 and 12:08:47). Wait up to 120 s for the
+# address to be configured; "-" so a wait that runs out still tries to start (and
+# then fails loudly and is retried by Restart=). A loopback bind returns at once.
+# The host is the bind minus its port, brackets dropped ([::1]:9501 -> ::1).
+# TimeoutStartSec must stay above the wait: the default 90 s would kill the
+# ExecStartPre at 90 s and fail the start instead of proceeding.
+TimeoutStartSec=150
+ExecStartPre=-/usr/bin/timeout 120 /bin/sh -c 'h=$(echo "$1" | sed -E "s/:[0-9]+$//; s/^\\[//; s/\\]$//"); until /usr/bin/ip -o addr show | grep -qF " $h/"; do sleep 2; done' wait-for-bind ${PTASK_SERVE_BIND}
 ExecStart=%h/.cargo/bin/pt serve --bind ${PTASK_SERVE_BIND}
 Restart=on-failure
 RestartSec=5

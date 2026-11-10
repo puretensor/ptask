@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-bot"
-version = "3.55.8"
+version = "3.55.9"
 dependencies = [
  "anyhow",
  "jiff",
@@ -2794,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-cli"
-version = "3.55.8"
+version = "3.55.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -2822,7 +2822,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-core"
-version = "3.55.8"
+version = "3.55.9"
 dependencies = [
  "hex",
  "hmac",
@@ -2844,7 +2844,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-distill"
-version = "3.55.8"
+version = "3.55.9"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -2868,7 +2868,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-notify"
-version = "3.55.8"
+version = "3.55.9"
 dependencies = [
  "lettre",
  "ptask-core",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-server"
-version = "3.55.8"
+version = "3.55.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -2913,7 +2913,7 @@ dependencies = [
 
 [[package]]
 name = "ptask-tui"
-version = "3.55.8"
+version = "3.55.9"
 dependencies = [
  "anyhow",
  "crossterm",
