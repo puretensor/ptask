@@ -1239,8 +1239,8 @@ impl PtaskMcp {
 
 #[tool_handler]
 impl ServerHandler for PtaskMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
                 "pTask — PureTensor's sovereign task manager. Start sessions with \
