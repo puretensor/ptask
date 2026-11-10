@@ -444,7 +444,15 @@ pub fn cmd_show(db: &Db, a: IdArgs, json: bool) -> Result<()> {
 pub fn cmd_payload(db: &Db, a: PayloadArgs) -> Result<()> {
     let bytes = if a.any_status {
         inspect_guardrails()?;
-        approvals::inspect_payload_bytes(db, &a.id).map_err(map_core)?
+        let found = approvals::inspect_payload_bytes(db, &a.id).map_err(map_core)?;
+        if !found.matches_digest {
+            eprintln!(
+                "warning: {}: the stored bytes do not hash to the approval's digest; \
+                 the row was edited outside pTask and these are not the requested bytes",
+                a.id
+            );
+        }
+        found.bytes
     } else {
         approvals::payload_bytes(db, &a.id).map_err(map_core)?
     };

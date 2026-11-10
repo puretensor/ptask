@@ -395,6 +395,50 @@ fn pending_row_with_substituted_payload_cannot_be_approved() {
     .expect("an inconsistent row can be rejected");
 }
 
+/// The rehash is not a journal feature: with the journal off, the row is
+/// all there is, and swapped bytes must still be neither released nor
+/// approvable.
+#[test]
+fn substituted_payload_is_refused_without_a_journal() {
+    let _g = ENV.lock().unwrap_or_else(|e| e.into_inner());
+    let s = setup(None);
+    let approved = request_file(&s.db, b"approved instructions");
+    approve(&s.db, &approved.ap_id());
+    let in_force = |db: &Db| approvals::get(db, &approved.ap_id()).unwrap().in_force();
+    assert!(in_force(&s.db), "approved and intact");
+    swap_payload(&s, &approved.uuid, b"unapproved instructions");
+    assert!(
+        !in_force(&s.db),
+        "a poller must not be told to fetch bytes `payload` refuses"
+    );
+    let released = approvals::payload_bytes(&s.db, &approved.ap_id());
+    assert!(
+        matches!(
+            released,
+            Err(Error::Approval(ApprovalError::DigestMismatch))
+        ),
+        "substituted bytes must not be released: {released:?}"
+    );
+    let inspected = approvals::inspect_payload_bytes(&s.db, &approved.ap_id()).unwrap();
+    assert_eq!(inspected.bytes, b"unapproved instructions");
+    assert!(!inspected.matches_digest, "inspection flags the mismatch");
+
+    let pending = request_file(&s.db, b"pay 10 GBP to the supplier");
+    swap_payload(&s, &pending.uuid, b"pay 10000 GBP to someone else");
+    let r = approvals::decide(
+        &s.db,
+        &pending.ap_id(),
+        Decision::Approve,
+        DecidedVia::Api,
+        None,
+        &EventCtx::local("operator"),
+    );
+    assert!(
+        matches!(r, Err(Error::Approval(ApprovalError::DigestMismatch))),
+        "an inconsistent row must not be approvable: {r:?}"
+    );
+}
+
 /// `record_event` runs after the journal consume is fsynced. A colliding
 /// idempotency key makes that insert fail and the SQLite transaction roll
 /// back. The journal consume must be voided, or the still-approved row can

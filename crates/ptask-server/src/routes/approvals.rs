@@ -64,9 +64,17 @@ fn err_status(e: &ptask_core::Error) -> StatusCode {
         ptask_core::Error::Approval(ApprovalError::Forbidden(_)) => StatusCode::FORBIDDEN,
         ptask_core::Error::Approval(ApprovalError::Conflict(_)) => StatusCode::CONFLICT,
         ptask_core::Error::Approval(ApprovalError::Invalid(_)) => StatusCode::BAD_REQUEST,
-        // The stored bytes do not hash to the row's digest: the row was edited outside
-        // pTask. Refusing to approve it is a conflict with the stored state, not a crash.
-        ptask_core::Error::Approval(ApprovalError::DigestMismatch) => StatusCode::CONFLICT,
+        // Every other approval refusal is pTask declining the request because of the
+        // state it found, not a crash: stored bytes that do not hash to the row's digest
+        // (the row was edited outside pTask), or a journal that does not vouch for the
+        // row.
+        ptask_core::Error::Approval(
+            ApprovalError::DigestMismatch
+            | ApprovalError::Unverified(_)
+            | ApprovalError::Pending
+            | ApprovalError::Terminal(_)
+            | ApprovalError::AlreadyConsumed,
+        ) => StatusCode::CONFLICT,
         ptask_core::Error::PtIdNotFound(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -256,8 +264,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn digest_mismatch_is_a_conflict_not_a_server_error() {
-        let e = ptask_core::Error::Approval(ApprovalError::DigestMismatch);
-        assert_eq!(err_status(&e), StatusCode::CONFLICT);
+    fn approval_refusals_are_conflicts_not_server_errors() {
+        for refusal in [
+            ApprovalError::DigestMismatch,
+            ApprovalError::Unverified("no journaled approve".into()),
+            ApprovalError::Pending,
+            ApprovalError::Terminal("rejected".into()),
+            ApprovalError::AlreadyConsumed,
+        ] {
+            let e = ptask_core::Error::Approval(refusal);
+            assert_eq!(err_status(&e), StatusCode::CONFLICT, "{e}");
+        }
     }
 }
