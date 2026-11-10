@@ -19,6 +19,7 @@ Scope: the 3.55.5–3.55.6 diff, one medium-effort pass. 5 findings, all fixed.
 | 3.55.7 | `in_force` stayed true for an approved row whose stored payload was swapped, so a poller waiting on it called `payload` and got exit 5 indefinitely. | `in_force` is false when the stored bytes do not hash to the digest. `verify`/`consume` are unchanged: an executor offering the bytes the digest names is still authorised. |
 | 3.55.7 | `Unverified` (the journal refusing a row) returned 500 from the HTTP approval routes. | Every approval refusal without its own status maps to 409. |
 | 3.55.7 | `cargo deny` advisories against `rmcp 3.3.0` (including RUSTSEC-2026-0462). | `rmcp` 3.9.0 (lockfile only). |
+| 3.55.7 | `cargo deny` advisory RUSTSEC-2026-0459 against the bundled SQLite in `libsqlite3-sys 0.37.0`. | `rusqlite` 0.41, `r2d2_sqlite` 0.36, `refinery` 0.10 (`libsqlite3-sys` 0.39.1); no source changes needed. |
 
 ## 2026-11-04 — GPT-6 Astra review (3.55.5–3.55.6)
 
