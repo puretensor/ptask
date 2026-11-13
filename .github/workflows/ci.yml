@@ -9,38 +9,22 @@ on:
 permissions:
   contents: read
 
-# Every job runs on the self-hosted tensor-core runner, which is also the
-# production host (canonical store, `pt serve`, timers). This repository is
-# public, so each job runs only for pushes and for pull requests whose head
-# branch lives in this repository (opening one needs write access). The test
-# is on the head repo's name, not `head.repo.fork`: a PR whose fork was deleted
-# has a null head repo, and `!null` would let it through. A fork can still
-# rewrite this file in its PR; the repository's fork-approval setting is the
-# control for that (docs/operations.md, "CI runner").
+# CI runs on GitHub-hosted runners (ubuntu-latest), which are free for public repositories
+# (PT-2844, 2026-11-13). A pull request's code, a fork's included, therefore never runs on
+# tensor-core, the production host. Only release.yml uses the self-hosted runner, and it runs
+# on v* tag pushes, which forks cannot make. Fork pull requests still need a maintainer's
+# approval to run (Settings -> Actions -> General: Require approval for all external
+# contributors; docs/operations.md, "CI runners").
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  # A job skipped by `if:` reports success, so without this a fork PR would
-  # show green CI with nothing run. GitHub-hosted: it never touches tensor-core.
-  fork-pr:
-    name: fork PR (CI not run)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-    steps:
-      - run: |
-          echo "::error::CI does not run fork pull requests on the self-hosted runner. A maintainer can push this branch into the repository to test it."
-          exit 1
-
-  # actionlint, rustfmt, the dependency policy and clippy share one job: the
-  # single self-hosted runner takes jobs one at a time with about a minute
-  # between them, and GitHub cancels a job no runner acquires within ~12 min.
+  # actionlint, rustfmt, the dependency policy and clippy share one job.
   lint:
     name: lint (actionlint, rustfmt, cargo-deny, clippy)
-    runs-on: [self-hosted, tensor-core]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: install actionlint
@@ -63,7 +47,7 @@ jobs:
       - name: install cargo-deny
         run: |
           cargo deny --version 2>/dev/null | grep -q '0\.19\.9' \
-            || flock -w 900 /home/ghrunner/.cargo-install.lock cargo install cargo-deny --version 0.19.9 --locked
+            || cargo install cargo-deny --version 0.19.9 --locked
       - run: cargo deny check advisories licenses sources
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
@@ -74,17 +58,9 @@ jobs:
 
   test:
     name: test
-    runs-on: [self-hosted, tensor-core]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      # This self-hosted runner reuses one workspace across runs, and
-      # Swatinem/rust-cache prunes target/ in place when it saves. A later job
-      # then compiles against that half-deleted tree and cargo aborts while
-      # writing dep info under target/release/deps. Let the cache restore below
-      # be the only thing that populates target/.
-      - name: Drop stale target/ left by an earlier job on this runner
-        run: rm -rf target
       - uses: ./.github/actions/rust-toolchain
         with:
           toolchain: 1.98.1
@@ -110,8 +86,7 @@ jobs:
 
   dashboard-test:
     name: dashboard python tests
-    runs-on: [self-hosted, tensor-core]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -125,17 +100,9 @@ jobs:
 
   schema-check:
     name: schema sanity
-    runs-on: [self-hosted, tensor-core]
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      # This self-hosted runner reuses one workspace across runs, and
-      # Swatinem/rust-cache prunes target/ in place when it saves. A later job
-      # then compiles against that half-deleted tree and cargo aborts while
-      # writing dep info under target/release/deps. Let the cache restore below
-      # be the only thing that populates target/.
-      - name: Drop stale target/ left by an earlier job on this runner
-        run: rm -rf target
       - uses: ./.github/actions/rust-toolchain
         with:
           toolchain: 1.98.1
