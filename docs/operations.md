@@ -799,25 +799,20 @@ Nightly Ceph snapshot via `ptask-backup.timer` keeps a 30-day file
 backup independent of Litestream — it is the recovery path of last
 resort if Litestream itself misbehaves.
 
-## CI runner (self-hosted, public repository)
+## CI runners (public repository)
 
-Every GitHub Actions job runs on the self-hosted `tensor-core` runner, the
-same host that serves the canonical store, and this repository is public.
-For `pull_request` events GitHub runs the workflow files from the pull
-request's own merge ref, so a fork can edit `.github/workflows/ci.yml` or add
-a workflow of its own that targets `[self-hosted, tensor-core]`.
+`ci.yml` runs every job on GitHub-hosted `ubuntu-latest` runners, which are free for public
+repositories (PT-2844, 2026-11-13). A pull request's code, a fork's included, never runs on
+tensor-core, the production host that serves the canonical store.
 
-- `ci.yml` skips every job for pull requests whose head branch is not in this
-  repository. That keeps ordinary fork PRs off the runner. It cannot stop a
-  fork that rewrites the workflow. Skipped jobs report success, so a
-  GitHub-hosted `fork PR (CI not run)` job fails on such PRs to keep them from
-  looking tested.
-- The control that does stop it is the repository setting **Settings →
-  Actions → General → Approval for running fork pull request workflows →
-  Require approval for all external contributors**. Keep it set, and read the
-  diff for `.github/` changes before approving a run.
-- To test a fork's change, push its branch into this repository after reading
-  it. CI then runs as a same-repository pull request.
+- `release.yml` is the only workflow on the self-hosted `tensor-core` runner (it installs
+  `pt` there). It runs on `v*` tag pushes, which forks cannot make; see the next section for
+  who can push tags.
+- Fork pull requests still need a maintainer's approval before any workflow runs: keep
+  **Settings → Actions → General → Approval for running fork pull request workflows →
+  Require approval for all external contributors** set (set 2026-11-13), and read the diff
+  for `.github/` changes before approving a run. A fork that adds a workflow targeting
+  `[self-hosted, tensor-core]` would otherwise reach the production host.
 
 ## Release tags (who can publish a release)
 
